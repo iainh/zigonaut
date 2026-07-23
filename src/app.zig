@@ -1,4 +1,5 @@
 const std = @import("std");
+const terminal_vt = @import("terminal.zig");
 
 pub const Shell = enum {
     powershell,
@@ -22,6 +23,7 @@ pub const Shell = enum {
 pub const Session = struct {
     id: u32,
     shell: Shell,
+    terminal: terminal_vt.Terminal,
 };
 
 pub const App = struct {
@@ -35,14 +37,22 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        for (self.sessions.items) |*session| session.terminal.deinit();
         self.sessions.deinit(self.allocator);
     }
 
     pub fn addSession(self: *App, shell: Shell) !usize {
         const index = self.sessions.items.len;
+        var terminal = try terminal_vt.Terminal.init(100, 28);
+        errdefer terminal.deinit();
+        terminal.feed(switch (shell) {
+            .powershell => "\x1b[1;36mPowerShell\x1b[0m session ready.\r\n",
+            .wsl => "\x1b[1;32mWSL\x1b[0m session ready.\r\n",
+        });
         try self.sessions.append(self.allocator, .{
             .id = self.next_id,
             .shell = shell,
+            .terminal = terminal,
         });
         self.next_id +%= 1;
         self.active = index;
@@ -51,7 +61,8 @@ pub const App = struct {
 
     pub fn closeSession(self: *App, index: usize) void {
         if (index >= self.sessions.items.len) return;
-        _ = self.sessions.orderedRemove(index);
+        var removed = self.sessions.orderedRemove(index);
+        removed.terminal.deinit();
 
         if (self.sessions.items.len == 0) {
             self.active = null;
@@ -64,9 +75,9 @@ pub const App = struct {
         if (index < self.sessions.items.len) self.active = index;
     }
 
-    pub fn activeSession(self: *const App) ?Session {
+    pub fn activeSession(self: *App) ?*Session {
         const index = self.active orelse return null;
-        return self.sessions.items[index];
+        return &self.sessions.items[index];
     }
 };
 
@@ -92,5 +103,5 @@ test "closing the active session selects its nearest neighbor" {
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
 
     app.closeSession(0);
-    try std.testing.expectEqual(@as(?Session, null), app.activeSession());
+    try std.testing.expect(app.activeSession() == null);
 }

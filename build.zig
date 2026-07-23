@@ -3,12 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const ghostty = b.dependency("ghostty", .{
+        .target = target,
+        .optimize = optimize,
+        .@"emit-lib-vt" = true,
+        .simd = false,
+    });
 
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    configureGhostty(app_module, ghostty);
 
     const exe = b.addExecutable(.{
         .name = "zigonaut",
@@ -33,6 +40,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+}
+
+fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) void {
+    module.addIncludePath(ghostty.path("include"));
+    module.addCMacro("GHOSTTY_STATIC", "1");
+    module.linkLibrary(ghostty.artifact("ghostty-vt-static"));
 }

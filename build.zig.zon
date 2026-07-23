@@ -3,7 +3,12 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.15.2",
     .fingerprint = 0xdfc39dc8b860abe1,
-    .dependencies = .{},
+    .dependencies = .{
+        .ghostty = .{
+            .url = "https://github.com/ghostty-org/ghostty/archive/ae52f97dcac558735cfa916ea3965f247e5c6e9e.tar.gz",
+            .hash = "ghostty-1.3.2-dev-5UdBC3mOEQVnvmgXKsKHMIKzQjvD6rUcWJ4jP2NfhOH5",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

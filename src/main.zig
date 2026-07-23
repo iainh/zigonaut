@@ -193,12 +193,8 @@ fn paint(hwnd: win.HWND) void {
     _ = win.SetTextColor(dc, rgb(198, 206, 220));
 
     if (model.activeSession()) |session| {
-        var text_buffer: [256]u8 = undefined;
-        const text = std.fmt.bufPrint(
-            &text_buffer,
-            "{s} session #{d}\r\n\r\nConPTY and libghostty surface integration are the next MVP slice.\r\nCommand: {s}",
-            .{ session.shell.title(), session.id, session.shell.command() },
-        ) catch "Terminal session";
+        var text_buffer: [16 * 1024]u8 = undefined;
+        const text = session.terminal.writeViewportText(&text_buffer) catch "libghostty render state unavailable";
         drawText(dc, text, &terminal_rect, win.DT_LEFT | win.DT_TOP | win.DT_NOPREFIX);
     } else {
         drawText(dc, "Open a PowerShell or WSL session.", &terminal_rect, win.DT_LEFT | win.DT_TOP);
