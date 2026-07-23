@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("user32");
     exe.linkSystemLibrary("gdi32");
     exe.linkSystemLibrary("dwmapi");
+    exe.linkSystemLibrary("kernel32");
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -40,6 +41,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.linkLibC();
+    tests.linkSystemLibrary("kernel32");
     configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

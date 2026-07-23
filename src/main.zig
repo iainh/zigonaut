@@ -17,6 +17,7 @@ const command_new_powershell = 1001;
 const command_new_wsl = 1002;
 const command_tab_base = 1100;
 const command_close_tab = 1200;
+const refresh_timer = 1;
 
 const State = struct {
     model: app_model.App,
@@ -91,6 +92,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             );
             state = .{ .model = app_model.App.init(std.heap.page_allocator), .font = font };
             _ = state.?.model.addSession(.powershell) catch return -1;
+            _ = win.SetTimer(hwnd, refresh_timer, 33, null);
             return 0;
         },
         win.WM_COMMAND => {
@@ -112,11 +114,16 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_ERASEBKGND => return 1,
+        win.WM_TIMER => {
+            if (wparam == refresh_timer) _ = win.InvalidateRect(hwnd, null, 0);
+            return 0;
+        },
         win.WM_PAINT => {
             paint(hwnd);
             return 0;
         },
         win.WM_DESTROY => {
+            _ = win.KillTimer(hwnd, refresh_timer);
             if (state) |*current| {
                 current.model.deinit();
                 _ = win.DeleteObject(current.font);
@@ -194,7 +201,7 @@ fn paint(hwnd: win.HWND) void {
 
     if (model.activeSession()) |session| {
         var text_buffer: [16 * 1024]u8 = undefined;
-        const text = session.terminal.writeViewportText(&text_buffer) catch "libghostty render state unavailable";
+        const text = session.runtime.?.writeViewportText(&text_buffer) catch "libghostty render state unavailable";
         drawText(dc, text, &terminal_rect, win.DT_LEFT | win.DT_TOP | win.DT_NOPREFIX);
     } else {
         drawText(dc, "Open a PowerShell or WSL session.", &terminal_rect, win.DT_LEFT | win.DT_TOP);
@@ -209,7 +216,7 @@ fn drawButton(dc: win.HDC, rect: win.RECT, text: []const u8, color: win.COLORREF
 }
 
 fn drawText(dc: win.HDC, text: []const u8, rect: *win.RECT, format: win.UINT) void {
-    var wide: [512]u16 = undefined;
+    var wide: [16 * 1024]u16 = undefined;
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
     _ = win.DrawTextW(dc, &wide, @intCast(length), rect, format);
 }

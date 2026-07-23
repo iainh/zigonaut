@@ -1,5 +1,5 @@
 const std = @import("std");
-const terminal_vt = @import("terminal.zig");
+const SessionRuntime = @import("session.zig").SessionRuntime;
 
 pub const Shell = enum {
     powershell,
@@ -23,7 +23,7 @@ pub const Shell = enum {
 pub const Session = struct {
     id: u32,
     shell: Shell,
-    terminal: terminal_vt.Terminal,
+    runtime: ?*SessionRuntime,
 };
 
 pub const App = struct {
@@ -37,22 +37,24 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        for (self.sessions.items) |*session| session.terminal.deinit();
+        for (self.sessions.items) |session| {
+            if (session.runtime) |runtime| runtime.destroy();
+        }
         self.sessions.deinit(self.allocator);
     }
 
     pub fn addSession(self: *App, shell: Shell) !usize {
+        const runtime = try SessionRuntime.create(self.allocator, shell.command());
+        errdefer runtime.destroy();
+        return self.addSessionRecord(shell, runtime);
+    }
+
+    fn addSessionRecord(self: *App, shell: Shell, runtime: ?*SessionRuntime) !usize {
         const index = self.sessions.items.len;
-        var terminal = try terminal_vt.Terminal.init(100, 28);
-        errdefer terminal.deinit();
-        terminal.feed(switch (shell) {
-            .powershell => "\x1b[1;36mPowerShell\x1b[0m session ready.\r\n",
-            .wsl => "\x1b[1;32mWSL\x1b[0m session ready.\r\n",
-        });
         try self.sessions.append(self.allocator, .{
             .id = self.next_id,
             .shell = shell,
-            .terminal = terminal,
+            .runtime = runtime,
         });
         self.next_id +%= 1;
         self.active = index;
@@ -61,8 +63,8 @@ pub const App = struct {
 
     pub fn closeSession(self: *App, index: usize) void {
         if (index >= self.sessions.items.len) return;
-        var removed = self.sessions.orderedRemove(index);
-        removed.terminal.deinit();
+        const removed = self.sessions.orderedRemove(index);
+        if (removed.runtime) |runtime| runtime.destroy();
 
         if (self.sessions.items.len == 0) {
             self.active = null;
@@ -85,8 +87,8 @@ test "sessions are added and selected" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), try app.addSession(.powershell));
-    try std.testing.expectEqual(@as(usize, 1), try app.addSession(.wsl));
+    try std.testing.expectEqual(@as(usize, 0), try app.addSessionRecord(.powershell, null));
+    try std.testing.expectEqual(@as(usize, 1), try app.addSessionRecord(.wsl, null));
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
 
     app.activate(0);
@@ -97,8 +99,8 @@ test "closing the active session selects its nearest neighbor" {
     var app = App.init(std.testing.allocator);
     defer app.deinit();
 
-    _ = try app.addSession(.powershell);
-    _ = try app.addSession(.wsl);
+    _ = try app.addSessionRecord(.powershell, null);
+    _ = try app.addSessionRecord(.wsl, null);
     app.closeSession(1);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
 
