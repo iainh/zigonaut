@@ -81,6 +81,12 @@ pub const App = struct {
         const index = self.active orelse return null;
         return &self.sessions.items[index];
     }
+
+    pub fn resizeSessions(self: *App, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
+        for (self.sessions.items) |session| {
+            if (session.runtime) |runtime| runtime.resize(columns, rows, cell_width, cell_height);
+        }
+    }
 };
 
 test "sessions are added and selected" {

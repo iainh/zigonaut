@@ -18,11 +18,19 @@ const command_new_wsl = 1002;
 const command_tab_base = 1100;
 const command_close_tab = 1200;
 const refresh_timer = 1;
+const terminal_left = 16;
+const terminal_top = 108;
+const terminal_margin = 16;
+const terminal_padding = 24;
 
 const State = struct {
     model: app_model.App,
     font: win.HFONT,
     pending_high_surrogate: ?u16 = null,
+    cell_width: u32,
+    cell_height: u32,
+    columns: u16 = 0,
+    rows: u16 = 0,
 };
 
 var state: ?State = null;
@@ -91,8 +99,15 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 win.FIXED_PITCH | win.FF_MODERN,
                 font_name,
             );
-            state = .{ .model = app_model.App.init(std.heap.page_allocator), .font = font };
+            const cell_size = measureCell(hwnd, font);
+            state = .{
+                .model = app_model.App.init(std.heap.page_allocator),
+                .font = font,
+                .cell_width = cell_size.width,
+                .cell_height = cell_size.height,
+            };
             _ = state.?.model.addSession(.powershell) catch return -1;
+            resizeSessions(hwnd);
             _ = win.SetTimer(hwnd, refresh_timer, 33, null);
             return 0;
         },
@@ -100,8 +115,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const command: u16 = @truncate(wparam);
             if (command == command_new_powershell) {
                 _ = state.?.model.addSession(.powershell) catch return 0;
+                resizeSessions(hwnd);
             } else if (command == command_new_wsl) {
                 _ = state.?.model.addSession(.wsl) catch return 0;
+                resizeSessions(hwnd);
             } else if (command == command_close_tab) {
                 if (state.?.model.active) |active| state.?.model.closeSession(active);
             } else if (command >= command_tab_base and command < command_tab_base + 32) {
@@ -120,6 +137,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_CHAR => {
             handleCharacter(@truncate(wparam));
+            return 0;
+        },
+        win.WM_SIZE => {
+            resizeSessions(hwnd);
             return 0;
         },
         win.WM_ERASEBKGND => return 1,
@@ -222,6 +243,41 @@ fn currentModifiers() u16 {
     return modifiers;
 }
 
+const CellSize = struct { width: u32, height: u32 };
+
+fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
+    const dc = win.GetDC(hwnd);
+    if (dc == null) return .{ .width = 9, .height = 18 };
+    defer _ = win.ReleaseDC(hwnd, dc);
+
+    const previous = win.SelectObject(dc, font);
+    defer _ = win.SelectObject(dc, previous);
+    var metrics: win.TEXTMETRICW = undefined;
+    if (win.GetTextMetricsW(dc, &metrics) == 0) return .{ .width = 9, .height = 18 };
+    return .{
+        .width = @intCast(@max(metrics.tmAveCharWidth, 1)),
+        .height = @intCast(@max(metrics.tmHeight + metrics.tmExternalLeading, 1)),
+    };
+}
+
+fn resizeSessions(hwnd: win.HWND) void {
+    if (state == null) return;
+    var client: win.RECT = undefined;
+    if (win.GetClientRect(hwnd, &client) == 0) return;
+
+    const inner_width = @max(client.right - terminal_left - terminal_margin - 2 * terminal_padding, 1);
+    const inner_height = @max(client.bottom - terminal_top - terminal_margin - 2 * terminal_padding, 1);
+    const columns: u16 = @intCast(@min(@divTrunc(inner_width, @as(i32, @intCast(state.?.cell_width))), std.math.maxInt(u16)));
+    const rows: u16 = @intCast(@min(@divTrunc(inner_height, @as(i32, @intCast(state.?.cell_height))), std.math.maxInt(u16)));
+    const safe_columns = @max(columns, 1);
+    const safe_rows = @max(rows, 1);
+    if (state.?.columns == safe_columns and state.?.rows == safe_rows) return;
+
+    state.?.columns = safe_columns;
+    state.?.rows = safe_rows;
+    state.?.model.resizeSessions(safe_columns, safe_rows, state.?.cell_width, state.?.cell_height);
+}
+
 fn sendCommand(hwnd: win.HWND, command: u16) void {
     _ = win.SendMessageW(hwnd, win.WM_COMMAND, command, 0);
 }
@@ -254,10 +310,17 @@ fn paint(hwnd: win.HWND) void {
         );
     }
 
-    var terminal_rect = win.RECT{ .left = 16, .top = 108, .right = client.right - 16, .bottom = client.bottom - 16 };
+    var terminal_rect = win.RECT{
+        .left = terminal_left,
+        .top = terminal_top,
+        .right = client.right - terminal_margin,
+        .bottom = client.bottom - terminal_margin,
+    };
     fill(dc, terminal_rect, rgb(9, 10, 13));
-    terminal_rect.left += 24;
-    terminal_rect.top += 24;
+    terminal_rect.left += terminal_padding;
+    terminal_rect.top += terminal_padding;
+    terminal_rect.right -= terminal_padding;
+    terminal_rect.bottom -= terminal_padding;
     _ = win.SetTextColor(dc, rgb(198, 206, 220));
 
     if (model.activeSession()) |session| {
