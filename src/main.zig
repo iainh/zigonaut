@@ -22,6 +22,7 @@ const refresh_timer = 1;
 const State = struct {
     model: app_model.App,
     font: win.HFONT,
+    pending_high_surrogate: ?u16 = null,
 };
 
 var state: ?State = null;
@@ -113,6 +114,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             handleClick(hwnd, pointX(lparam), pointY(lparam));
             return 0;
         },
+        win.WM_KEYDOWN, win.WM_SYSKEYDOWN => {
+            if (handleKey(wparam, lparam)) return 0;
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
+        },
+        win.WM_CHAR => {
+            handleCharacter(@truncate(wparam));
+            return 0;
+        },
         win.WM_ERASEBKGND => return 1,
         win.WM_TIMER => {
             if (wparam == refresh_timer) _ = win.InvalidateRect(hwnd, null, 0);
@@ -159,6 +168,58 @@ fn handleClick(hwnd: win.HWND, x: i32, y: i32) void {
         const index: u16 = @intCast(@divTrunc(x - 16, 168));
         sendCommand(hwnd, command_tab_base + index);
     }
+}
+
+fn handleKey(wparam: win.WPARAM, lparam: win.LPARAM) bool {
+    const key: @import("terminal.zig").Terminal.Key = switch (wparam) {
+        win.VK_DELETE => .delete,
+        win.VK_END => .end,
+        win.VK_HOME => .home,
+        win.VK_NEXT => .page_down,
+        win.VK_PRIOR => .page_up,
+        win.VK_DOWN => .arrow_down,
+        win.VK_LEFT => .arrow_left,
+        win.VK_RIGHT => .arrow_right,
+        win.VK_UP => .arrow_up,
+        else => return false,
+    };
+    const session = state.?.model.activeSession() orelse return true;
+    const repeat = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
+    session.runtime.?.sendKey(key, repeat, currentModifiers()) catch {};
+    return true;
+}
+
+fn handleCharacter(code_unit: u16) void {
+    const session = state.?.model.activeSession() orelse return;
+    var utf16: [2]u16 = undefined;
+    var length: usize = 1;
+
+    if (code_unit >= 0xD800 and code_unit <= 0xDBFF) {
+        state.?.pending_high_surrogate = code_unit;
+        return;
+    } else if (code_unit >= 0xDC00 and code_unit <= 0xDFFF) {
+        const high = state.?.pending_high_surrogate orelse return;
+        utf16[0] = high;
+        utf16[1] = code_unit;
+        length = 2;
+    } else {
+        utf16[0] = code_unit;
+    }
+    state.?.pending_high_surrogate = null;
+
+    var utf8: [4]u8 = undefined;
+    const utf8_length = std.unicode.utf16LeToUtf8(&utf8, utf16[0..length]) catch return;
+    session.runtime.?.write(utf8[0..utf8_length]) catch {};
+}
+
+fn currentModifiers() u16 {
+    const Modifier = @import("terminal.zig").Terminal.Modifier;
+    var modifiers: u16 = 0;
+    if (win.GetKeyState(win.VK_SHIFT) < 0) modifiers |= Modifier.shift;
+    if (win.GetKeyState(win.VK_CONTROL) < 0) modifiers |= Modifier.control;
+    if (win.GetKeyState(win.VK_MENU) < 0) modifiers |= Modifier.alt;
+    if (win.GetKeyState(win.VK_LWIN) < 0 or win.GetKeyState(win.VK_RWIN) < 0) modifiers |= Modifier.super;
+    return modifiers;
 }
 
 fn sendCommand(hwnd: win.HWND, command: u16) void {
