@@ -12,7 +12,7 @@ pub const command = struct {
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
 const Initialize = *const fn (win.HWND, Callback, ?*anyopaque) callconv(.c) ?*anyopaque;
-const Update = *const fn (?*anyopaque, [*]const u8, u32, i32) callconv(.c) win.HRESULT;
+const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
 const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
 const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
@@ -56,9 +56,9 @@ pub const Bridge = struct {
         return .{ .module = module, .instance = instance, .update_fn = update_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
     }
 
-    pub fn update(self: *Bridge, kinds: []const u8, active: ?usize) bool {
+    pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_fn(instance, kinds.ptr, @intCast(kinds.len), if (active) |index| @intCast(index) else -1));
+        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, @intCast(titles.len), if (active) |index| @intCast(index) else -1));
     }
 
     pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {

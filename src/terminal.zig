@@ -13,8 +13,12 @@ pub const Terminal = struct {
     row_cells: vt.GhosttyRenderStateRowCells,
     key_encoder: vt.GhosttyKeyEncoder,
     key_event: vt.GhosttyKeyEvent,
+    title_changed: ?TitleChanged = null,
+    title_context: ?*anyopaque = null,
     columns: u16,
     rows: u16,
+
+    pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
 
     pub const Cell = struct {
         pub const Occupancy = enum(u8) {
@@ -178,6 +182,13 @@ pub const Terminal = struct {
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+    }
+
+    pub fn setTitleChanged(self: *Terminal, callback: TitleChanged, context: ?*anyopaque) !void {
+        self.title_changed = callback;
+        self.title_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(vt.GhosttyTerminalTitleChangedFn, titleChanged)));
     }
 
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
@@ -410,6 +421,14 @@ pub const Terminal = struct {
     }
 };
 
+fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.title_changed orelse return;
+    var title = std.mem.zeroes(vt.GhosttyString);
+    if (vt.ghostty_terminal_get(terminal, vt.GHOSTTY_TERMINAL_DATA_TITLE, &title) != vt.GHOSTTY_SUCCESS) return;
+    callback(self.title_context, title.ptr[0..title.len]);
+}
+
 fn currentCellOccupancy(cells: vt.GhosttyRenderStateRowCells) !Terminal.Cell.Occupancy {
     var raw: vt.GhosttyCell = 0;
     try check(vt.ghostty_render_state_row_cells_get(
@@ -450,6 +469,25 @@ fn fromGhostty(color: vt.GhosttyColorRgb) theme.Color {
 
 fn check(result: vt.GhosttyResult) !void {
     if (result != vt.GHOSTTY_SUCCESS) return error.LibGhosttyFailure;
+}
+
+test "libghostty reports shell title changes" {
+    const Listener = struct {
+        value: []const u8 = "",
+
+        fn changed(context: ?*anyopaque, title: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.value = title;
+        }
+    };
+
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    var listener = Listener{};
+    try terminal.setTitleChanged(Listener.changed, &listener);
+
+    terminal.feed("\x1b]2;project shell\x07");
+    try std.testing.expectEqualStrings("project shell", listener.value);
 }
 
 test "libghostty parses control sequences into viewport state" {

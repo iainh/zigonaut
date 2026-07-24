@@ -21,6 +21,7 @@ const command_new_powershell = 1001;
 const command_new_wsl = 1002;
 const command_close_tab = 1200;
 const chrome_message = win.WM_APP + 1;
+const titles_changed_message = win.WM_APP + 2;
 const tab_selection_changed: win.UINT = @bitCast(@as(i32, -551));
 const fallback_terminal_top: i32 = 108;
 const winui_terminal_top: i32 = 48;
@@ -167,6 +168,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 settings.font_family,
                 settings.font_size,
                 dpi,
+                titles_changed_message,
             );
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             state.?.terminal_ready = true;
@@ -206,6 +208,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.InvalidateRect(hwnd, null, 0);
             state.?.terminal_view.invalidate();
             syncChrome();
+            return 0;
+        },
+        titles_changed_message => {
+            if (state.?.model.syncTitles()) syncChrome();
             return 0;
         },
         win.WM_NOTIFY => {
@@ -317,12 +323,16 @@ fn syncChrome() void {
     if (state == null) return;
     if (state.?.chrome) |*bridge| {
         const count = state.?.model.sessions.items.len;
-        const kinds = std.heap.page_allocator.alloc(u8, count) catch return;
-        defer std.heap.page_allocator.free(kinds);
+        const titles = std.heap.page_allocator.alloc([*]const u8, count) catch return;
+        defer std.heap.page_allocator.free(titles);
+        const title_lengths = std.heap.page_allocator.alloc(u32, count) catch return;
+        defer std.heap.page_allocator.free(title_lengths);
         for (state.?.model.sessions.items, 0..) |session, index| {
-            kinds[index] = @intFromEnum(session.shell);
+            const title = session.displayTitle();
+            titles[index] = title.ptr;
+            title_lengths[index] = @intCast(title.len);
         }
-        if (!bridge.update(kinds, state.?.model.active)) disableChrome(state.?.hwnd);
+        if (!bridge.update(titles, title_lengths, state.?.model.active)) disableChrome(state.?.hwnd);
     } else syncFallbackTabs();
 }
 
@@ -405,9 +415,12 @@ fn syncFallbackTabs() void {
     if (tabs == null) return;
     _ = win.SendMessageW(tabs, win.TCM_DELETEALLITEMS, 0, 0);
     for (state.?.model.sessions.items, 0..) |session, index| {
+        var wide_title = std.mem.zeroes([512]u16);
+        const title_length = std.unicode.utf8ToUtf16Le(wide_title[0 .. wide_title.len - 1], session.displayTitle()) catch 0;
+        const label: win.LPCWSTR = if (title_length > 0) wide_title[0..title_length :0].ptr else if (session.shell == .powershell) powershell_label.ptr else wsl_label.ptr;
         var item = std.mem.zeroes(win.TCITEMW);
         item.mask = win.TCIF_TEXT;
-        item.pszText = @constCast(if (session.shell == .powershell) powershell_label else wsl_label);
+        item.pszText = @constCast(label);
         _ = win.SendMessageW(tabs, win.TCM_INSERTITEMW, index, @intCast(@intFromPtr(&item)));
     }
     if (state.?.model.active) |active| _ = win.SendMessageW(tabs, win.TCM_SETCURSEL, active, 0);
@@ -533,7 +546,9 @@ fn paintFallbackTab(draw: *const win.DRAWITEMSTRUCT) void {
     _ = win.SetTextColor(draw.hDC, foreground);
     var text_rect = draw.rcItem;
     const session = state.?.model.sessions.items[draw.itemID];
-    const label = if (session.shell == .powershell) powershell_label else wsl_label;
+    var wide_title = std.mem.zeroes([512]u16);
+    const title_length = std.unicode.utf8ToUtf16Le(wide_title[0 .. wide_title.len - 1], session.displayTitle()) catch 0;
+    const label: win.LPCWSTR = if (title_length > 0) wide_title[0..title_length :0].ptr else if (session.shell == .powershell) powershell_label.ptr else wsl_label.ptr;
     _ = win.DrawTextW(draw.hDC, label, -1, &text_rect, win.DT_CENTER | win.DT_VCENTER | win.DT_SINGLELINE);
     if ((draw.itemState & win.ODS_FOCUS) != 0 and (draw.itemState & win.ODS_NOFOCUSRECT) == 0) {
         var focus_rect = draw.rcItem;

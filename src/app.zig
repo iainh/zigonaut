@@ -31,6 +31,12 @@ pub const Session = struct {
     id: u32,
     shell: Shell,
     runtime: ?*SessionRuntime,
+    title: std.ArrayList(u8) = .empty,
+    title_generation: u64 = 0,
+
+    pub fn displayTitle(self: *const Session) []const u8 {
+        return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.shell.title();
+    }
 };
 
 pub const App = struct {
@@ -45,8 +51,9 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        for (self.sessions.items) |session| {
+        for (self.sessions.items) |*session| {
             if (session.runtime) |runtime| runtime.destroy();
+            session.title.deinit(self.allocator);
         }
         self.sessions.deinit(self.allocator);
     }
@@ -71,8 +78,9 @@ pub const App = struct {
 
     pub fn closeSession(self: *App, index: usize) void {
         if (index >= self.sessions.items.len) return;
-        const removed = self.sessions.orderedRemove(index);
+        var removed = self.sessions.orderedRemove(index);
         if (removed.runtime) |runtime| runtime.destroy();
+        removed.title.deinit(self.allocator);
 
         if (self.sessions.items.len == 0) {
             self.active = null;
@@ -94,6 +102,29 @@ pub const App = struct {
         for (self.sessions.items) |session| {
             if (session.runtime) |runtime| runtime.resize(columns, rows, cell_width, cell_height);
         }
+    }
+
+    pub fn titlesGeneration(self: *const App) u64 {
+        var generation: u64 = 0;
+        for (self.sessions.items) |session| {
+            if (session.runtime) |runtime| generation +%= runtime.titleGeneration();
+        }
+        return generation;
+    }
+
+    pub fn syncTitles(self: *App) bool {
+        var changed = false;
+        for (self.sessions.items) |*session| {
+            const runtime = session.runtime orelse continue;
+            const generation = runtime.titleGeneration();
+            if (generation == session.title_generation) continue;
+            const title = runtime.titleAlloc(self.allocator) catch continue;
+            session.title.deinit(self.allocator);
+            session.title = .fromOwnedSlice(title);
+            session.title_generation = generation;
+            changed = true;
+        }
+        return changed;
     }
 };
 

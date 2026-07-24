@@ -10,6 +10,8 @@ pub const SessionRuntime = struct {
     reader_thread: ?std.Thread = null,
     terminal_mutex: std.Thread.Mutex = .{},
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    title: std.ArrayList(u8) = .empty,
+    title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -26,6 +28,7 @@ pub const SessionRuntime = struct {
             .terminal = try Terminal.init(columns, rows, terminal_theme),
         };
         errdefer self.terminal.deinit();
+        try self.terminal.setTitleChanged(titleChanged, self);
 
         self.pty = Pty.spawn(allocator, command, columns, rows) catch |err| {
             var message: [256]u8 = undefined;
@@ -55,6 +58,7 @@ pub const SessionRuntime = struct {
             pty.closeConsole();
             pty.finishClose();
         }
+        self.title.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -73,6 +77,16 @@ pub const SessionRuntime = struct {
 
     pub fn contentGeneration(self: *const SessionRuntime) u64 {
         return self.content_generation.load(.monotonic);
+    }
+
+    pub fn titleGeneration(self: *const SessionRuntime) u64 {
+        return self.title_generation.load(.acquire);
+    }
+
+    pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return allocator.dupe(u8, self.title.items);
     }
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
@@ -109,5 +123,13 @@ pub const SessionRuntime = struct {
             self.terminal_mutex.unlock();
             _ = self.content_generation.fetchAdd(1, .monotonic);
         }
+    }
+
+    fn titleChanged(context: ?*anyopaque, title: []const u8) void {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
+        self.title.ensureTotalCapacity(self.allocator, title.len) catch return;
+        self.title.clearRetainingCapacity();
+        self.title.appendSliceAssumeCapacity(title);
+        _ = self.title_generation.fetchAdd(1, .release);
     }
 };

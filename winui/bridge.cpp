@@ -21,6 +21,7 @@
 #include <winrt/Microsoft.UI.Interop.h>
 #include <algorithm>
 #include <array>
+#include <string_view>
 
 using namespace winrt;
 using namespace Microsoft::UI;
@@ -206,7 +207,7 @@ struct Bridge {
         if (!closed && callback) callback(context, command, argument);
     }
 
-    void update(uint8_t const* kinds, uint32_t count, int32_t active) {
+    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t count, int32_t active) {
         updating = true;
         struct ResetUpdating {
             bool& value;
@@ -216,7 +217,7 @@ struct Bridge {
         while (items.Size() > count) items.RemoveAtEnd();
         for (uint32_t i = 0; i < count; ++i) {
             TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
-            item.Header(box_value(kinds[i] == 0 ? L"PowerShell" : L"WSL"));
+            item.Header(box_value(to_hstring(std::string_view{titles[i], title_lengths[i]})));
             item.MinHeight(40);
             item.IsClosable(true);
             if (i == items.Size()) items.Append(item);
@@ -345,11 +346,11 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
     }
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const uint8_t* kinds, uint32_t count, int32_t active) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if (count && !kinds) return E_INVALIDARG;
-    try { bridge->update(kinds, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
+    if (count && (!titles || !title_lengths)) return E_INVALIDARG;
+    try { bridge->update(titles, title_lengths, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
