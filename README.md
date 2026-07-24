@@ -27,16 +27,20 @@ The build uses the Windows subsystem and links only Windows SDK libraries availa
 
 ### Optional WinUI 3 chrome
 
-Restore and build the x64 bridge with VS 2022 (the project pins Windows App SDK 1.8 and explicitly owns bootstrap lifetime):
+Install the x64 Windows App Runtime 1.8 once on development and target machines:
 
 ```powershell
-& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' winui\Zigonaut.WinUI.Bridge.vcxproj /restore /t:Build /p:Configuration=Release /p:Platform=x64
-Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.dll, winui\x64\Release\Microsoft.WindowsAppRuntime.Bootstrap.dll zig-out\bin\
-Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.pri zig-out\bin\resources.pri
+winget install -e --id Microsoft.WindowsAppRuntime.1.8
+```
+
+Then restore, build, and deploy the x64 bridge with VS 2022 and run the application:
+
+```powershell
+zig build winui
 zig build run
 ```
 
-The compiled XAML resource index must be deployed as `resources.pri`, the conventional name the unpackaged host loads. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread. Zig loads it dynamically, so the normal `zig build` has no Visual Studio or Windows App SDK dependency.
+The `winui` build step discovers MSBuild through Visual Studio Installer, builds the bridge, deploys its DLL, bootstrap DLL, and compiled XAML resource index, and verifies that the x64 runtime is installed. It fails clearly for non-x64 targets. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread. Zig loads it dynamically, so the normal `zig build` has no Visual Studio or Windows App SDK dependency.
 
 ## MVP path
 

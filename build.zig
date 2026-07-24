@@ -35,6 +35,18 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run Zigonaut");
     run_step.dependOn(&run_cmd.step);
 
+    const winui_step = b.step("winui", "Build and deploy the optional x64 WinUI 3 bridge");
+    if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .windows) {
+        const winui_cmd = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+        winui_cmd.addFileArg(b.path("winui/build.ps1"));
+        winui_cmd.addArgs(&.{ "-TargetArch", @tagName(target.result.cpu.arch), "-Configuration", "Release" });
+        winui_cmd.step.dependOn(b.getInstallStep());
+        winui_step.dependOn(&winui_cmd.step);
+    } else {
+        const unsupported = b.addFail("the WinUI bridge currently supports only x86_64-windows targets");
+        winui_step.dependOn(&unsupported.step);
+    }
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/app.zig"),
