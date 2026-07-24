@@ -76,11 +76,12 @@ pub const Bridge = struct {
         _ = self.close_fn(instance);
     }
 
-    pub fn deinit(self: *Bridge) void {
-        const instance = self.instance orelse return;
+    pub fn deinit(self: *Bridge) bool {
+        const instance = self.instance orelse return true;
+        if (!succeeded(self.destroy_fn(instance))) return false;
         self.instance = null;
-        _ = self.destroy_fn(instance);
         // WinUI can retain delegate code until process teardown, so the bridge DLL must remain loaded.
+        return true;
     }
 };
 

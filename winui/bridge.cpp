@@ -5,15 +5,19 @@
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Content.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
+#include <winrt/Microsoft.UI.Windowing.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Graphics.h>
 #include <winrt/base.h>
 #include <Microsoft.UI.Dispatching.Interop.h>
 #include <winrt/Microsoft.UI.Interop.h>
+#include <algorithm>
+#include <array>
 
 using namespace winrt;
 using namespace Microsoft::UI;
@@ -62,6 +66,9 @@ struct Bridge {
     void* context{};
     Microsoft::UI::Dispatching::DispatcherQueueController dispatcher{nullptr};
     Application application{nullptr};
+    HWND parent{};
+    Microsoft::UI::Windowing::AppWindow app_window{nullptr};
+    Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     DesktopWindowXamlSource source{nullptr};
     TabView tabs{nullptr};
     MenuFlyout new_tab_menu{nullptr};
@@ -80,16 +87,17 @@ struct Bridge {
     bool handlers_detached = false;
     bool updating = false;
     bool closed = false;
+    bool custom_title_bar = false;
 
     Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
            Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
            Application const& app)
         : callback(cb), context(ctx), dispatcher(controller), application(app) {
+        this->parent = parent;
         source = DesktopWindowXamlSource{};
         source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
         tabs = TabView{};
 
-        tabs.Margin(Thickness{8, 4, 8, 0});
         tabs.IsAddTabButtonVisible(true);
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
@@ -104,6 +112,82 @@ struct Bridge {
             if (sender.TabItems().IndexOf(args.Item(), index)) notify(command_close, index);
         });
         source.Content(tabs);
+        enableTitleBar();
+    }
+
+    void enableTitleBar() {
+        tabs.Margin(Thickness{8, 4, 8, 0});
+        if (!Microsoft::UI::Windowing::AppWindowTitleBar::IsCustomizationSupported()) return;
+        try {
+            app_window = Microsoft::UI::Windowing::AppWindow::GetFromWindowId(Microsoft::UI::GetWindowIdFromWindow(parent));
+            title_bar = app_window.TitleBar();
+            title_bar.ExtendsContentIntoTitleBar(true);
+            custom_title_bar = true;
+            title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
+            updateTitleBarLayout();
+        } catch (...) {
+            reportCurrentException(L"enable custom title bar");
+            HRESULT result = S_OK;
+            if (!restoreTitleBar(result)) return;
+            app_window = nullptr;
+            title_bar = nullptr;
+        }
+    }
+
+    bool restoreTitleBar(HRESULT& result) noexcept {
+        if (!custom_title_bar) return true;
+        if (IsWindow(parent)) {
+            if (!cleanup(L"restore system title bar", [&] { title_bar.ResetToDefault(); }, result)) return false;
+        }
+        custom_title_bar = false;
+        title_bar = nullptr;
+        app_window = nullptr;
+        return true;
+    }
+
+    void updateTitleBarLayout() {
+        if (!custom_title_bar) return;
+        RECT client{};
+        if (IsIconic(parent) || !GetClientRect(parent, &client) || client.right <= 0 || client.bottom <= 0) return;
+        auto const dpi = GetDpiForWindow(parent);
+        auto const drag_width = MulDiv(40, dpi, 96);
+        auto const left_inset = title_bar.LeftInset();
+        auto const right_inset = title_bar.RightInset();
+        auto const client_width = static_cast<int32_t>(client.right);
+        auto const client_height = static_cast<int32_t>(client.bottom);
+        auto const drag_height = std::min(title_bar.Height(), client_height);
+        auto const drag_left = std::min(std::max(left_inset, 0), client_width);
+        auto const drag_right = std::max(drag_left, client_width - std::max(right_inset, 0));
+        auto const left_drag_width = std::min(drag_width, drag_right - drag_left);
+        auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
+        tabs.Margin(Thickness{to_dips(left_inset + drag_width), 4, to_dips(right_inset) + 8, 0});
+        std::array<Windows::Graphics::RectInt32, 2> drag_areas{
+            Windows::Graphics::RectInt32{drag_left, 0, left_drag_width, drag_height},
+            Windows::Graphics::RectInt32{},
+        };
+        uint32_t drag_area_count = left_drag_width > 0 && drag_height > 0 ? 1 : 0;
+        double occupied_width = tabs.Margin().Left;
+        bool items_measured = true;
+        for (auto const& value : tabs.TabItems()) {
+            auto const width = value.as<TabViewItem>().ActualWidth();
+            if (width <= 0) items_measured = false;
+            occupied_width += width;
+        }
+        if (items_measured) {
+            constexpr double add_button_width = 48;
+            auto const drag_start = static_cast<int32_t>((occupied_width + add_button_width) * dpi / 96.0 + 0.5);
+            if (drag_right > drag_start && drag_height > 0) {
+                drag_areas[drag_area_count] = {drag_start, 0, drag_right - drag_start, drag_height};
+                ++drag_area_count;
+            }
+        }
+        if (drag_area_count > 0) title_bar.SetDragRectangles({drag_areas.data(), drag_area_count});
+    }
+
+    void move(int32_t x, int32_t y, int32_t width, int32_t height) {
+        if (IsIconic(parent)) return;
+        source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1});
+        updateTitleBarLayout();
     }
 
     void notify(uint32_t command, uint32_t argument) const {
@@ -125,6 +209,8 @@ struct Bridge {
             if (i == items.Size()) items.Append(item);
         }
         tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
+        tabs.UpdateLayout();
+        updateTitleBarLayout();
     }
 
     void showNewTabMenu() {
@@ -185,6 +271,7 @@ struct Bridge {
         if (!safe_to_release) return result;
 
         handlers_detached = true;
+        if (!restoreTitleBar(result)) return result;
         closed = true;
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         powershell_item = nullptr;
@@ -253,7 +340,7 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const uint8_t* ki
 extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    try { bridge->source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1}); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
+    try { bridge->move(x, y, width, height); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
 }
 
 extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {
@@ -272,11 +359,11 @@ extern "C" HRESULT __cdecl zigonaut_chrome_destroy(void* value) noexcept {
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     auto dispatcher = bridge->dispatcher;
     auto result = bridge->close();
-    if (!bridge->handlers_detached) return result;
+    if (!bridge->handlers_detached || bridge->custom_title_bar) return FAILED(result) ? result : E_FAIL;
     delete bridge;
-    try { dispatcher.ShutdownQueue(); } catch (...) { if (SUCCEEDED(result)) result = reportCurrentException(L"ShutdownQueue"); }
+    try { dispatcher.ShutdownQueue(); } catch (...) { reportCurrentException(L"ShutdownQueue"); }
     dispatcher = nullptr;
     MddBootstrapShutdown();
     uninit_apartment();
-    return result;
+    return S_OK;
 }

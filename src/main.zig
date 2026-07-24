@@ -98,7 +98,7 @@ pub fn main() !void {
         _ = win.DispatchMessageW(&message);
     }
     if (state) |*current| {
-        if (current.chrome) |*bridge| bridge.deinit();
+        if (current.chrome) |*bridge| _ = bridge.deinit();
     }
     state = null;
 }
@@ -318,7 +318,9 @@ fn syncChrome() void {
 }
 
 fn disableChrome(hwnd: win.HWND) void {
-    if (state.?.chrome) |*bridge| bridge.deinit();
+    if (state.?.chrome) |*bridge| {
+        if (!bridge.deinit()) return;
+    }
     state.?.chrome = null;
     createFallbackControls(hwnd, win.GetModuleHandleW(null)) catch {};
     layoutTerminalView(hwnd);
