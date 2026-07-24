@@ -211,7 +211,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 win.SWP_NOACTIVATE | win.SWP_NOZORDER,
             );
             if (state) |*current| {
-                const new_dpi: u32 = @truncate(wparam);
+                const new_dpi: u32 = @intCast(wparam & 0xffff);
                 const new_font = createFont(new_dpi);
                 current.terminal_view.updateFont(new_font);
                 _ = win.DeleteObject(current.font);
