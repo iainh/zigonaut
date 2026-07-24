@@ -64,6 +64,18 @@ bool cleanup(wchar_t const* operation, Action&& action, HRESULT& result) noexcep
     }
 }
 
+FrameworkElement findDescendant(DependencyObject const& root, wchar_t const* name) {
+    auto const count = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChildrenCount(root);
+    for (int32_t index = 0; index < count; ++index) {
+        auto const child = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChild(root, index);
+        if (auto const element = child.try_as<FrameworkElement>(); element && element.Name() == name) {
+            return element;
+        }
+        if (auto const found = findDescendant(child, name)) return found;
+    }
+    return nullptr;
+}
+
 struct Bridge {
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
@@ -240,7 +252,9 @@ struct Bridge {
         wsl_handler_attached = true;
         new_tab_menu.Items().Append(powershell_item);
         new_tab_menu.Items().Append(wsl_item);
-        new_tab_menu.ShowAt(tabs);
+        auto const add_button = findDescendant(tabs, L"AddButton");
+        new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        new_tab_menu.ShowAt(add_button ? add_button : tabs);
     }
 
     void closeNewTabMenu() {
