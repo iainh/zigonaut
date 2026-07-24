@@ -3,6 +3,8 @@ const App = @import("app.zig").App;
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
+const GdiRenderer = @import("gdi_renderer.zig");
+const input = @import("input.zig");
 const theme = @import("theme.zig");
 
 const win = @import("win32.zig").c;
@@ -17,8 +19,7 @@ pub const View = struct {
     model: *App,
     font: win.HFONT,
     text_engine: ?TextEngine,
-    pending_high_surrogate: ?u16 = null,
-    suppressed_character: ?u16 = null,
+    input_state: input.State = .{},
     cell_width: u32,
     cell_height: u32,
     columns: u16 = 0,
@@ -26,11 +27,7 @@ pub const View = struct {
     focused: bool = false,
     dark_theme: bool = true,
     high_contrast: bool = false,
-    back_dc: win.HDC = null,
-    back_bitmap: win.HBITMAP = null,
-    back_original_bitmap: win.HGDIOBJ = null,
-    back_width: i32 = 0,
-    back_height: i32 = 0,
+    gdi_renderer: GdiRenderer.Owner = .{},
     last_runtime: ?*SessionRuntime = null,
     last_content_generation: u64 = 0,
     last_titles_generation: u64 = 0,
@@ -207,12 +204,20 @@ pub const View = struct {
             return;
         }
 
-        if (self.ensureBackBuffer(dc, width, height)) {
-            self.paintFrame(self.back_dc, client);
-            _ = win.BitBlt(dc, 0, 0, width, height, self.back_dc, 0, 0, win.SRCCOPY);
-        } else {
-            self.paintFrame(dc, client);
-        }
+        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
+        const session = self.model.activeSession();
+        self.gdi_renderer.present(dc, client, .{
+            .font = self.font,
+            .foreground = self.model.terminal_theme.foreground,
+            .background = self.activeBackground(),
+            .runtime = if (session) |active| active.runtime else null,
+            .cell_width = self.cell_width,
+            .cell_height = self.cell_height,
+            .focused = self.focused,
+            .high_contrast = self.high_contrast,
+            .origin_x = padding,
+            .origin_y = padding,
+        });
     }
 
     fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !void {
@@ -258,82 +263,6 @@ pub const View = struct {
         try engine.endFrame();
     }
 
-    fn ensureBackBuffer(self: *View, dc: win.HDC, width: i32, height: i32) bool {
-        if (self.back_bitmap != null and self.back_width == width and self.back_height == height) return true;
-
-        if (self.back_dc == null) self.back_dc = win.CreateCompatibleDC(dc);
-        if (self.back_dc == null) return false;
-
-        const bitmap = win.CreateCompatibleBitmap(dc, width, height);
-        if (bitmap == null) return false;
-        const previous = win.SelectObject(self.back_dc, bitmap);
-        if (previous == null) {
-            _ = win.DeleteObject(bitmap);
-            return false;
-        }
-
-        if (self.back_bitmap == null) {
-            self.back_original_bitmap = previous;
-        } else {
-            _ = win.DeleteObject(self.back_bitmap);
-        }
-        self.back_bitmap = bitmap;
-        self.back_width = width;
-        self.back_height = height;
-        return true;
-    }
-
-    fn releaseBackBuffer(self: *View) void {
-        if (self.back_dc != null and self.back_original_bitmap != null) {
-            _ = win.SelectObject(self.back_dc, self.back_original_bitmap);
-        }
-        if (self.back_bitmap != null) _ = win.DeleteObject(self.back_bitmap);
-        if (self.back_dc != null) _ = win.DeleteDC(self.back_dc);
-        self.back_dc = null;
-        self.back_bitmap = null;
-        self.back_original_bitmap = null;
-        self.back_width = 0;
-        self.back_height = 0;
-    }
-
-    fn paintFrame(self: *View, dc: win.HDC, client: win.RECT) void {
-        const saved_dc = win.SaveDC(dc);
-        defer {
-            if (saved_dc != 0) _ = win.RestoreDC(dc, saved_dc);
-        }
-        const background = if (self.high_contrast)
-            win.GetSysColor(win.COLOR_WINDOW)
-        else
-            colorRef(self.activeBackground());
-        const foreground = if (self.high_contrast)
-            win.GetSysColor(win.COLOR_WINDOWTEXT)
-        else
-            colorRef(self.model.terminal_theme.foreground);
-        fill(dc, client, background);
-
-        _ = win.SelectObject(dc, self.font);
-        _ = win.SetBkMode(dc, win.TRANSPARENT);
-        _ = win.SetTextColor(dc, foreground);
-        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
-
-        if (self.model.activeSession()) |session| {
-            var renderer = CellRenderer{
-                .dc = dc,
-                .view = self,
-                .client = client,
-                .origin_x = padding,
-                .origin_y = padding,
-            };
-            session.runtime.?.renderViewport(&renderer) catch {
-                var text_rect = paddedRect(client, padding);
-                drawText(dc, "libghostty render state unavailable", &text_rect, win.DT_LEFT | win.DT_TOP);
-            };
-        } else {
-            var text_rect = paddedRect(client, padding);
-            drawText(dc, "Open a PowerShell or WSL session.", &text_rect, win.DT_LEFT | win.DT_TOP);
-        }
-    }
-
     fn activeBackground(self: *View) theme.Color {
         const session = self.model.activeSession() orelse return self.model.terminal_theme.background;
         return session.background;
@@ -341,225 +270,23 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
-        const key: Terminal.Key = switch (wparam) {
-            win.VK_ESCAPE => .escape,
-            win.VK_BACK => .backspace,
-            win.VK_TAB => .tab,
-            win.VK_RETURN => .enter,
-            win.VK_INSERT => .insert,
-            win.VK_DELETE => .delete,
-            win.VK_END => .end,
-            win.VK_HOME => .home,
-            win.VK_NEXT => .page_down,
-            win.VK_PRIOR => .page_up,
-            win.VK_DOWN => .arrow_down,
-            win.VK_LEFT => .arrow_left,
-            win.VK_RIGHT => .arrow_right,
-            win.VK_UP => .arrow_up,
-            win.VK_F1 => .f1,
-            win.VK_F2 => .f2,
-            win.VK_F3 => .f3,
-            win.VK_F4 => .f4,
-            win.VK_F5 => .f5,
-            win.VK_F6 => .f6,
-            win.VK_F7 => .f7,
-            win.VK_F8 => .f8,
-            win.VK_F9 => .f9,
-            win.VK_F10 => .f10,
-            win.VK_F11 => .f11,
-            win.VK_F12 => .f12,
-            else => return false,
-        };
+        if (input.keyFromVirtualKey(wparam) == null) return false;
         const session = self.model.activeSession() orelse return true;
-        const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
-        const action: Terminal.KeyAction = if (released) .release else if (repeated) .repeat else .press;
-        session.runtime.?.sendKey(key, action, currentModifiers()) catch |err| {
+        const event = self.input_state.keyEvent(wparam, lparam, released).?;
+        session.runtime.?.sendKey(event.key, event.action, input.currentModifiers()) catch |err| {
             log.debug("unable to send terminal key: {}", .{err});
         };
-        if (!released) {
-            self.suppressed_character = switch (wparam) {
-                win.VK_ESCAPE => 0x1b,
-                win.VK_BACK => 0x08,
-                win.VK_TAB => 0x09,
-                win.VK_RETURN => 0x0d,
-                else => null,
-            };
-        }
         return true;
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
-        if (self.suppressCharacter(code_unit)) return;
+        if (self.input_state.suppressCharacter(code_unit)) return;
         const session = self.model.activeSession() orelse return;
-        var utf16: [2]u16 = undefined;
-        var length: usize = 1;
-
-        if (code_unit >= 0xD800 and code_unit <= 0xDBFF) {
-            self.pending_high_surrogate = code_unit;
-            return;
-        } else if (code_unit >= 0xDC00 and code_unit <= 0xDFFF) {
-            const high = self.pending_high_surrogate orelse return;
-            utf16[0] = high;
-            utf16[1] = code_unit;
-            length = 2;
-        } else {
-            utf16[0] = code_unit;
-        }
-        self.pending_high_surrogate = null;
-
         var utf8: [4]u8 = undefined;
-        const utf8_length = std.unicode.utf16LeToUtf8(&utf8, utf16[0..length]) catch return;
-        session.runtime.?.write(utf8[0..utf8_length]) catch |err| {
+        const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
+        session.runtime.?.write(encoded) catch |err| {
             log.debug("unable to write terminal input: {}", .{err});
         };
-    }
-
-    fn suppressCharacter(self: *View, code_unit: u16) bool {
-        const suppressed = self.suppressed_character == code_unit;
-        self.suppressed_character = null;
-        return suppressed;
-    }
-};
-
-const CellRenderer = struct {
-    dc: win.HDC,
-    view: *View,
-    client: win.RECT,
-    origin_x: i32,
-    origin_y: i32,
-    frame: ?Terminal.Frame = null,
-
-    pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
-        self.frame = frame;
-        if (!self.view.high_contrast) fill(self.dc, self.client, colorRef(frame.background));
-        _ = win.SelectObject(self.dc, self.view.font);
-        _ = win.SetBkMode(self.dc, win.OPAQUE);
-    }
-
-    pub fn beginRow(_: *CellRenderer, _: u16) void {}
-
-    pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
-        if (cell.occupancy == .wide_tail) return;
-        const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
-        const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
-        const cell_span: i32 = if (cell.occupancy == .wide) 2 else 1;
-        var rect = win.RECT{
-            .left = left,
-            .top = top,
-            .right = left + cell_span * @as(i32, @intCast(self.view.cell_width)),
-            .bottom = top + @as(i32, @intCast(self.view.cell_height)),
-        };
-        const solid_cursor = self.view.focused and
-            self.frame.?.cursor_visible and
-            self.frame.?.cursor_style == .block and
-            cell.x >= self.frame.?.cursor_x and
-            cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and
-            cell.y == self.frame.?.cursor_y;
-        const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        const foreground = if (solid_cursor) normal_background else normal_foreground;
-        const background = if (solid_cursor)
-            (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
-        else
-            normal_background;
-        const text_foreground = if (cell.faint and !self.view.high_contrast)
-            blendColorRef(foreground, background)
-        else
-            foreground;
-        const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
-        const decoration_color = if (cell.faint and !self.view.high_contrast)
-            blendColorRef(underline_color, background)
-        else
-            underline_color;
-        _ = win.SetTextColor(self.dc, text_foreground);
-        _ = win.SetBkColor(self.dc, background);
-
-        var wide: [32]u16 = undefined;
-        var length: usize = 0;
-        for (cell.codepoints) |codepoint| {
-            if (codepoint <= 0xffff) {
-                if (codepoint >= 0xd800 and codepoint <= 0xdfff) continue;
-                wide[length] = @intCast(codepoint);
-                length += 1;
-            } else if (codepoint <= 0x10ffff and length + 1 < wide.len) {
-                const value = codepoint - 0x10000;
-                wide[length] = @intCast(0xd800 + (value >> 10));
-                wide[length + 1] = @intCast(0xdc00 + (value & 0x3ff));
-                length += 2;
-            }
-        }
-        _ = win.ExtTextOutW(
-            self.dc,
-            left,
-            top,
-            win.ETO_CLIPPED | win.ETO_OPAQUE,
-            &rect,
-            &wide,
-            @intCast(length),
-            null,
-        );
-        if (cell.underline != 0) {
-            fill(self.dc, .{
-                .left = rect.left,
-                .top = rect.bottom - 2,
-                .right = rect.right,
-                .bottom = rect.bottom - 1,
-            }, decoration_color);
-            if (cell.underline == 2) {
-                fill(self.dc, .{
-                    .left = rect.left,
-                    .top = rect.bottom - 4,
-                    .right = rect.right,
-                    .bottom = rect.bottom - 3,
-                }, decoration_color);
-            }
-        }
-        if (cell.strikethrough) {
-            const middle = rect.top + @divTrunc(rect.bottom - rect.top, 2);
-            fill(self.dc, .{
-                .left = rect.left,
-                .top = middle,
-                .right = rect.right,
-                .bottom = middle + 1,
-            }, text_foreground);
-        }
-        if (cell.overline) {
-            fill(self.dc, .{
-                .left = rect.left,
-                .top = rect.top,
-                .right = rect.right,
-                .bottom = rect.top + 1,
-            }, text_foreground);
-        }
-    }
-
-    pub fn endRow(_: *CellRenderer, _: u16) void {}
-
-    pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
-        if (!frame.cursor_visible) return;
-        const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
-        const top = self.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.view.cell_height));
-        var rect = win.RECT{
-            .left = left,
-            .top = top,
-            .right = left + @as(i32, @intCast(frame.cursor_columns)) * @as(i32, @intCast(self.view.cell_width)),
-            .bottom = top + @as(i32, @intCast(self.view.cell_height)),
-        };
-        const cursor_color = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor);
-        if (!self.view.focused or frame.cursor_style == .hollow) {
-            frameRect(self.dc, rect, cursor_color);
-        } else switch (frame.cursor_style) {
-            .block => {},
-            .bar => {
-                rect.right = rect.left + @max(@divTrunc(@as(i32, @intCast(self.view.cell_width)), 8), 2);
-                fill(self.dc, rect, cursor_color);
-            },
-            .underline => {
-                rect.top = rect.bottom - 2;
-                fill(self.dc, rect, cursor_color);
-            },
-            .hollow => unreachable,
-        }
     }
 };
 
@@ -703,7 +430,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_SYSCHAR => {
             if (view) |current| {
-                if (current.suppressCharacter(@truncate(wparam))) return 0;
+                if (current.input_state.suppressCharacter(@truncate(wparam))) return 0;
             }
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
@@ -725,7 +452,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
             if (view) |current| {
-                current.releaseBackBuffer();
+                current.gdi_renderer.release();
                 if (current.text_engine) |*engine| engine.deinit();
                 current.text_engine = null;
             }
@@ -754,21 +481,6 @@ fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
 
 fn scaled(value: i32, dpi: u32) i32 {
     return win.MulDiv(value, @intCast(dpi), 96);
-}
-
-fn currentModifiers() u16 {
-    var modifiers: u16 = 0;
-    if (win.GetKeyState(win.VK_SHIFT) < 0) modifiers |= Terminal.Modifier.shift;
-    if (win.GetKeyState(win.VK_CONTROL) < 0) modifiers |= Terminal.Modifier.control;
-    if (win.GetKeyState(win.VK_MENU) < 0) modifiers |= Terminal.Modifier.alt;
-    if (win.GetKeyState(win.VK_LWIN) < 0 or win.GetKeyState(win.VK_RWIN) < 0) modifiers |= Terminal.Modifier.super;
-    return modifiers;
-}
-
-fn drawText(dc: win.HDC, text: []const u8, rect: *win.RECT, format: win.UINT) void {
-    var wide: [16 * 1024]u16 = undefined;
-    const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
-    _ = win.DrawTextW(dc, &wide, @intCast(length), rect, format);
 }
 
 fn drawDirectWriteMessage(
@@ -823,20 +535,6 @@ fn paddedRect(rect: win.RECT, padding: i32) win.RECT {
         .right = rect.right - padding,
         .bottom = rect.bottom - padding,
     };
-}
-
-fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
-    _ = win.SetDCBrushColor(dc, color);
-    const brush: win.HBRUSH = @ptrCast(@alignCast(win.GetStockObject(win.DC_BRUSH)));
-    var mutable_rect = rect;
-    _ = win.FillRect(dc, &mutable_rect, brush);
-}
-
-fn frameRect(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
-    _ = win.SetDCBrushColor(dc, color);
-    const brush: win.HBRUSH = @ptrCast(@alignCast(win.GetStockObject(win.DC_BRUSH)));
-    var mutable_rect = rect;
-    _ = win.FrameRect(dc, &mutable_rect, brush);
 }
 
 fn colorRef(color: theme.Color) win.COLORREF {

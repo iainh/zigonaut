@@ -5,6 +5,8 @@ const modules = .{
     @import("chrome_bridge.zig"),
     @import("config.zig"),
     @import("directwrite_renderer.zig"),
+    @import("gdi_renderer.zig"),
+    @import("input.zig"),
     @import("pty.zig"),
     @import("session.zig"),
     @import("terminal.zig"),
