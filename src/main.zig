@@ -22,7 +22,7 @@ const command_close_tab = 1200;
 const chrome_message = win.WM_APP + 1;
 const tab_selection_changed: win.UINT = @bitCast(@as(i32, -551));
 const fallback_terminal_top: i32 = 108;
-const winui_terminal_top: i32 = 52;
+const winui_terminal_top: i32 = 48;
 
 const State = struct {
     hwnd: win.HWND,

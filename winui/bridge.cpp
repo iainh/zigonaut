@@ -3,6 +3,7 @@
 #include "bridge.h"
 #include <MddBootstrap.h>
 #include <winrt/Microsoft.UI.h>
+#include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Content.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Windowing.h>
@@ -10,9 +11,11 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
+#include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/base.h>
 #include <Microsoft.UI.Dispatching.Interop.h>
 #include <winrt/Microsoft.UI.Interop.h>
@@ -70,6 +73,7 @@ struct Bridge {
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     DesktopWindowXamlSource source{nullptr};
+    Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     TabView tabs{nullptr};
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
@@ -99,6 +103,7 @@ struct Bridge {
         tabs = TabView{};
 
         tabs.IsAddTabButtonVisible(true);
+        tabs.VerticalAlignment(VerticalAlignment::Bottom);
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         add_tab_token = tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
@@ -112,11 +117,14 @@ struct Bridge {
             if (sender.TabItems().IndexOf(args.Item(), index)) notify(command_close, index);
         });
         source.Content(tabs);
+        backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
+        backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
+        source.SystemBackdrop(backdrop);
         enableTitleBar();
     }
 
     void enableTitleBar() {
-        tabs.Margin(Thickness{8, 4, 8, 0});
+        tabs.Margin(Thickness{8, 0, 8, 0});
         if (!Microsoft::UI::Windowing::AppWindowTitleBar::IsCustomizationSupported()) return;
         try {
             app_window = Microsoft::UI::Windowing::AppWindow::GetFromWindowId(Microsoft::UI::GetWindowIdFromWindow(parent));
@@ -124,6 +132,10 @@ struct Bridge {
             title_bar.ExtendsContentIntoTitleBar(true);
             custom_title_bar = true;
             title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
+            auto const transparent = box_value(Windows::UI::Color{0, 0, 0, 0})
+                .as<Windows::Foundation::IReference<Windows::UI::Color>>();
+            title_bar.ButtonBackgroundColor(transparent);
+            title_bar.ButtonInactiveBackgroundColor(transparent);
             updateTitleBarLayout();
         } catch (...) {
             reportCurrentException(L"enable custom title bar");
@@ -160,7 +172,7 @@ struct Bridge {
         auto const drag_right = std::max(drag_left, client_width - std::max(right_inset, 0));
         auto const left_drag_width = std::min(drag_width, drag_right - drag_left);
         auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
-        tabs.Margin(Thickness{to_dips(left_inset + drag_width), 4, to_dips(right_inset) + 8, 0});
+        tabs.Margin(Thickness{to_dips(left_inset + drag_width), 0, to_dips(right_inset) + 8, 0});
         std::array<Windows::Graphics::RectInt32, 2> drag_areas{
             Windows::Graphics::RectInt32{drag_left, 0, left_drag_width, drag_height},
             Windows::Graphics::RectInt32{},
@@ -205,6 +217,7 @@ struct Bridge {
         for (uint32_t i = 0; i < count; ++i) {
             TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
             item.Header(box_value(kinds[i] == 0 ? L"PowerShell" : L"WSL"));
+            item.MinHeight(40);
             item.IsClosable(true);
             if (i == items.Size()) items.Append(item);
         }
@@ -280,6 +293,8 @@ struct Bridge {
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
         tabs = nullptr;
+        cleanup(L"clear system backdrop", [&] { source.SystemBackdrop(nullptr); }, result);
+        backdrop = nullptr;
         cleanup(L"close XAML source", [&] { source.Close(); }, result);
         source = nullptr;
         application = nullptr;
