@@ -1,5 +1,6 @@
 const std = @import("std");
 const app_model = @import("app.zig");
+const chrome = @import("chrome_bridge.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
 const win = @import("win32.zig").c;
@@ -17,9 +18,11 @@ const terminal_top = 108;
 const terminal_margin = 16;
 
 const State = struct {
+    hwnd: win.HWND,
     model: app_model.App,
     font: win.HFONT,
     terminal_view: TerminalView,
+    chrome: ?chrome.Bridge = null,
 };
 
 var state: ?State = null;
@@ -65,9 +68,18 @@ pub fn main() !void {
 
     var message: win.MSG = undefined;
     while (win.GetMessageW(&message, null, 0, 0) > 0) {
+        if (state) |*current| {
+            if (current.chrome) |*bridge| {
+                if (bridge.pretranslate(&message)) continue;
+            }
+        }
         _ = win.TranslateMessage(&message);
         _ = win.DispatchMessageW(&message);
     }
+    if (state) |*current| {
+        if (current.chrome) |*bridge| bridge.deinit();
+    }
+    state = null;
 }
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
@@ -90,6 +102,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 font_name,
             );
             state = .{
+                .hwnd = hwnd,
                 .model = app_model.App.init(std.heap.page_allocator),
                 .font = font,
                 .terminal_view = undefined,
@@ -97,8 +110,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             _ = state.?.model.addSession(.powershell) catch return -1;
+            state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null);
             layoutTerminalView(hwnd);
             state.?.terminal_view.syncSessions();
+            syncChrome();
             return 0;
         },
         win.WM_COMMAND => {
@@ -116,15 +131,20 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             }
             _ = win.InvalidateRect(hwnd, null, 0);
             state.?.terminal_view.invalidate();
+            syncChrome();
             return 0;
         },
         win.WM_LBUTTONUP => {
-            handleClick(hwnd, pointX(lparam), pointY(lparam));
+            if (state.?.chrome == null) handleClick(hwnd, pointX(lparam), pointY(lparam));
             return 0;
         },
         win.WM_SIZE => {
             layoutTerminalView(hwnd);
             return 0;
+        },
+        win.WM_CLOSE => {
+            if (state.?.chrome) |*bridge| bridge.close();
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_ERASEBKGND => return 1,
         win.WM_PAINT => {
@@ -136,7 +156,6 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 current.model.deinit();
                 _ = win.DeleteObject(current.font);
             }
-            state = null;
             win.PostQuitMessage(0);
             return 0;
         },
@@ -173,12 +192,37 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     if (state == null) return;
     var client: win.RECT = undefined;
     if (win.GetClientRect(hwnd, &client) == 0) return;
+    if (state.?.chrome) |*bridge| bridge.move(0, 0, client.right, terminal_top - 8);
     state.?.terminal_view.move(
         terminal_left,
         terminal_top,
         client.right - terminal_left - terminal_margin,
         client.bottom - terminal_top - terminal_margin,
     );
+}
+
+fn syncChrome() void {
+    if (state == null) return;
+    if (state.?.chrome) |*bridge| {
+        var kinds: [32]u8 = undefined;
+        const count = @min(state.?.model.sessions.items.len, kinds.len);
+        for (state.?.model.sessions.items[0..count], 0..) |session, index| {
+            kinds[index] = @intFromEnum(session.shell);
+        }
+        bridge.update(kinds[0..count], state.?.model.active);
+    }
+}
+
+fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
+    const hwnd = state.?.hwnd;
+    const win32_command: u16 = switch (command) {
+        chrome.command.new_powershell => command_new_powershell,
+        chrome.command.new_wsl => command_new_wsl,
+        chrome.command.close => command_close_tab,
+        chrome.command.select => command_tab_base + @as(u16, @intCast(argument)),
+        else => return,
+    };
+    sendCommand(hwnd, win32_command);
 }
 
 fn sendCommand(hwnd: win.HWND, command: u16) void {
@@ -193,6 +237,8 @@ fn paint(hwnd: win.HWND) void {
     var client: win.RECT = undefined;
     _ = win.GetClientRect(hwnd, &client);
     fill(dc, client, rgb(15, 17, 21));
+
+    if (state.?.chrome != null) return;
 
     _ = win.SelectObject(dc, state.?.font);
     _ = win.SetBkMode(dc, win.TRANSPARENT);

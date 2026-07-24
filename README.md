@@ -11,7 +11,7 @@ Zigonaut is an early-stage Windows terminal application built with Zig 0.15.2. T
 
 The repository contains a runnable native Win32 application shell and a tested tab/session model. Each PowerShell and WSL tab owns an isolated Windows ConPTY process and `libghostty-vt` terminal. A background reader feeds ConPTY output into Ghostty, and the UI reads synchronized render-state snapshots rather than displaying unparsed process output. Windows Unicode text input is sent to ConPTY as UTF-8, while navigation keys use Ghostty's mode-aware key encoder. Window resizing measures the active monospace font and keeps every Ghostty grid and ConPTY session synchronized to the available viewport.
 
-Terminal painting, focus, input, refresh, and grid sizing are isolated in a dedicated Win32 child-window class. The top-level window owns only application chrome and tab commands. This child `HWND` is the native terminal surface that a WinUI 3 shell can position and host without moving terminal behavior into XAML controls.
+Terminal painting, focus, input, refresh, and grid sizing are isolated in a dedicated Win32 child-window class. The top-level window owns only application chrome and tab commands. An optional C++/WinRT bridge hosts genuine WinUI 3 controls in a `DesktopWindowXamlSource` above the terminal sibling. The bridge forwards commands to Zig and owns no session behavior. If its DLL is absent or initialization fails, the existing hand-painted Win32 chrome remains active.
 
 The dependency is pinned to Ghostty commit `ae52f97dcac558735cfa916ea3965f247e5c6e9e`, matching the upstream Ghostling reference application and Zig 0.15.2. Full `libghostty` surfaces currently have no Win32 platform renderer, so Zigonaut uses the supported cross-platform VT library and owns its Windows rendering.
 
@@ -24,6 +24,18 @@ zig build run
 ```
 
 The build uses the Windows subsystem and links only Windows SDK libraries available with Zig. No Visual Studio project generation is required for this milestone.
+
+### Optional WinUI 3 chrome
+
+Restore and build the x64 bridge with VS 2022 (the project pins Windows App SDK 1.8 and explicitly owns bootstrap lifetime):
+
+```powershell
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' winui\Zigonaut.WinUI.Bridge.vcxproj /restore /t:Build /p:Configuration=Release /p:Platform=x64
+Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.dll, winui\x64\Release\Microsoft.WindowsAppRuntime.Bootstrap.dll, winui\x64\Release\Zigonaut.WinUI.Bridge.pri zig-out\bin\
+zig build run
+```
+
+The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread. Zig loads it dynamically, so the normal `zig build` has no Visual Studio or Windows App SDK dependency.
 
 ## MVP path
 
