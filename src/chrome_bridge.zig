@@ -57,23 +57,29 @@ pub const Bridge = struct {
     }
 
     pub fn update(self: *Bridge, kinds: []const u8, active: ?usize) bool {
-        return succeeded(self.update_fn(self.instance, kinds.ptr, @intCast(kinds.len), if (active) |index| @intCast(index) else -1));
+        const instance = self.instance orelse return false;
+        return succeeded(self.update_fn(instance, kinds.ptr, @intCast(kinds.len), if (active) |index| @intCast(index) else -1));
     }
 
     pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {
-        return succeeded(self.move_fn(self.instance, x, y, width, height));
+        const instance = self.instance orelse return false;
+        return succeeded(self.move_fn(instance, x, y, width, height));
     }
 
     pub fn pretranslate(self: *Bridge, message: *win.MSG) bool {
-        return self.pretranslate_fn(self.instance, message) != 0;
+        const instance = self.instance orelse return false;
+        return self.pretranslate_fn(instance, message) != 0;
     }
 
     pub fn close(self: *Bridge) void {
-        _ = self.close_fn(self.instance);
+        const instance = self.instance orelse return;
+        _ = self.close_fn(instance);
     }
 
     pub fn deinit(self: *Bridge) void {
-        _ = self.destroy_fn(self.instance);
+        const instance = self.instance orelse return;
+        self.instance = null;
+        _ = self.destroy_fn(instance);
         // WinUI can retain delegate code until process teardown, so the bridge DLL must remain loaded.
     }
 };
