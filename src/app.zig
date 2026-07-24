@@ -1,5 +1,6 @@
 const std = @import("std");
 const SessionRuntime = @import("session.zig").SessionRuntime;
+const theme = @import("theme.zig");
 
 pub const Shell = enum {
     powershell,
@@ -28,12 +29,13 @@ pub const Session = struct {
 
 pub const App = struct {
     allocator: std.mem.Allocator,
+    terminal_theme: theme.Theme,
     sessions: std.ArrayList(Session) = .empty,
     active: ?usize = null,
     next_id: u32 = 1,
 
-    pub fn init(allocator: std.mem.Allocator) App {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: std.mem.Allocator, terminal_theme: theme.Theme) App {
+        return .{ .allocator = allocator, .terminal_theme = terminal_theme };
     }
 
     pub fn deinit(self: *App) void {
@@ -44,7 +46,7 @@ pub const App = struct {
     }
 
     pub fn addSession(self: *App, shell: Shell) !usize {
-        const runtime = try SessionRuntime.create(self.allocator, shell.command());
+        const runtime = try SessionRuntime.create(self.allocator, shell.command(), self.terminal_theme);
         errdefer runtime.destroy();
         return self.addSessionRecord(shell, runtime);
     }
@@ -90,7 +92,7 @@ pub const App = struct {
 };
 
 test "sessions are added and selected" {
-    var app = App.init(std.testing.allocator);
+    var app = App.init(std.testing.allocator, theme.rasmus);
     defer app.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), try app.addSessionRecord(.powershell, null));
@@ -102,7 +104,7 @@ test "sessions are added and selected" {
 }
 
 test "closing the active session selects its nearest neighbor" {
-    var app = App.init(std.testing.allocator);
+    var app = App.init(std.testing.allocator, theme.rasmus);
     defer app.deinit();
 
     _ = try app.addSessionRecord(.powershell, null);
@@ -112,4 +114,8 @@ test "closing the active session selects its nearest neighbor" {
 
     app.closeSession(0);
     try std.testing.expect(app.activeSession() == null);
+}
+
+test {
+    _ = @import("config.zig");
 }

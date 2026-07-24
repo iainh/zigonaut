@@ -23,6 +23,22 @@ zig build test
 zig build run
 ```
 
+## Configuration
+
+On first launch Zigonaut creates `%APPDATA%\spiralpoint\zigonaut\zigonaut.conf`:
+
+```ini
+font_family=Cascadia Mono
+font_size=18
+theme=rasmus
+default_shell=powershell
+```
+
+Supported themes are `rasmus`, `campbell`, and `solarized-dark`; `default_shell` may be
+`powershell` or `wsl`. Changes take effect after restarting Zigonaut. The configured
+shell is used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
+explicit PowerShell and WSL buttons continue to open their named profiles.
+
 The build uses the Windows subsystem and links only Windows SDK libraries available with Zig. No Visual Studio project generation is required for this milestone.
 
 ### Optional WinUI 3 chrome

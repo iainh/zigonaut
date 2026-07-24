@@ -198,11 +198,11 @@ pub const View = struct {
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else
-            colorRef(theme.rasmus.background);
+            colorRef(self.model.terminal_theme.background);
         const foreground = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOWTEXT)
         else
-            colorRef(theme.rasmus.foreground);
+            colorRef(self.model.terminal_theme.foreground);
         fill(dc, client, background);
 
         _ = win.SelectObject(dc, self.font);

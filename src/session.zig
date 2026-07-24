@@ -1,6 +1,7 @@
 const std = @import("std");
 const Pty = @import("pty.zig").Pty;
 const Terminal = @import("terminal.zig").Terminal;
+const theme = @import("theme.zig");
 
 pub const SessionRuntime = struct {
     allocator: std.mem.Allocator,
@@ -10,13 +11,13 @@ pub const SessionRuntime = struct {
     terminal_mutex: std.Thread.Mutex = .{},
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
-    pub fn create(allocator: std.mem.Allocator, command: []const u8) !*SessionRuntime {
+    pub fn create(allocator: std.mem.Allocator, command: []const u8, terminal_theme: theme.Theme) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .allocator = allocator,
-            .terminal = try Terminal.init(100, 28),
+            .terminal = try Terminal.init(100, 28, terminal_theme),
         };
         errdefer self.terminal.deinit();
 

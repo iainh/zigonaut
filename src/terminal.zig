@@ -75,7 +75,7 @@ pub const Terminal = struct {
         pub const super: u16 = 1 << 3;
     };
 
-    pub fn init(columns: u16, rows: u16) !Terminal {
+    pub fn init(columns: u16, rows: u16, terminal_theme: theme.Theme) !Terminal {
         var terminal: vt.GhosttyTerminal = null;
         try check(vt.ghostty_terminal_new(null, &terminal, .{
             .cols = columns,
@@ -104,7 +104,7 @@ pub const Terminal = struct {
         try check(vt.ghostty_key_event_new(null, &key_event));
         errdefer vt.ghostty_key_event_free(key_event);
 
-        try applyTheme(terminal, theme.rasmus);
+        try applyTheme(terminal, terminal_theme);
 
         return .{
             .terminal = terminal,
@@ -361,7 +361,7 @@ fn check(result: vt.GhosttyResult) !void {
 }
 
 test "libghostty parses control sequences into viewport state" {
-    var terminal = try Terminal.init(20, 3);
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
     defer terminal.deinit();
 
     terminal.feed("plain \x1b[31mred\x1b[0m\r\nsecond");
@@ -372,7 +372,7 @@ test "libghostty parses control sequences into viewport state" {
 }
 
 test "render state resolves ANSI colors through the Rasmus theme" {
-    var terminal = try Terminal.init(4, 2);
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
 
     terminal.feed("\x1b[31mX");
@@ -384,7 +384,7 @@ test "render state resolves ANSI colors through the Rasmus theme" {
 }
 
 test "libghostty encodes navigation keys" {
-    var terminal = try Terminal.init(20, 3);
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
     defer terminal.deinit();
 
     var buffer: [64]u8 = undefined;
@@ -393,7 +393,7 @@ test "libghostty encodes navigation keys" {
 }
 
 test "libghostty encodes physical special and function keys" {
-    var terminal = try Terminal.init(20, 3);
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
     defer terminal.deinit();
 
     var buffer: [64]u8 = undefined;

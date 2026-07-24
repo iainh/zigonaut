@@ -1,0 +1,108 @@
+const std = @import("std");
+const theme = @import("theme.zig");
+
+pub const default_contents =
+    \\# Zigonaut configuration
+    \\# Changes are applied the next time Zigonaut starts.
+    \\font_family=Cascadia Mono
+    \\font_size=18
+    \\theme=rasmus
+    \\default_shell=powershell
+    \\
+;
+
+pub const Shell = enum {
+    powershell,
+    wsl,
+};
+
+pub const Config = struct {
+    font_family: []const u8 = "Cascadia Mono",
+    font_size: u16 = 18,
+    theme: theme.Name = .rasmus,
+    default_shell: Shell = .powershell,
+};
+
+pub const Loaded = struct {
+    allocator: std.mem.Allocator,
+    contents: []u8,
+    value: Config,
+
+    pub fn deinit(self: *Loaded) void {
+        self.allocator.free(self.contents);
+    }
+};
+
+pub fn loadOrCreate(allocator: std.mem.Allocator) !Loaded {
+    const app_data = try std.process.getEnvVarOwned(allocator, "APPDATA");
+    defer allocator.free(app_data);
+    const directory = try std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut" });
+    defer allocator.free(directory);
+    const path = try std.fs.path.join(allocator, &.{ directory, "zigonaut.conf" });
+    defer allocator.free(path);
+
+    try std.fs.cwd().makePath(directory);
+    var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => create: {
+            var created = try std.fs.createFileAbsolute(path, .{});
+            try created.writeAll(default_contents);
+            created.close();
+            break :create try std.fs.openFileAbsolute(path, .{});
+        },
+        else => return err,
+    };
+    defer file.close();
+
+    const contents = try file.readToEndAlloc(allocator, 64 * 1024);
+    return .{
+        .allocator = allocator,
+        .contents = contents,
+        .value = parse(contents),
+    };
+}
+
+pub fn parse(contents: []const u8) Config {
+    var result = Config{};
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+        const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..separator], " \t");
+        const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
+
+        if (std.ascii.eqlIgnoreCase(key, "font_family")) {
+            if (value.len > 0 and value.len < 128) result.font_family = value;
+        } else if (std.ascii.eqlIgnoreCase(key, "font_size")) {
+            const size = std.fmt.parseInt(u16, value, 10) catch continue;
+            if (size >= 6 and size <= 72) result.font_size = size;
+        } else if (std.ascii.eqlIgnoreCase(key, "theme")) {
+            result.theme = theme.Name.parse(value) orelse result.theme;
+        } else if (std.ascii.eqlIgnoreCase(key, "default_shell")) {
+            if (std.ascii.eqlIgnoreCase(value, "powershell")) {
+                result.default_shell = .powershell;
+            } else if (std.ascii.eqlIgnoreCase(value, "wsl")) {
+                result.default_shell = .wsl;
+            }
+        }
+    }
+    return result;
+}
+
+test "configuration parses supported values and ignores invalid ones" {
+    const parsed = parse(
+        \\font_family = JetBrains Mono
+        \\font_size=14
+        \\theme=campbell
+        \\default_shell=WSL
+    );
+    try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
+    try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
+    try std.testing.expectEqual(theme.Name.campbell, parsed.theme);
+    try std.testing.expectEqual(Shell.wsl, parsed.default_shell);
+
+    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=cmd\n");
+    try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
+    try std.testing.expectEqual(theme.Name.rasmus, invalid.theme);
+    try std.testing.expectEqual(Shell.powershell, invalid.default_shell);
+}

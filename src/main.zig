@@ -1,13 +1,13 @@
 const std = @import("std");
 const app_model = @import("app.zig");
 const chrome = @import("chrome_bridge.zig");
+const config = @import("config.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
 const win = @import("win32.zig").c;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
-const font_name = std.unicode.utf8ToUtf16LeStringLiteral("Cascadia Mono");
 const button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
 const tab_class = std.unicode.utf8ToUtf16LeStringLiteral("SysTabControl32");
 const powershell_label = std.unicode.utf8ToUtf16LeStringLiteral("PowerShell");
@@ -41,8 +41,13 @@ const State = struct {
 };
 
 var state: ?State = null;
+var settings = config.Config{};
 
 pub fn main() !void {
+    var loaded_config = try config.loadOrCreate(std.heap.page_allocator);
+    defer loaded_config.deinit();
+    settings = loaded_config.value;
+
     const instance = win.GetModuleHandleW(null);
     const arrow_cursor: win.LPCWSTR = @ptrFromInt(32512);
     const cursor = win.LoadCursorW(null, arrow_cursor);
@@ -122,7 +127,7 @@ fn handleShortcut(message: *const win.MSG) bool {
     if (!control or alt) return false;
 
     if (shift and message.wParam == 'T') {
-        if (!repeated) sendCommand(hwnd, command_new_powershell);
+        if (!repeated) addDefaultSession() catch {};
         return true;
     }
     if (shift and message.wParam == 'W') {
@@ -147,7 +152,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const font = createFont(dpi);
             state = .{
                 .hwnd = hwnd,
-                .model = app_model.App.init(std.heap.page_allocator),
+                .model = app_model.App.init(std.heap.page_allocator, settings.theme.value()),
                 .font = font,
                 .dpi = dpi,
                 .dark_theme = false,
@@ -157,7 +162,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             state.?.terminal_ready = true;
-            _ = state.?.model.addSession(.powershell) catch return -1;
+            addDefaultSession() catch return -1;
             state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null);
             if (state.?.chrome == null) createFallbackControls(hwnd, win.GetModuleHandleW(null)) catch return -1;
             layoutTerminalView(hwnd);
@@ -411,6 +416,18 @@ fn sendCommand(hwnd: win.HWND, command: u16) void {
     _ = win.SendMessageW(hwnd, win.WM_COMMAND, command, 0);
 }
 
+fn addDefaultSession() !void {
+    if (state == null) return;
+    const shell: app_model.Shell = switch (settings.default_shell) {
+        .powershell => .powershell,
+        .wsl => .wsl,
+    };
+    _ = try state.?.model.addSession(shell);
+    state.?.terminal_view.syncSessions();
+    state.?.terminal_view.invalidate();
+    syncChrome();
+}
+
 fn sendChromeCommand(hwnd: win.HWND, command: u32, argument: u32) void {
     _ = win.PostMessageW(hwnd, chrome_message, command, @intCast(argument));
 }
@@ -535,8 +552,10 @@ fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
 }
 
 fn createFont(dpi: u32) win.HFONT {
+    var wide_name = std.mem.zeroes([128]u16);
+    _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], settings.font_family) catch 0;
     return win.CreateFontW(
-        -scaled(18, dpi),
+        -scaled(settings.font_size, dpi),
         0,
         0,
         0,
@@ -549,12 +568,12 @@ fn createFont(dpi: u32) win.HFONT {
         win.CLIP_DEFAULT_PRECIS,
         win.CLEARTYPE_QUALITY,
         win.FIXED_PITCH | win.FF_MODERN,
-        font_name,
+        &wide_name,
     );
 }
 
-fn scaled(value: i32, dpi: u32) i32 {
-    return win.MulDiv(value, @intCast(dpi), 96);
+fn scaled(value: anytype, dpi: u32) i32 {
+    return win.MulDiv(@intCast(value), @intCast(dpi), 96);
 }
 
 fn fallbackBackground() win.COLORREF {
