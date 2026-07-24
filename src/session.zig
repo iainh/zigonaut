@@ -11,17 +11,23 @@ pub const SessionRuntime = struct {
     terminal_mutex: std.Thread.Mutex = .{},
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
-    pub fn create(allocator: std.mem.Allocator, command: []const u8, terminal_theme: theme.Theme) !*SessionRuntime {
+    pub fn create(
+        allocator: std.mem.Allocator,
+        command: []const u8,
+        terminal_theme: theme.Theme,
+        columns: u16,
+        rows: u16,
+    ) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .allocator = allocator,
-            .terminal = try Terminal.init(100, 28, terminal_theme),
+            .terminal = try Terminal.init(columns, rows, terminal_theme),
         };
         errdefer self.terminal.deinit();
 
-        self.pty = Pty.spawn(allocator, command, 100, 28) catch |err| {
+        self.pty = Pty.spawn(allocator, command, columns, rows) catch |err| {
             var message: [256]u8 = undefined;
             const text = std.fmt.bufPrint(
                 &message,

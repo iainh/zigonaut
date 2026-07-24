@@ -51,8 +51,8 @@ pub const App = struct {
         self.sessions.deinit(self.allocator);
     }
 
-    pub fn addSession(self: *App, shell: Shell) !usize {
-        const runtime = try SessionRuntime.create(self.allocator, shell.command(), self.terminal_theme);
+    pub fn addSession(self: *App, shell: Shell, columns: u16, rows: u16) !usize {
+        const runtime = try SessionRuntime.create(self.allocator, shell.command(), self.terminal_theme, columns, rows);
         errdefer runtime.destroy();
         return self.addSessionRecord(shell, runtime);
     }

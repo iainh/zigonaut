@@ -133,6 +133,7 @@ pub const Engine = struct {
         width: f32,
         height: f32,
         color: u32,
+        style: u8,
     ) void {
         native.zigonaut_text_engine_draw_cursor(
             self.handle,
@@ -141,6 +142,7 @@ pub const Engine = struct {
             width,
             height,
             color,
+            style,
         );
     }
 

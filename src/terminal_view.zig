@@ -22,6 +22,7 @@ pub const View = struct {
     cell_height: u32,
     columns: u16 = 0,
     rows: u16 = 0,
+    focused: bool = false,
     dark_theme: bool = true,
     high_contrast: bool = false,
     back_dc: win.HDC = null,
@@ -384,8 +385,10 @@ const CellRenderer = struct {
     client: win.RECT,
     origin_x: i32,
     origin_y: i32,
+    frame: ?Terminal.Frame = null,
 
     pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
+        self.frame = frame;
         if (!self.view.high_contrast) fill(self.dc, self.client, colorRef(frame.background));
         _ = win.SelectObject(self.dc, self.view.font);
         _ = win.SetBkMode(self.dc, win.OPAQUE);
@@ -394,6 +397,7 @@ const CellRenderer = struct {
     pub fn beginRow(_: *CellRenderer, _: u16) void {}
 
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
+        if (cell.occupancy == .wide_tail) return;
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
         const cell_span: i32 = if (cell.occupancy == .wide) 2 else 1;
@@ -403,8 +407,19 @@ const CellRenderer = struct {
             .right = left + cell_span * @as(i32, @intCast(self.view.cell_width)),
             .bottom = top + @as(i32, @intCast(self.view.cell_height)),
         };
-        const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const solid_cursor = self.view.focused and
+            self.frame.?.cursor_visible and
+            self.frame.?.cursor_style == .block and
+            cell.x >= self.frame.?.cursor_x and
+            cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and
+            cell.y == self.frame.?.cursor_y;
+        const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
+        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const foreground = if (solid_cursor) normal_background else normal_foreground;
+        const background = if (solid_cursor)
+            (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
+        else
+            normal_background;
         const text_foreground = if (cell.faint and !self.view.high_contrast)
             blendColorRef(foreground, background)
         else
@@ -482,13 +497,27 @@ const CellRenderer = struct {
         if (!frame.cursor_visible) return;
         const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.view.cell_height));
-        const rect = win.RECT{
+        var rect = win.RECT{
             .left = left,
             .top = top,
-            .right = left + @as(i32, @intCast(self.view.cell_width)),
+            .right = left + @as(i32, @intCast(frame.cursor_columns)) * @as(i32, @intCast(self.view.cell_width)),
             .bottom = top + @as(i32, @intCast(self.view.cell_height)),
         };
-        frameRect(self.dc, rect, if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor));
+        const cursor_color = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor);
+        if (!self.view.focused or frame.cursor_style == .hollow) {
+            frameRect(self.dc, rect, cursor_color);
+        } else switch (frame.cursor_style) {
+            .block => {},
+            .bar => {
+                rect.right = rect.left + @max(@divTrunc(@as(i32, @intCast(self.view.cell_width)), 8), 2);
+                fill(self.dc, rect, cursor_color);
+            },
+            .underline => {
+                rect.top = rect.bottom - 2;
+                fill(self.dc, rect, cursor_color);
+            },
+            .hollow => unreachable,
+        }
     }
 };
 
@@ -498,10 +527,10 @@ const DirectWriteCellRenderer = struct {
     client: win.RECT,
     origin_x: i32,
     origin_y: i32,
+    frame: ?Terminal.Frame = null,
 
     pub fn beginFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
-        _ = self;
-        _ = frame;
+        self.frame = frame;
     }
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
@@ -517,8 +546,19 @@ const DirectWriteCellRenderer = struct {
     pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
-        const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const solid_cursor = self.view.focused and
+            self.frame.?.cursor_visible and
+            self.frame.?.cursor_style == .block and
+            cell.x >= self.frame.?.cursor_x and
+            cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and
+            cell.y == self.frame.?.cursor_y;
+        const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
+        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const foreground = if (solid_cursor) normal_background else normal_foreground;
+        const background = if (solid_cursor)
+            (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
+        else
+            normal_background;
         const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
@@ -547,14 +587,23 @@ const DirectWriteCellRenderer = struct {
 
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
         if (!frame.cursor_visible) return;
+        if (self.view.focused and frame.cursor_style == .block) return;
         const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.view.cell_height));
         self.engine.drawCursor(
             @floatFromInt(left),
             @floatFromInt(top),
-            @floatFromInt(self.view.cell_width),
+            @floatFromInt(@as(u32, frame.cursor_columns) * self.view.cell_width),
             @floatFromInt(self.view.cell_height),
             if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor),
+            if (!self.view.focused or frame.cursor_style == .hollow)
+                0
+            else switch (frame.cursor_style) {
+                .block => 1,
+                .bar => 2,
+                .underline => 3,
+                .hollow => 0,
+            },
         );
     }
 };
@@ -577,6 +626,20 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_LBUTTONDOWN => {
             _ = win.SetFocus(hwnd);
+            return 0;
+        },
+        win.WM_SETFOCUS => {
+            if (view) |current| {
+                current.focused = true;
+                current.invalidate();
+            }
+            return 0;
+        },
+        win.WM_KILLFOCUS => {
+            if (view) |current| {
+                current.focused = false;
+                current.invalidate();
+            }
             return 0;
         },
         win.WM_GETDLGCODE => return win.DLGC_WANTTAB,

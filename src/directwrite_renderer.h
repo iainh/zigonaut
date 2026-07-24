@@ -78,7 +78,8 @@ void zigonaut_text_engine_draw_cursor(
     float top,
     float width,
     float height,
-    uint32_t color);
+    uint32_t color,
+    uint8_t style);
 
 HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
 

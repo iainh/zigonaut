@@ -906,13 +906,23 @@ extern "C" void zigonaut_text_engine_draw_cursor(
     float top,
     float width,
     float height,
-    uint32_t cursor_color) {
+    uint32_t cursor_color,
+    uint8_t style) {
     if (engine == nullptr || engine->target == nullptr || engine->brush == nullptr) return;
     engine->brush->SetColor(color(cursor_color));
-    engine->target->DrawRectangle(
-        D2D1::RectF(left + 0.5f, top + 0.5f, left + width - 0.5f, top + height - 0.5f),
-        engine->brush,
-        1.0f);
+    if (style == 1) {
+        engine->target->FillRectangle(D2D1::RectF(left, top, left + width, top + height), engine->brush);
+    } else if (style == 2) {
+        const float bar_width = width / 8.0f > 2.0f ? width / 8.0f : 2.0f;
+        engine->target->FillRectangle(D2D1::RectF(left, top, left + bar_width, top + height), engine->brush);
+    } else if (style == 3) {
+        engine->target->FillRectangle(D2D1::RectF(left, top + height - 2.0f, left + width, top + height), engine->brush);
+    } else {
+        engine->target->DrawRectangle(
+            D2D1::RectF(left + 0.5f, top + 0.5f, left + width - 0.5f, top + height - 0.5f),
+            engine->brush,
+            1.0f);
+    }
 }
 
 extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {

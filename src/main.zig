@@ -170,21 +170,19 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             );
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             state.?.terminal_ready = true;
-            addDefaultSession() catch return -1;
             state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null);
             if (state.?.chrome == null) createFallbackControls(hwnd, win.GetModuleHandleW(null)) catch return -1;
             layoutTerminalView(hwnd);
-            state.?.terminal_view.syncSessions();
-            syncChrome();
+            addDefaultSession() catch return -1;
             return 0;
         },
         win.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
             if (command == command_new_powershell) {
-                _ = state.?.model.addSession(.powershell) catch return 0;
+                _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0;
                 state.?.terminal_view.syncSessions();
             } else if (command == command_new_wsl) {
-                _ = state.?.model.addSession(.wsl) catch return 0;
+                _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0;
                 state.?.terminal_view.syncSessions();
             } else if (command == command_close_tab) {
                 if (state.?.model.active) |active| state.?.model.closeSession(active);
@@ -198,8 +196,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const command: u32 = @intCast(wparam);
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell) catch return 0,
-                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl) catch return 0,
+                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
+                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
                 chrome.command.close => state.?.model.closeSession(argument),
                 chrome.command.select => state.?.model.activate(argument),
                 else => return 0,
@@ -430,7 +428,7 @@ fn addDefaultSession() !void {
         .powershell => .powershell,
         .wsl => .wsl,
     };
-    _ = try state.?.model.addSession(shell);
+    _ = try state.?.model.addSession(shell, state.?.terminal_view.columns, state.?.terminal_view.rows);
     state.?.terminal_view.syncSessions();
     state.?.terminal_view.invalidate();
     syncChrome();

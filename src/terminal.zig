@@ -40,12 +40,21 @@ pub const Terminal = struct {
     };
 
     pub const Frame = struct {
+        pub const CursorStyle = enum(u8) {
+            bar,
+            block,
+            underline,
+            hollow,
+        };
+
         foreground: theme.Color,
         background: theme.Color,
         cursor: theme.Color,
+        cursor_style: CursorStyle,
         cursor_visible: bool,
         cursor_x: u16,
         cursor_y: u16,
+        cursor_columns: u8,
     };
 
     pub const Key = enum {
@@ -181,19 +190,35 @@ pub const Terminal = struct {
         var cursor_has_position = false;
         var cursor_x: u16 = 0;
         var cursor_y: u16 = 0;
+        var cursor_wide_tail = false;
+        var cursor_visual_style: vt.GhosttyRenderStateCursorVisualStyle = vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
+        try check(vt.ghostty_render_state_get(
+            self.render_state,
+            vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
+            &cursor_visual_style,
+        ));
         try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &cursor_visible));
         try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &cursor_has_position));
         if (cursor_has_position) {
             try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cursor_x));
             try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cursor_y));
+            try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_WIDE_TAIL, &cursor_wide_tail));
+            if (cursor_wide_tail and cursor_x > 0) cursor_x -= 1;
         }
         const frame = Frame{
             .foreground = fromGhostty(colors.foreground),
             .background = fromGhostty(colors.background),
             .cursor = fromGhostty(if (colors.cursor_has_value) colors.cursor else colors.foreground),
+            .cursor_style = switch (cursor_visual_style) {
+                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => .bar,
+                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => .underline,
+                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => .hollow,
+                else => .block,
+            },
             .cursor_visible = cursor_visible and cursor_has_position,
             .cursor_x = cursor_x,
             .cursor_y = cursor_y,
+            .cursor_columns = if (cursor_wide_tail) 2 else 1,
         };
         renderer.beginFrame(frame);
 
@@ -469,6 +494,31 @@ test "render state resolves ANSI colors through the Rasmus theme" {
 
     try std.testing.expectEqual(theme.rasmus.background, renderer.frame.?.background);
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
+}
+
+test "render state exposes the requested cursor style" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("\x1b[5 q");
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(Terminal.Frame.CursorStyle.bar, renderer.frame.?.cursor_style);
+
+    terminal.feed("\x1b[3 q");
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(Terminal.Frame.CursorStyle.underline, renderer.frame.?.cursor_style);
+}
+
+test "render state normalizes a cursor on a wide cell tail" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("中\x1b[D");
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(@as(u16, 0), renderer.frame.?.cursor_x);
+    try std.testing.expectEqual(@as(u8, 2), renderer.frame.?.cursor_columns);
 }
 
 test "render state exposes text decorations and wide occupancy" {
