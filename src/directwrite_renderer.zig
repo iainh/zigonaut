@@ -76,6 +76,7 @@ pub const Engine = struct {
         background: u32,
         bold: bool,
         italic: bool,
+        occupancy: u8,
     ) void {
         _ = native.zigonaut_text_engine_draw_cell(
             self.handle,
@@ -89,7 +90,30 @@ pub const Engine = struct {
             background,
             @intFromBool(bold),
             @intFromBool(italic),
+            @intCast(occupancy),
         );
+    }
+
+    pub fn beginRow(
+        self: *Engine,
+        row: u16,
+        origin_x: f32,
+        top: f32,
+        cell_width: f32,
+        cell_height: f32,
+    ) void {
+        native.zigonaut_text_engine_begin_row(
+            self.handle,
+            row,
+            origin_x,
+            top,
+            cell_width,
+            cell_height,
+        );
+    }
+
+    pub fn endRow(self: *Engine) void {
+        native.zigonaut_text_engine_end_row(self.handle);
     }
 
     pub fn drawCursor(

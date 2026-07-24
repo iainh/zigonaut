@@ -391,13 +391,16 @@ const CellRenderer = struct {
         _ = win.SetBkMode(self.dc, win.OPAQUE);
     }
 
+    pub fn beginRow(_: *CellRenderer, _: u16) void {}
+
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
+        const cell_span: i32 = if (cell.occupancy == .wide) 2 else 1;
         var rect = win.RECT{
             .left = left,
             .top = top,
-            .right = left + @as(i32, @intCast(self.view.cell_width)),
+            .right = left + cell_span * @as(i32, @intCast(self.view.cell_width)),
             .bottom = top + @as(i32, @intCast(self.view.cell_height)),
         };
         const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
@@ -431,6 +434,8 @@ const CellRenderer = struct {
         );
     }
 
+    pub fn endRow(_: *CellRenderer, _: u16) void {}
+
     pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
         if (!frame.cursor_visible) return;
         const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
@@ -457,6 +462,16 @@ const DirectWriteCellRenderer = struct {
         _ = frame;
     }
 
+    pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
+        self.engine.beginRow(
+            y,
+            @floatFromInt(self.origin_x),
+            @floatFromInt(self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height))),
+            @floatFromInt(self.view.cell_width),
+            @floatFromInt(self.view.cell_height),
+        );
+    }
+
     pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
@@ -474,7 +489,12 @@ const DirectWriteCellRenderer = struct {
             background,
             cell.bold,
             cell.italic,
+            @intFromEnum(cell.occupancy),
         );
+    }
+
+    pub fn endRow(self: *DirectWriteCellRenderer, _: u16) void {
+        self.engine.endRow();
     }
 
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
@@ -617,6 +637,7 @@ fn drawDirectWriteMessage(
         background,
         false,
         false,
+        @intFromEnum(Terminal.Cell.Occupancy.narrow),
     );
 }
 

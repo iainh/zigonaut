@@ -1,12 +1,14 @@
 #include "directwrite_renderer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <map>
 #include <new>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -35,6 +37,25 @@ struct LayoutKey {
     }
 };
 
+struct RowCell {
+    std::u16string text;
+    uint32_t column;
+    uint32_t foreground;
+    uint32_t background;
+    bool bold;
+    bool italic;
+    ZigonautCellOccupancy occupancy;
+};
+
+struct RowSegment {
+    std::u16string text;
+    std::vector<uint32_t> start_columns;
+    std::vector<uint32_t> end_columns;
+    uint32_t foreground = 0;
+    bool bold = false;
+    bool italic = false;
+};
+
 D2D1_COLOR_F color(uint32_t value) {
     return D2D1::ColorF(
         static_cast<float>(value & 0xff) / 255.0f,
@@ -45,6 +66,8 @@ D2D1_COLOR_F color(uint32_t value) {
 
 } // namespace
 
+class GridTextRenderer;
+
 struct ZigonautTextEngine {
     IDWriteFactory* factory = nullptr;
     IDWriteFontCollection* fonts = nullptr;
@@ -54,11 +77,17 @@ struct ZigonautTextEngine {
     ID2D1HwndRenderTarget* target = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, IDWriteTextLayout*> layouts;
+    std::vector<RowCell> row_cells;
     std::wstring family;
     HWND hwnd = nullptr;
     uint32_t font_size = 18;
     uint32_t dpi = 96;
     ZigonautCellMetrics metrics = {9, 18, 14};
+    float row_origin_x = 0.0f;
+    float row_top = 0.0f;
+    float row_cell_width = 0.0f;
+    float row_cell_height = 0.0f;
+    bool row_active = false;
 
     ~ZigonautTextEngine() {
         discardTarget();
@@ -236,11 +265,30 @@ struct ZigonautTextEngine {
         uint32_t foreground,
         uint32_t background,
         bool bold,
-        bool italic) {
+        bool italic,
+        ZigonautCellOccupancy occupancy) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
         brush->SetColor(color(background));
         target->FillRectangle(rect, brush);
+        if (row_active) {
+            std::u16string cell_text;
+            if (text_length != 0) {
+                cell_text.assign(
+                    reinterpret_cast<const char16_t*>(text),
+                    reinterpret_cast<const char16_t*>(text) + text_length);
+            }
+            row_cells.push_back({
+                std::move(cell_text),
+                static_cast<uint32_t>(std::lround((left - row_origin_x) / row_cell_width)),
+                foreground,
+                background,
+                bold,
+                italic,
+                occupancy,
+            });
+            return S_OK;
+        }
         if (text_length == 0) return S_OK;
 
         const size_t format_index = (bold ? 1u : 0u) | (italic ? 2u : 0u);
@@ -278,7 +326,269 @@ struct ZigonautTextEngine {
         target->PopAxisAlignedClip();
         return S_OK;
     }
+
+    void beginRow(
+        float origin_x,
+        float top,
+        float cell_width,
+        float cell_height) {
+        row_cells.clear();
+        row_origin_x = origin_x;
+        row_top = top;
+        row_cell_width = cell_width;
+        row_cell_height = cell_height;
+        row_active = true;
+    }
+
+    void endRow();
+
+    HRESULT drawSegment(const RowSegment& segment);
 };
+
+class GridTextRenderer final : public IDWriteTextRenderer {
+public:
+    GridTextRenderer(ZigonautTextEngine* engine, const RowSegment& segment)
+        : engine_(engine), segment_(segment) {}
+
+    IFACEMETHOD(QueryInterface)(REFIID iid, void** object) override {
+        if (object == nullptr) return E_POINTER;
+        *object = nullptr;
+        if (iid == __uuidof(IUnknown) ||
+            iid == __uuidof(IDWritePixelSnapping) ||
+            iid == __uuidof(IDWriteTextRenderer)) {
+            *object = static_cast<IDWriteTextRenderer*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    IFACEMETHOD_(ULONG, AddRef)() override {
+        return ++references_;
+    }
+
+    IFACEMETHOD_(ULONG, Release)() override {
+        const ULONG remaining = --references_;
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+
+    IFACEMETHOD(IsPixelSnappingDisabled)(
+        void*,
+        BOOL* disabled) override {
+        if (disabled == nullptr) return E_POINTER;
+        *disabled = FALSE;
+        return S_OK;
+    }
+
+    IFACEMETHOD(GetCurrentTransform)(
+        void*,
+        DWRITE_MATRIX* transform) override {
+        if (transform == nullptr) return E_POINTER;
+        *transform = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+        return S_OK;
+    }
+
+    IFACEMETHOD(GetPixelsPerDip)(void*, FLOAT* value) override {
+        if (value == nullptr) return E_POINTER;
+        *value = 1.0f;
+        return S_OK;
+    }
+
+    IFACEMETHOD(DrawGlyphRun)(
+        void*,
+        FLOAT,
+        FLOAT,
+        DWRITE_MEASURING_MODE measuring_mode,
+        const DWRITE_GLYPH_RUN* glyph_run,
+        const DWRITE_GLYPH_RUN_DESCRIPTION* description,
+        IUnknown*) override {
+        if (glyph_run == nullptr || engine_->target == nullptr || engine_->brush == nullptr) {
+            return E_INVALIDARG;
+        }
+
+        std::vector<FLOAT> advances(
+            glyph_run->glyphAdvances,
+            glyph_run->glyphAdvances + glyph_run->glyphCount);
+        float origin_x = engine_->row_origin_x;
+
+        if (description != nullptr && description->clusterMap != nullptr &&
+            description->stringLength > 0) {
+            struct ClusterSpan {
+                uint32_t start_column = UINT32_MAX;
+                uint32_t end_column = 0;
+                uint32_t first_text_index = UINT32_MAX;
+                uint32_t text_end = 0;
+            };
+            std::map<UINT16, ClusterSpan> spans;
+            uint32_t run_start_column = UINT32_MAX;
+            uint32_t run_end_column = 0;
+            for (UINT32 index = 0; index < description->stringLength; ++index) {
+                const uint32_t text_index = description->textPosition + index;
+                if (text_index >= segment_.start_columns.size()) break;
+                auto& span = spans[description->clusterMap[index]];
+                span.start_column = std::min(
+                    span.start_column,
+                    segment_.start_columns[text_index]);
+                span.end_column = std::max(
+                    span.end_column,
+                    segment_.end_columns[text_index]);
+                span.first_text_index = std::min(span.first_text_index, text_index);
+                span.text_end = std::max(span.text_end, text_index + 1);
+                run_start_column = std::min(run_start_column, span.start_column);
+                run_end_column = std::max(run_end_column, span.end_column);
+            }
+
+            std::vector<UINT16> glyph_starts;
+            glyph_starts.reserve(spans.size());
+            for (const auto& entry : spans) {
+                if (entry.first < glyph_run->glyphCount) glyph_starts.push_back(entry.first);
+            }
+            std::sort(glyph_starts.begin(), glyph_starts.end());
+            glyph_starts.erase(
+                std::unique(glyph_starts.begin(), glyph_starts.end()),
+                glyph_starts.end());
+            for (size_t index = 0; index < glyph_starts.size(); ++index) {
+                const UINT32 glyph_start = glyph_starts[index];
+                const UINT32 glyph_end = index + 1 < glyph_starts.size()
+                    ? glyph_starts[index + 1]
+                    : glyph_run->glyphCount;
+                if (glyph_start >= glyph_end) continue;
+                const auto found = spans.find(static_cast<UINT16>(glyph_start));
+                if (found == spans.end()) continue;
+                float natural = 0.0f;
+                for (UINT32 glyph = glyph_start; glyph < glyph_end; ++glyph) {
+                    natural += advances[glyph];
+                }
+                const uint32_t cluster_left = segment_.start_columns[
+                    found->second.first_text_index];
+                const uint32_t cluster_right =
+                    found->second.text_end < segment_.start_columns.size()
+                    ? segment_.start_columns[found->second.text_end]
+                    : segment_.end_columns[found->second.text_end - 1];
+                const float expected = static_cast<float>(
+                    cluster_right - cluster_left) * engine_->row_cell_width;
+                advances[glyph_end - 1] += expected - natural;
+            }
+
+            if (run_start_column != UINT32_MAX) {
+                origin_x += static_cast<float>(
+                    glyph_run->bidiLevel % 2 == 0
+                        ? run_start_column
+                        : run_end_column) * engine_->row_cell_width;
+            }
+        }
+
+        DWRITE_GLYPH_RUN adjusted = *glyph_run;
+        adjusted.glyphAdvances = advances.data();
+        engine_->brush->SetColor(color(segment_.foreground));
+        engine_->target->DrawGlyphRun(
+            D2D1::Point2F(
+                origin_x,
+                engine_->row_top + static_cast<float>(engine_->metrics.baseline)),
+            &adjusted,
+            engine_->brush,
+            measuring_mode);
+        return S_OK;
+    }
+
+    IFACEMETHOD(DrawUnderline)(
+        void*, FLOAT, FLOAT, const DWRITE_UNDERLINE*, IUnknown*) override {
+        return S_OK;
+    }
+
+    IFACEMETHOD(DrawStrikethrough)(
+        void*, FLOAT, FLOAT, const DWRITE_STRIKETHROUGH*, IUnknown*) override {
+        return S_OK;
+    }
+
+    IFACEMETHOD(DrawInlineObject)(
+        void*, FLOAT, FLOAT, IDWriteInlineObject*, BOOL, BOOL, IUnknown*) override {
+        return E_NOTIMPL;
+    }
+
+private:
+    std::atomic<ULONG> references_{1};
+    ZigonautTextEngine* engine_;
+    const RowSegment& segment_;
+};
+
+HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
+    if (segment.text.empty()) return S_OK;
+    uint32_t start_column = UINT32_MAX;
+    uint32_t end_column = 0;
+    for (size_t index = 0; index < segment.start_columns.size(); ++index) {
+        start_column = std::min(start_column, segment.start_columns[index]);
+        end_column = std::max(end_column, segment.end_columns[index]);
+    }
+    if (start_column == UINT32_MAX || end_column <= start_column) return S_OK;
+
+    IDWriteTextLayout* layout = nullptr;
+    const size_t format_index = (segment.bold ? 1u : 0u) |
+        (segment.italic ? 2u : 0u);
+    HRESULT hr = factory->CreateTextLayout(
+        reinterpret_cast<const wchar_t*>(segment.text.data()),
+        static_cast<UINT32>(segment.text.size()),
+        formats[format_index],
+        static_cast<float>(end_column - start_column) * row_cell_width,
+        row_cell_height,
+        &layout);
+    if (FAILED(hr)) return hr;
+
+    auto* renderer = new (std::nothrow) GridTextRenderer(this, segment);
+    if (renderer == nullptr) {
+        release(layout);
+        return E_OUTOFMEMORY;
+    }
+    hr = layout->Draw(nullptr, renderer, 0.0f, 0.0f);
+    renderer->Release();
+    release(layout);
+    return hr;
+}
+
+void ZigonautTextEngine::endRow() {
+    if (!row_active) return;
+    row_active = false;
+
+    RowSegment segment;
+    bool has_segment = false;
+    const auto flush = [&]() {
+        if (has_segment) drawSegment(segment);
+        segment = RowSegment{};
+        has_segment = false;
+    };
+
+    for (const auto& cell : row_cells) {
+        if (cell.occupancy == ZIGONAUT_CELL_WIDE_TAIL) continue;
+        if (has_segment &&
+            (segment.foreground != cell.foreground ||
+             segment.bold != cell.bold ||
+             segment.italic != cell.italic)) {
+            flush();
+        }
+        if (!has_segment) {
+            segment.foreground = cell.foreground;
+            segment.bold = cell.bold;
+            segment.italic = cell.italic;
+            has_segment = true;
+        }
+
+        const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
+        if (cell.text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
+            segment.text.push_back(u' ');
+            segment.start_columns.push_back(cell.column);
+            segment.end_columns.push_back(cell.column + span);
+        } else {
+            segment.text.append(cell.text);
+            for (size_t index = 0; index < cell.text.size(); ++index) {
+                segment.start_columns.push_back(cell.column);
+                segment.end_columns.push_back(cell.column + span);
+            }
+        }
+    }
+    flush();
+    row_cells.clear();
+}
 
 extern "C" HRESULT zigonaut_text_engine_create(
     const wchar_t* font_family,
@@ -347,6 +657,17 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     return S_OK;
 }
 
+extern "C" void zigonaut_text_engine_begin_row(
+    ZigonautTextEngine* engine,
+    uint32_t,
+    float origin_x,
+    float top,
+    float cell_width,
+    float cell_height) {
+    if (engine == nullptr || cell_width <= 0.0f || cell_height <= 0.0f) return;
+    engine->beginRow(origin_x, top, cell_width, cell_height);
+}
+
 extern "C" HRESULT zigonaut_text_engine_draw_cell(
     ZigonautTextEngine* engine,
     const uint16_t* text,
@@ -358,7 +679,8 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
     uint32_t foreground,
     uint32_t background,
     BOOL bold,
-    BOOL italic) {
+    BOOL italic,
+    ZigonautCellOccupancy occupancy) {
     if (engine == nullptr || (text == nullptr && text_length != 0)) return E_INVALIDARG;
     return engine->drawCell(
         text,
@@ -370,7 +692,12 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
         foreground,
         background,
         bold != FALSE,
-        italic != FALSE);
+        italic != FALSE,
+        occupancy);
+}
+
+extern "C" void zigonaut_text_engine_end_row(ZigonautTextEngine* engine) {
+    if (engine != nullptr) engine->endRow();
 }
 
 extern "C" void zigonaut_text_engine_draw_cursor(

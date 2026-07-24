@@ -15,6 +15,13 @@ typedef struct ZigonautCellMetrics {
     uint32_t baseline;
 } ZigonautCellMetrics;
 
+typedef enum ZigonautCellOccupancy {
+    ZIGONAUT_CELL_NARROW = 0,
+    ZIGONAUT_CELL_WIDE = 1,
+    ZIGONAUT_CELL_WIDE_TAIL = 2,
+    ZIGONAUT_CELL_WRAP_SPACER = 3,
+} ZigonautCellOccupancy;
+
 HRESULT zigonaut_text_engine_create(
     const wchar_t* font_family,
     uint32_t font_size,
@@ -36,6 +43,14 @@ HRESULT zigonaut_text_engine_begin_frame(
     uint32_t height,
     uint32_t background);
 
+void zigonaut_text_engine_begin_row(
+    ZigonautTextEngine* engine,
+    uint32_t row,
+    float origin_x,
+    float top,
+    float cell_width,
+    float cell_height);
+
 HRESULT zigonaut_text_engine_draw_cell(
     ZigonautTextEngine* engine,
     const uint16_t* text,
@@ -47,7 +62,10 @@ HRESULT zigonaut_text_engine_draw_cell(
     uint32_t foreground,
     uint32_t background,
     BOOL bold,
-    BOOL italic);
+    BOOL italic,
+    ZigonautCellOccupancy occupancy);
+
+void zigonaut_text_engine_end_row(ZigonautTextEngine* engine);
 
 void zigonaut_text_engine_draw_cursor(
     ZigonautTextEngine* engine,

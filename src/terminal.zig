@@ -15,8 +15,16 @@ pub const Terminal = struct {
     key_event: vt.GhosttyKeyEvent,
 
     pub const Cell = struct {
+        pub const Occupancy = enum(u8) {
+            narrow,
+            wide,
+            wide_tail,
+            wrap_spacer,
+        };
+
         x: u16,
         y: u16,
+        occupancy: Occupancy,
         codepoints: []const u32,
         foreground: theme.Color,
         background: theme.Color,
@@ -177,8 +185,11 @@ pub const Terminal = struct {
                 vt.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                 @ptrCast(&self.row_cells),
             ));
+            renderer.beginRow(y);
+            defer renderer.endRow(y);
             var x: u16 = 0;
             while (vt.ghostty_render_state_row_cells_next(self.row_cells)) : (x += 1) {
+                const occupancy = try currentCellOccupancy(self.row_cells);
                 var style = std.mem.zeroes(vt.GhosttyStyle);
                 style.size = @sizeOf(vt.GhosttyStyle);
                 try check(vt.ghostty_render_state_row_cells_get(
@@ -221,6 +232,7 @@ pub const Terminal = struct {
                 renderer.drawCell(Cell{
                     .x = x,
                     .y = y,
+                    .occupancy = occupancy,
                     .codepoints = if (style.invisible or codepoint_count > codepoints.len) codepoints[0..0] else codepoints[0..count],
                     .foreground = fromGhostty(foreground),
                     .background = fromGhostty(background),
@@ -303,6 +315,7 @@ pub const Terminal = struct {
             ));
 
             while (vt.ghostty_render_state_row_cells_next(self.row_cells)) {
+                const occupancy = try currentCellOccupancy(self.row_cells);
                 var codepoint_count: u32 = 0;
                 try check(vt.ghostty_render_state_row_cells_get(
                     self.row_cells,
@@ -310,7 +323,9 @@ pub const Terminal = struct {
                     @ptrCast(&codepoint_count),
                 ));
                 if (codepoint_count == 0) {
-                    try stream.writer().writeByte(' ');
+                    if (occupancy == .narrow or occupancy == .wrap_spacer) {
+                        try stream.writer().writeByte(' ');
+                    }
                     continue;
                 }
 
@@ -334,6 +349,23 @@ pub const Terminal = struct {
         return std.mem.trimRight(u8, stream.getWritten(), " \n");
     }
 };
+
+fn currentCellOccupancy(cells: vt.GhosttyRenderStateRowCells) !Terminal.Cell.Occupancy {
+    var raw: vt.GhosttyCell = 0;
+    try check(vt.ghostty_render_state_row_cells_get(
+        cells,
+        vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+        &raw,
+    ));
+    var wide: vt.GhosttyCellWide = vt.GHOSTTY_CELL_WIDE_NARROW;
+    try check(vt.ghostty_cell_get(raw, vt.GHOSTTY_CELL_DATA_WIDE, &wide));
+    return switch (wide) {
+        vt.GHOSTTY_CELL_WIDE_WIDE => .wide,
+        vt.GHOSTTY_CELL_WIDE_SPACER_TAIL => .wide_tail,
+        vt.GHOSTTY_CELL_WIDE_SPACER_HEAD => .wrap_spacer,
+        else => .narrow,
+    };
+}
 
 fn applyTheme(terminal: vt.GhosttyTerminal, value: theme.Theme) !void {
     var palette: [256]vt.GhosttyColorRgb = undefined;
@@ -369,6 +401,17 @@ test "libghostty parses control sequences into viewport state" {
     const viewport = try terminal.writeViewportText(&buffer);
 
     try std.testing.expectEqualStrings("plain red\nsecond", viewport);
+}
+
+test "wide cell tails do not add spaces to viewport text" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("中X");
+    var buffer: [64]u8 = undefined;
+    const viewport = try terminal.writeViewportText(&buffer);
+
+    try std.testing.expectEqualStrings("中X", viewport);
 }
 
 test "render state resolves ANSI colors through the Rasmus theme" {
@@ -411,9 +454,13 @@ const TestRenderer = struct {
         self.frame = frame;
     }
 
+    pub fn beginRow(_: *TestRenderer, _: u16) void {}
+
     pub fn drawCell(self: *TestRenderer, cell: Terminal.Cell) void {
         if (cell.codepoints.len == 1 and cell.codepoints[0] == 'X') self.x_foreground = cell.foreground;
     }
+
+    pub fn endRow(_: *TestRenderer, _: u16) void {}
 
     pub fn endFrame(_: *TestRenderer, _: Terminal.Frame) void {}
 };
