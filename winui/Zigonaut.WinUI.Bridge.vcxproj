@@ -9,6 +9,9 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>ZigonautWinUIBridge</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppContainerApplication>false</AppContainerApplication>
+    <EnableWin32Codegen>true</EnableWin32Codegen>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -19,19 +22,41 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <Language>C++</Language>
+    <XamlLanguage>CppWinRT</XamlLanguage>
+    <ManagedAssembly>false</ManagedAssembly>
+    <DefaultLanguageSourceExtension>.cpp</DefaultLanguageSourceExtension>
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
     <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><AdditionalIncludeDirectories>$(IntDir)Generated Files\winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
     <Link><AdditionalLibraryDirectories>$(NuGetPackageRoot)microsoft.windowsappsdk.foundation\1.8.260505001\lib\native\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs></Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="bridge.cpp" /></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
+    <ClInclude Include="bridge.h" />
+    <ClInclude Include="pch.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
+    <ClCompile Include="App.xaml.cpp"><DependentUpon>App.xaml</DependentUpon></ClCompile>
+    <ClCompile Include="bridge.cpp" />
+    <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
+    <ClCompile Include="$(IntDir)XamlLibMetadataProvider.g.cpp" />
+    <ClCompile Include="$(IntDir)XamlTypeInfo.g.cpp" />
+    <ClCompile Include="$(IntDir)XamlTypeInfo.Impl.g.cpp" />
+  </ItemGroup>
+  <ItemGroup><ApplicationDefinition Include="App.xaml" /></ItemGroup>
+  <ItemGroup><Midl Include="App.idl"><DependentUpon>App.xaml</DependentUpon></Midl></ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240405.15" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260508005" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CompileXamlBeforeCpp" BeforeTargets="ClCompile" DependsOnTargets="MarkupCompilePass1;MarkupCompilePass2" />
 </Project>

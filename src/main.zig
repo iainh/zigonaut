@@ -215,18 +215,24 @@ fn syncChrome() void {
 
 fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
     const hwnd = state.?.hwnd;
-    const win32_command: u16 = switch (command) {
-        chrome.command.new_powershell => command_new_powershell,
-        chrome.command.new_wsl => command_new_wsl,
-        chrome.command.close => command_close_tab,
-        chrome.command.select => command_tab_base + @as(u16, @intCast(argument)),
-        else => return,
-    };
-    sendCommand(hwnd, win32_command);
+    switch (command) {
+        chrome.command.new_powershell => postCommand(hwnd, command_new_powershell),
+        chrome.command.new_wsl => postCommand(hwnd, command_new_wsl),
+        chrome.command.close => {
+            postCommand(hwnd, command_tab_base + @as(u16, @intCast(argument)));
+            postCommand(hwnd, command_close_tab);
+        },
+        chrome.command.select => postCommand(hwnd, command_tab_base + @as(u16, @intCast(argument))),
+        else => {},
+    }
 }
 
 fn sendCommand(hwnd: win.HWND, command: u16) void {
     _ = win.SendMessageW(hwnd, win.WM_COMMAND, command, 0);
+}
+
+fn postCommand(hwnd: win.HWND, command: u16) void {
+    _ = win.PostMessageW(hwnd, win.WM_COMMAND, command, 0);
 }
 
 fn paint(hwnd: win.HWND) void {

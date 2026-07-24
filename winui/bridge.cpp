@@ -1,5 +1,6 @@
+#include "pch.h"
+#include "App.xaml.h"
 #include "bridge.h"
-#undef GetCurrentTime
 #include <MddBootstrap.h>
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Content.h>
@@ -10,7 +11,6 @@
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.UI.Text.h>
 #include <winrt/base.h>
 #include <Microsoft.UI.Dispatching.Interop.h>
 #include <winrt/Microsoft.UI.Interop.h>
@@ -27,64 +27,78 @@ constexpr uint32_t command_new_wsl = 2;
 constexpr uint32_t command_close = 3;
 constexpr uint32_t command_select = 4;
 
-struct IslandApplication : ApplicationT<IslandApplication> {};
-
 struct Bridge {
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
     void* context{};
     Microsoft::UI::Dispatching::DispatcherQueueController dispatcher{nullptr};
-    IslandApplication application;
-    WindowsXamlManager manager{nullptr};
-    DesktopWindowXamlSource source;
-    StackPanel tabs;
+    Application application{nullptr};
+    DesktopWindowXamlSource source{nullptr};
+    TabView tabs{nullptr};
+    bool updating = false;
     bool closed = false;
 
     Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
-           Microsoft::UI::Dispatching::DispatcherQueueController const& controller)
-        : callback(cb), context(ctx), dispatcher(controller) {
-        manager = WindowsXamlManager::InitializeForCurrentThread();
+           Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
+           Application const& app)
+        : callback(cb), context(ctx), dispatcher(controller), application(app) {
+        source = DesktopWindowXamlSource{};
         source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
+        tabs = TabView{};
 
-        StackPanel root;
-        root.Orientation(Orientation::Vertical);
-        root.Padding(Thickness{12, 8, 12, 6});
-        StackPanel commands;
-        commands.Orientation(Orientation::Horizontal);
-        addCommand(commands, L"New PowerShell", command_new_powershell);
-        addCommand(commands, L"New WSL", command_new_wsl);
-        addCommand(commands, L"Close active tab", command_close);
-        tabs.Orientation(Orientation::Horizontal);
-        root.Children().Append(commands);
-        root.Children().Append(tabs);
-        source.Content(root);
-    }
-
-    void addCommand(StackPanel const& panel, wchar_t const* label, uint32_t command) {
-        Button button;
-        button.Content(box_value(label));
-        button.Margin(Thickness{0, 0, 8, 4});
-        button.Click([this, command](auto&&, auto&&) { callback(context, command, 0); });
-        panel.Children().Append(button);
+        tabs.Margin(Thickness{8, 4, 8, 0});
+        tabs.IsAddTabButtonVisible(true);
+        tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
+        tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
+        tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
+        tabs.SelectionChanged([this](auto&&, auto&&) {
+            if (!updating && tabs.SelectedIndex() >= 0) {
+                callback(context, command_select, static_cast<uint32_t>(tabs.SelectedIndex()));
+            }
+        });
+        tabs.TabCloseRequested([this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
+            uint32_t index = 0;
+            if (sender.TabItems().IndexOf(args.Item(), index)) callback(context, command_close, index);
+        });
+        source.Content(tabs);
     }
 
     void update(uint8_t const* kinds, uint32_t count, int32_t active) {
-        tabs.Children().Clear();
+        updating = true;
+        auto items = tabs.TabItems();
+        while (items.Size() > count) items.RemoveAtEnd();
         for (uint32_t i = 0; i < count; ++i) {
-            Button button;
-            button.Content(box_value(kinds[i] == 0 ? L"PowerShell" : L"WSL"));
-            button.Margin(Thickness{0, 0, 6, 0});
-            if (active == static_cast<int32_t>(i)) button.FontWeight(Windows::UI::Text::FontWeights::Bold());
-            button.Click([this, i](auto&&, auto&&) { callback(context, command_select, i); });
-            tabs.Children().Append(button);
+            TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
+            item.Header(box_value(kinds[i] == 0 ? L"PowerShell" : L"WSL"));
+            item.IsClosable(true);
+            if (i == items.Size()) items.Append(item);
         }
+        tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
+        updating = false;
+    }
+
+    void showNewTabMenu() {
+        MenuFlyout menu;
+        MenuFlyoutItem powershell;
+        powershell.Text(L"PowerShell");
+        powershell.Click([this](auto&&, auto&&) { callback(context, command_new_powershell, 0); });
+        MenuFlyoutItem wsl;
+        wsl.Text(L"WSL");
+        wsl.Click([this](auto&&, auto&&) { callback(context, command_new_wsl, 0); });
+        menu.Items().Append(powershell);
+        menu.Items().Append(wsl);
+        menu.ShowAt(tabs);
     }
 
     void close() {
         if (closed) return;
         closed = true;
+        tabs.TabItems().Clear();
         source.Content(nullptr);
+        tabs = nullptr;
         source.Close();
+        source = nullptr;
+        application = nullptr;
     }
 };
 
@@ -107,7 +121,8 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
         }
         try {
             auto dispatcher = Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
-            return new Bridge(parent, callback, context, dispatcher);
+            auto application = make<ZigonautWinUIBridge::implementation::App>();
+            return new Bridge(parent, callback, context, dispatcher, application);
         }
         catch (...) {
             MddBootstrapShutdown();

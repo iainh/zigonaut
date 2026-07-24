@@ -31,11 +31,12 @@ Restore and build the x64 bridge with VS 2022 (the project pins Windows App SDK 
 
 ```powershell
 & 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' winui\Zigonaut.WinUI.Bridge.vcxproj /restore /t:Build /p:Configuration=Release /p:Platform=x64
-Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.dll, winui\x64\Release\Microsoft.WindowsAppRuntime.Bootstrap.dll, winui\x64\Release\Zigonaut.WinUI.Bridge.pri zig-out\bin\
+Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.dll, winui\x64\Release\Microsoft.WindowsAppRuntime.Bootstrap.dll zig-out\bin\
+Copy-Item winui\x64\Release\Zigonaut.WinUI.Bridge.pri zig-out\bin\resources.pri
 zig build run
 ```
 
-The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread. Zig loads it dynamically, so the normal `zig build` has no Visual Studio or Windows App SDK dependency.
+The compiled XAML resource index must be deployed as `resources.pri`, the conventional name the unpackaged host loads. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread. Zig loads it dynamically, so the normal `zig build` has no Visual Studio or Windows App SDK dependency.
 
 ## MVP path
 

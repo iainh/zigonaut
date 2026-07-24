@@ -3,3 +3,5 @@ zig-out/
 winui/obj/
 winui/x64/
 winui/Zigonaut.*/
+winui/XamlMetaDataProvider.cpp
+winui/XamlMetaDataProvider.idl

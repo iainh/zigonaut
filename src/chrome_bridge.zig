@@ -61,7 +61,7 @@ pub const Bridge = struct {
 
     pub fn deinit(self: *Bridge) void {
         self.destroy_fn(self.instance);
-        _ = win.FreeLibrary(self.module);
+        // WinUI can retain delegate code until process teardown, so the bridge DLL must remain loaded.
     }
 };
 
