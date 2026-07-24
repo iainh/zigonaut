@@ -159,7 +159,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 .high_contrast = false,
                 .terminal_view = undefined,
             };
-            state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
+            state.?.terminal_view = TerminalView.init(
+                hwnd,
+                &state.?.model,
+                font,
+                settings.font_family,
+                settings.font_size,
+                dpi,
+            );
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             state.?.terminal_ready = true;
             addDefaultSession() catch return -1;
@@ -251,7 +258,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (state) |*current| {
                 const new_dpi: u32 = @intCast(wparam & 0xffff);
                 const new_font = createFont(new_dpi);
-                current.terminal_view.updateFont(new_font);
+                current.terminal_view.updateFont(new_font, new_dpi);
                 _ = win.DeleteObject(current.font);
                 current.font = new_font;
                 current.dpi = new_dpi;

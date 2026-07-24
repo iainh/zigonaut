@@ -2,6 +2,7 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
+const TextEngine = @import("directwrite_renderer.zig").Engine;
 const theme = @import("theme.zig");
 
 const win = @import("win32.zig").c;
@@ -14,6 +15,7 @@ pub const View = struct {
     hwnd: win.HWND = null,
     model: *App,
     font: win.HFONT,
+    text_engine: ?TextEngine,
     pending_high_surrogate: ?u16 = null,
     suppressed_character: ?u16 = null,
     cell_width: u32,
@@ -48,11 +50,23 @@ pub const View = struct {
         if (win.RegisterClassExW(&window_class) == 0) return error.RegisterTerminalViewClassFailed;
     }
 
-    pub fn init(parent: win.HWND, model: *App, font: win.HFONT) View {
-        const cell_size = measureCell(parent, font);
+    pub fn init(
+        parent: win.HWND,
+        model: *App,
+        font: win.HFONT,
+        font_family: []const u8,
+        font_size: u16,
+        dpi: u32,
+    ) View {
+        const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
+        const cell_size = if (text_engine) |engine| size: {
+            const metrics = engine.metrics();
+            break :size CellSize{ .width = metrics.width, .height = metrics.height };
+        } else measureCell(parent, font);
         return .{
             .model = model,
             .font = font,
+            .text_engine = text_engine,
             .cell_width = cell_size.width,
             .cell_height = cell_size.height,
         };
@@ -79,9 +93,13 @@ pub const View = struct {
         _ = win.MoveWindow(self.hwnd, x, y, @max(width, 1), @max(height, 1), 1);
     }
 
-    pub fn updateFont(self: *View, font: win.HFONT) void {
+    pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
-        const cell_size = measureCell(self.hwnd, font);
+        if (self.text_engine) |*engine| engine.setDpi(dpi) catch {};
+        const cell_size = if (self.text_engine) |engine| size: {
+            const metrics = engine.metrics();
+            break :size CellSize{ .width = metrics.width, .height = metrics.height };
+        } else measureCell(self.hwnd, font);
         self.cell_width = cell_size.width;
         self.cell_height = cell_size.height;
         self.columns = 0;
@@ -433,7 +451,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
-            if (view) |current| current.releaseBackBuffer();
+            if (view) |current| {
+                current.releaseBackBuffer();
+                if (current.text_engine) |*engine| engine.deinit();
+                current.text_engine = null;
+            }
             return 0;
         },
         else => return win.DefWindowProcW(hwnd, message, wparam, lparam),

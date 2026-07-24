@@ -24,8 +24,15 @@ pub fn build(b: *std.Build) void {
     });
     exe.subsystem = .Windows;
     exe.linkLibC();
+    exe.linkLibCpp();
+    exe.addIncludePath(b.path("src"));
+    exe.addCSourceFile(.{
+        .file = b.path("src/directwrite_renderer.cpp"),
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+    });
     exe.linkSystemLibrary("user32");
     exe.linkSystemLibrary("gdi32");
+    exe.linkSystemLibrary("dwrite");
     exe.linkSystemLibrary("comctl32");
     exe.linkSystemLibrary("dwmapi");
     exe.linkSystemLibrary("advapi32");
