@@ -35,6 +35,14 @@ struct Bridge {
     Application application{nullptr};
     DesktopWindowXamlSource source{nullptr};
     TabView tabs{nullptr};
+    MenuFlyout new_tab_menu{nullptr};
+    MenuFlyoutItem powershell_item{nullptr};
+    MenuFlyoutItem wsl_item{nullptr};
+    event_token add_tab_token{};
+    event_token selection_token{};
+    event_token close_tab_token{};
+    event_token powershell_token{};
+    event_token wsl_token{};
     bool updating = false;
     bool closed = false;
 
@@ -50,17 +58,21 @@ struct Bridge {
         tabs.IsAddTabButtonVisible(true);
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
-        tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
-        tabs.SelectionChanged([this](auto&&, auto&&) {
+        add_tab_token = tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
+        selection_token = tabs.SelectionChanged([this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
-                callback(context, command_select, static_cast<uint32_t>(tabs.SelectedIndex()));
+                notify(command_select, static_cast<uint32_t>(tabs.SelectedIndex()));
             }
         });
-        tabs.TabCloseRequested([this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
+        close_tab_token = tabs.TabCloseRequested([this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
             uint32_t index = 0;
-            if (sender.TabItems().IndexOf(args.Item(), index)) callback(context, command_close, index);
+            if (sender.TabItems().IndexOf(args.Item(), index)) notify(command_close, index);
         });
         source.Content(tabs);
+    }
+
+    void notify(uint32_t command, uint32_t argument) const {
+        if (!closed && callback) callback(context, command, argument);
     }
 
     void update(uint8_t const* kinds, uint32_t count, int32_t active) {
@@ -78,21 +90,39 @@ struct Bridge {
     }
 
     void showNewTabMenu() {
-        MenuFlyout menu;
-        MenuFlyoutItem powershell;
-        powershell.Text(L"PowerShell");
-        powershell.Click([this](auto&&, auto&&) { callback(context, command_new_powershell, 0); });
-        MenuFlyoutItem wsl;
-        wsl.Text(L"WSL");
-        wsl.Click([this](auto&&, auto&&) { callback(context, command_new_wsl, 0); });
-        menu.Items().Append(powershell);
-        menu.Items().Append(wsl);
-        menu.ShowAt(tabs);
+        closeNewTabMenu();
+        new_tab_menu = MenuFlyout{};
+        powershell_item = MenuFlyoutItem{};
+        powershell_item.Text(L"PowerShell");
+        powershell_token = powershell_item.Click([this](auto&&, auto&&) { notify(command_new_powershell, 0); });
+        wsl_item = MenuFlyoutItem{};
+        wsl_item.Text(L"WSL");
+        wsl_token = wsl_item.Click([this](auto&&, auto&&) { notify(command_new_wsl, 0); });
+        new_tab_menu.Items().Append(powershell_item);
+        new_tab_menu.Items().Append(wsl_item);
+        new_tab_menu.ShowAt(tabs);
+    }
+
+    void closeNewTabMenu() {
+        if (!new_tab_menu) return;
+        new_tab_menu.Hide();
+        if (powershell_item) powershell_item.Click(powershell_token);
+        if (wsl_item) wsl_item.Click(wsl_token);
+        new_tab_menu.Items().Clear();
+        powershell_item = nullptr;
+        wsl_item = nullptr;
+        new_tab_menu = nullptr;
     }
 
     void close() {
         if (closed) return;
         closed = true;
+        closeNewTabMenu();
+        tabs.AddTabButtonClick(add_tab_token);
+        tabs.SelectionChanged(selection_token);
+        tabs.TabCloseRequested(close_tab_token);
+        callback = nullptr;
+        context = nullptr;
         tabs.TabItems().Clear();
         source.Content(nullptr);
         tabs = nullptr;
