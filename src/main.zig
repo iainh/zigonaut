@@ -21,8 +21,6 @@ const command_new_wsl = 1002;
 const command_close_tab = 1200;
 const chrome_message = win.WM_APP + 1;
 const tab_selection_changed: win.UINT = @bitCast(@as(i32, -551));
-const terminal_left = 16;
-const terminal_margin = 16;
 const fallback_terminal_top: i32 = 108;
 const winui_terminal_top: i32 = 52;
 
@@ -297,10 +295,10 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     }
     layoutFallbackControls(client.right, dpi);
     state.?.terminal_view.move(
-        scaled(terminal_left, dpi),
+        0,
         terminal_top,
-        client.right - scaled(terminal_left + terminal_margin, dpi),
-        client.bottom - terminal_top - scaled(terminal_margin, dpi),
+        client.right,
+        client.bottom - terminal_top,
     );
 }
 
