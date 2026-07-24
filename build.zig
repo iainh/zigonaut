@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    app_module.addIncludePath(b.path("winui"));
     configureGhostty(app_module, ghostty);
 
     const exe = b.addExecutable(.{

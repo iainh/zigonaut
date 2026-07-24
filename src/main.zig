@@ -114,7 +114,7 @@ fn handleShortcut(message: *const win.MSG) bool {
     }
     if (shift and message.wParam == 'W') {
         if (!repeated) {
-            if (state.?.model.active) |active| sendChromeCommand(hwnd, chrome.command.close, @intCast(active));
+            if (state.?.model.active) |active| sendChromeCommand(hwnd, .close, @intCast(active));
         }
         return true;
     }
@@ -124,7 +124,7 @@ fn handleShortcut(message: *const win.MSG) bool {
     const active = state.?.model.active orelse return true;
     if (count > 1) {
         const next = if (shift) (active + count - 1) % count else (active + 1) % count;
-        sendChromeCommand(hwnd, chrome.command.select, @intCast(next));
+        sendChromeCommand(hwnd, .select, @intCast(next));
     }
     return true;
 }
@@ -171,38 +171,37 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         chrome_message => {
-            const command: u32 = @intCast(wparam);
+            const command = std.meta.intToEnum(chrome.Command, wparam) catch return 0;
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                .new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
                     log.err("unable to open PowerShell session: {}", .{err});
                     return 0;
                 },
-                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                .new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
                     log.err("unable to open WSL session: {}", .{err});
                     return 0;
                 },
-                chrome.command.close => {
+                .close => {
                     state.?.model.closeSession(argument);
                     if (state.?.model.sessions.items.len == 0) {
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
                 },
-                chrome.command.select => state.?.model.activate(argument),
-                chrome.command.open_settings => {
+                .select => state.?.model.activate(argument),
+                .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
                     return 0;
                 },
-                chrome.command.reload_settings => {
+                .reload_settings => {
                     reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
                     return 0;
                 },
-                chrome.command.quit => {
+                .quit => {
                     _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                     return 0;
                 },
-                else => return 0,
             }
             state.?.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
@@ -320,7 +319,8 @@ fn syncChrome() void {
 
 fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
     const hwnd = if (state) |current| current.hwnd else return;
-    sendChromeCommand(hwnd, command, argument);
+    const typed = std.meta.intToEnum(chrome.Command, command) catch return;
+    sendChromeCommand(hwnd, typed, argument);
 }
 
 fn addDefaultSession() !void {
@@ -335,8 +335,8 @@ fn addDefaultSession() !void {
     syncChrome();
 }
 
-fn sendChromeCommand(hwnd: win.HWND, command: u32, argument: u32) void {
-    _ = win.PostMessageW(hwnd, chrome_message, command, @intCast(argument));
+fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) void {
+    _ = win.PostMessageW(hwnd, chrome_message, @intFromEnum(command), @intCast(argument));
 }
 
 fn createFont(dpi: u32) win.HFONT {

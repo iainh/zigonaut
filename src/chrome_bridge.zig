@@ -1,16 +1,19 @@
 const win = @import("win32.zig").c;
 const std = @import("std");
+const abi = @cImport({
+    @cInclude("bridge.h");
+});
 
 const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut.WinUI.Bridge.dll");
 
-pub const command = struct {
-    pub const new_powershell = 1;
-    pub const new_wsl = 2;
-    pub const close = 3;
-    pub const select = 4;
-    pub const open_settings = 5;
-    pub const reload_settings = 6;
-    pub const quit = 7;
+pub const Command = enum(u32) {
+    new_powershell = abi.ZIGONAUT_CHROME_NEW_POWERSHELL,
+    new_wsl = abi.ZIGONAUT_CHROME_NEW_WSL,
+    close = abi.ZIGONAUT_CHROME_CLOSE,
+    select = abi.ZIGONAUT_CHROME_SELECT,
+    open_settings = abi.ZIGONAUT_CHROME_OPEN_SETTINGS,
+    reload_settings = abi.ZIGONAUT_CHROME_RELOAD_SETTINGS,
+    quit = abi.ZIGONAUT_CHROME_QUIT,
 };
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;

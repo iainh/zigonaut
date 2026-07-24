@@ -30,14 +30,6 @@ using namespace Microsoft::UI::Xaml::Controls;
 using namespace Microsoft::UI::Xaml::Hosting;
 
 namespace {
-constexpr uint32_t command_new_powershell = 1;
-constexpr uint32_t command_new_wsl = 2;
-constexpr uint32_t command_close = 3;
-constexpr uint32_t command_select = 4;
-constexpr uint32_t command_open_settings = 5;
-constexpr uint32_t command_reload_settings = 6;
-constexpr uint32_t command_quit = 7;
-
 HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
     wchar_t message[160]{};
     swprintf_s(message, L"Zigonaut WinUI: %s failed with HRESULT 0x%08X\n", operation, static_cast<unsigned>(result));
@@ -138,12 +130,12 @@ struct Bridge {
         add_tab_token = tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
         selection_token = tabs.SelectionChanged([this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
-                notify(command_select, static_cast<uint32_t>(tabs.SelectedIndex()));
+                notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
             }
         });
         close_tab_token = tabs.TabCloseRequested([this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
             uint32_t index = 0;
-            if (sender.TabItems().IndexOf(args.Item(), index)) notify(command_close, index);
+            if (sender.TabItems().IndexOf(args.Item(), index)) notify(ZIGONAUT_CHROME_CLOSE, index);
         });
 
         menu_button = Button{};
@@ -162,15 +154,15 @@ struct Bridge {
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         open_settings_item = MenuFlyoutItem{};
         open_settings_item.Text(L"Open Settings");
-        open_settings_token = open_settings_item.Click([this](auto&&, auto&&) { notify(command_open_settings, 0); });
+        open_settings_token = open_settings_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_OPEN_SETTINGS, 0); });
         open_settings_handler_attached = true;
         reload_settings_item = MenuFlyoutItem{};
         reload_settings_item.Text(L"Reload Settings");
-        reload_settings_token = reload_settings_item.Click([this](auto&&, auto&&) { notify(command_reload_settings, 0); });
+        reload_settings_token = reload_settings_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
         reload_settings_handler_attached = true;
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Quit");
-        quit_token = quit_item.Click([this](auto&&, auto&&) { notify(command_quit, 0); });
+        quit_token = quit_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
         quit_handler_attached = true;
         app_menu.Items().Append(open_settings_item);
         app_menu.Items().Append(reload_settings_item);
@@ -261,8 +253,8 @@ struct Bridge {
         updateTitleBarLayout();
     }
 
-    void notify(uint32_t command, uint32_t argument) const {
-        if (!closed && callback) callback(context, command, argument);
+    void notify(zigonaut_chrome_command_id command, uint32_t argument) const {
+        if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
 
     void update(char const* const* titles, uint32_t const* title_lengths, uint32_t count, int32_t active) {
@@ -290,11 +282,11 @@ struct Bridge {
         new_tab_menu = MenuFlyout{};
         powershell_item = MenuFlyoutItem{};
         powershell_item.Text(L"PowerShell");
-        powershell_token = powershell_item.Click([this](auto&&, auto&&) { notify(command_new_powershell, 0); });
+        powershell_token = powershell_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_POWERSHELL, 0); });
         powershell_handler_attached = true;
         wsl_item = MenuFlyoutItem{};
         wsl_item.Text(L"WSL");
-        wsl_token = wsl_item.Click([this](auto&&, auto&&) { notify(command_new_wsl, 0); });
+        wsl_token = wsl_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WSL, 0); });
         wsl_handler_attached = true;
         new_tab_menu.Items().Append(powershell_item);
         new_tab_menu.Items().Append(wsl_item);

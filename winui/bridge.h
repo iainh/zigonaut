@@ -9,6 +9,16 @@ extern "C" {
 #define ZIGONAUT_NOEXCEPT
 #endif
 
+typedef enum zigonaut_chrome_command_id {
+    ZIGONAUT_CHROME_NEW_POWERSHELL = 1,
+    ZIGONAUT_CHROME_NEW_WSL = 2,
+    ZIGONAUT_CHROME_CLOSE = 3,
+    ZIGONAUT_CHROME_SELECT = 4,
+    ZIGONAUT_CHROME_OPEN_SETTINGS = 5,
+    ZIGONAUT_CHROME_RELOAD_SETTINGS = 6,
+    ZIGONAUT_CHROME_QUIT = 7,
+} zigonaut_chrome_command_id;
+
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);
 
 __declspec(dllexport) void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) ZIGONAUT_NOEXCEPT;
