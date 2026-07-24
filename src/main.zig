@@ -105,11 +105,24 @@ pub fn main() !void {
 
 fn handleShortcut(message: *const win.MSG) bool {
     if (message.message != win.WM_KEYDOWN and message.message != win.WM_SYSKEYDOWN) return false;
-    if (win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_MENU) < 0) return false;
-
+    const control = win.GetKeyState(win.VK_CONTROL) < 0;
+    const alt = win.GetKeyState(win.VK_MENU) < 0;
     const shift = win.GetKeyState(win.VK_SHIFT) < 0;
     const repeated = (message.lParam & (@as(win.LPARAM, 1) << 30)) != 0;
     const hwnd = state.?.hwnd;
+    if (!control and !alt and message.wParam == win.VK_F6 and state.?.fallback_tabs != null) {
+        if (!repeated) {
+            const terminal = state.?.terminal_view.hwnd;
+            const target = if (win.GetFocus() == terminal)
+                (if (shift) state.?.fallback_tabs else state.?.fallback_powershell)
+            else
+                terminal;
+            _ = win.SetFocus(target);
+        }
+        return true;
+    }
+    if (!control or alt) return false;
+
     if (shift and message.wParam == 'T') {
         if (!repeated) sendCommand(hwnd, command_new_powershell);
         return true;

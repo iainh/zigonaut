@@ -252,6 +252,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.SetFocus(hwnd);
             return 0;
         },
+        win.WM_GETDLGCODE => return win.DLGC_WANTTAB,
         win.WM_KEYDOWN, win.WM_SYSKEYDOWN => {
             if (view) |current| {
                 if (current.handleKey(wparam, lparam, false)) return 0;
