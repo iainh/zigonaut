@@ -4,7 +4,8 @@ const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
-const win = @import("win32.zig").c;
+const win32 = @import("win32.zig");
+const win = win32.c;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
@@ -545,7 +546,7 @@ fn paintFallbackTab(draw: *const win.DRAWITEMSTRUCT) void {
 
 fn fallbackTabProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM, _: win.UINT_PTR, _: win.DWORD_PTR) callconv(.c) win.LRESULT {
     if (message == win.WM_ERASEBKGND and state != null) {
-        const dc: win.HDC = @ptrFromInt(wparam);
+        const dc = win32.handleFromInt(win.HDC, wparam);
         var client: win.RECT = undefined;
         if (win.GetClientRect(hwnd, &client) != 0) fill(dc, client, fallbackBackground());
         return 1;

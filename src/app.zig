@@ -4,6 +4,7 @@ const SessionRuntime = @import("session.zig").SessionRuntime;
 
 test {
     _ = directwrite_renderer;
+    _ = @import("win32.zig");
 }
 const theme = @import("theme.zig");
 
