@@ -201,10 +201,32 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_NOTIFY => {
             const header: *const win.NMHDR = @ptrFromInt(@as(usize, @bitCast(lparam)));
-            if (state.?.fallback_tabs != null and header.hwndFrom == state.?.fallback_tabs and header.code == tab_selection_changed) {
-                const selected = win.SendMessageW(state.?.fallback_tabs, win.TCM_GETCURSEL, 0, 0);
-                if (selected >= 0) state.?.model.activate(@intCast(selected));
-                state.?.terminal_view.invalidate();
+            if (state.?.fallback_tabs != null and header.hwndFrom == state.?.fallback_tabs) {
+                if (header.code == tab_selection_changed) {
+                    const selected = win.SendMessageW(state.?.fallback_tabs, win.TCM_GETCURSEL, 0, 0);
+                    if (selected >= 0) state.?.model.activate(@intCast(selected));
+                    state.?.terminal_view.invalidate();
+                }
+            }
+            return 0;
+        },
+        win.WM_DRAWITEM => {
+            const draw: *const win.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (draw.hwndItem == state.?.fallback_tabs) {
+                paintFallbackTab(draw);
+                return 1;
+            } else if (draw.hwndItem == state.?.fallback_powershell or draw.hwndItem == state.?.fallback_wsl or draw.hwndItem == state.?.fallback_close) {
+                paintFallbackButton(draw);
+                return 1;
+            }
+            return 0;
+        },
+        win.WM_MEASUREITEM => {
+            const measure: *win.MEASUREITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (measure.CtlType == win.ODT_TAB) {
+                measure.itemWidth = @intCast(scaled(120, state.?.dpi));
+                measure.itemHeight = @intCast(scaled(32, state.?.dpi));
+                return 1;
             }
             return 0;
         },
@@ -236,7 +258,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             }
             return 0;
         },
-        win.WM_SETTINGCHANGE, win.WM_THEMECHANGED => {
+        win.WM_SETTINGCHANGE, win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
             updateTheme(hwnd);
             return 0;
         },
@@ -305,14 +327,14 @@ fn disableChrome(hwnd: win.HWND) void {
 
 fn createFallbackControls(parent: win.HWND, instance: win.HINSTANCE) !void {
     if (state.?.fallback_tabs != null) return;
-    state.?.fallback_powershell = try createFallbackControl(parent, instance, button_class, powershell_label, win.BS_PUSHBUTTON | win.WS_GROUP, command_new_powershell);
-    state.?.fallback_wsl = try createFallbackControl(parent, instance, button_class, wsl_label, win.BS_PUSHBUTTON, command_new_wsl);
-    state.?.fallback_close = try createFallbackControl(parent, instance, button_class, close_label, win.BS_PUSHBUTTON, command_close_tab);
+    state.?.fallback_powershell = try createFallbackControl(parent, instance, button_class, powershell_label, win.BS_OWNERDRAW | win.WS_GROUP, command_new_powershell);
+    state.?.fallback_wsl = try createFallbackControl(parent, instance, button_class, wsl_label, win.BS_OWNERDRAW, command_new_wsl);
+    state.?.fallback_close = try createFallbackControl(parent, instance, button_class, close_label, win.BS_OWNERDRAW, command_close_tab);
     state.?.fallback_tabs = win.CreateWindowExW(
         0,
         tab_class,
         null,
-        win.WS_CHILD | win.WS_VISIBLE | win.WS_TABSTOP | win.WS_CLIPSIBLINGS,
+        win.WS_CHILD | win.WS_VISIBLE | win.WS_TABSTOP | win.WS_CLIPSIBLINGS | win.TCS_BUTTONS | win.TCS_FLATBUTTONS | win.TCS_HOTTRACK | win.TCS_OWNERDRAWFIXED,
         0,
         0,
         1,
@@ -322,6 +344,7 @@ fn createFallbackControls(parent: win.HWND, instance: win.HINSTANCE) !void {
         instance,
         null,
     ) orelse return error.CreateFallbackTabsFailed;
+    if (win.SetWindowSubclass(state.?.fallback_tabs, fallbackTabProc, 1, 0) == 0) return error.SubclassFallbackTabsFailed;
     setFallbackFont(&state.?, state.?.font);
     syncFallbackTabs();
 }
@@ -349,7 +372,7 @@ fn layoutFallbackControls(width: i32, dpi: u32) void {
     if (state.?.fallback_tabs == null) return;
     _ = win.MoveWindow(state.?.fallback_powershell, scaled(16, dpi), scaled(12, dpi), scaled(120, dpi), scaled(32, dpi), 1);
     _ = win.MoveWindow(state.?.fallback_wsl, scaled(144, dpi), scaled(12, dpi), scaled(76, dpi), scaled(32, dpi), 1);
-    _ = win.MoveWindow(state.?.fallback_close, scaled(228, dpi), scaled(12, dpi), scaled(92, dpi), scaled(32, dpi), 1);
+    _ = win.MoveWindow(state.?.fallback_close, scaled(228, dpi), scaled(12, dpi), scaled(108, dpi), scaled(32, dpi), 1);
     _ = win.MoveWindow(state.?.fallback_tabs, scaled(16, dpi), scaled(52, dpi), @max(width - scaled(32, dpi), 1), scaled(48, dpi), 1);
 }
 
@@ -358,7 +381,12 @@ fn setFallbackFont(current: *State, font: win.HFONT) void {
     if (current.fallback_powershell != null) _ = win.SendMessageW(current.fallback_powershell, win.WM_SETFONT, font_value, 1);
     if (current.fallback_wsl != null) _ = win.SendMessageW(current.fallback_wsl, win.WM_SETFONT, font_value, 1);
     if (current.fallback_close != null) _ = win.SendMessageW(current.fallback_close, win.WM_SETFONT, font_value, 1);
-    if (current.fallback_tabs != null) _ = win.SendMessageW(current.fallback_tabs, win.WM_SETFONT, font_value, 1);
+    if (current.fallback_tabs != null) {
+        _ = win.SendMessageW(current.fallback_tabs, win.WM_SETFONT, font_value, 1);
+        const width: u32 = @intCast(scaled(120, current.dpi));
+        const height: u32 = @intCast(scaled(32, current.dpi));
+        _ = win.SendMessageW(current.fallback_tabs, win.TCM_SETITEMSIZE, 0, @intCast(width | (height << 16)));
+    }
 }
 
 fn syncFallbackTabs() void {
@@ -404,6 +432,104 @@ fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
     _ = win.FillRect(dc, &mutable_rect, brush);
 }
 
+fn frame(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
+    const brush = win.CreateSolidBrush(color);
+    defer _ = win.DeleteObject(brush);
+    var mutable_rect = rect;
+    _ = win.FrameRect(dc, &mutable_rect, brush);
+}
+
+fn paintFallbackButton(draw: *const win.DRAWITEMSTRUCT) void {
+    const saved_dc = win.SaveDC(draw.hDC);
+    defer {
+        if (saved_dc != 0) _ = win.RestoreDC(draw.hDC, saved_dc);
+    }
+    const pressed = (draw.itemState & win.ODS_SELECTED) != 0;
+    const hot = (draw.itemState & win.ODS_HOTLIGHT) != 0;
+    const disabled = (draw.itemState & win.ODS_DISABLED) != 0;
+    const background = if (state.?.high_contrast)
+        (if (pressed) win.GetSysColor(win.COLOR_HIGHLIGHT) else win.GetSysColor(win.COLOR_BTNFACE))
+    else if (state.?.dark_theme)
+        (if (pressed) rgb(71, 76, 87) else if (hot) rgb(55, 60, 70) else rgb(39, 43, 51))
+    else
+        (if (pressed) rgb(210, 210, 210) else if (hot) rgb(229, 229, 229) else rgb(255, 255, 255));
+    const foreground = if (disabled)
+        win.GetSysColor(win.COLOR_GRAYTEXT)
+    else if (state.?.high_contrast and pressed)
+        win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+    else if (state.?.high_contrast)
+        win.GetSysColor(win.COLOR_BTNTEXT)
+    else if (state.?.dark_theme)
+        rgb(245, 245, 245)
+    else
+        rgb(32, 32, 32);
+    const border = if (state.?.high_contrast) foreground else if (state.?.dark_theme) rgb(92, 98, 112) else rgb(173, 173, 173);
+
+    fill(draw.hDC, draw.rcItem, background);
+    frame(draw.hDC, draw.rcItem, border);
+    _ = win.SelectObject(draw.hDC, state.?.font);
+    _ = win.SetBkMode(draw.hDC, win.TRANSPARENT);
+    _ = win.SetTextColor(draw.hDC, foreground);
+    var text: [64]u16 = std.mem.zeroes([64]u16);
+    _ = win.GetWindowTextW(draw.hwndItem, &text, text.len);
+    var text_rect = draw.rcItem;
+    if (pressed) _ = win.OffsetRect(&text_rect, 1, 1);
+    _ = win.DrawTextW(draw.hDC, &text, -1, &text_rect, win.DT_CENTER | win.DT_VCENTER | win.DT_SINGLELINE);
+    if ((draw.itemState & win.ODS_FOCUS) != 0 and (draw.itemState & win.ODS_NOFOCUSRECT) == 0) {
+        var focus_rect = draw.rcItem;
+        _ = win.InflateRect(&focus_rect, -3, -3);
+        _ = win.DrawFocusRect(draw.hDC, &focus_rect);
+    }
+}
+
+fn paintFallbackTab(draw: *const win.DRAWITEMSTRUCT) void {
+    if (draw.itemID >= state.?.model.sessions.items.len) return;
+    const saved_dc = win.SaveDC(draw.hDC);
+    defer {
+        if (saved_dc != 0) _ = win.RestoreDC(draw.hDC, saved_dc);
+    }
+    const selected = (draw.itemState & win.ODS_SELECTED) != 0;
+    const hot = (draw.itemState & win.ODS_HOTLIGHT) != 0;
+    const background = if (state.?.high_contrast)
+        (if (selected) win.GetSysColor(win.COLOR_HIGHLIGHT) else win.GetSysColor(win.COLOR_BTNFACE))
+    else if (state.?.dark_theme)
+        (if (selected) rgb(55, 60, 70) else if (hot) rgb(45, 49, 58) else rgb(31, 34, 41))
+    else
+        (if (selected) rgb(255, 255, 255) else if (hot) rgb(220, 220, 220) else rgb(232, 232, 232));
+    const foreground = if (state.?.high_contrast)
+        (if (selected) win.GetSysColor(win.COLOR_HIGHLIGHTTEXT) else win.GetSysColor(win.COLOR_BTNTEXT))
+    else if (state.?.dark_theme)
+        rgb(245, 245, 245)
+    else
+        rgb(32, 32, 32);
+    const border = if (state.?.high_contrast) foreground else if (state.?.dark_theme) rgb(92, 98, 112) else rgb(173, 173, 173);
+    fill(draw.hDC, draw.rcItem, background);
+    frame(draw.hDC, draw.rcItem, border);
+    _ = win.SelectObject(draw.hDC, state.?.font);
+    _ = win.SetBkMode(draw.hDC, win.TRANSPARENT);
+    _ = win.SetTextColor(draw.hDC, foreground);
+    var text_rect = draw.rcItem;
+    const session = state.?.model.sessions.items[draw.itemID];
+    const label = if (session.shell == .powershell) powershell_label else wsl_label;
+    _ = win.DrawTextW(draw.hDC, label, -1, &text_rect, win.DT_CENTER | win.DT_VCENTER | win.DT_SINGLELINE);
+    if ((draw.itemState & win.ODS_FOCUS) != 0 and (draw.itemState & win.ODS_NOFOCUSRECT) == 0) {
+        var focus_rect = draw.rcItem;
+        _ = win.InflateRect(&focus_rect, -3, -3);
+        _ = win.DrawFocusRect(draw.hDC, &focus_rect);
+    }
+}
+
+fn fallbackTabProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM, _: win.UINT_PTR, _: win.DWORD_PTR) callconv(.c) win.LRESULT {
+    if (message == win.WM_ERASEBKGND and state != null) {
+        const dc: win.HDC = @ptrFromInt(wparam);
+        var client: win.RECT = undefined;
+        if (win.GetClientRect(hwnd, &client) != 0) fill(dc, client, fallbackBackground());
+        return 1;
+    }
+    if (message == win.WM_NCDESTROY) _ = win.RemoveWindowSubclass(hwnd, fallbackTabProc, 1);
+    return win.DefSubclassProc(hwnd, message, wparam, lparam);
+}
+
 fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
     return @as(win.COLORREF, red) | (@as(win.COLORREF, green) << 8) | (@as(win.COLORREF, blue) << 16);
 }
@@ -444,6 +570,10 @@ fn updateTheme(hwnd: win.HWND) void {
     var dark_mode: win.BOOL = @intFromBool(state.?.dark_theme and !state.?.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);
+    if (state.?.fallback_powershell != null) _ = win.InvalidateRect(state.?.fallback_powershell, null, 0);
+    if (state.?.fallback_wsl != null) _ = win.InvalidateRect(state.?.fallback_wsl, null, 0);
+    if (state.?.fallback_close != null) _ = win.InvalidateRect(state.?.fallback_close, null, 0);
+    if (state.?.fallback_tabs != null) _ = win.InvalidateRect(state.?.fallback_tabs, null, 1);
 }
 
 fn appsUseDarkTheme() bool {
