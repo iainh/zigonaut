@@ -39,6 +39,8 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("kernel32");
     exe.linkSystemLibrary("shell32");
+    const check_step = b.step("check", "Compile Zigonaut without installing it");
+    check_step.dependOn(&exe.step);
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
 

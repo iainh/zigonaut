@@ -1,10 +1,13 @@
 pub const c = @cImport({
     @cDefine("UNICODE", "1");
     @cDefine("_UNICODE", "1");
+    @cDefine("_WIN32_WINNT", "0x0A00");
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cInclude("windows.h");
     @cInclude("dwmapi.h");
     @cInclude("shellapi.h");
+    @cInclude("bridge.h");
+    @cInclude("directwrite_renderer.h");
 });
 
 /// Windows handles are opaque integer values despite being declared as typed

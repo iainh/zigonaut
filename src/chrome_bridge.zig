@@ -1,19 +1,16 @@
 const win = @import("win32.zig").c;
 const std = @import("std");
-const abi = @cImport({
-    @cInclude("bridge.h");
-});
 
 const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut.WinUI.Bridge.dll");
 
 pub const Command = enum(u32) {
-    new_powershell = abi.ZIGONAUT_CHROME_NEW_POWERSHELL,
-    new_wsl = abi.ZIGONAUT_CHROME_NEW_WSL,
-    close = abi.ZIGONAUT_CHROME_CLOSE,
-    select = abi.ZIGONAUT_CHROME_SELECT,
-    open_settings = abi.ZIGONAUT_CHROME_OPEN_SETTINGS,
-    reload_settings = abi.ZIGONAUT_CHROME_RELOAD_SETTINGS,
-    quit = abi.ZIGONAUT_CHROME_QUIT,
+    new_powershell = win.ZIGONAUT_CHROME_NEW_POWERSHELL,
+    new_wsl = win.ZIGONAUT_CHROME_NEW_WSL,
+    close = win.ZIGONAUT_CHROME_CLOSE,
+    select = win.ZIGONAUT_CHROME_SELECT,
+    open_settings = win.ZIGONAUT_CHROME_OPEN_SETTINGS,
+    reload_settings = win.ZIGONAUT_CHROME_RELOAD_SETTINGS,
+    quit = win.ZIGONAUT_CHROME_QUIT,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -109,8 +106,8 @@ fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
 }
 
 test "chrome commands match the shared ABI" {
-    try std.testing.expectEqual(Command.open_settings, commandFromInt(abi.ZIGONAUT_CHROME_OPEN_SETTINGS).?);
-    try std.testing.expectEqual(Command.quit, commandFromInt(abi.ZIGONAUT_CHROME_QUIT).?);
+    try std.testing.expectEqual(Command.open_settings, commandFromInt(win.ZIGONAUT_CHROME_OPEN_SETTINGS).?);
+    try std.testing.expectEqual(Command.quit, commandFromInt(win.ZIGONAUT_CHROME_QUIT).?);
     try std.testing.expect(commandFromInt(0) == null);
     try std.testing.expect(commandFromInt(8) == null);
 }

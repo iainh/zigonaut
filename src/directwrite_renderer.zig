@@ -1,6 +1,4 @@
-const native = @cImport({
-    @cInclude("directwrite_renderer.h");
-});
+const native = @import("win32.zig").c;
 
 pub const Engine = struct {
     handle: *native.ZigonautTextEngine,

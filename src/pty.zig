@@ -1,12 +1,5 @@
 const std = @import("std");
-
-const win = @cImport({
-    @cDefine("UNICODE", "1");
-    @cDefine("_UNICODE", "1");
-    @cDefine("_WIN32_WINNT", "0x0A00");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const win = @import("win32.zig").c;
 
 pub const Pty = struct {
     pseudo_console: win.HPCON,
