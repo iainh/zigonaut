@@ -1,6 +1,7 @@
 const win = @import("win32.zig").c;
+const std = @import("std");
 
-const dll_name = "Zigonaut.WinUI.Bridge.dll";
+const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut.WinUI.Bridge.dll");
 
 pub const command = struct {
     pub const new_powershell = 1;
@@ -27,7 +28,19 @@ pub const Bridge = struct {
     destroy_fn: Destroy,
 
     pub fn load(parent: win.HWND, callback: Callback, context: ?*anyopaque) ?Bridge {
-        const module = win.LoadLibraryA(dll_name) orelse return null;
+        var path: [win.MAX_PATH]u16 = undefined;
+        const path_length = win.GetModuleFileNameW(null, &path, path.len);
+        if (path_length == 0 or path_length >= path.len) return null;
+        const directory_end = std.mem.lastIndexOfScalar(u16, path[0..path_length], '\\') orelse return null;
+        if (directory_end + 1 + dll_name.len >= path.len) return null;
+        @memcpy(path[directory_end + 1 ..][0..dll_name.len], dll_name);
+        path[directory_end + 1 + dll_name.len] = 0;
+
+        const module = win.LoadLibraryExW(
+            &path,
+            null,
+            win.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | win.LOAD_LIBRARY_SEARCH_APPLICATION_DIR | win.LOAD_LIBRARY_SEARCH_SYSTEM32,
+        ) orelse return null;
         var loaded = false;
         defer {
             if (!loaded) _ = win.FreeLibrary(module);
