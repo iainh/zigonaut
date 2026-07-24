@@ -1,5 +1,6 @@
 const std = @import("std");
 const App = @import("app.zig").App;
+const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 
 const win = @import("win32.zig").c;
@@ -20,6 +21,13 @@ pub const View = struct {
     rows: u16 = 0,
     dark_theme: bool = true,
     high_contrast: bool = false,
+    back_dc: win.HDC = null,
+    back_bitmap: win.HBITMAP = null,
+    back_original_bitmap: win.HGDIOBJ = null,
+    back_width: i32 = 0,
+    back_height: i32 = 0,
+    last_runtime: ?*SessionRuntime = null,
+    last_content_generation: u64 = 0,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -90,6 +98,16 @@ pub const View = struct {
         _ = win.InvalidateRect(self.hwnd, null, 0);
     }
 
+    fn refreshIfNeeded(self: *View) void {
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        const generation = runtime.contentGeneration();
+        if (runtime == self.last_runtime and generation == self.last_content_generation) return;
+        self.last_runtime = runtime;
+        self.last_content_generation = generation;
+        self.invalidate();
+    }
+
     pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool) void {
         self.dark_theme = dark_theme;
         self.high_contrast = high_contrast;
@@ -121,6 +139,61 @@ pub const View = struct {
 
         var client: win.RECT = undefined;
         _ = win.GetClientRect(self.hwnd, &client);
+        const width = client.right - client.left;
+        const height = client.bottom - client.top;
+        if (width <= 0 or height <= 0) return;
+
+        if (self.ensureBackBuffer(dc, width, height)) {
+            self.paintFrame(self.back_dc, client);
+            _ = win.BitBlt(dc, 0, 0, width, height, self.back_dc, 0, 0, win.SRCCOPY);
+        } else {
+            self.paintFrame(dc, client);
+        }
+    }
+
+    fn ensureBackBuffer(self: *View, dc: win.HDC, width: i32, height: i32) bool {
+        if (self.back_bitmap != null and self.back_width == width and self.back_height == height) return true;
+
+        if (self.back_dc == null) self.back_dc = win.CreateCompatibleDC(dc);
+        if (self.back_dc == null) return false;
+
+        const bitmap = win.CreateCompatibleBitmap(dc, width, height);
+        if (bitmap == null) return false;
+        const previous = win.SelectObject(self.back_dc, bitmap);
+        if (previous == null) {
+            _ = win.DeleteObject(bitmap);
+            return false;
+        }
+
+        if (self.back_bitmap == null) {
+            self.back_original_bitmap = previous;
+        } else {
+            _ = win.DeleteObject(self.back_bitmap);
+        }
+        self.back_bitmap = bitmap;
+        self.back_width = width;
+        self.back_height = height;
+        return true;
+    }
+
+    fn releaseBackBuffer(self: *View) void {
+        if (self.back_dc != null and self.back_original_bitmap != null) {
+            _ = win.SelectObject(self.back_dc, self.back_original_bitmap);
+        }
+        if (self.back_bitmap != null) _ = win.DeleteObject(self.back_bitmap);
+        if (self.back_dc != null) _ = win.DeleteDC(self.back_dc);
+        self.back_dc = null;
+        self.back_bitmap = null;
+        self.back_original_bitmap = null;
+        self.back_width = 0;
+        self.back_height = 0;
+    }
+
+    fn paintFrame(self: *View, dc: win.HDC, client: win.RECT) void {
+        const saved_dc = win.SaveDC(dc);
+        defer {
+            if (saved_dc != 0) _ = win.RestoreDC(dc, saved_dc);
+        }
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else if (self.dark_theme)
@@ -280,7 +353,9 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_TIMER => {
-            if (wparam == refresh_timer) _ = win.InvalidateRect(hwnd, null, 0);
+            if (wparam == refresh_timer) {
+                if (view) |current| current.refreshIfNeeded();
+            }
             return 0;
         },
         win.WM_ERASEBKGND => return 1,
@@ -290,6 +365,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
+            if (view) |current| current.releaseBackBuffer();
             return 0;
         },
         else => return win.DefWindowProcW(hwnd, message, wparam, lparam),

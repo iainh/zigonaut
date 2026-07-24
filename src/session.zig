@@ -8,6 +8,7 @@ pub const SessionRuntime = struct {
     pty: ?Pty = null,
     reader_thread: ?std.Thread = null,
     terminal_mutex: std.Thread.Mutex = .{},
+    content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn create(allocator: std.mem.Allocator, command: []const u8) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
@@ -27,6 +28,7 @@ pub const SessionRuntime = struct {
                 .{ command, @errorName(err) },
             ) catch "Unable to start shell.\r\n";
             self.terminal.feed(text);
+            _ = self.content_generation.fetchAdd(1, .monotonic);
             return self;
         };
         errdefer {
@@ -54,6 +56,10 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         return self.terminal.writeViewportText(output);
+    }
+
+    pub fn contentGeneration(self: *const SessionRuntime) u64 {
+        return self.content_generation.load(.monotonic);
     }
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
@@ -88,6 +94,7 @@ pub const SessionRuntime = struct {
             self.terminal_mutex.lock();
             self.terminal.feed(buffer[0..count]);
             self.terminal_mutex.unlock();
+            _ = self.content_generation.fetchAdd(1, .monotonic);
         }
     }
 };
