@@ -34,6 +34,7 @@ pub const View = struct {
     last_content_generation: u64 = 0,
     last_titles_generation: u64 = 0,
     titles_changed_message: win.UINT,
+    shell_exited_message: win.UINT,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -61,6 +62,7 @@ pub const View = struct {
         font_size: u16,
         dpi: u32,
         titles_changed_message: win.UINT,
+        shell_exited_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
@@ -74,6 +76,7 @@ pub const View = struct {
             .cell_width = cell_size.width,
             .cell_height = cell_size.height,
             .titles_changed_message = titles_changed_message,
+            .shell_exited_message = shell_exited_message,
         };
     }
 
@@ -127,6 +130,9 @@ pub const View = struct {
     }
 
     fn refreshIfNeeded(self: *View) void {
+        if (self.model.hasCleanlyExitedSession()) {
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
+        }
         const titles_generation = self.model.titlesGeneration();
         if (titles_generation != self.last_titles_generation) {
             self.last_titles_generation = titles_generation;

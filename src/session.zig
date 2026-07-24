@@ -101,6 +101,11 @@ pub const SessionRuntime = struct {
         return error.ShellNotRunning;
     }
 
+    pub fn exitedCleanly(self: *const SessionRuntime) bool {
+        const pty = self.pty orelse return false;
+        return pty.exitedCleanly();
+    }
+
     pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16) !void {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();

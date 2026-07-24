@@ -125,6 +125,12 @@ pub const Pty = struct {
         }
     }
 
+    pub fn exitedCleanly(self: *const Pty) bool {
+        if (win.WaitForSingleObject(self.process, 0) != win.WAIT_OBJECT_0) return false;
+        var exit_code: win.DWORD = 0;
+        return win.GetExitCodeProcess(self.process, &exit_code) != 0 and exit_code == 0;
+    }
+
     pub fn stopIo(self: *Pty, reader_thread: ?std.Thread) void {
         _ = win.CloseHandle(self.input);
         if (reader_thread) |thread| _ = win.CancelSynchronousIo(@ptrCast(thread.getHandle()));

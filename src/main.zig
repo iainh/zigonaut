@@ -14,6 +14,7 @@ const apps_use_light_theme = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLigh
 
 const chrome_message = win.WM_APP + 1;
 const titles_changed_message = win.WM_APP + 2;
+const shell_exited_message = win.WM_APP + 3;
 const winui_terminal_top: i32 = 48;
 
 const State = struct {
@@ -146,6 +147,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 settings.font_size,
                 dpi,
                 titles_changed_message,
+                shell_exited_message,
             );
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
             state.?.terminal_ready = true;
@@ -160,7 +162,13 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             switch (command) {
                 chrome.command.new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
                 chrome.command.new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
-                chrome.command.close => state.?.model.closeSession(argument),
+                chrome.command.close => {
+                    state.?.model.closeSession(argument);
+                    if (state.?.model.sessions.items.len == 0) {
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    }
+                },
                 chrome.command.select => state.?.model.activate(argument),
                 else => return 0,
             }
@@ -172,6 +180,17 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         titles_changed_message => {
             if (state.?.model.syncTitles()) syncChrome();
+            return 0;
+        },
+        shell_exited_message => {
+            if (!state.?.model.closeCleanlyExitedSessions()) return 0;
+            if (state.?.model.sessions.items.len == 0) {
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            }
+            state.?.terminal_view.syncSessions();
+            state.?.terminal_view.invalidate();
+            syncChrome();
             return 0;
         },
         win.WM_SIZE => {

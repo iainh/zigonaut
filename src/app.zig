@@ -89,14 +89,18 @@ pub const App = struct {
 
     pub fn closeSession(self: *App, index: usize) void {
         if (index >= self.sessions.items.len) return;
+        const active = self.active;
         var removed = self.sessions.orderedRemove(index);
         if (removed.runtime) |runtime| runtime.destroy();
         removed.title.deinit(self.allocator);
 
         if (self.sessions.items.len == 0) {
             self.active = null;
-        } else if (self.active) |active| {
-            self.active = @min(active, self.sessions.items.len - 1);
+        } else if (active) |active_index| {
+            self.active = if (active_index > index)
+                active_index - 1
+            else
+                @min(active_index, self.sessions.items.len - 1);
         }
     }
 
@@ -121,6 +125,28 @@ pub const App = struct {
             if (session.runtime) |runtime| generation +%= runtime.titleGeneration();
         }
         return generation;
+    }
+
+    pub fn hasCleanlyExitedSession(self: *const App) bool {
+        for (self.sessions.items) |session| {
+            if (session.runtime) |runtime| {
+                if (runtime.exitedCleanly()) return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn closeCleanlyExitedSessions(self: *App) bool {
+        var changed = false;
+        var index = self.sessions.items.len;
+        while (index > 0) {
+            index -= 1;
+            const runtime = self.sessions.items[index].runtime orelse continue;
+            if (!runtime.exitedCleanly()) continue;
+            self.closeSession(index);
+            changed = true;
+        }
+        return changed;
     }
 
     pub fn syncTitles(self: *App) bool {
@@ -162,6 +188,17 @@ test "closing the active session selects its nearest neighbor" {
 
     app.closeSession(0);
     try std.testing.expect(app.activeSession() == null);
+}
+
+test "closing a session before the active session preserves the selection" {
+    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    defer app.deinit();
+
+    _ = try app.addSessionRecord(.powershell, null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, null, theme.rasmus.background);
+    app.closeSession(0);
+
+    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
 }
 
 test {
