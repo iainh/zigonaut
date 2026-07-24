@@ -93,22 +93,14 @@ struct Bridge {
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
     MenuFlyoutItem wsl_item{nullptr};
-    event_token add_tab_token{};
-    event_token selection_token{};
-    event_token close_tab_token{};
-    event_token open_settings_token{};
-    event_token reload_settings_token{};
-    event_token quit_token{};
-    event_token powershell_token{};
-    event_token wsl_token{};
-    bool add_tab_handler_attached = true;
-    bool selection_handler_attached = true;
-    bool close_tab_handler_attached = true;
-    bool open_settings_handler_attached = false;
-    bool reload_settings_handler_attached = false;
-    bool quit_handler_attached = false;
-    bool powershell_handler_attached = false;
-    bool wsl_handler_attached = false;
+    TabView::AddTabButtonClick_revoker add_tab_revoker{};
+    TabView::SelectionChanged_revoker selection_revoker{};
+    TabView::TabCloseRequested_revoker close_tab_revoker{};
+    MenuFlyoutItem::Click_revoker open_settings_revoker{};
+    MenuFlyoutItem::Click_revoker reload_settings_revoker{};
+    MenuFlyoutItem::Click_revoker quit_revoker{};
+    MenuFlyoutItem::Click_revoker powershell_revoker{};
+    MenuFlyoutItem::Click_revoker wsl_revoker{};
     bool handlers_detached = false;
     bool updating = false;
     bool closed = false;
@@ -128,13 +120,13 @@ struct Bridge {
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
-        add_tab_token = tabs.AddTabButtonClick([this](auto&&, auto&&) { showNewTabMenu(); });
-        selection_token = tabs.SelectionChanged([this](auto&&, auto&&) {
+        add_tab_revoker = tabs.AddTabButtonClick(auto_revoke, [this](auto&&, auto&&) { showNewTabMenu(); });
+        selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
                 notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
             }
         });
-        close_tab_token = tabs.TabCloseRequested([this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
+        close_tab_revoker = tabs.TabCloseRequested(auto_revoke, [this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
             uint32_t index = 0;
             if (sender.TabItems().IndexOf(args.Item(), index)) notify(ZIGONAUT_CHROME_CLOSE, index);
         });
@@ -155,20 +147,28 @@ struct Bridge {
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         open_settings_item = MenuFlyoutItem{};
         open_settings_item.Text(L"Open Settings");
-        open_settings_token = open_settings_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_OPEN_SETTINGS, 0); });
-        open_settings_handler_attached = true;
+        open_settings_revoker = open_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_OPEN_SETTINGS, 0); });
         reload_settings_item = MenuFlyoutItem{};
         reload_settings_item.Text(L"Reload Settings");
-        reload_settings_token = reload_settings_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
-        reload_settings_handler_attached = true;
+        reload_settings_revoker = reload_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Quit");
-        quit_token = quit_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
-        quit_handler_attached = true;
+        quit_revoker = quit_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
         app_menu.Items().Append(open_settings_item);
         app_menu.Items().Append(reload_settings_item);
         app_menu.Items().Append(quit_item);
         menu_button.Flyout(app_menu);
+
+        new_tab_menu = MenuFlyout{};
+        new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        powershell_item = MenuFlyoutItem{};
+        powershell_item.Text(L"PowerShell");
+        powershell_revoker = powershell_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_POWERSHELL, 0); });
+        wsl_item = MenuFlyoutItem{};
+        wsl_item.Text(L"WSL");
+        wsl_revoker = wsl_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WSL, 0); });
+        new_tab_menu.Items().Append(powershell_item);
+        new_tab_menu.Items().Append(wsl_item);
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
@@ -279,38 +279,8 @@ struct Bridge {
     }
 
     void showNewTabMenu() {
-        closeNewTabMenu();
-        new_tab_menu = MenuFlyout{};
-        powershell_item = MenuFlyoutItem{};
-        powershell_item.Text(L"PowerShell");
-        powershell_token = powershell_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_POWERSHELL, 0); });
-        powershell_handler_attached = true;
-        wsl_item = MenuFlyoutItem{};
-        wsl_item.Text(L"WSL");
-        wsl_token = wsl_item.Click([this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WSL, 0); });
-        wsl_handler_attached = true;
-        new_tab_menu.Items().Append(powershell_item);
-        new_tab_menu.Items().Append(wsl_item);
         auto const add_button = findDescendant(tabs, L"AddButton");
-        new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         new_tab_menu.ShowAt(add_button ? add_button : tabs);
-    }
-
-    void closeNewTabMenu() {
-        if (!new_tab_menu) return;
-        new_tab_menu.Hide();
-        if (powershell_handler_attached) {
-            powershell_item.Click(powershell_token);
-            powershell_handler_attached = false;
-        }
-        if (wsl_handler_attached) {
-            wsl_item.Click(wsl_token);
-            wsl_handler_attached = false;
-        }
-        new_tab_menu.Items().Clear();
-        powershell_item = nullptr;
-        wsl_item = nullptr;
-        new_tab_menu = nullptr;
     }
 
     HRESULT close() noexcept {
@@ -319,41 +289,16 @@ struct Bridge {
         context = nullptr;
 
         HRESULT result = S_OK;
-        bool safe_to_release = true;
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
-        if (powershell_handler_attached) {
-            if (cleanup(L"revoke PowerShell menu handler", [&] { powershell_item.Click(powershell_token); }, result)) {
-                powershell_handler_attached = false;
-            } else safe_to_release = false;
-        }
-        if (wsl_handler_attached) {
-            if (cleanup(L"revoke WSL menu handler", [&] { wsl_item.Click(wsl_token); }, result)) {
-                wsl_handler_attached = false;
-            } else safe_to_release = false;
-        }
-        if (open_settings_handler_attached) {
-            if (cleanup(L"revoke open-settings handler", [&] { open_settings_item.Click(open_settings_token); }, result)) {
-                open_settings_handler_attached = false;
-            } else safe_to_release = false;
-        }
-        if (reload_settings_handler_attached) {
-            if (cleanup(L"revoke reload-settings handler", [&] { reload_settings_item.Click(reload_settings_token); }, result)) {
-                reload_settings_handler_attached = false;
-            } else safe_to_release = false;
-        }
-        if (quit_handler_attached) {
-            if (cleanup(L"revoke quit handler", [&] { quit_item.Click(quit_token); }, result)) {
-                quit_handler_attached = false;
-            } else safe_to_release = false;
-        }
-        if (add_tab_handler_attached && cleanup(L"revoke add-tab handler", [&] { tabs.AddTabButtonClick(add_tab_token); }, result)) add_tab_handler_attached = false;
-        if (selection_handler_attached && cleanup(L"revoke selection handler", [&] { tabs.SelectionChanged(selection_token); }, result)) selection_handler_attached = false;
-        if (close_tab_handler_attached && cleanup(L"revoke close-tab handler", [&] { tabs.TabCloseRequested(close_tab_token); }, result)) close_tab_handler_attached = false;
-        if (add_tab_handler_attached || selection_handler_attached || close_tab_handler_attached ||
-            open_settings_handler_attached || reload_settings_handler_attached || quit_handler_attached) safe_to_release = false;
-        if (!safe_to_release) return result;
-
+        powershell_revoker.revoke();
+        wsl_revoker.revoke();
+        open_settings_revoker.revoke();
+        reload_settings_revoker.revoke();
+        quit_revoker.revoke();
+        add_tab_revoker.revoke();
+        selection_revoker.revoke();
+        close_tab_revoker.revoke();
         handlers_detached = true;
         if (!restoreTitleBar(result)) return result;
         closed = true;
