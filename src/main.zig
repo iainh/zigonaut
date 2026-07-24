@@ -11,8 +11,8 @@ const font_name = std.unicode.utf8ToUtf16LeStringLiteral("Cascadia Mono");
 
 const command_new_powershell = 1001;
 const command_new_wsl = 1002;
-const command_tab_base = 1100;
 const command_close_tab = 1200;
+const chrome_message = win.WM_APP + 1;
 const terminal_left = 16;
 const terminal_margin = 16;
 const fallback_terminal_top: i32 = 108;
@@ -106,7 +106,7 @@ fn handleShortcut(message: *const win.MSG) bool {
     const active = state.?.model.active orelse return true;
     if (count > 1) {
         const next = if (shift) (active + count - 1) % count else (active + 1) % count;
-        sendCommand(hwnd, command_tab_base + @as(u16, @intCast(next)));
+        sendChromeCommand(hwnd, chrome.command.select, @intCast(next));
     }
     return true;
 }
@@ -142,9 +142,23 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 state.?.terminal_view.syncSessions();
             } else if (command == command_close_tab) {
                 if (state.?.model.active) |active| state.?.model.closeSession(active);
-            } else if (command >= command_tab_base and command < command_tab_base + 32) {
-                state.?.model.activate(command - command_tab_base);
             }
+            _ = win.InvalidateRect(hwnd, null, 0);
+            state.?.terminal_view.invalidate();
+            syncChrome();
+            return 0;
+        },
+        chrome_message => {
+            const command: u32 = @intCast(wparam);
+            const argument: u32 = @intCast(lparam);
+            switch (command) {
+                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell) catch return 0,
+                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl) catch return 0,
+                chrome.command.close => state.?.model.closeSession(argument),
+                chrome.command.select => state.?.model.activate(argument),
+                else => return 0,
+            }
+            state.?.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
             state.?.terminal_view.invalidate();
             syncChrome();
@@ -223,8 +237,8 @@ fn handleClick(hwnd: win.HWND, x: i32, y: i32) void {
         return;
     }
     if (y >= scaled(56, dpi) and y < scaled(96, dpi) and x >= scaled(16, dpi)) {
-        const index: u16 = @intCast(@divTrunc(x - scaled(16, dpi), scaled(168, dpi)));
-        sendCommand(hwnd, command_tab_base + index);
+        const index: u32 = @intCast(@divTrunc(x - scaled(16, dpi), scaled(168, dpi)));
+        sendChromeCommand(hwnd, chrome.command.select, index);
     }
 }
 
@@ -246,35 +260,27 @@ fn layoutTerminalView(hwnd: win.HWND) void {
 fn syncChrome() void {
     if (state == null) return;
     if (state.?.chrome) |*bridge| {
-        var kinds: [32]u8 = undefined;
-        const count = @min(state.?.model.sessions.items.len, kinds.len);
-        for (state.?.model.sessions.items[0..count], 0..) |session, index| {
+        const count = state.?.model.sessions.items.len;
+        const kinds = std.heap.page_allocator.alloc(u8, count) catch return;
+        defer std.heap.page_allocator.free(kinds);
+        for (state.?.model.sessions.items, 0..) |session, index| {
             kinds[index] = @intFromEnum(session.shell);
         }
-        bridge.update(kinds[0..count], state.?.model.active);
+        bridge.update(kinds, state.?.model.active);
     }
 }
 
 fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
-    const hwnd = state.?.hwnd;
-    switch (command) {
-        chrome.command.new_powershell => postCommand(hwnd, command_new_powershell),
-        chrome.command.new_wsl => postCommand(hwnd, command_new_wsl),
-        chrome.command.close => {
-            postCommand(hwnd, command_tab_base + @as(u16, @intCast(argument)));
-            postCommand(hwnd, command_close_tab);
-        },
-        chrome.command.select => postCommand(hwnd, command_tab_base + @as(u16, @intCast(argument))),
-        else => {},
-    }
+    const hwnd = if (state) |current| current.hwnd else return;
+    sendChromeCommand(hwnd, command, argument);
 }
 
 fn sendCommand(hwnd: win.HWND, command: u16) void {
     _ = win.SendMessageW(hwnd, win.WM_COMMAND, command, 0);
 }
 
-fn postCommand(hwnd: win.HWND, command: u16) void {
-    _ = win.PostMessageW(hwnd, win.WM_COMMAND, command, 0);
+fn sendChromeCommand(hwnd: win.HWND, command: u32, argument: u32) void {
+    _ = win.PostMessageW(hwnd, chrome_message, command, @intCast(argument));
 }
 
 fn paint(hwnd: win.HWND) void {
