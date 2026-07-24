@@ -2,6 +2,7 @@ const std = @import("std");
 const Pty = @import("pty.zig").Pty;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
+const log = std.log.scoped(.session);
 
 pub const SessionRuntime = struct {
     allocator: std.mem.Allocator,
@@ -91,15 +92,22 @@ pub const SessionRuntime = struct {
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
         self.terminal_mutex.lock();
-        self.terminal.resize(columns, rows, cell_width, cell_height) catch {};
+        self.terminal.resize(columns, rows, cell_width, cell_height) catch |err| {
+            log.warn("unable to resize terminal grid: {}", .{err});
+        };
         self.terminal_mutex.unlock();
-        if (self.pty) |*pty| pty.resize(columns, rows) catch {};
+        if (self.pty) |*pty| pty.resize(columns, rows) catch |err| {
+            log.warn("unable to resize pseudoconsole: {}", .{err});
+        };
     }
 
     pub fn setTheme(self: *SessionRuntime, value: theme.Theme) void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        self.terminal.setTheme(value) catch return;
+        self.terminal.setTheme(value) catch |err| {
+            log.warn("unable to apply terminal theme: {}", .{err});
+            return;
+        };
         _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 

@@ -6,6 +6,7 @@ const TerminalView = @import("terminal_view.zig").View;
 
 const win32 = @import("win32.zig");
 const win = win32.c;
+const log = std.log.scoped(.app);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
@@ -108,7 +109,7 @@ fn handleShortcut(message: *const win.MSG) bool {
     if (!control or alt) return false;
 
     if (shift and message.wParam == 'T') {
-        if (!repeated) addDefaultSession() catch {};
+        if (!repeated) addDefaultSession() catch |err| log.err("unable to open default session: {}", .{err});
         return true;
     }
     if (shift and message.wParam == 'W') {
@@ -156,19 +157,31 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 titles_changed_message,
                 shell_exited_message,
             );
-            state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
+            state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
+                log.err("unable to create terminal view: {}", .{err});
+                return -1;
+            };
             state.?.terminal_ready = true;
             state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null) orelse return -1;
             layoutTerminalView(hwnd);
-            addDefaultSession() catch return -1;
+            addDefaultSession() catch |err| {
+                log.err("unable to create initial session: {}", .{err});
+                return -1;
+            };
             return 0;
         },
         chrome_message => {
             const command: u32 = @intCast(wparam);
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
-                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch return 0,
+                chrome.command.new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                    log.err("unable to open PowerShell session: {}", .{err});
+                    return 0;
+                },
+                chrome.command.new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                    log.err("unable to open WSL session: {}", .{err});
+                    return 0;
+                },
                 chrome.command.close => {
                     state.?.model.closeSession(argument);
                     if (state.?.model.sessions.items.len == 0) {
@@ -178,11 +191,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 },
                 chrome.command.select => state.?.model.activate(argument),
                 chrome.command.open_settings => {
-                    openSettings(hwnd) catch {};
+                    openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
                     return 0;
                 },
                 chrome.command.reload_settings => {
-                    reloadSettings() catch {};
+                    reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
                     return 0;
                 },
                 chrome.command.quit => {
@@ -285,8 +298,14 @@ fn syncChrome() void {
     if (state == null) return;
     const bridge = if (state.?.chrome) |*value| value else return;
     const count = state.?.model.sessions.items.len;
-    state.?.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch return;
-    state.?.chrome_title_lengths.ensureTotalCapacity(std.heap.page_allocator, count) catch return;
+    state.?.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+        log.err("unable to allocate chrome title pointers: {}", .{err});
+        return;
+    };
+    state.?.chrome_title_lengths.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+        log.err("unable to allocate chrome title lengths: {}", .{err});
+        return;
+    };
     state.?.chrome_titles.items.len = count;
     state.?.chrome_title_lengths.items.len = count;
     for (state.?.model.sessions.items, 0..) |session, index| {

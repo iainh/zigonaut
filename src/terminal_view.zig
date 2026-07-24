@@ -6,6 +6,7 @@ const TextEngine = @import("directwrite_renderer.zig").Engine;
 const theme = @import("theme.zig");
 
 const win = @import("win32.zig").c;
+const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
@@ -95,7 +96,8 @@ pub const View = struct {
             instance,
             self,
         ) orelse return error.CreateTerminalViewFailed;
-        if (self.text_engine) |*engine| engine.setWindow(self.hwnd) catch {
+        if (self.text_engine) |*engine| engine.setWindow(self.hwnd) catch |err| {
+            log.warn("DirectWrite window initialization failed; using GDI fallback: {}", .{err});
             engine.deinit();
             self.text_engine = null;
         };
@@ -107,7 +109,9 @@ pub const View = struct {
 
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
-        if (self.text_engine) |*engine| engine.setDpi(dpi) catch {};
+        if (self.text_engine) |*engine| engine.setDpi(dpi) catch |err| {
+            log.warn("unable to update DirectWrite DPI: {}", .{err});
+        };
         self.updateCellSize(font);
     }
 
@@ -369,7 +373,9 @@ pub const View = struct {
         const session = self.model.activeSession() orelse return true;
         const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
         const action: Terminal.KeyAction = if (released) .release else if (repeated) .repeat else .press;
-        session.runtime.?.sendKey(key, action, currentModifiers()) catch {};
+        session.runtime.?.sendKey(key, action, currentModifiers()) catch |err| {
+            log.debug("unable to send terminal key: {}", .{err});
+        };
         if (!released) {
             self.suppressed_character = switch (wparam) {
                 win.VK_ESCAPE => 0x1b,
@@ -403,7 +409,9 @@ pub const View = struct {
 
         var utf8: [4]u8 = undefined;
         const utf8_length = std.unicode.utf16LeToUtf8(&utf8, utf16[0..length]) catch return;
-        session.runtime.?.write(utf8[0..utf8_length]) catch {};
+        session.runtime.?.write(utf8[0..utf8_length]) catch |err| {
+            log.debug("unable to write terminal input: {}", .{err});
+        };
     }
 
     fn suppressCharacter(self: *View, code_unit: u16) bool {
