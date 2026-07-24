@@ -108,6 +108,20 @@ pub const View = struct {
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
         if (self.text_engine) |*engine| engine.setDpi(dpi) catch {};
+        self.updateCellSize(font);
+    }
+
+    pub fn reloadFont(self: *View, font: win.HFONT, font_family: []const u8, font_size: u16, dpi: u32) !void {
+        var text_engine = try TextEngine.init(font_family, font_size, dpi);
+        errdefer text_engine.deinit();
+        try text_engine.setWindow(self.hwnd);
+        if (self.text_engine) |*engine| engine.deinit();
+        self.text_engine = text_engine;
+        self.font = font;
+        self.updateCellSize(font);
+    }
+
+    fn updateCellSize(self: *View, font: win.HFONT) void {
         const cell_size = if (self.text_engine) |engine| size: {
             const metrics = engine.metrics();
             break :size CellSize{ .width = metrics.width, .height = metrics.height };

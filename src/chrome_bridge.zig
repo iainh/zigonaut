@@ -8,6 +8,9 @@ pub const command = struct {
     pub const new_wsl = 2;
     pub const close = 3;
     pub const select = 4;
+    pub const open_settings = 5;
+    pub const reload_settings = 6;
+    pub const quit = 7;
 };
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;

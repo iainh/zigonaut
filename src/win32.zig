@@ -4,6 +4,7 @@ pub const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cInclude("windows.h");
     @cInclude("dwmapi.h");
+    @cInclude("shellapi.h");
 });
 
 /// Windows handles are opaque integer values despite being declared as typed

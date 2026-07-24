@@ -34,6 +34,9 @@ constexpr uint32_t command_new_powershell = 1;
 constexpr uint32_t command_new_wsl = 2;
 constexpr uint32_t command_close = 3;
 constexpr uint32_t command_select = 4;
+constexpr uint32_t command_open_settings = 5;
+constexpr uint32_t command_reload_settings = 6;
+constexpr uint32_t command_quit = 7;
 
 HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
     wchar_t message[160]{};
@@ -87,18 +90,30 @@ struct Bridge {
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     DesktopWindowXamlSource source{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
+    Grid root{nullptr};
     TabView tabs{nullptr};
+    Button menu_button{nullptr};
+    MenuFlyout app_menu{nullptr};
+    MenuFlyoutItem open_settings_item{nullptr};
+    MenuFlyoutItem reload_settings_item{nullptr};
+    MenuFlyoutItem quit_item{nullptr};
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
     MenuFlyoutItem wsl_item{nullptr};
     event_token add_tab_token{};
     event_token selection_token{};
     event_token close_tab_token{};
+    event_token open_settings_token{};
+    event_token reload_settings_token{};
+    event_token quit_token{};
     event_token powershell_token{};
     event_token wsl_token{};
     bool add_tab_handler_attached = true;
     bool selection_handler_attached = true;
     bool close_tab_handler_attached = true;
+    bool open_settings_handler_attached = false;
+    bool reload_settings_handler_attached = false;
+    bool quit_handler_attached = false;
     bool powershell_handler_attached = false;
     bool wsl_handler_attached = false;
     bool handlers_detached = false;
@@ -113,6 +128,7 @@ struct Bridge {
         this->parent = parent;
         source = DesktopWindowXamlSource{};
         source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
+        root = Grid{};
         tabs = TabView{};
 
         tabs.IsAddTabButtonVisible(true);
@@ -129,7 +145,41 @@ struct Bridge {
             uint32_t index = 0;
             if (sender.TabItems().IndexOf(args.Item(), index)) notify(command_close, index);
         });
-        source.Content(tabs);
+
+        menu_button = Button{};
+        menu_button.Width(40);
+        menu_button.Height(40);
+        menu_button.HorizontalAlignment(HorizontalAlignment::Left);
+        menu_button.VerticalAlignment(VerticalAlignment::Bottom);
+        menu_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        menu_button.BorderThickness(Thickness{});
+        menu_button.CornerRadius(CornerRadius{});
+        auto const menu_icon = FontIcon{};
+        menu_icon.Glyph(L"\xE700");
+        menu_button.Content(menu_icon);
+
+        app_menu = MenuFlyout{};
+        app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        open_settings_item = MenuFlyoutItem{};
+        open_settings_item.Text(L"Open Settings");
+        open_settings_token = open_settings_item.Click([this](auto&&, auto&&) { notify(command_open_settings, 0); });
+        open_settings_handler_attached = true;
+        reload_settings_item = MenuFlyoutItem{};
+        reload_settings_item.Text(L"Reload Settings");
+        reload_settings_token = reload_settings_item.Click([this](auto&&, auto&&) { notify(command_reload_settings, 0); });
+        reload_settings_handler_attached = true;
+        quit_item = MenuFlyoutItem{};
+        quit_item.Text(L"Quit");
+        quit_token = quit_item.Click([this](auto&&, auto&&) { notify(command_quit, 0); });
+        quit_handler_attached = true;
+        app_menu.Items().Append(open_settings_item);
+        app_menu.Items().Append(reload_settings_item);
+        app_menu.Items().Append(quit_item);
+        menu_button.Flyout(app_menu);
+
+        root.Children().Append(tabs);
+        root.Children().Append(menu_button);
+        source.Content(root);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
         source.SystemBackdrop(backdrop);
@@ -137,7 +187,8 @@ struct Bridge {
     }
 
     void enableTitleBar() {
-        tabs.Margin(Thickness{8, 0, 8, 0});
+        menu_button.Margin(Thickness{8, 0, 0, 0});
+        tabs.Margin(Thickness{56, 0, 8, 0});
         if (!Microsoft::UI::Windowing::AppWindowTitleBar::IsCustomizationSupported()) return;
         try {
             app_window = Microsoft::UI::Windowing::AppWindow::GetFromWindowId(Microsoft::UI::GetWindowIdFromWindow(parent));
@@ -175,22 +226,17 @@ struct Bridge {
         RECT client{};
         if (IsIconic(parent) || !GetClientRect(parent, &client) || client.right <= 0 || client.bottom <= 0) return;
         auto const dpi = GetDpiForWindow(parent);
-        auto const drag_width = MulDiv(40, dpi, 96);
         auto const left_inset = title_bar.LeftInset();
         auto const right_inset = title_bar.RightInset();
         auto const client_width = static_cast<int32_t>(client.right);
         auto const client_height = static_cast<int32_t>(client.bottom);
         auto const drag_height = std::min(title_bar.Height(), client_height);
-        auto const drag_left = std::min(std::max(left_inset, 0), client_width);
-        auto const drag_right = std::max(drag_left, client_width - std::max(right_inset, 0));
-        auto const left_drag_width = std::min(drag_width, drag_right - drag_left);
+        auto const drag_right = std::max(0, client_width - std::max(right_inset, 0));
         auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
-        tabs.Margin(Thickness{to_dips(left_inset + drag_width), 0, to_dips(right_inset) + 8, 0});
-        std::array<Windows::Graphics::RectInt32, 2> drag_areas{
-            Windows::Graphics::RectInt32{drag_left, 0, left_drag_width, drag_height},
-            Windows::Graphics::RectInt32{},
-        };
-        uint32_t drag_area_count = left_drag_width > 0 && drag_height > 0 ? 1 : 0;
+        menu_button.Margin(Thickness{to_dips(left_inset) + 8, 0, 0, 0});
+        tabs.Margin(Thickness{to_dips(left_inset) + 56, 0, to_dips(right_inset) + 8, 0});
+        std::array<Windows::Graphics::RectInt32, 1> drag_areas{};
+        uint32_t drag_area_count = 0;
         double occupied_width = tabs.Margin().Left;
         bool items_measured = true;
         for (auto const& value : tabs.TabItems()) {
@@ -206,7 +252,7 @@ struct Bridge {
                 ++drag_area_count;
             }
         }
-        if (drag_area_count > 0) title_bar.SetDragRectangles({drag_areas.data(), drag_area_count});
+        title_bar.SetDragRectangles({drag_areas.data(), drag_area_count});
     }
 
     void move(int32_t x, int32_t y, int32_t width, int32_t height) {
@@ -282,6 +328,7 @@ struct Bridge {
         HRESULT result = S_OK;
         bool safe_to_release = true;
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
+        if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
         if (powershell_handler_attached) {
             if (cleanup(L"revoke PowerShell menu handler", [&] { powershell_item.Click(powershell_token); }, result)) {
                 powershell_handler_attached = false;
@@ -292,10 +339,26 @@ struct Bridge {
                 wsl_handler_attached = false;
             } else safe_to_release = false;
         }
+        if (open_settings_handler_attached) {
+            if (cleanup(L"revoke open-settings handler", [&] { open_settings_item.Click(open_settings_token); }, result)) {
+                open_settings_handler_attached = false;
+            } else safe_to_release = false;
+        }
+        if (reload_settings_handler_attached) {
+            if (cleanup(L"revoke reload-settings handler", [&] { reload_settings_item.Click(reload_settings_token); }, result)) {
+                reload_settings_handler_attached = false;
+            } else safe_to_release = false;
+        }
+        if (quit_handler_attached) {
+            if (cleanup(L"revoke quit handler", [&] { quit_item.Click(quit_token); }, result)) {
+                quit_handler_attached = false;
+            } else safe_to_release = false;
+        }
         if (add_tab_handler_attached && cleanup(L"revoke add-tab handler", [&] { tabs.AddTabButtonClick(add_tab_token); }, result)) add_tab_handler_attached = false;
         if (selection_handler_attached && cleanup(L"revoke selection handler", [&] { tabs.SelectionChanged(selection_token); }, result)) selection_handler_attached = false;
         if (close_tab_handler_attached && cleanup(L"revoke close-tab handler", [&] { tabs.TabCloseRequested(close_tab_token); }, result)) close_tab_handler_attached = false;
-        if (add_tab_handler_attached || selection_handler_attached || close_tab_handler_attached) safe_to_release = false;
+        if (add_tab_handler_attached || selection_handler_attached || close_tab_handler_attached ||
+            open_settings_handler_attached || reload_settings_handler_attached || quit_handler_attached) safe_to_release = false;
         if (!safe_to_release) return result;
 
         handlers_detached = true;
@@ -305,9 +368,18 @@ struct Bridge {
         powershell_item = nullptr;
         wsl_item = nullptr;
         new_tab_menu = nullptr;
+        cleanup(L"detach application menu", [&] { menu_button.Flyout(nullptr); }, result);
+        cleanup(L"clear application menu", [&] { app_menu.Items().Clear(); }, result);
+        open_settings_item = nullptr;
+        reload_settings_item = nullptr;
+        quit_item = nullptr;
+        app_menu = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
+        cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
+        menu_button = nullptr;
         tabs = nullptr;
+        root = nullptr;
         cleanup(L"clear system backdrop", [&] { source.SystemBackdrop(nullptr); }, result);
         backdrop = nullptr;
         cleanup(L"close XAML source", [&] { source.Close(); }, result);

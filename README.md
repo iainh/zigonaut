@@ -44,8 +44,9 @@ randomize_tab_background=true
 ```
 
 Supported themes are `rasmus`, `campbell`, and `solarized-dark`; `default_shell` may be
-`powershell` or `wsl`. Changes take effect after restarting Zigonaut. The configured
-shell is used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
+`powershell` or `wsl`. Use **Open Settings** and **Reload Settings** from the title-bar
+menu to edit and apply changes without restarting Zigonaut. The configured shell is
+used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
 PowerShell and WSL entries in the new-tab menu open their named profiles.
 By default, each new tab receives a random background hue with the same perceived
 darkness as the configured theme background. Set `randomize_tab_background=false`

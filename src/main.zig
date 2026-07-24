@@ -9,6 +9,7 @@ const win = win32.c;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
+const open_operation = std.unicode.utf8ToUtf16LeStringLiteral("open");
 const personalize_key = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
 const apps_use_light_theme = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
 
@@ -33,11 +34,15 @@ const State = struct {
 
 var state: ?State = null;
 var settings = config.Config{};
+var loaded_settings: ?config.Loaded = null;
 
 pub fn main() !void {
-    var loaded_config = try config.loadOrCreate(std.heap.page_allocator);
-    defer loaded_config.deinit();
-    settings = loaded_config.value;
+    loaded_settings = try config.loadOrCreate(std.heap.page_allocator);
+    defer {
+        if (loaded_settings) |*loaded| loaded.deinit();
+        loaded_settings = null;
+    }
+    settings = loaded_settings.?.value;
 
     const instance = win.GetModuleHandleW(null);
     const arrow_cursor: win.LPCWSTR = @ptrFromInt(32512);
@@ -172,6 +177,18 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                     }
                 },
                 chrome.command.select => state.?.model.activate(argument),
+                chrome.command.open_settings => {
+                    openSettings(hwnd) catch {};
+                    return 0;
+                },
+                chrome.command.reload_settings => {
+                    reloadSettings() catch {};
+                    return 0;
+                },
+                chrome.command.quit => {
+                    _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                    return 0;
+                },
                 else => return 0,
             }
             state.?.terminal_view.syncSessions();
@@ -304,10 +321,14 @@ fn sendChromeCommand(hwnd: win.HWND, command: u32, argument: u32) void {
 }
 
 fn createFont(dpi: u32) win.HFONT {
+    return createFontFor(settings, dpi);
+}
+
+fn createFontFor(value: config.Config, dpi: u32) win.HFONT {
     var wide_name = std.mem.zeroes([128]u16);
-    _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], settings.font_family) catch 0;
+    _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], value.font_family) catch 0;
     return win.CreateFontW(
-        -scaled(settings.font_size, dpi),
+        -scaled(value.font_size, dpi),
         0,
         0,
         0,
@@ -322,6 +343,51 @@ fn createFont(dpi: u32) win.HFONT {
         win.FIXED_PITCH | win.FF_MODERN,
         &wide_name,
     );
+}
+
+fn openSettings(hwnd: win.HWND) !void {
+    const path = try config.pathAlloc(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(path);
+    const wide_path = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(wide_path);
+    const result = win.ShellExecuteW(hwnd, open_operation, wide_path.ptr, null, null, win.SW_SHOWNORMAL);
+    if (@intFromPtr(result) <= 32) return error.OpenSettingsFailed;
+}
+
+fn reloadSettings() !void {
+    if (state == null) return;
+    var replacement = try config.loadOrCreate(std.heap.page_allocator);
+    errdefer replacement.deinit();
+
+    const next = replacement.value;
+    const font_changed = next.font_size != settings.font_size or
+        !std.mem.eql(u8, next.font_family, settings.font_family);
+    const theme_changed = next.theme != settings.theme or
+        next.randomize_tab_background != settings.randomize_tab_background;
+    const new_font = if (font_changed) createFontFor(next, state.?.dpi) else null;
+    if (font_changed and new_font == null) return error.CreateFontFailed;
+    errdefer {
+        if (new_font != null) _ = win.DeleteObject(new_font);
+    }
+    if (new_font != null) {
+        try state.?.terminal_view.reloadFont(new_font, next.font_family, next.font_size, state.?.dpi);
+    }
+
+    const old_font = state.?.font;
+    if (new_font != null) state.?.font = new_font;
+    var previous = loaded_settings;
+    loaded_settings = replacement;
+    settings = loaded_settings.?.value;
+    if (previous) |*loaded| loaded.deinit();
+
+    if (theme_changed) {
+        state.?.model.applySettings(settings.theme.value(), settings.randomize_tab_background);
+    }
+    if (new_font != null) {
+        _ = win.DeleteObject(old_font);
+        layoutTerminalView(state.?.hwnd);
+    }
+    state.?.terminal_view.invalidate();
 }
 
 fn scaled(value: anytype, dpi: u32) i32 {

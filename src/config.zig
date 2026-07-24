@@ -3,7 +3,7 @@ const theme = @import("theme.zig");
 
 pub const default_contents =
     \\# Zigonaut configuration
-    \\# Changes are applied the next time Zigonaut starts.
+    \\# Changes are applied when Zigonaut starts or reloads settings.
     \\font_family=Cascadia Mono
     \\font_size=18
     \\theme=rasmus
@@ -35,13 +35,16 @@ pub const Loaded = struct {
     }
 };
 
-pub fn loadOrCreate(allocator: std.mem.Allocator) !Loaded {
+pub fn pathAlloc(allocator: std.mem.Allocator) ![]u8 {
     const app_data = try std.process.getEnvVarOwned(allocator, "APPDATA");
     defer allocator.free(app_data);
-    const directory = try std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut" });
-    defer allocator.free(directory);
-    const path = try std.fs.path.join(allocator, &.{ directory, "zigonaut.conf" });
+    return std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut", "zigonaut.conf" });
+}
+
+pub fn loadOrCreate(allocator: std.mem.Allocator) !Loaded {
+    const path = try pathAlloc(allocator);
     defer allocator.free(path);
+    const directory = std.fs.path.dirname(path) orelse return error.InvalidConfigPath;
 
     try std.fs.cwd().makePath(directory);
     var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {

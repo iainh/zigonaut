@@ -155,6 +155,10 @@ pub const Terminal = struct {
         vt.ghostty_terminal_free(self.terminal);
     }
 
+    pub fn setTheme(self: *Terminal, value: theme.Theme) !void {
+        try applyTheme(self.terminal, value);
+    }
+
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
         // The pinned Ghostty revision underflows while shrinking rows and
         // columns together if the cursor is below the new bottom row. Reflow

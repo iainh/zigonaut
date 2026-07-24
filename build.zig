@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("dwmapi");
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("kernel32");
+    exe.linkSystemLibrary("shell32");
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
 

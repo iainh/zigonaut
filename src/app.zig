@@ -119,6 +119,19 @@ pub const App = struct {
         }
     }
 
+    pub fn applySettings(self: *App, terminal_theme: theme.Theme, randomize_tab_background: bool) void {
+        self.terminal_theme = terminal_theme;
+        self.randomize_tab_background = randomize_tab_background;
+        for (self.sessions.items) |*session| {
+            const session_theme = if (randomize_tab_background)
+                theme.randomizedBackground(terminal_theme, std.crypto.random.int(u16))
+            else
+                terminal_theme;
+            session.background = session_theme.background;
+            if (session.runtime) |runtime| runtime.setTheme(session_theme);
+        }
+    }
+
     pub fn titlesGeneration(self: *const App) u64 {
         var generation: u64 = 0;
         for (self.sessions.items) |session| {
@@ -199,6 +212,18 @@ test "closing a session before the active session preserves the selection" {
     app.closeSession(0);
 
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+}
+
+test "applying settings updates existing session backgrounds" {
+    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    defer app.deinit();
+
+    _ = try app.addSessionRecord(.powershell, null, theme.rasmus.background);
+    app.applySettings(theme.campbell, false);
+
+    try std.testing.expectEqual(theme.campbell.background, app.sessions.items[0].background);
+    try std.testing.expectEqual(theme.campbell, app.terminal_theme);
+    try std.testing.expect(!app.randomize_tab_background);
 }
 
 test {

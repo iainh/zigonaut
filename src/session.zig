@@ -96,6 +96,13 @@ pub const SessionRuntime = struct {
         if (self.pty) |*pty| pty.resize(columns, rows) catch {};
     }
 
+    pub fn setTheme(self: *SessionRuntime, value: theme.Theme) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.setTheme(value) catch return;
+        _ = self.content_generation.fetchAdd(1, .monotonic);
+    }
+
     pub fn write(self: *SessionRuntime, bytes: []const u8) !void {
         if (self.pty) |*pty| return pty.write(bytes);
         return error.ShellNotRunning;
