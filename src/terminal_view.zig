@@ -13,6 +13,7 @@ pub const View = struct {
     model: *App,
     font: win.HFONT,
     pending_high_surrogate: ?u16 = null,
+    suppressed_character: ?u16 = null,
     cell_width: u32,
     cell_height: u32,
     columns: u16 = 0,
@@ -120,8 +121,14 @@ pub const View = struct {
         }
     }
 
-    fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM) bool {
+    fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
+        if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
         const key: Terminal.Key = switch (wparam) {
+            win.VK_ESCAPE => .escape,
+            win.VK_BACK => .backspace,
+            win.VK_TAB => .tab,
+            win.VK_RETURN => .enter,
+            win.VK_INSERT => .insert,
             win.VK_DELETE => .delete,
             win.VK_END => .end,
             win.VK_HOME => .home,
@@ -131,15 +138,38 @@ pub const View = struct {
             win.VK_LEFT => .arrow_left,
             win.VK_RIGHT => .arrow_right,
             win.VK_UP => .arrow_up,
+            win.VK_F1 => .f1,
+            win.VK_F2 => .f2,
+            win.VK_F3 => .f3,
+            win.VK_F4 => .f4,
+            win.VK_F5 => .f5,
+            win.VK_F6 => .f6,
+            win.VK_F7 => .f7,
+            win.VK_F8 => .f8,
+            win.VK_F9 => .f9,
+            win.VK_F10 => .f10,
+            win.VK_F11 => .f11,
+            win.VK_F12 => .f12,
             else => return false,
         };
         const session = self.model.activeSession() orelse return true;
-        const repeat = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
-        session.runtime.?.sendKey(key, repeat, currentModifiers()) catch {};
+        const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
+        const action: Terminal.KeyAction = if (released) .release else if (repeated) .repeat else .press;
+        session.runtime.?.sendKey(key, action, currentModifiers()) catch {};
+        if (!released) {
+            self.suppressed_character = switch (wparam) {
+                win.VK_ESCAPE => 0x1b,
+                win.VK_BACK => 0x08,
+                win.VK_TAB => 0x09,
+                win.VK_RETURN => 0x0d,
+                else => null,
+            };
+        }
         return true;
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
+        if (self.suppressCharacter(code_unit)) return;
         const session = self.model.activeSession() orelse return;
         var utf16: [2]u16 = undefined;
         var length: usize = 1;
@@ -160,6 +190,12 @@ pub const View = struct {
         var utf8: [4]u8 = undefined;
         const utf8_length = std.unicode.utf16LeToUtf8(&utf8, utf16[0..length]) catch return;
         session.runtime.?.write(utf8[0..utf8_length]) catch {};
+    }
+
+    fn suppressCharacter(self: *View, code_unit: u16) bool {
+        const suppressed = self.suppressed_character == code_unit;
+        self.suppressed_character = null;
+        return suppressed;
     }
 };
 
@@ -185,13 +221,25 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_KEYDOWN, win.WM_SYSKEYDOWN => {
             if (view) |current| {
-                if (current.handleKey(wparam, lparam)) return 0;
+                if (current.handleKey(wparam, lparam, false)) return 0;
+            }
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
+        },
+        win.WM_KEYUP, win.WM_SYSKEYUP => {
+            if (view) |current| {
+                if (current.handleKey(wparam, lparam, true)) return 0;
             }
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_CHAR => {
             if (view) |current| current.handleCharacter(@truncate(wparam));
             return 0;
+        },
+        win.WM_SYSCHAR => {
+            if (view) |current| {
+                if (current.suppressCharacter(@truncate(wparam))) return 0;
+            }
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_SIZE => {
             if (view) |current| current.resizeSessions();

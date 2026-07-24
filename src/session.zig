@@ -68,10 +68,10 @@ pub const SessionRuntime = struct {
         return error.ShellNotRunning;
     }
 
-    pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, repeat: bool, modifiers: u16) !void {
+    pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16) !void {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();
-        const encoded = self.terminal.encodeKey(key, repeat, modifiers, &buffer) catch |err| {
+        const encoded = self.terminal.encodeKey(key, action, modifiers, &buffer) catch |err| {
             self.terminal_mutex.unlock();
             return err;
         };

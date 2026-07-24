@@ -14,8 +14,9 @@ const command_new_wsl = 1002;
 const command_tab_base = 1100;
 const command_close_tab = 1200;
 const terminal_left = 16;
-const terminal_top = 108;
 const terminal_margin = 16;
+const fallback_terminal_top: i32 = 108;
+const winui_terminal_top: i32 = 52;
 
 const State = struct {
     hwnd: win.HWND,
@@ -219,7 +220,8 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     if (state == null) return;
     var client: win.RECT = undefined;
     if (win.GetClientRect(hwnd, &client) == 0) return;
-    if (state.?.chrome) |*bridge| bridge.move(0, 0, client.right, terminal_top - 8);
+    const terminal_top = if (state.?.chrome != null) winui_terminal_top else fallback_terminal_top;
+    if (state.?.chrome) |*bridge| bridge.move(0, 0, client.right, terminal_top);
     state.?.terminal_view.move(
         terminal_left,
         terminal_top,

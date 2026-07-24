@@ -14,6 +14,11 @@ pub const Terminal = struct {
     key_event: vt.GhosttyKeyEvent,
 
     pub const Key = enum {
+        escape,
+        backspace,
+        tab,
+        enter,
+        insert,
         delete,
         end,
         home,
@@ -23,6 +28,24 @@ pub const Terminal = struct {
         arrow_left,
         arrow_right,
         arrow_up,
+        f1,
+        f2,
+        f3,
+        f4,
+        f5,
+        f6,
+        f7,
+        f8,
+        f9,
+        f10,
+        f11,
+        f12,
+    };
+
+    pub const KeyAction = enum {
+        press,
+        repeat,
+        release,
     };
 
     pub const Modifier = struct {
@@ -94,13 +117,19 @@ pub const Terminal = struct {
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
     }
 
-    pub fn encodeKey(self: *Terminal, key: Key, repeat: bool, modifiers: u16, output: []u8) ![]const u8 {
+    pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, output: []u8) ![]const u8 {
         vt.ghostty_key_encoder_setopt_from_terminal(self.key_encoder, self.terminal);
-        vt.ghostty_key_event_set_action(
-            self.key_event,
-            if (repeat) vt.GHOSTTY_KEY_ACTION_REPEAT else vt.GHOSTTY_KEY_ACTION_PRESS,
-        );
+        vt.ghostty_key_event_set_action(self.key_event, switch (action) {
+            .press => vt.GHOSTTY_KEY_ACTION_PRESS,
+            .repeat => vt.GHOSTTY_KEY_ACTION_REPEAT,
+            .release => vt.GHOSTTY_KEY_ACTION_RELEASE,
+        });
         vt.ghostty_key_event_set_key(self.key_event, switch (key) {
+            .escape => vt.GHOSTTY_KEY_ESCAPE,
+            .backspace => vt.GHOSTTY_KEY_BACKSPACE,
+            .tab => vt.GHOSTTY_KEY_TAB,
+            .enter => vt.GHOSTTY_KEY_ENTER,
+            .insert => vt.GHOSTTY_KEY_INSERT,
             .delete => vt.GHOSTTY_KEY_DELETE,
             .end => vt.GHOSTTY_KEY_END,
             .home => vt.GHOSTTY_KEY_HOME,
@@ -110,6 +139,18 @@ pub const Terminal = struct {
             .arrow_left => vt.GHOSTTY_KEY_ARROW_LEFT,
             .arrow_right => vt.GHOSTTY_KEY_ARROW_RIGHT,
             .arrow_up => vt.GHOSTTY_KEY_ARROW_UP,
+            .f1 => vt.GHOSTTY_KEY_F1,
+            .f2 => vt.GHOSTTY_KEY_F2,
+            .f3 => vt.GHOSTTY_KEY_F3,
+            .f4 => vt.GHOSTTY_KEY_F4,
+            .f5 => vt.GHOSTTY_KEY_F5,
+            .f6 => vt.GHOSTTY_KEY_F6,
+            .f7 => vt.GHOSTTY_KEY_F7,
+            .f8 => vt.GHOSTTY_KEY_F8,
+            .f9 => vt.GHOSTTY_KEY_F9,
+            .f10 => vt.GHOSTTY_KEY_F10,
+            .f11 => vt.GHOSTTY_KEY_F11,
+            .f12 => vt.GHOSTTY_KEY_F12,
         });
         vt.ghostty_key_event_set_mods(self.key_event, modifiers);
         vt.ghostty_key_event_set_consumed_mods(self.key_event, 0);
@@ -199,6 +240,17 @@ test "libghostty encodes navigation keys" {
     defer terminal.deinit();
 
     var buffer: [64]u8 = undefined;
-    const encoded = try terminal.encodeKey(.arrow_up, false, 0, &buffer);
+    const encoded = try terminal.encodeKey(.arrow_up, .press, 0, &buffer);
     try std.testing.expectEqualStrings("\x1b[A", encoded);
+}
+
+test "libghostty encodes physical special and function keys" {
+    var terminal = try Terminal.init(20, 3);
+    defer terminal.deinit();
+
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b", try terminal.encodeKey(.escape, .press, 0, &buffer));
+    try std.testing.expectEqualStrings("\x1b[2~", try terminal.encodeKey(.insert, .press, 0, &buffer));
+    try std.testing.expectEqualStrings("\x1bOP", try terminal.encodeKey(.f1, .press, 0, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), (try terminal.encodeKey(.f1, .release, 0, &buffer)).len);
 }
