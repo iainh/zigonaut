@@ -195,7 +195,7 @@ pub const View = struct {
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else
-            colorRef(self.model.terminal_theme.background);
+            colorRef(self.activeBackground());
         const foreground = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOWTEXT)
         else
@@ -280,7 +280,7 @@ pub const View = struct {
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else
-            colorRef(self.model.terminal_theme.background);
+            colorRef(self.activeBackground());
         const foreground = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOWTEXT)
         else
@@ -308,6 +308,11 @@ pub const View = struct {
             var text_rect = paddedRect(client, padding);
             drawText(dc, "Open a PowerShell or WSL session.", &text_rect, win.DT_LEFT | win.DT_TOP);
         }
+    }
+
+    fn activeBackground(self: *View) theme.Color {
+        const session = self.model.activeSession() orelse return self.model.terminal_theme.background;
+        return session.background;
     }
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {

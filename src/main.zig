@@ -127,7 +127,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const font = createFont(dpi);
             state = .{
                 .hwnd = hwnd,
-                .model = app_model.App.init(std.heap.page_allocator, settings.theme.value()),
+                .model = app_model.App.init(
+                    std.heap.page_allocator,
+                    settings.theme.value(),
+                    settings.randomize_tab_background,
+                ),
                 .font = font,
                 .dpi = dpi,
                 .dark_theme = false,

@@ -8,6 +8,7 @@ pub const default_contents =
     \\font_size=18
     \\theme=rasmus
     \\default_shell=powershell
+    \\randomize_tab_background=true
     \\
 ;
 
@@ -21,6 +22,7 @@ pub const Config = struct {
     font_size: u16 = 18,
     theme: theme.Name = .rasmus,
     default_shell: Shell = .powershell,
+    randomize_tab_background: bool = true,
 };
 
 pub const Loaded = struct {
@@ -84,6 +86,12 @@ pub fn parse(contents: []const u8) Config {
             } else if (std.ascii.eqlIgnoreCase(value, "wsl")) {
                 result.default_shell = .wsl;
             }
+        } else if (std.ascii.eqlIgnoreCase(key, "randomize_tab_background")) {
+            if (std.ascii.eqlIgnoreCase(value, "true")) {
+                result.randomize_tab_background = true;
+            } else if (std.ascii.eqlIgnoreCase(value, "false")) {
+                result.randomize_tab_background = false;
+            }
         }
     }
     return result;
@@ -95,14 +103,17 @@ test "configuration parses supported values and ignores invalid ones" {
         \\font_size=14
         \\theme=campbell
         \\default_shell=WSL
+        \\randomize_tab_background=false
     );
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
     try std.testing.expectEqual(theme.Name.campbell, parsed.theme);
     try std.testing.expectEqual(Shell.wsl, parsed.default_shell);
+    try std.testing.expect(!parsed.randomize_tab_background);
 
-    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=cmd\n");
+    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=cmd\nrandomize_tab_background=perhaps\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
     try std.testing.expectEqual(theme.Name.rasmus, invalid.theme);
     try std.testing.expectEqual(Shell.powershell, invalid.default_shell);
+    try std.testing.expect(invalid.randomize_tab_background);
 }

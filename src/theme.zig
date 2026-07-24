@@ -13,6 +13,39 @@ pub const Theme = struct {
     ansi: [16]Color,
 };
 
+pub fn randomizedBackground(value: Theme, random: u16) Theme {
+    var result = value;
+    const hue: u16 = random % (6 * 256);
+    const sector = hue / 256;
+    const offset: u8 = @truncate(hue);
+    const rising: u8 = 32 + @as(u8, @intCast((@as(u16, offset) * 223) / 255));
+    const falling: u8 = 255 - @as(u8, @intCast((@as(u16, offset) * 223) / 255));
+    const vivid = switch (sector) {
+        0 => Color{ .red = 255, .green = rising, .blue = 32 },
+        1 => Color{ .red = falling, .green = 255, .blue = 32 },
+        2 => Color{ .red = 32, .green = 255, .blue = rising },
+        3 => Color{ .red = 32, .green = falling, .blue = 255 },
+        4 => Color{ .red = rising, .green = 32, .blue = 255 },
+        else => Color{ .red = 255, .green = 32, .blue = falling },
+    };
+    const target = luminance(value.background);
+    const source = luminance(vivid);
+    result.background = .{
+        .red = scaledChannel(vivid.red, target, source),
+        .green = scaledChannel(vivid.green, target, source),
+        .blue = scaledChannel(vivid.blue, target, source),
+    };
+    return result;
+}
+
+fn luminance(color: Color) u32 {
+    return 2126 * @as(u32, color.red) + 7152 * @as(u32, color.green) + 722 * @as(u32, color.blue);
+}
+
+fn scaledChannel(channel: u8, target: u32, source: u32) u8 {
+    return @intCast((@as(u64, channel) * target + source / 2) / source);
+}
+
 pub const Name = enum {
     rasmus,
     campbell,
@@ -82,4 +115,16 @@ test "Rasmus theme exposes its Alacritty palette" {
     try std.testing.expectEqual(Color{ .red = 0x1a, .green = 0x1a, .blue = 0x19 }, rasmus.background);
     try std.testing.expectEqual(Color{ .red = 0xff, .green = 0x96, .blue = 0x8c }, rasmus.ansi[1]);
     try std.testing.expectEqual(Color{ .red = 0xea, .green = 0xea, .blue = 0xea }, rasmus.ansi[15]);
+}
+
+test "random backgrounds retain the theme background darkness" {
+    const first = randomizedBackground(rasmus, 0);
+    const second = randomizedBackground(rasmus, 900);
+
+    try std.testing.expect(!std.meta.eql(first.background, second.background));
+    const target: i64 = luminance(rasmus.background);
+    try std.testing.expect(@abs(@as(i64, luminance(first.background)) - target) < 10_000);
+    try std.testing.expect(@abs(@as(i64, luminance(second.background)) - target) < 10_000);
+    try std.testing.expectEqual(rasmus.foreground, first.foreground);
+    try std.testing.expectEqual(rasmus.ansi, first.ansi);
 }

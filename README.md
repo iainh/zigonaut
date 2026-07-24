@@ -40,12 +40,16 @@ font_family=Cascadia Mono
 font_size=18
 theme=rasmus
 default_shell=powershell
+randomize_tab_background=true
 ```
 
 Supported themes are `rasmus`, `campbell`, and `solarized-dark`; `default_shell` may be
 `powershell` or `wsl`. Changes take effect after restarting Zigonaut. The configured
 shell is used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
 PowerShell and WSL entries in the new-tab menu open their named profiles.
+By default, each new tab receives a random background hue with the same perceived
+darkness as the configured theme background. Set `randomize_tab_background=false`
+to use the theme background unchanged for every tab.
 
 The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It verifies that the x64 runtime is installed and fails clearly for non-x64 targets. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
 
