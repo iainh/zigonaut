@@ -2,6 +2,7 @@ const std = @import("std");
 const App = @import("app.zig").App;
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
+const theme = @import("theme.zig");
 
 const win = @import("win32.zig").c;
 
@@ -196,33 +197,33 @@ pub const View = struct {
         }
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
-        else if (self.dark_theme)
-            rgb(9, 10, 13)
         else
-            rgb(255, 255, 255);
+            colorRef(theme.rasmus.background);
         const foreground = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOWTEXT)
-        else if (self.dark_theme)
-            rgb(198, 206, 220)
         else
-            rgb(32, 32, 32);
+            colorRef(theme.rasmus.foreground);
         fill(dc, client, background);
 
         _ = win.SelectObject(dc, self.font);
         _ = win.SetBkMode(dc, win.TRANSPARENT);
         _ = win.SetTextColor(dc, foreground);
-        var text_rect = client;
         const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
-        text_rect.left += padding;
-        text_rect.top += padding;
-        text_rect.right -= padding;
-        text_rect.bottom -= padding;
 
         if (self.model.activeSession()) |session| {
-            var text_buffer: [16 * 1024]u8 = undefined;
-            const text = session.runtime.?.writeViewportText(&text_buffer) catch "libghostty render state unavailable";
-            drawText(dc, text, &text_rect, win.DT_LEFT | win.DT_TOP | win.DT_NOPREFIX);
+            var renderer = CellRenderer{
+                .dc = dc,
+                .view = self,
+                .client = client,
+                .origin_x = padding,
+                .origin_y = padding,
+            };
+            session.runtime.?.renderViewport(&renderer) catch {
+                var text_rect = paddedRect(client, padding);
+                drawText(dc, "libghostty render state unavailable", &text_rect, win.DT_LEFT | win.DT_TOP);
+            };
         } else {
+            var text_rect = paddedRect(client, padding);
             drawText(dc, "Open a PowerShell or WSL session.", &text_rect, win.DT_LEFT | win.DT_TOP);
         }
     }
@@ -302,6 +303,73 @@ pub const View = struct {
         const suppressed = self.suppressed_character == code_unit;
         self.suppressed_character = null;
         return suppressed;
+    }
+};
+
+const CellRenderer = struct {
+    dc: win.HDC,
+    view: *View,
+    client: win.RECT,
+    origin_x: i32,
+    origin_y: i32,
+
+    pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
+        if (!self.view.high_contrast) fill(self.dc, self.client, colorRef(frame.background));
+        _ = win.SelectObject(self.dc, self.view.font);
+        _ = win.SetBkMode(self.dc, win.OPAQUE);
+    }
+
+    pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
+        const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
+        const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
+        var rect = win.RECT{
+            .left = left,
+            .top = top,
+            .right = left + @as(i32, @intCast(self.view.cell_width)),
+            .bottom = top + @as(i32, @intCast(self.view.cell_height)),
+        };
+        const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
+        const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        _ = win.SetTextColor(self.dc, foreground);
+        _ = win.SetBkColor(self.dc, background);
+
+        var wide: [32]u16 = undefined;
+        var length: usize = 0;
+        for (cell.codepoints) |codepoint| {
+            if (codepoint <= 0xffff) {
+                if (codepoint >= 0xd800 and codepoint <= 0xdfff) continue;
+                wide[length] = @intCast(codepoint);
+                length += 1;
+            } else if (codepoint <= 0x10ffff and length + 1 < wide.len) {
+                const value = codepoint - 0x10000;
+                wide[length] = @intCast(0xd800 + (value >> 10));
+                wide[length + 1] = @intCast(0xdc00 + (value & 0x3ff));
+                length += 2;
+            }
+        }
+        _ = win.ExtTextOutW(
+            self.dc,
+            left,
+            top,
+            win.ETO_CLIPPED | win.ETO_OPAQUE,
+            &rect,
+            &wide,
+            @intCast(length),
+            null,
+        );
+    }
+
+    pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
+        if (!frame.cursor_visible) return;
+        const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
+        const top = self.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.view.cell_height));
+        const rect = win.RECT{
+            .left = left,
+            .top = top,
+            .right = left + @as(i32, @intCast(self.view.cell_width)),
+            .bottom = top + @as(i32, @intCast(self.view.cell_height)),
+        };
+        frameRect(self.dc, rect, if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor));
     }
 };
 
@@ -408,11 +476,31 @@ fn drawText(dc: win.HDC, text: []const u8, rect: *win.RECT, format: win.UINT) vo
     _ = win.DrawTextW(dc, &wide, @intCast(length), rect, format);
 }
 
+fn paddedRect(rect: win.RECT, padding: i32) win.RECT {
+    return .{
+        .left = rect.left + padding,
+        .top = rect.top + padding,
+        .right = rect.right - padding,
+        .bottom = rect.bottom - padding,
+    };
+}
+
 fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
     const brush = win.CreateSolidBrush(color);
     defer _ = win.DeleteObject(brush);
     var mutable_rect = rect;
     _ = win.FillRect(dc, &mutable_rect, brush);
+}
+
+fn frameRect(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
+    const brush = win.CreateSolidBrush(color);
+    defer _ = win.DeleteObject(brush);
+    var mutable_rect = rect;
+    _ = win.FrameRect(dc, &mutable_rect, brush);
+}
+
+fn colorRef(color: theme.Color) win.COLORREF {
+    return rgb(color.red, color.green, color.blue);
 }
 
 fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {

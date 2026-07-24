@@ -58,6 +58,12 @@ pub const SessionRuntime = struct {
         return self.terminal.writeViewportText(output);
     }
 
+    pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        try self.terminal.renderViewport(renderer);
+    }
+
     pub fn contentGeneration(self: *const SessionRuntime) u64 {
         return self.content_generation.load(.monotonic);
     }
