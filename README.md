@@ -19,7 +19,7 @@ The dependency is pinned to Ghostty commit `ae52f97dcac558735cfa916ea3965f247e5c
 
 ## Build
 
-Install Visual Studio 2022 with **Desktop development with C++**, then install the x64 Windows App Runtime 1.8 once:
+Install Visual Studio 2022 with **Desktop development with C++**, then install the Windows App Runtime 1.8 architecture matching your target (x64 or ARM64) once:
 
 ```powershell
 winget install -e --id Microsoft.WindowsAppRuntime.1.8
@@ -52,7 +52,7 @@ By default, each new tab receives a random background hue with the same perceive
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.
 
-The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It verifies that the x64 runtime is installed and fails clearly for non-x64 targets. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
+The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 1.8 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
 
 ## MVP path
 

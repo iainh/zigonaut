@@ -49,16 +49,19 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run Zigonaut");
     run_step.dependOn(&run_cmd.step);
 
-    const winui_step = b.step("winui", "Build and deploy the x64 WinUI 3 shell");
-    if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .windows) {
+    const winui_step = b.step("winui", "Build and deploy the WinUI 3 shell");
+    if (target.result.os.tag == .windows and
+        (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64))
+    {
         const winui_cmd = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
         winui_cmd.addFileArg(b.path("winui/build.ps1"));
-        winui_cmd.addArgs(&.{ "-TargetArch", @tagName(target.result.cpu.arch), "-Configuration", "Release" });
+        const target_arch: []const u8 = if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64";
+        winui_cmd.addArgs(&.{ "-TargetArch", target_arch, "-Configuration", "Release" });
         winui_cmd.step.dependOn(&install_exe.step);
         winui_step.dependOn(&winui_cmd.step);
         b.getInstallStep().dependOn(&winui_cmd.step);
     } else {
-        const unsupported = b.addFail("the WinUI shell currently supports only x86_64-windows targets");
+        const unsupported = b.addFail("the WinUI shell supports only x86_64-windows and aarch64-windows targets");
         winui_step.dependOn(&unsupported.step);
         b.getInstallStep().dependOn(&unsupported.step);
     }
