@@ -13,6 +13,8 @@ pub const Terminal = struct {
     row_cells: vt.GhosttyRenderStateRowCells,
     key_encoder: vt.GhosttyKeyEncoder,
     key_event: vt.GhosttyKeyEvent,
+    columns: u16,
+    rows: u16,
 
     pub const Cell = struct {
         pub const Occupancy = enum(u8) {
@@ -126,6 +128,8 @@ pub const Terminal = struct {
             .row_cells = row_cells,
             .key_encoder = key_encoder,
             .key_event = key_event,
+            .columns = columns,
+            .rows = rows,
         };
     }
 
@@ -139,6 +143,19 @@ pub const Terminal = struct {
     }
 
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
+        // The pinned Ghostty revision underflows while shrinking rows and
+        // columns together if the cursor is below the new bottom row. Reflow
+        // columns against the old row count first, matching upstream #12907.
+        if (columns < self.columns and rows < self.rows) {
+            try check(vt.ghostty_terminal_resize(
+                self.terminal,
+                columns,
+                self.rows,
+                cell_width,
+                cell_height,
+            ));
+            self.columns = columns;
+        }
         try check(vt.ghostty_terminal_resize(
             self.terminal,
             columns,
@@ -146,6 +163,8 @@ pub const Terminal = struct {
             cell_width,
             cell_height,
         ));
+        self.columns = columns;
+        self.rows = rows;
     }
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
@@ -428,6 +447,16 @@ test "wide cell tails do not add spaces to viewport text" {
     const viewport = try terminal.writeViewportText(&buffer);
 
     try std.testing.expectEqualStrings("中X", viewport);
+}
+
+test "shrinking rows and columns keeps a bottom-row cursor in bounds" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("\x1b[24;1HX");
+    try terminal.resize(79, 20, 9, 18);
+    try std.testing.expectEqual(@as(u16, 79), terminal.columns);
+    try std.testing.expectEqual(@as(u16, 20), terminal.rows);
 }
 
 test "render state resolves ANSI colors through the Rasmus theme" {
