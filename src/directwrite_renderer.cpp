@@ -88,6 +88,20 @@ struct RowSegment {
     uint32_t foreground = 0;
     bool bold = false;
     bool italic = false;
+
+    void clear() {
+        text.clear();
+        start_columns.clear();
+        end_columns.clear();
+    }
+};
+
+struct ClusterSpan {
+    uint32_t start_column = UINT32_MAX;
+    uint32_t end_column = 0;
+    uint32_t first_text_index = UINT32_MAX;
+    uint32_t text_end = 0;
+    bool used = false;
 };
 
 D2D1_COLOR_F color(uint32_t value) {
@@ -122,6 +136,7 @@ struct ZigonautTextEngine {
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, IDWriteTextLayout*> layouts;
     std::vector<RowCell> row_cells;
+    RowSegment row_segment;
     std::wstring family;
     HWND hwnd = nullptr;
     uint32_t font_size = 18;
@@ -512,19 +527,23 @@ public:
 
         if (description != nullptr && description->clusterMap != nullptr &&
             description->stringLength > 0) {
-            struct ClusterSpan {
-                uint32_t start_column = UINT32_MAX;
-                uint32_t end_column = 0;
-                uint32_t first_text_index = UINT32_MAX;
-                uint32_t text_end = 0;
-            };
-            std::map<UINT16, ClusterSpan> spans;
+            std::vector<ClusterSpan> spans(glyph_run->glyphCount);
+            std::vector<UINT16> glyph_starts;
+            glyph_starts.reserve(std::min<UINT32>(
+                description->stringLength,
+                glyph_run->glyphCount));
             uint32_t run_start_column = UINT32_MAX;
             uint32_t run_end_column = 0;
             for (UINT32 index = 0; index < description->stringLength; ++index) {
                 const uint32_t text_index = description->textPosition + index;
                 if (text_index >= segment_.start_columns.size()) break;
-                auto& span = spans[description->clusterMap[index]];
+                const UINT16 glyph_start = description->clusterMap[index];
+                if (glyph_start >= glyph_run->glyphCount) continue;
+                auto& span = spans[glyph_start];
+                if (!span.used) {
+                    span.used = true;
+                    glyph_starts.push_back(glyph_start);
+                }
                 span.start_column = std::min(
                     span.start_column,
                     segment_.start_columns[text_index]);
@@ -537,29 +556,20 @@ public:
                 run_end_column = std::max(run_end_column, span.end_column);
             }
 
-            std::vector<UINT16> glyph_starts;
-            glyph_starts.reserve(spans.size());
-            for (const auto& entry : spans) {
-                if (entry.first < glyph_run->glyphCount) glyph_starts.push_back(entry.first);
-            }
             std::sort(glyph_starts.begin(), glyph_starts.end());
-            glyph_starts.erase(
-                std::unique(glyph_starts.begin(), glyph_starts.end()),
-                glyph_starts.end());
             for (size_t index = 0; index < glyph_starts.size(); ++index) {
                 const UINT32 glyph_start = glyph_starts[index];
                 const UINT32 glyph_end = index + 1 < glyph_starts.size()
                     ? glyph_starts[index + 1]
                     : glyph_run->glyphCount;
                 if (glyph_start >= glyph_end) continue;
-                const auto found = spans.find(static_cast<UINT16>(glyph_start));
-                if (found == spans.end()) continue;
+                const auto& span = spans[glyph_start];
                 const uint32_t cluster_left = segment_.start_columns[
-                    found->second.first_text_index];
+                    span.first_text_index];
                 const uint32_t cluster_right =
-                    found->second.text_end < segment_.start_columns.size()
-                    ? segment_.start_columns[found->second.text_end]
-                    : segment_.end_columns[found->second.text_end - 1];
+                    span.text_end < segment_.start_columns.size()
+                    ? segment_.start_columns[span.text_end]
+                    : segment_.end_columns[span.text_end - 1];
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
                 zigonaut_fit_cluster_advances(
@@ -728,11 +738,12 @@ void ZigonautTextEngine::endRow() {
     if (!row_active) return;
     row_active = false;
 
-    RowSegment segment;
+    auto& segment = row_segment;
+    segment.clear();
     bool has_segment = false;
     const auto flush = [&]() {
         if (has_segment) drawSegment(segment);
-        segment = RowSegment{};
+        segment.clear();
         has_segment = false;
     };
 

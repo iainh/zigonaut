@@ -804,15 +804,15 @@ fn paddedRect(rect: win.RECT, padding: i32) win.RECT {
 }
 
 fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
-    const brush = win.CreateSolidBrush(color);
-    defer _ = win.DeleteObject(brush);
+    _ = win.SetDCBrushColor(dc, color);
+    const brush: win.HBRUSH = @ptrCast(@alignCast(win.GetStockObject(win.DC_BRUSH)));
     var mutable_rect = rect;
     _ = win.FillRect(dc, &mutable_rect, brush);
 }
 
 fn frameRect(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
-    const brush = win.CreateSolidBrush(color);
-    defer _ = win.DeleteObject(brush);
+    _ = win.SetDCBrushColor(dc, color);
+    const brush: win.HBRUSH = @ptrCast(@alignCast(win.GetStockObject(win.DC_BRUSH)));
     var mutable_rect = rect;
     _ = win.FrameRect(dc, &mutable_rect, brush);
 }

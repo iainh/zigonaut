@@ -27,6 +27,8 @@ const State = struct {
     terminal_ready: bool = false,
     terminal_view: TerminalView,
     chrome: ?chrome.Bridge = null,
+    chrome_titles: std.ArrayList([*]const u8) = .empty,
+    chrome_title_lengths: std.ArrayList(u32) = .empty,
 };
 
 var state: ?State = null;
@@ -232,6 +234,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_DESTROY => {
             if (state) |*current| {
                 current.model.deinit();
+                current.chrome_titles.deinit(std.heap.page_allocator);
+                current.chrome_title_lengths.deinit(std.heap.page_allocator);
                 _ = win.DeleteObject(current.font);
             }
             win.PostQuitMessage(0);
@@ -264,16 +268,16 @@ fn syncChrome() void {
     if (state == null) return;
     const bridge = if (state.?.chrome) |*value| value else return;
     const count = state.?.model.sessions.items.len;
-    const titles = std.heap.page_allocator.alloc([*]const u8, count) catch return;
-    defer std.heap.page_allocator.free(titles);
-    const title_lengths = std.heap.page_allocator.alloc(u32, count) catch return;
-    defer std.heap.page_allocator.free(title_lengths);
+    state.?.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch return;
+    state.?.chrome_title_lengths.ensureTotalCapacity(std.heap.page_allocator, count) catch return;
+    state.?.chrome_titles.items.len = count;
+    state.?.chrome_title_lengths.items.len = count;
     for (state.?.model.sessions.items, 0..) |session, index| {
         const title = session.displayTitle();
-        titles[index] = title.ptr;
-        title_lengths[index] = @intCast(title.len);
+        state.?.chrome_titles.items[index] = title.ptr;
+        state.?.chrome_title_lengths.items[index] = @intCast(title.len);
     }
-    if (!bridge.update(titles, title_lengths, state.?.model.active)) {
+    if (!bridge.update(state.?.chrome_titles.items, state.?.chrome_title_lengths.items, state.?.model.active)) {
         _ = win.PostMessageW(state.?.hwnd, win.WM_CLOSE, 0, 0);
     }
 }
