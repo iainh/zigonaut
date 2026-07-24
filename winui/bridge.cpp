@@ -44,6 +44,18 @@ HRESULT reportCurrentException(wchar_t const* operation) noexcept {
     }
 }
 
+template <typename Action>
+bool cleanup(wchar_t const* operation, Action&& action, HRESULT& result) noexcept {
+    try {
+        action();
+        return true;
+    } catch (...) {
+        auto const failure = reportCurrentException(operation);
+        if (SUCCEEDED(result)) result = failure;
+        return false;
+    }
+}
+
 struct Bridge {
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
@@ -60,6 +72,12 @@ struct Bridge {
     event_token close_tab_token{};
     event_token powershell_token{};
     event_token wsl_token{};
+    bool add_tab_handler_attached = true;
+    bool selection_handler_attached = true;
+    bool close_tab_handler_attached = true;
+    bool powershell_handler_attached = false;
+    bool wsl_handler_attached = false;
+    bool handlers_detached = false;
     bool updating = false;
     bool closed = false;
 
@@ -115,9 +133,11 @@ struct Bridge {
         powershell_item = MenuFlyoutItem{};
         powershell_item.Text(L"PowerShell");
         powershell_token = powershell_item.Click([this](auto&&, auto&&) { notify(command_new_powershell, 0); });
+        powershell_handler_attached = true;
         wsl_item = MenuFlyoutItem{};
         wsl_item.Text(L"WSL");
         wsl_token = wsl_item.Click([this](auto&&, auto&&) { notify(command_new_wsl, 0); });
+        wsl_handler_attached = true;
         new_tab_menu.Items().Append(powershell_item);
         new_tab_menu.Items().Append(wsl_item);
         new_tab_menu.ShowAt(tabs);
@@ -126,29 +146,57 @@ struct Bridge {
     void closeNewTabMenu() {
         if (!new_tab_menu) return;
         new_tab_menu.Hide();
-        if (powershell_item) powershell_item.Click(powershell_token);
-        if (wsl_item) wsl_item.Click(wsl_token);
+        if (powershell_handler_attached) {
+            powershell_item.Click(powershell_token);
+            powershell_handler_attached = false;
+        }
+        if (wsl_handler_attached) {
+            wsl_item.Click(wsl_token);
+            wsl_handler_attached = false;
+        }
         new_tab_menu.Items().Clear();
         powershell_item = nullptr;
         wsl_item = nullptr;
         new_tab_menu = nullptr;
     }
 
-    void close() {
-        if (closed) return;
-        closed = true;
-        closeNewTabMenu();
-        tabs.AddTabButtonClick(add_tab_token);
-        tabs.SelectionChanged(selection_token);
-        tabs.TabCloseRequested(close_tab_token);
+    HRESULT close() noexcept {
+        if (closed) return S_OK;
         callback = nullptr;
         context = nullptr;
-        tabs.TabItems().Clear();
-        source.Content(nullptr);
+
+        HRESULT result = S_OK;
+        bool safe_to_release = true;
+        if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
+        if (powershell_handler_attached) {
+            if (cleanup(L"revoke PowerShell menu handler", [&] { powershell_item.Click(powershell_token); }, result)) {
+                powershell_handler_attached = false;
+            } else safe_to_release = false;
+        }
+        if (wsl_handler_attached) {
+            if (cleanup(L"revoke WSL menu handler", [&] { wsl_item.Click(wsl_token); }, result)) {
+                wsl_handler_attached = false;
+            } else safe_to_release = false;
+        }
+        if (add_tab_handler_attached && cleanup(L"revoke add-tab handler", [&] { tabs.AddTabButtonClick(add_tab_token); }, result)) add_tab_handler_attached = false;
+        if (selection_handler_attached && cleanup(L"revoke selection handler", [&] { tabs.SelectionChanged(selection_token); }, result)) selection_handler_attached = false;
+        if (close_tab_handler_attached && cleanup(L"revoke close-tab handler", [&] { tabs.TabCloseRequested(close_tab_token); }, result)) close_tab_handler_attached = false;
+        if (add_tab_handler_attached || selection_handler_attached || close_tab_handler_attached) safe_to_release = false;
+        if (!safe_to_release) return result;
+
+        handlers_detached = true;
+        closed = true;
+        cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
+        powershell_item = nullptr;
+        wsl_item = nullptr;
+        new_tab_menu = nullptr;
+        cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
+        cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
         tabs = nullptr;
-        source.Close();
+        cleanup(L"close XAML source", [&] { source.Close(); }, result);
         source = nullptr;
         application = nullptr;
+        return result;
     }
 };
 
@@ -216,15 +264,15 @@ extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) 
 extern "C" HRESULT __cdecl zigonaut_chrome_close(void* value) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    try { bridge->close(); return S_OK; } catch (...) { return reportCurrentException(L"close"); }
+    return bridge->close();
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_destroy(void* value) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     auto dispatcher = bridge->dispatcher;
-    HRESULT result = S_OK;
-    try { bridge->close(); } catch (...) { result = reportCurrentException(L"close during destroy"); }
+    auto result = bridge->close();
+    if (!bridge->handlers_detached) return result;
     delete bridge;
     try { dispatcher.ShutdownQueue(); } catch (...) { if (SUCCEEDED(result)) result = reportCurrentException(L"ShutdownQueue"); }
     dispatcher = nullptr;
