@@ -22,6 +22,7 @@ const State = struct {
     hwnd: win.HWND,
     model: app_model.App,
     font: win.HFONT,
+    dpi: u32,
     terminal_view: TerminalView,
     chrome: ?chrome.Bridge = null,
 };
@@ -113,26 +114,13 @@ fn handleShortcut(message: *const win.MSG) bool {
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
     switch (message) {
         win.WM_CREATE => {
-            const font = win.CreateFontW(
-                -18,
-                0,
-                0,
-                0,
-                win.FW_NORMAL,
-                0,
-                0,
-                0,
-                win.DEFAULT_CHARSET,
-                win.OUT_DEFAULT_PRECIS,
-                win.CLIP_DEFAULT_PRECIS,
-                win.CLEARTYPE_QUALITY,
-                win.FIXED_PITCH | win.FF_MODERN,
-                font_name,
-            );
+            const dpi = win.GetDpiForWindow(hwnd);
+            const font = createFont(dpi);
             state = .{
                 .hwnd = hwnd,
                 .model = app_model.App.init(std.heap.page_allocator),
                 .font = font,
+                .dpi = dpi,
                 .terminal_view = undefined,
             };
             state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
@@ -170,6 +158,29 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             layoutTerminalView(hwnd);
             return 0;
         },
+        win.WM_DPICHANGED => {
+            const suggested: *const win.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            _ = win.SetWindowPos(
+                hwnd,
+                null,
+                suggested.left,
+                suggested.top,
+                suggested.right - suggested.left,
+                suggested.bottom - suggested.top,
+                win.SWP_NOACTIVATE | win.SWP_NOZORDER,
+            );
+            if (state) |*current| {
+                const new_dpi: u32 = @truncate(wparam);
+                const new_font = createFont(new_dpi);
+                current.terminal_view.updateFont(new_font);
+                _ = win.DeleteObject(current.font);
+                current.font = new_font;
+                current.dpi = new_dpi;
+                layoutTerminalView(hwnd);
+                _ = win.InvalidateRect(hwnd, null, 0);
+            }
+            return 0;
+        },
         win.WM_CLOSE => {
             if (state.?.chrome) |*bridge| bridge.close();
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
@@ -200,18 +211,19 @@ fn pointY(value: win.LPARAM) i32 {
 }
 
 fn handleClick(hwnd: win.HWND, x: i32, y: i32) void {
-    if (y < 52) {
-        if (x >= 16 and x < 136) {
+    const dpi = state.?.dpi;
+    if (y < scaled(52, dpi)) {
+        if (x >= scaled(16, dpi) and x < scaled(136, dpi)) {
             sendCommand(hwnd, command_new_powershell);
-        } else if (x >= 144 and x < 220) {
+        } else if (x >= scaled(144, dpi) and x < scaled(220, dpi)) {
             sendCommand(hwnd, command_new_wsl);
-        } else if (x >= 228 and x < 266) {
+        } else if (x >= scaled(228, dpi) and x < scaled(266, dpi)) {
             sendCommand(hwnd, command_close_tab);
         }
         return;
     }
-    if (y >= 56 and y < 96 and x >= 16) {
-        const index: u16 = @intCast(@divTrunc(x - 16, 168));
+    if (y >= scaled(56, dpi) and y < scaled(96, dpi) and x >= scaled(16, dpi)) {
+        const index: u16 = @intCast(@divTrunc(x - scaled(16, dpi), scaled(168, dpi)));
         sendCommand(hwnd, command_tab_base + index);
     }
 }
@@ -220,13 +232,14 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     if (state == null) return;
     var client: win.RECT = undefined;
     if (win.GetClientRect(hwnd, &client) == 0) return;
-    const terminal_top = if (state.?.chrome != null) winui_terminal_top else fallback_terminal_top;
+    const dpi = state.?.dpi;
+    const terminal_top = scaled(if (state.?.chrome != null) winui_terminal_top else fallback_terminal_top, dpi);
     if (state.?.chrome) |*bridge| bridge.move(0, 0, client.right, terminal_top);
     state.?.terminal_view.move(
-        terminal_left,
+        scaled(terminal_left, dpi),
         terminal_top,
-        client.right - terminal_left - terminal_margin,
-        client.bottom - terminal_top - terminal_margin,
+        client.right - scaled(terminal_left + terminal_margin, dpi),
+        client.bottom - terminal_top - scaled(terminal_margin, dpi),
     );
 }
 
@@ -277,10 +290,11 @@ fn paint(hwnd: win.HWND) void {
 
     _ = win.SelectObject(dc, state.?.font);
     _ = win.SetBkMode(dc, win.TRANSPARENT);
+    const dpi = state.?.dpi;
 
-    drawButton(dc, .{ .left = 16, .top = 12, .right = 136, .bottom = 44 }, "PowerShell", rgb(51, 58, 72));
-    drawButton(dc, .{ .left = 144, .top = 12, .right = 220, .bottom = 44 }, "+ WSL", rgb(51, 58, 72));
-    drawButton(dc, .{ .left = 228, .top = 12, .right = 266, .bottom = 44 }, "x", rgb(83, 43, 50));
+    drawButton(dc, scaledRect(.{ .left = 16, .top = 12, .right = 136, .bottom = 44 }, dpi), "PowerShell", rgb(51, 58, 72));
+    drawButton(dc, scaledRect(.{ .left = 144, .top = 12, .right = 220, .bottom = 44 }, dpi), "+ WSL", rgb(51, 58, 72));
+    drawButton(dc, scaledRect(.{ .left = 228, .top = 12, .right = 266, .bottom = 44 }, dpi), "x", rgb(83, 43, 50));
 
     const model = &state.?.model;
     for (model.sessions.items, 0..) |session, index| {
@@ -288,7 +302,7 @@ fn paint(hwnd: win.HWND) void {
         const active = model.active != null and model.active.? == index;
         drawButton(
             dc,
-            .{ .left = left, .top = 56, .right = left + 160, .bottom = 94 },
+            scaledRect(.{ .left = left, .top = 56, .right = left + 160, .bottom = 94 }, dpi),
             session.shell.title(),
             if (active) rgb(70, 83, 111) else rgb(31, 35, 43),
         );
@@ -317,4 +331,36 @@ fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
 
 fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
     return @as(win.COLORREF, red) | (@as(win.COLORREF, green) << 8) | (@as(win.COLORREF, blue) << 16);
+}
+
+fn createFont(dpi: u32) win.HFONT {
+    return win.CreateFontW(
+        -scaled(18, dpi),
+        0,
+        0,
+        0,
+        win.FW_NORMAL,
+        0,
+        0,
+        0,
+        win.DEFAULT_CHARSET,
+        win.OUT_DEFAULT_PRECIS,
+        win.CLIP_DEFAULT_PRECIS,
+        win.CLEARTYPE_QUALITY,
+        win.FIXED_PITCH | win.FF_MODERN,
+        font_name,
+    );
+}
+
+fn scaled(value: i32, dpi: u32) i32 {
+    return win.MulDiv(value, @intCast(dpi), 96);
+}
+
+fn scaledRect(rect: win.RECT, dpi: u32) win.RECT {
+    return .{
+        .left = scaled(rect.left, dpi),
+        .top = scaled(rect.top, dpi),
+        .right = scaled(rect.right, dpi),
+        .bottom = scaled(rect.bottom, dpi),
+    };
 }

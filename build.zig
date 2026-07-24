@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zigonaut",
         .root_module = app_module,
+        .win32_manifest = b.path("zigonaut.manifest"),
     });
     exe.subsystem = .Windows;
     exe.linkLibC();

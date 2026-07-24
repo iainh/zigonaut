@@ -6,7 +6,7 @@ const win = @import("win32.zig").c;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
-const padding = 24;
+const logical_padding = 24;
 
 pub const View = struct {
     hwnd: win.HWND = null,
@@ -68,6 +68,17 @@ pub const View = struct {
         _ = win.MoveWindow(self.hwnd, x, y, @max(width, 1), @max(height, 1), 1);
     }
 
+    pub fn updateFont(self: *View, font: win.HFONT) void {
+        self.font = font;
+        const cell_size = measureCell(self.hwnd, font);
+        self.cell_width = cell_size.width;
+        self.cell_height = cell_size.height;
+        self.columns = 0;
+        self.rows = 0;
+        self.resizeSessions();
+        self.invalidate();
+    }
+
     pub fn syncSessions(self: *View) void {
         if (self.columns == 0 or self.rows == 0) return;
         self.model.resizeSessions(self.columns, self.rows, self.cell_width, self.cell_height);
@@ -81,6 +92,7 @@ pub const View = struct {
         var client: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &client) == 0) return;
 
+        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
         const inner_width = @max(client.right - 2 * padding, 1);
         const inner_height = @max(client.bottom - 2 * padding, 1);
         const columns: u16 = @intCast(@min(@divTrunc(inner_width, @as(i32, @intCast(self.cell_width))), std.math.maxInt(u16)));
@@ -107,6 +119,7 @@ pub const View = struct {
         _ = win.SetBkMode(dc, win.TRANSPARENT);
         _ = win.SetTextColor(dc, rgb(198, 206, 220));
         var text_rect = client;
+        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
         text_rect.left += padding;
         text_rect.top += padding;
         text_rect.right -= padding;
@@ -277,6 +290,10 @@ fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
         .width = @intCast(@max(metrics.tmAveCharWidth, 1)),
         .height = @intCast(@max(metrics.tmHeight + metrics.tmExternalLeading, 1)),
     };
+}
+
+fn scaled(value: i32, dpi: u32) i32 {
+    return win.MulDiv(value, @intCast(dpi), 96);
 }
 
 fn currentModifiers() u16 {
