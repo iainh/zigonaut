@@ -25,6 +25,8 @@ pub const Config = struct {
     randomize_tab_background: bool = true,
 };
 
+/// Owns the file contents backing borrowed string fields in `value`.
+/// Keep this object alive for as long as its `Config` is in use.
 pub const Loaded = struct {
     allocator: std.mem.Allocator,
     contents: []u8,
@@ -35,6 +37,7 @@ pub const Loaded = struct {
     }
 };
 
+/// Returns the absolute configuration path owned by the caller.
 pub fn pathAlloc(allocator: std.mem.Allocator) ![]u8 {
     const app_data = try std.process.getEnvVarOwned(allocator, "APPDATA");
     defer allocator.free(app_data);

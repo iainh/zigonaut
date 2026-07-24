@@ -33,6 +33,8 @@ const State = struct {
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 };
 
+// The application currently owns exactly one window and one STA UI thread.
+// Window procedures and WinUI callbacks access these values only on that thread.
 var state: ?State = null;
 var settings = config.Config{};
 var loaded_settings: ?config.Loaded = null;

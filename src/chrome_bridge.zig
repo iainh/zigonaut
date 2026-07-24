@@ -24,6 +24,9 @@ const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 const Destroy = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 
+/// UI-thread-owned WinUI bridge. Every method must run on the thread that called
+/// `load`. Successful `deinit` destroys the instance but deliberately keeps the
+/// DLL loaded because WinUI may retain delegate code until process teardown.
 pub const Bridge = struct {
     module: win.HMODULE,
     instance: ?*anyopaque,
@@ -86,7 +89,6 @@ pub const Bridge = struct {
         const instance = self.instance orelse return true;
         if (!succeeded(self.destroy_fn(instance))) return false;
         self.instance = null;
-        // WinUI can retain delegate code until process teardown, so the bridge DLL must remain loaded.
         return true;
     }
 };

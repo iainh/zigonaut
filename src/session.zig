@@ -4,6 +4,8 @@ const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const log = std.log.scoped(.session);
 
+/// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
+/// Call `destroy` only after no caller can submit input or rendering work.
 pub const SessionRuntime = struct {
     allocator: std.mem.Allocator,
     terminal: Terminal,
@@ -145,6 +147,8 @@ pub const SessionRuntime = struct {
         }
     }
 
+    /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
+    /// already holds `terminal_mutex`. Readers acquire that mutex in `titleAlloc`.
     fn titleChanged(context: ?*anyopaque, title: []const u8) void {
         const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
         self.title.ensureTotalCapacity(self.allocator, title.len) catch return;

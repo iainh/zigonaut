@@ -72,6 +72,7 @@ FrameworkElement findDescendant(DependencyObject const& root, wchar_t const* nam
 }
 
 struct Bridge {
+    // All XAML objects and event revocation must stay on this creating STA thread.
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
     void* context{};
