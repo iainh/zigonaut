@@ -25,6 +25,22 @@ pub const Config = struct {
     randomize_tab_background: bool = true,
 };
 
+pub const Changes = struct {
+    font: bool,
+    theme: bool,
+    default_shell: bool,
+};
+
+pub fn changes(previous: Config, next: Config) Changes {
+    return .{
+        .font = previous.font_size != next.font_size or
+            !std.mem.eql(u8, previous.font_family, next.font_family),
+        .theme = previous.theme != next.theme or
+            previous.randomize_tab_background != next.randomize_tab_background,
+        .default_shell = previous.default_shell != next.default_shell,
+    };
+}
+
 /// Owns the file contents backing borrowed string fields in `value`.
 /// Keep this object alive for as long as its `Config` is in use.
 pub const Loaded = struct {
@@ -122,4 +138,21 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(theme.Name.rasmus, invalid.theme);
     try std.testing.expectEqual(Shell.powershell, invalid.default_shell);
     try std.testing.expect(invalid.randomize_tab_background);
+}
+
+test "configuration changes are classified by subsystem" {
+    const original = Config{};
+    try std.testing.expectEqual(Changes{ .font = false, .theme = false, .default_shell = false }, changes(original, original));
+
+    var modified = original;
+    modified.font_size = 20;
+    try std.testing.expect(changes(original, modified).font);
+
+    modified = original;
+    modified.theme = .campbell;
+    try std.testing.expect(changes(original, modified).theme);
+
+    modified = original;
+    modified.default_shell = .wsl;
+    try std.testing.expect(changes(original, modified).default_shell);
 }

@@ -173,7 +173,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         chrome_message => {
-            const command = std.meta.intToEnum(chrome.Command, wparam) catch return 0;
+            const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
             switch (command) {
                 .new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
@@ -321,7 +321,7 @@ fn syncChrome() void {
 
 fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
     const hwnd = if (state) |current| current.hwnd else return;
-    const typed = std.meta.intToEnum(chrome.Command, command) catch return;
+    const typed = chrome.commandFromInt(command) orelse return;
     sendChromeCommand(hwnd, typed, argument);
 }
 
@@ -381,12 +381,9 @@ fn reloadSettings() !void {
     errdefer replacement.deinit();
 
     const next = replacement.value;
-    const font_changed = next.font_size != settings.font_size or
-        !std.mem.eql(u8, next.font_family, settings.font_family);
-    const theme_changed = next.theme != settings.theme or
-        next.randomize_tab_background != settings.randomize_tab_background;
-    const new_font = if (font_changed) createFontFor(next, state.?.dpi) else null;
-    if (font_changed and new_font == null) return error.CreateFontFailed;
+    const changed = config.changes(settings, next);
+    const new_font = if (changed.font) createFontFor(next, state.?.dpi) else null;
+    if (changed.font and new_font == null) return error.CreateFontFailed;
     errdefer {
         if (new_font != null) _ = win.DeleteObject(new_font);
     }
@@ -401,7 +398,7 @@ fn reloadSettings() !void {
     settings = loaded_settings.?.value;
     if (previous) |*loaded| loaded.deinit();
 
-    if (theme_changed) {
+    if (changed.theme) {
         state.?.model.applySettings(settings.theme.value(), settings.randomize_tab_background);
     }
     if (new_font != null) {

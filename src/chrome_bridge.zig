@@ -16,6 +16,10 @@ pub const Command = enum(u32) {
     quit = abi.ZIGONAUT_CHROME_QUIT,
 };
 
+pub fn commandFromInt(value: u32) ?Command {
+    return std.meta.intToEnum(Command, value) catch null;
+}
+
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
 const Initialize = *const fn (win.HWND, Callback, ?*anyopaque) callconv(.c) ?*anyopaque;
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
@@ -100,4 +104,11 @@ fn succeeded(result: win.HRESULT) bool {
 fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
     const address = win.GetProcAddress(module, name) orelse return null;
     return @ptrCast(address);
+}
+
+test "chrome commands match the shared ABI" {
+    try std.testing.expectEqual(Command.open_settings, commandFromInt(abi.ZIGONAUT_CHROME_OPEN_SETTINGS).?);
+    try std.testing.expectEqual(Command.quit, commandFromInt(abi.ZIGONAUT_CHROME_QUIT).?);
+    try std.testing.expect(commandFromInt(0) == null);
+    try std.testing.expect(commandFromInt(8) == null);
 }

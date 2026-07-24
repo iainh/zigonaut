@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/app.zig"),
+            .root_source_file = b.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
     tests.linkLibC();
     tests.linkLibCpp();
     tests.addIncludePath(b.path("src"));
+    tests.root_module.addIncludePath(b.path("winui"));
     tests.addCSourceFile(.{
         .file = b.path("src/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
