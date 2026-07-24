@@ -91,6 +91,8 @@ pub const Bridge = struct {
 
     pub fn deinit(self: *Bridge) bool {
         const instance = self.instance orelse return true;
+        // Native destruction clears its callback and context before any
+        // fallible WinUI cleanup, so a failed destroy cannot call the owner.
         if (!succeeded(self.destroy_fn(instance))) return false;
         self.instance = null;
         return true;

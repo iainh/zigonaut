@@ -79,6 +79,7 @@ pub const View = struct {
     }
 
     pub fn create(self: *View, parent: win.HWND, instance: win.HINSTANCE) !void {
+        errdefer self.deinitResources();
         self.hwnd = win.CreateWindowExW(
             0,
             class_name,
@@ -98,6 +99,12 @@ pub const View = struct {
             engine.deinit();
             self.text_engine = null;
         };
+    }
+
+    fn deinitResources(self: *View) void {
+        self.gdi_renderer.release();
+        if (self.text_engine) |*engine| engine.deinit();
+        self.text_engine = null;
     }
 
     pub fn move(self: *View, x: i32, y: i32, width: i32, height: i32) void {
@@ -451,12 +458,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
-            if (view) |current| {
-                current.gdi_renderer.release();
-                if (current.text_engine) |*engine| engine.deinit();
-                current.text_engine = null;
-            }
+            if (view) |current| current.deinitResources();
             return 0;
+        },
+        win.WM_NCDESTROY => {
+            const result = win.DefWindowProcW(hwnd, message, wparam, lparam);
+            _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, 0);
+            if (view) |current| current.hwnd = null;
+            return result;
         },
         else => return win.DefWindowProcW(hwnd, message, wparam, lparam),
     }

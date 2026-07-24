@@ -19,33 +19,62 @@ const titles_changed_message = win.WM_APP + 2;
 const shell_exited_message = win.WM_APP + 3;
 const winui_terminal_top: i32 = 48;
 
-const State = struct {
-    hwnd: win.HWND,
+const Application = struct {
+    loaded: config.Loaded,
+    settings: config.Config,
+    hwnd: ?win.HWND = null,
     model: app_model.App,
-    font: win.HFONT,
-    dpi: u32,
-    dark_theme: bool,
-    high_contrast: bool,
+    font: win.HFONT = null,
+    dpi: u32 = 96,
+    dark_theme: bool = false,
+    high_contrast: bool = false,
     terminal_ready: bool = false,
-    terminal_view: TerminalView,
+    terminal_view: TerminalView = undefined,
     chrome: ?chrome.Bridge = null,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
+
+    fn init(loaded: config.Loaded) Application {
+        return .{
+            .settings = loaded.value,
+            .loaded = loaded,
+            .model = app_model.App.init(std.heap.page_allocator, loaded.value.theme.value(), loaded.value.randomize_tab_background),
+        };
+    }
+
+    fn deinit(self: *Application) void {
+        if (self.chrome) |*bridge| _ = bridge.deinit();
+        self.model.deinit();
+        self.chrome_titles.deinit(std.heap.page_allocator);
+        self.chrome_title_lengths.deinit(std.heap.page_allocator);
+        if (self.font != null) _ = win.DeleteObject(self.font);
+        self.loaded.deinit();
+    }
+
+    const handleShortcut = handleShortcutImpl;
+    const windowMessage = windowMessageImpl;
+    const layoutTerminalView = layoutTerminalViewImpl;
+    const syncChrome = syncChromeImpl;
+    const addDefaultSession = addDefaultSessionImpl;
+    const reloadSettings = reloadSettingsImpl;
+    const updateTheme = updateThemeImpl;
 };
 
-// The application currently owns exactly one window and one STA UI thread.
-// Window procedures and WinUI callbacks access these values only on that thread.
-var state: ?State = null;
-var settings = config.Config{};
-var loaded_settings: ?config.Loaded = null;
-
 pub fn main() !void {
-    loaded_settings = try config.loadOrCreate(std.heap.page_allocator);
+    var loaded = try config.loadOrCreate(std.heap.page_allocator);
+    const application = std.heap.page_allocator.create(Application) catch |err| {
+        loaded.deinit();
+        return err;
+    };
+    application.* = Application.init(loaded);
     defer {
-        if (loaded_settings) |*loaded| loaded.deinit();
-        loaded_settings = null;
+        // If synchronous window destruction fails, retain the owner until
+        // process exit rather than leave GWLP_USERDATA pointing at freed memory.
+        if (application.hwnd == null) {
+            application.deinit();
+            std.heap.page_allocator.destroy(application);
+        }
     }
-    settings = loaded_settings.?.value;
 
     const instance = win.GetModuleHandleW(null);
     const arrow_cursor: win.LPCWSTR = @ptrFromInt(32512);
@@ -67,7 +96,7 @@ pub fn main() !void {
     };
     if (win.RegisterClassExW(&window_class) == 0) return error.RegisterWindowClassFailed;
 
-    const hwnd = win.CreateWindowExW(
+    _ = win.CreateWindowExW(
         win.WS_EX_CONTROLPARENT,
         class_name,
         window_title,
@@ -79,51 +108,51 @@ pub fn main() !void {
         null,
         null,
         instance,
-        null,
+        application,
     ) orelse return error.CreateWindowFailed;
 
-    updateTheme(hwnd);
+    application.updateTheme();
 
     var message: win.MSG = undefined;
-    while (win.GetMessageW(&message, null, 0, 0) > 0) {
-        if (handleShortcut(&message)) continue;
-        if (state) |*current| {
-            if (current.chrome) |*bridge| {
-                if (bridge.pretranslate(&message)) continue;
+    while (true) {
+        const status = win.GetMessageW(&message, null, 0, 0);
+        if (status <= 0) {
+            if (application.hwnd) |hwnd| {
+                if (win.DestroyWindow(hwnd) == 0) return error.DestroyWindowFailed;
             }
+            if (status < 0) return error.GetMessageFailed;
+            break;
         }
+        if (application.handleShortcut(&message)) continue;
+        if (application.chrome) |*bridge| if (bridge.pretranslate(&message)) continue;
         _ = win.TranslateMessage(&message);
         _ = win.DispatchMessageW(&message);
     }
-    if (state) |*current| {
-        if (current.chrome) |*bridge| _ = bridge.deinit();
-    }
-    state = null;
 }
 
-fn handleShortcut(message: *const win.MSG) bool {
+fn handleShortcutImpl(self: *Application, message: *const win.MSG) bool {
     if (message.message != win.WM_KEYDOWN and message.message != win.WM_SYSKEYDOWN) return false;
     const control = win.GetKeyState(win.VK_CONTROL) < 0;
     const alt = win.GetKeyState(win.VK_MENU) < 0;
     const shift = win.GetKeyState(win.VK_SHIFT) < 0;
     const repeated = (message.lParam & (@as(win.LPARAM, 1) << 30)) != 0;
-    const hwnd = state.?.hwnd;
+    const hwnd = self.hwnd.?;
     if (!control or alt) return false;
 
     if (shift and message.wParam == 'T') {
-        if (!repeated) addDefaultSession() catch |err| log.err("unable to open default session: {}", .{err});
+        if (!repeated) self.addDefaultSession() catch |err| log.err("unable to open default session: {}", .{err});
         return true;
     }
     if (shift and message.wParam == 'W') {
         if (!repeated) {
-            if (state.?.model.active) |active| sendChromeCommand(hwnd, .close, @intCast(active));
+            if (self.model.active) |active| sendChromeCommand(hwnd, .close, @intCast(active));
         }
         return true;
     }
     if (message.wParam != win.VK_TAB) return false;
 
-    const count = state.?.model.sessions.items.len;
-    const active = state.?.model.active orelse return true;
+    const count = self.model.sessions.items.len;
+    const active = self.model.active orelse return true;
     if (count > 1) {
         const next = if (shift) (active + count - 1) % count else (active + 1) % count;
         sendChromeCommand(hwnd, .select, @intCast(next));
@@ -132,41 +161,56 @@ fn handleShortcut(message: *const win.MSG) bool {
 }
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
+    var application: ?*Application = null;
+    if (message == win.WM_NCCREATE) {
+        const create: *const win.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        application = @ptrCast(@alignCast(create.lpCreateParams orelse return 0));
+        application.?.hwnd = hwnd;
+        const userdata: win.LONG_PTR = @bitCast(@intFromPtr(application.?));
+        _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, userdata);
+        if (win.GetWindowLongPtrW(hwnd, win.GWLP_USERDATA) != userdata) {
+            application.?.hwnd = null;
+            return 0;
+        }
+    } else {
+        const value = win.GetWindowLongPtrW(hwnd, win.GWLP_USERDATA);
+        if (value != 0) application = @ptrFromInt(@as(usize, @bitCast(value)));
+    }
+    const self = application orelse return win.DefWindowProcW(hwnd, message, wparam, lparam);
+    const result = self.windowMessage(message, wparam, lparam);
+    if (message == win.WM_NCDESTROY) {
+        _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, 0);
+        self.hwnd = null;
+    }
+    return result;
+}
+
+fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) win.LRESULT {
+    const hwnd = self.hwnd.?;
     switch (message) {
         win.WM_CREATE => {
             const dpi = win.GetDpiForWindow(hwnd);
-            const font = createFont(dpi);
-            state = .{
-                .hwnd = hwnd,
-                .model = app_model.App.init(
-                    std.heap.page_allocator,
-                    settings.theme.value(),
-                    settings.randomize_tab_background,
-                ),
-                .font = font,
-                .dpi = dpi,
-                .dark_theme = false,
-                .high_contrast = false,
-                .terminal_view = undefined,
-            };
-            state.?.terminal_view = TerminalView.init(
+            const font = createFontFor(self.settings, dpi);
+            self.font = font;
+            self.dpi = dpi;
+            self.terminal_view = TerminalView.init(
                 hwnd,
-                &state.?.model,
+                &self.model,
                 font,
-                settings.font_family,
-                settings.font_size,
+                self.settings.font_family,
+                self.settings.font_size,
                 dpi,
                 titles_changed_message,
                 shell_exited_message,
             );
-            state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
+            self.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
                 log.err("unable to create terminal view: {}", .{err});
                 return -1;
             };
-            state.?.terminal_ready = true;
-            state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null) orelse return -1;
-            layoutTerminalView(hwnd);
-            addDefaultSession() catch |err| {
+            self.terminal_ready = true;
+            self.chrome = chrome.Bridge.load(hwnd, chromeCommand, self) orelse return -1;
+            self.layoutTerminalView();
+            self.addDefaultSession() catch |err| {
                 log.err("unable to create initial session: {}", .{err});
                 return -1;
             };
@@ -176,28 +220,28 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                .new_powershell => _ = state.?.model.addSession(.powershell, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                .new_powershell => _ = self.model.addSession(.powershell, self.terminal_view.columns, self.terminal_view.rows) catch |err| {
                     log.err("unable to open PowerShell session: {}", .{err});
                     return 0;
                 },
-                .new_wsl => _ = state.?.model.addSession(.wsl, state.?.terminal_view.columns, state.?.terminal_view.rows) catch |err| {
+                .new_wsl => _ = self.model.addSession(.wsl, self.terminal_view.columns, self.terminal_view.rows) catch |err| {
                     log.err("unable to open WSL session: {}", .{err});
                     return 0;
                 },
                 .close => {
-                    state.?.model.closeSession(argument);
-                    if (state.?.model.sessions.items.len == 0) {
+                    self.model.closeSession(argument);
+                    if (self.model.sessions.items.len == 0) {
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
                 },
-                .select => state.?.model.activate(argument),
+                .select => self.model.activate(argument),
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
                     return 0;
                 },
                 .reload_settings => {
-                    reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
+                    self.reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
                     return 0;
                 },
                 .quit => {
@@ -205,29 +249,29 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                     return 0;
                 },
             }
-            state.?.terminal_view.syncSessions();
+            self.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
-            state.?.terminal_view.invalidate();
-            syncChrome();
+            self.terminal_view.invalidate();
+            self.syncChrome();
             return 0;
         },
         titles_changed_message => {
-            if (state.?.model.syncTitles()) syncChrome();
+            if (self.model.syncTitles()) self.syncChrome();
             return 0;
         },
         shell_exited_message => {
-            if (!state.?.model.closeCleanlyExitedSessions()) return 0;
-            if (state.?.model.sessions.items.len == 0) {
+            if (!self.model.closeCleanlyExitedSessions()) return 0;
+            if (self.model.sessions.items.len == 0) {
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
             }
-            state.?.terminal_view.syncSessions();
-            state.?.terminal_view.invalidate();
-            syncChrome();
+            self.terminal_view.syncSessions();
+            self.terminal_view.invalidate();
+            self.syncChrome();
             return 0;
         },
         win.WM_SIZE => {
-            layoutTerminalView(hwnd);
+            self.layoutTerminalView();
             return 0;
         },
         win.WM_DPICHANGED => {
@@ -241,34 +285,26 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 suggested.bottom - suggested.top,
                 win.SWP_NOACTIVATE | win.SWP_NOZORDER,
             );
-            if (state) |*current| {
-                const new_dpi: u32 = @intCast(wparam & 0xffff);
-                const new_font = createFont(new_dpi);
-                current.terminal_view.updateFont(new_font, new_dpi);
-                _ = win.DeleteObject(current.font);
-                current.font = new_font;
-                current.dpi = new_dpi;
-                layoutTerminalView(hwnd);
-                _ = win.InvalidateRect(hwnd, null, 0);
-            }
+            const new_dpi: u32 = @intCast(wparam & 0xffff);
+            const new_font = createFontFor(self.settings, new_dpi);
+            self.terminal_view.updateFont(new_font, new_dpi);
+            _ = win.DeleteObject(self.font);
+            self.font = new_font;
+            self.dpi = new_dpi;
+            self.layoutTerminalView();
+            _ = win.InvalidateRect(hwnd, null, 0);
             return 0;
         },
         win.WM_SETTINGCHANGE, win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
-            updateTheme(hwnd);
+            self.updateTheme();
             return 0;
         },
         win.WM_CLOSE => {
-            if (state.?.chrome) |*bridge| bridge.close();
+            if (self.chrome) |*bridge| bridge.close();
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_ERASEBKGND => return 1,
         win.WM_DESTROY => {
-            if (state) |*current| {
-                current.model.deinit();
-                current.chrome_titles.deinit(std.heap.page_allocator);
-                current.chrome_title_lengths.deinit(std.heap.page_allocator);
-                _ = win.DeleteObject(current.font);
-            }
             win.PostQuitMessage(0);
             return 0;
         },
@@ -276,18 +312,18 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
     }
 }
 
-fn layoutTerminalView(hwnd: win.HWND) void {
-    if (state == null) return;
+fn layoutTerminalViewImpl(self: *Application) void {
+    const hwnd = self.hwnd orelse return;
     var client: win.RECT = undefined;
     if (win.GetClientRect(hwnd, &client) == 0) return;
-    const dpi = state.?.dpi;
+    const dpi = self.dpi;
     const terminal_top = scaled(winui_terminal_top, dpi);
-    const bridge = if (state.?.chrome) |*value| value else return;
+    const bridge = if (self.chrome) |*value| value else return;
     if (!bridge.move(0, 0, client.right, terminal_top)) {
         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
         return;
     }
-    state.?.terminal_view.move(
+    self.terminal_view.move(
         0,
         terminal_top,
         client.right,
@@ -295,54 +331,49 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     );
 }
 
-fn syncChrome() void {
-    if (state == null) return;
-    const bridge = if (state.?.chrome) |*value| value else return;
-    const count = state.?.model.sessions.items.len;
-    state.?.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+fn syncChromeImpl(self: *Application) void {
+    const bridge = if (self.chrome) |*value| value else return;
+    const count = self.model.sessions.items.len;
+    self.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
         log.err("unable to allocate chrome title pointers: {}", .{err});
         return;
     };
-    state.?.chrome_title_lengths.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+    self.chrome_title_lengths.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
         log.err("unable to allocate chrome title lengths: {}", .{err});
         return;
     };
-    state.?.chrome_titles.items.len = count;
-    state.?.chrome_title_lengths.items.len = count;
-    for (state.?.model.sessions.items, 0..) |session, index| {
+    self.chrome_titles.items.len = count;
+    self.chrome_title_lengths.items.len = count;
+    for (self.model.sessions.items, 0..) |session, index| {
         const title = session.displayTitle();
-        state.?.chrome_titles.items[index] = title.ptr;
-        state.?.chrome_title_lengths.items[index] = @intCast(title.len);
+        self.chrome_titles.items[index] = title.ptr;
+        self.chrome_title_lengths.items[index] = @intCast(title.len);
     }
-    if (!bridge.update(state.?.chrome_titles.items, state.?.chrome_title_lengths.items, state.?.model.active)) {
-        _ = win.PostMessageW(state.?.hwnd, win.WM_CLOSE, 0, 0);
+    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.model.active)) {
+        _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
     }
 }
 
-fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
-    const hwnd = if (state) |current| current.hwnd else return;
+fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
+    const self: *Application = @ptrCast(@alignCast(context orelse return));
+    const hwnd = self.hwnd orelse return;
     const typed = chrome.commandFromInt(command) orelse return;
     sendChromeCommand(hwnd, typed, argument);
 }
 
-fn addDefaultSession() !void {
-    if (state == null) return;
-    const shell: app_model.Shell = switch (settings.default_shell) {
+fn addDefaultSessionImpl(self: *Application) !void {
+    const shell: app_model.Shell = switch (self.settings.default_shell) {
         .powershell => .powershell,
         .wsl => .wsl,
     };
-    _ = try state.?.model.addSession(shell, state.?.terminal_view.columns, state.?.terminal_view.rows);
-    state.?.terminal_view.syncSessions();
-    state.?.terminal_view.invalidate();
-    syncChrome();
+    _ = try self.model.addSession(shell, self.terminal_view.columns, self.terminal_view.rows);
+    self.terminal_view.syncSessions();
+    self.terminal_view.invalidate();
+    self.syncChrome();
 }
 
 fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) void {
     _ = win.PostMessageW(hwnd, chrome_message, @intFromEnum(command), @intCast(argument));
-}
-
-fn createFont(dpi: u32) win.HFONT {
-    return createFontFor(settings, dpi);
 }
 
 fn createFontFor(value: config.Config, dpi: u32) win.HFONT {
@@ -375,49 +406,48 @@ fn openSettings(hwnd: win.HWND) !void {
     if (@intFromPtr(result) <= 32) return error.OpenSettingsFailed;
 }
 
-fn reloadSettings() !void {
-    if (state == null) return;
+fn reloadSettingsImpl(self: *Application) !void {
     var replacement = try config.loadOrCreate(std.heap.page_allocator);
     errdefer replacement.deinit();
 
     const next = replacement.value;
-    const changed = config.changes(settings, next);
-    const new_font = if (changed.font) createFontFor(next, state.?.dpi) else null;
+    const changed = config.changes(self.settings, next);
+    const new_font = if (changed.font) createFontFor(next, self.dpi) else null;
     if (changed.font and new_font == null) return error.CreateFontFailed;
     errdefer {
         if (new_font != null) _ = win.DeleteObject(new_font);
     }
     if (new_font != null) {
-        try state.?.terminal_view.reloadFont(new_font, next.font_family, next.font_size, state.?.dpi);
+        try self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi);
     }
 
-    const old_font = state.?.font;
-    if (new_font != null) state.?.font = new_font;
-    var previous = loaded_settings;
-    loaded_settings = replacement;
-    settings = loaded_settings.?.value;
-    if (previous) |*loaded| loaded.deinit();
+    const old_font = self.font;
+    if (new_font != null) self.font = new_font;
+    var previous = self.loaded;
+    self.loaded = replacement;
+    self.settings = self.loaded.value;
+    previous.deinit();
 
     if (changed.theme) {
-        state.?.model.applySettings(settings.theme.value(), settings.randomize_tab_background);
+        self.model.applySettings(self.settings.theme.value(), self.settings.randomize_tab_background);
     }
     if (new_font != null) {
         _ = win.DeleteObject(old_font);
-        layoutTerminalView(state.?.hwnd);
+        self.layoutTerminalView();
     }
-    state.?.terminal_view.invalidate();
+    self.terminal_view.invalidate();
 }
 
 fn scaled(value: anytype, dpi: u32) i32 {
     return win.MulDiv(@intCast(value), @intCast(dpi), 96);
 }
 
-fn updateTheme(hwnd: win.HWND) void {
-    if (state == null) return;
-    state.?.dark_theme = appsUseDarkTheme();
-    state.?.high_contrast = highContrastEnabled();
-    if (state.?.terminal_ready) state.?.terminal_view.updateTheme(state.?.dark_theme, state.?.high_contrast);
-    var dark_mode: win.BOOL = @intFromBool(state.?.dark_theme and !state.?.high_contrast);
+fn updateThemeImpl(self: *Application) void {
+    const hwnd = self.hwnd orelse return;
+    self.dark_theme = appsUseDarkTheme();
+    self.high_contrast = highContrastEnabled();
+    if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast);
+    var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);
 }
