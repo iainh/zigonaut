@@ -9,9 +9,11 @@ Zigonaut is an early-stage Windows terminal application built with Zig 0.15.2. T
 
 ## Current milestone
 
-The repository contains a runnable native Win32 application shell and a tested tab/session model. Each PowerShell and WSL tab owns an isolated Windows ConPTY process and `libghostty-vt` terminal. A background reader feeds ConPTY output into Ghostty, and the UI paints synchronized, themed cell render-state snapshots rather than displaying unparsed process output. The built-in Rasmus theme supplies the default, cursor, and ANSI colors while preserving application-defined RGB colors. Windows Unicode text input is sent to ConPTY as UTF-8, while navigation keys use Ghostty's mode-aware key encoder. Window resizing measures the active monospace font and keeps every Ghostty grid and ConPTY session synchronized to the available viewport.
+The repository contains a runnable native Win32 application shell and a tested tab/session model. Each PowerShell and WSL tab owns an isolated Windows ConPTY process and `libghostty-vt` terminal. A background reader feeds ConPTY output into Ghostty, and the UI paints synchronized, themed cell render-state snapshots rather than displaying unparsed process output. The built-in Rasmus theme supplies the default, cursor, and ANSI colors while preserving application-defined RGB colors. Windows Unicode text input is sent to ConPTY as UTF-8, while navigation keys use Ghostty's mode-aware key encoder. Window resizing measures the active monospace font with DirectWrite and keeps every Ghostty grid and ConPTY session synchronized to the available viewport.
 
 Terminal painting, focus, input, refresh, and grid sizing are isolated in a dedicated Win32 child-window class. The top-level window owns only application chrome and tab commands. An optional C++/WinRT bridge hosts genuine WinUI 3 controls in a `DesktopWindowXamlSource` above the terminal sibling. The bridge forwards commands to Zig and owns no session behavior. If its DLL is absent or initialization fails, the existing hand-painted Win32 chrome remains active.
+
+The terminal surface uses Direct2D and DirectWrite. Ghostty's physical narrow, wide, and spacer cells remain authoritative: compatible row spans are contextually shaped with system font fallback, then each DirectWrite glyph cluster is fitted back to its exact terminal-column span. The renderer supports bold, italic, faint, underline variants, strikethrough, overline, and layered COLR/CPAL color glyphs while preserving per-cell backgrounds and cursor geometry. GDI remains available as an initialization fallback.
 
 The dependency is pinned to Ghostty commit `ae52f97dcac558735cfa916ea3965f247e5c6e9e`, matching the upstream Ghostling reference application and Zig 0.15.2. Full `libghostty` surfaces currently have no Win32 platform renderer, so Zigonaut uses the supported cross-platform VT library and owns its Windows rendering.
 
@@ -61,5 +63,5 @@ The `winui` build step discovers MSBuild through Visual Studio Installer, builds
 ## MVP path
 
 1. Add full physical-key mapping, key releases, and IME composition support.
-2. Complete Ghostty cell style rendering, then move text shaping from GDI to DirectWrite.
+2. Add terminal selection, links, and clipboard integration on top of the fixed-grid renderer.
 3. Add WinUI 3 packaging/chrome where it improves the native shell without coupling terminal state to XAML controls.

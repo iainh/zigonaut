@@ -61,8 +61,13 @@ HRESULT zigonaut_text_engine_draw_cell(
     float height,
     uint32_t foreground,
     uint32_t background,
+    uint32_t underline_color,
     BOOL bold,
     BOOL italic,
+    BOOL faint,
+    BOOL strikethrough,
+    BOOL overline,
+    uint8_t underline,
     ZigonautCellOccupancy occupancy);
 
 void zigonaut_text_engine_end_row(ZigonautTextEngine* engine);
@@ -76,6 +81,11 @@ void zigonaut_text_engine_draw_cursor(
     uint32_t color);
 
 HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
+
+void zigonaut_fit_cluster_advances(
+    float* advances,
+    uint32_t glyph_count,
+    float expected_width);
 
 #ifdef __cplusplus
 }

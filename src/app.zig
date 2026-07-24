@@ -1,5 +1,10 @@
 const std = @import("std");
+const directwrite_renderer = @import("directwrite_renderer.zig");
 const SessionRuntime = @import("session.zig").SessionRuntime;
+
+test {
+    _ = directwrite_renderer;
+}
 const theme = @import("theme.zig");
 
 pub const Shell = enum {

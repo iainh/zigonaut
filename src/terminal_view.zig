@@ -405,7 +405,16 @@ const CellRenderer = struct {
         };
         const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        _ = win.SetTextColor(self.dc, foreground);
+        const text_foreground = if (cell.faint and !self.view.high_contrast)
+            blendColorRef(foreground, background)
+        else
+            foreground;
+        const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
+        const decoration_color = if (cell.faint and !self.view.high_contrast)
+            blendColorRef(underline_color, background)
+        else
+            underline_color;
+        _ = win.SetTextColor(self.dc, text_foreground);
         _ = win.SetBkColor(self.dc, background);
 
         var wide: [32]u16 = undefined;
@@ -432,6 +441,39 @@ const CellRenderer = struct {
             @intCast(length),
             null,
         );
+        if (cell.underline != 0) {
+            fill(self.dc, .{
+                .left = rect.left,
+                .top = rect.bottom - 2,
+                .right = rect.right,
+                .bottom = rect.bottom - 1,
+            }, decoration_color);
+            if (cell.underline == 2) {
+                fill(self.dc, .{
+                    .left = rect.left,
+                    .top = rect.bottom - 4,
+                    .right = rect.right,
+                    .bottom = rect.bottom - 3,
+                }, decoration_color);
+            }
+        }
+        if (cell.strikethrough) {
+            const middle = rect.top + @divTrunc(rect.bottom - rect.top, 2);
+            fill(self.dc, .{
+                .left = rect.left,
+                .top = middle,
+                .right = rect.right,
+                .bottom = middle + 1,
+            }, text_foreground);
+        }
+        if (cell.overline) {
+            fill(self.dc, .{
+                .left = rect.left,
+                .top = rect.top,
+                .right = rect.right,
+                .bottom = rect.top + 1,
+            }, text_foreground);
+        }
     }
 
     pub fn endRow(_: *CellRenderer, _: u16) void {}
@@ -477,6 +519,7 @@ const DirectWriteCellRenderer = struct {
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
         const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
         self.engine.drawCell(
@@ -487,8 +530,13 @@ const DirectWriteCellRenderer = struct {
             @floatFromInt(self.view.cell_height),
             foreground,
             background,
+            underline_color,
             cell.bold,
             cell.italic,
+            cell.faint and !self.view.high_contrast,
+            cell.strikethrough,
+            cell.overline,
+            cell.underline,
             @intFromEnum(cell.occupancy),
         );
     }
@@ -635,8 +683,13 @@ fn drawDirectWriteMessage(
         @floatFromInt(@max(rect.bottom - rect.top, 1)),
         foreground,
         background,
+        foreground,
         false,
         false,
+        false,
+        false,
+        false,
+        0,
         @intFromEnum(Terminal.Cell.Occupancy.narrow),
     );
 }
@@ -687,4 +740,12 @@ fn colorRef(color: theme.Color) win.COLORREF {
 
 fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
     return @as(win.COLORREF, red) | (@as(win.COLORREF, green) << 8) | (@as(win.COLORREF, blue) << 16);
+}
+
+fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {
+    return rgb(
+        @intCast(((foreground & 0xff) + (background & 0xff)) / 2),
+        @intCast((((foreground >> 8) & 0xff) + ((background >> 8) & 0xff)) / 2),
+        @intCast((((foreground >> 16) & 0xff) + ((background >> 16) & 0xff)) / 2),
+    );
 }

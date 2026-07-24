@@ -74,8 +74,13 @@ pub const Engine = struct {
         height: f32,
         foreground: u32,
         background: u32,
+        underline_color: u32,
         bold: bool,
         italic: bool,
+        faint: bool,
+        strikethrough: bool,
+        overline: bool,
+        underline: u8,
         occupancy: u8,
     ) void {
         _ = native.zigonaut_text_engine_draw_cell(
@@ -88,8 +93,13 @@ pub const Engine = struct {
             height,
             foreground,
             background,
+            underline_color,
             @intFromBool(bold),
             @intFromBool(italic),
+            @intFromBool(faint),
+            @intFromBool(strikethrough),
+            @intFromBool(overline),
+            underline,
             @intCast(occupancy),
         );
     }
@@ -140,3 +150,20 @@ pub const Engine = struct {
         }
     }
 };
+
+test "cluster advances fit exact terminal spans" {
+    const std = @import("std");
+    var ligature = [_]f32{ 3.0, 4.0, 2.0 };
+    native.zigonaut_fit_cluster_advances(&ligature, ligature.len, 20.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0), sum(&ligature), 0.001);
+
+    var combining = [_]f32{ 9.0, 0.0 };
+    native.zigonaut_fit_cluster_advances(&combining, combining.len, 10.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), sum(&combining), 0.001);
+}
+
+fn sum(values: []const f32) f32 {
+    var total: f32 = 0;
+    for (values) |value| total += value;
+    return total;
+}

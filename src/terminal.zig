@@ -28,8 +28,13 @@ pub const Terminal = struct {
         codepoints: []const u32,
         foreground: theme.Color,
         background: theme.Color,
+        underline_color: theme.Color,
         bold: bool,
         italic: bool,
+        faint: bool,
+        strikethrough: bool,
+        overline: bool,
+        underline: u8,
     };
 
     pub const Frame = struct {
@@ -213,6 +218,12 @@ pub const Terminal = struct {
                     &background,
                 ) != vt.GHOSTTY_SUCCESS) background = colors.background;
                 if (style.inverse) std.mem.swap(vt.GhosttyColorRgb, &foreground, &background);
+                var underline_color = foreground;
+                switch (style.underline_color.tag) {
+                    vt.GHOSTTY_STYLE_COLOR_PALETTE => underline_color = colors.palette[style.underline_color.value.palette],
+                    vt.GHOSTTY_STYLE_COLOR_RGB => underline_color = style.underline_color.value.rgb,
+                    else => {},
+                }
 
                 var codepoint_count: u32 = 0;
                 try check(vt.ghostty_render_state_row_cells_get(
@@ -236,8 +247,13 @@ pub const Terminal = struct {
                     .codepoints = if (style.invisible or codepoint_count > codepoints.len) codepoints[0..0] else codepoints[0..count],
                     .foreground = fromGhostty(foreground),
                     .background = fromGhostty(background),
+                    .underline_color = fromGhostty(underline_color),
                     .bold = style.bold,
                     .italic = style.italic,
+                    .faint = style.faint,
+                    .strikethrough = style.strikethrough,
+                    .overline = style.overline,
+                    .underline = @intCast(@max(style.underline, 0)),
                 });
             }
         }
@@ -426,6 +442,25 @@ test "render state resolves ANSI colors through the Rasmus theme" {
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
 }
 
+test "render state exposes text decorations and wide occupancy" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("\x1b[1;2;3;4;9;53;58;2;10;20;30mX\x1b[0m中");
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+
+    try std.testing.expect(renderer.x_bold);
+    try std.testing.expect(renderer.x_italic);
+    try std.testing.expect(renderer.x_faint);
+    try std.testing.expect(renderer.x_strikethrough);
+    try std.testing.expect(renderer.x_overline);
+    try std.testing.expectEqual(@as(u8, 1), renderer.x_underline);
+    try std.testing.expectEqual(theme.Color{ .red = 10, .green = 20, .blue = 30 }, renderer.x_underline_color.?);
+    try std.testing.expectEqual(@as(usize, 1), renderer.wide_cells);
+    try std.testing.expectEqual(@as(usize, 1), renderer.wide_tails);
+}
+
 test "libghostty encodes navigation keys" {
     var terminal = try Terminal.init(20, 3, theme.rasmus);
     defer terminal.deinit();
@@ -449,6 +484,15 @@ test "libghostty encodes physical special and function keys" {
 const TestRenderer = struct {
     frame: ?Terminal.Frame = null,
     x_foreground: ?theme.Color = null,
+    x_underline_color: ?theme.Color = null,
+    x_bold: bool = false,
+    x_italic: bool = false,
+    x_faint: bool = false,
+    x_strikethrough: bool = false,
+    x_overline: bool = false,
+    x_underline: u8 = 0,
+    wide_cells: usize = 0,
+    wide_tails: usize = 0,
 
     pub fn beginFrame(self: *TestRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
@@ -457,7 +501,18 @@ const TestRenderer = struct {
     pub fn beginRow(_: *TestRenderer, _: u16) void {}
 
     pub fn drawCell(self: *TestRenderer, cell: Terminal.Cell) void {
-        if (cell.codepoints.len == 1 and cell.codepoints[0] == 'X') self.x_foreground = cell.foreground;
+        if (cell.codepoints.len == 1 and cell.codepoints[0] == 'X') {
+            self.x_foreground = cell.foreground;
+            self.x_underline_color = cell.underline_color;
+            self.x_bold = cell.bold;
+            self.x_italic = cell.italic;
+            self.x_faint = cell.faint;
+            self.x_strikethrough = cell.strikethrough;
+            self.x_overline = cell.overline;
+            self.x_underline = cell.underline;
+        }
+        if (cell.occupancy == .wide) self.wide_cells += 1;
+        if (cell.occupancy == .wide_tail) self.wide_tails += 1;
     }
 
     pub fn endRow(_: *TestRenderer, _: u16) void {}

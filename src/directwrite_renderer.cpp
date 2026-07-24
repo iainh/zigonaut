@@ -5,7 +5,9 @@
 #include <cmath>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <dwrite_2.h>
 #include <map>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -44,7 +46,39 @@ struct RowCell {
     uint32_t background;
     bool bold;
     bool italic;
+    bool strikethrough;
     ZigonautCellOccupancy occupancy;
+};
+
+struct OwnedColorLayer {
+    IDWriteFontFace* font_face = nullptr;
+    std::vector<UINT16> indices;
+    std::vector<FLOAT> advances;
+    std::vector<DWRITE_GLYPH_OFFSET> offsets;
+    FLOAT em_size = 0.0f;
+    BOOL sideways = FALSE;
+    UINT32 bidi_level = 0;
+    FLOAT origin_x = 0.0f;
+    FLOAT origin_y = 0.0f;
+    DWRITE_COLOR_F run_color{};
+    UINT16 palette_index = 0xffff;
+
+    ~OwnedColorLayer() {
+        release(font_face);
+    }
+
+    DWRITE_GLYPH_RUN glyphRun() const {
+        return {
+            font_face,
+            em_size,
+            static_cast<UINT32>(indices.size()),
+            indices.data(),
+            advances.empty() ? nullptr : advances.data(),
+            offsets.empty() ? nullptr : offsets.data(),
+            sideways,
+            bidi_level,
+        };
+    }
 };
 
 struct RowSegment {
@@ -64,12 +98,22 @@ D2D1_COLOR_F color(uint32_t value) {
         1.0f);
 }
 
+uint32_t blend(uint32_t foreground, uint32_t background) {
+    const uint32_t red = ((foreground & 0xff) + (background & 0xff)) / 2;
+    const uint32_t green = (((foreground >> 8) & 0xff) +
+                            ((background >> 8) & 0xff)) / 2;
+    const uint32_t blue = (((foreground >> 16) & 0xff) +
+                           ((background >> 16) & 0xff)) / 2;
+    return red | (green << 8) | (blue << 16);
+}
+
 } // namespace
 
 class GridTextRenderer;
 
 struct ZigonautTextEngine {
     IDWriteFactory* factory = nullptr;
+    IDWriteFactory2* factory2 = nullptr;
     IDWriteFontCollection* fonts = nullptr;
     IDWriteFontFace* normal_face = nullptr;
     IDWriteTextFormat* formats[4] = {};
@@ -96,6 +140,7 @@ struct ZigonautTextEngine {
         for (auto*& format : formats) release(format);
         release(normal_face);
         release(fonts);
+        release(factory2);
         release(factory);
     }
 
@@ -105,6 +150,8 @@ struct ZigonautTextEngine {
             __uuidof(IDWriteFactory),
             reinterpret_cast<IUnknown**>(&factory));
         if (FAILED(hr)) return hr;
+        factory->QueryInterface(__uuidof(IDWriteFactory2),
+            reinterpret_cast<void**>(&factory2));
 
         hr = factory->GetSystemFontCollection(&fonts, FALSE);
         if (FAILED(hr)) return hr;
@@ -264,13 +311,63 @@ struct ZigonautTextEngine {
         float height,
         uint32_t foreground,
         uint32_t background,
+        uint32_t underline_color,
         bool bold,
         bool italic,
+        bool faint,
+        bool strikethrough,
+        bool overline,
+        uint8_t underline,
         ZigonautCellOccupancy occupancy) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
         brush->SetColor(color(background));
         target->FillRectangle(rect, brush);
+        if (faint) {
+            foreground = blend(foreground, background);
+            underline_color = blend(underline_color, background);
+        }
+        brush->SetColor(color(underline_color));
+        const float underline_y = top + height - 1.5f;
+        if (underline != 0) {
+            if (underline == 4) {
+                for (float x = left + 1.0f; x < left + width; x += 3.0f) {
+                    target->DrawLine(D2D1::Point2F(x, underline_y),
+                        D2D1::Point2F(x + 0.5f, underline_y), brush, 1.0f);
+                }
+            } else if (underline == 5) {
+                for (float x = left; x < left + width; x += 6.0f) {
+                    target->DrawLine(D2D1::Point2F(x, underline_y),
+                        D2D1::Point2F(std::min(x + 3.0f, left + width), underline_y),
+                        brush, 1.0f);
+                }
+            } else if (underline == 3) {
+                for (float x = left; x < left + width; x += 4.0f) {
+                    target->DrawLine(D2D1::Point2F(x, underline_y - 1.0f),
+                        D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+                        brush, 1.0f);
+                    target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+                        D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 1.0f),
+                        brush, 1.0f);
+                }
+            } else {
+                target->DrawLine(D2D1::Point2F(left, underline_y),
+                    D2D1::Point2F(left + width, underline_y), brush, 1.0f);
+                if (underline == 2) {
+                    target->DrawLine(D2D1::Point2F(left, underline_y - 2.0f),
+                        D2D1::Point2F(left + width, underline_y - 2.0f), brush, 1.0f);
+                }
+            }
+        }
+        brush->SetColor(color(foreground));
+        if (strikethrough && !row_active) {
+            const float y = top + height * 0.55f;
+            target->DrawLine(D2D1::Point2F(left, y), D2D1::Point2F(left + width, y), brush, 1.0f);
+        }
+        if (overline) {
+            target->DrawLine(D2D1::Point2F(left, top + 1.0f),
+                D2D1::Point2F(left + width, top + 1.0f), brush, 1.0f);
+        }
         if (row_active) {
             std::u16string cell_text;
             if (text_length != 0) {
@@ -285,6 +382,7 @@ struct ZigonautTextEngine {
                 background,
                 bold,
                 italic,
+                strikethrough,
                 occupancy,
             });
             return S_OK;
@@ -456,10 +554,6 @@ public:
                 if (glyph_start >= glyph_end) continue;
                 const auto found = spans.find(static_cast<UINT16>(glyph_start));
                 if (found == spans.end()) continue;
-                float natural = 0.0f;
-                for (UINT32 glyph = glyph_start; glyph < glyph_end; ++glyph) {
-                    natural += advances[glyph];
-                }
                 const uint32_t cluster_left = segment_.start_columns[
                     found->second.first_text_index];
                 const uint32_t cluster_right =
@@ -468,7 +562,10 @@ public:
                     : segment_.end_columns[found->second.text_end - 1];
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
-                advances[glyph_end - 1] += expected - natural;
+                zigonaut_fit_cluster_advances(
+                    advances.data() + glyph_start,
+                    glyph_end - glyph_start,
+                    expected);
             }
 
             if (run_start_column != UINT32_MAX) {
@@ -481,14 +578,95 @@ public:
 
         DWRITE_GLYPH_RUN adjusted = *glyph_run;
         adjusted.glyphAdvances = advances.data();
-        engine_->brush->SetColor(color(segment_.foreground));
-        engine_->target->DrawGlyphRun(
-            D2D1::Point2F(
+        const float origin_y = engine_->row_top +
+            static_cast<float>(engine_->metrics.baseline);
+        bool rendered_color = false;
+        if (engine_->factory2 != nullptr) {
+            const DWRITE_MATRIX transform = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+            IDWriteColorGlyphRunEnumerator* layers = nullptr;
+            const HRESULT color_result = engine_->factory2->TranslateColorGlyphRun(
                 origin_x,
-                engine_->row_top + static_cast<float>(engine_->metrics.baseline)),
-            &adjusted,
-            engine_->brush,
-            measuring_mode);
+                origin_y,
+                &adjusted,
+                description,
+                measuring_mode,
+                &transform,
+                0,
+                &layers);
+            if (SUCCEEDED(color_result)) {
+                std::vector<std::unique_ptr<OwnedColorLayer>> owned_layers;
+                bool enumeration_complete = false;
+                BOOL has_layer = FALSE;
+                for (;;) {
+                    const HRESULT next_result = layers->MoveNext(&has_layer);
+                    if (FAILED(next_result)) break;
+                    if (!has_layer) {
+                        enumeration_complete = true;
+                        break;
+                    }
+                    const DWRITE_COLOR_GLYPH_RUN* layer = nullptr;
+                    if (FAILED(layers->GetCurrentRun(&layer)) || layer == nullptr) break;
+                    try {
+                        auto owned = std::make_unique<OwnedColorLayer>();
+                        owned->font_face = layer->glyphRun.fontFace;
+                        if (owned->font_face != nullptr) owned->font_face->AddRef();
+                        owned->em_size = layer->glyphRun.fontEmSize;
+                        owned->sideways = layer->glyphRun.isSideways;
+                        owned->bidi_level = layer->glyphRun.bidiLevel;
+                        owned->origin_x = layer->baselineOriginX;
+                        owned->origin_y = layer->baselineOriginY;
+                        owned->run_color = layer->runColor;
+                        owned->palette_index = layer->paletteIndex;
+                        owned->indices.assign(
+                            layer->glyphRun.glyphIndices,
+                            layer->glyphRun.glyphIndices + layer->glyphRun.glyphCount);
+                        if (layer->glyphRun.glyphAdvances != nullptr) {
+                            owned->advances.assign(
+                                layer->glyphRun.glyphAdvances,
+                                layer->glyphRun.glyphAdvances + layer->glyphRun.glyphCount);
+                        }
+                        if (layer->glyphRun.glyphOffsets != nullptr) {
+                            owned->offsets.assign(
+                                layer->glyphRun.glyphOffsets,
+                                layer->glyphRun.glyphOffsets + layer->glyphRun.glyphCount);
+                        }
+                        owned_layers.push_back(std::move(owned));
+                    } catch (...) {
+                        enumeration_complete = false;
+                        break;
+                    }
+                }
+                if (enumeration_complete) {
+                    for (const auto& layer : owned_layers) {
+                        if (layer->palette_index == 0xffff) {
+                            engine_->brush->SetColor(color(segment_.foreground));
+                        } else {
+                            engine_->brush->SetColor(D2D1::ColorF(
+                                layer->run_color.r,
+                                layer->run_color.g,
+                                layer->run_color.b,
+                                layer->run_color.a));
+                        }
+                        const DWRITE_GLYPH_RUN color_run = layer->glyphRun();
+                        engine_->target->DrawGlyphRun(
+                            D2D1::Point2F(layer->origin_x, layer->origin_y),
+                            &color_run,
+                            engine_->brush,
+                            measuring_mode);
+                    }
+                    rendered_color = !owned_layers.empty();
+                }
+                release(layers);
+            }
+        }
+        if (!rendered_color) {
+            engine_->brush->SetColor(color(segment_.foreground));
+            engine_->target->DrawGlyphRun(
+                D2D1::Point2F(origin_x, origin_y),
+                &adjusted,
+                engine_->brush,
+                measuring_mode);
+        }
         return S_OK;
     }
 
@@ -587,6 +765,18 @@ void ZigonautTextEngine::endRow() {
         }
     }
     flush();
+    for (const auto& cell : row_cells) {
+        if (!cell.strikethrough) continue;
+        const float left = row_origin_x +
+            static_cast<float>(cell.column) * row_cell_width;
+        const float y = row_top + row_cell_height * 0.55f;
+        brush->SetColor(color(cell.foreground));
+        target->DrawLine(
+            D2D1::Point2F(left, y),
+            D2D1::Point2F(left + row_cell_width, y),
+            brush,
+            1.0f);
+    }
     row_cells.clear();
 }
 
@@ -678,8 +868,13 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
     float height,
     uint32_t foreground,
     uint32_t background,
+    uint32_t underline_color,
     BOOL bold,
     BOOL italic,
+    BOOL faint,
+    BOOL strikethrough,
+    BOOL overline,
+    uint8_t underline,
     ZigonautCellOccupancy occupancy) {
     if (engine == nullptr || (text == nullptr && text_length != 0)) return E_INVALIDARG;
     return engine->drawCell(
@@ -691,8 +886,13 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
         height,
         foreground,
         background,
+        underline_color,
         bold != FALSE,
         italic != FALSE,
+        faint != FALSE,
+        strikethrough != FALSE,
+        overline != FALSE,
+        underline,
         occupancy);
 }
 
@@ -720,4 +920,16 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     const HRESULT hr = engine->target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) engine->discardTarget();
     return hr;
+}
+
+extern "C" void zigonaut_fit_cluster_advances(
+    float* advances,
+    uint32_t glyph_count,
+    float expected_width) {
+    if (advances == nullptr || glyph_count == 0) return;
+    float natural_width = 0.0f;
+    for (uint32_t index = 0; index < glyph_count; ++index) {
+        natural_width += advances[index];
+    }
+    advances[glyph_count - 1] += expected_width - natural_width;
 }

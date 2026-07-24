@@ -65,6 +65,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.linkLibC();
+    tests.linkLibCpp();
+    tests.addIncludePath(b.path("src"));
+    tests.addCSourceFile(.{
+        .file = b.path("src/directwrite_renderer.cpp"),
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+    });
+    tests.linkSystemLibrary("user32");
+    tests.linkSystemLibrary("gdi32");
+    tests.linkSystemLibrary("d2d1");
+    tests.linkSystemLibrary("dwrite");
     tests.linkSystemLibrary("kernel32");
     configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
