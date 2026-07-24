@@ -87,6 +87,10 @@ pub const View = struct {
             instance,
             self,
         ) orelse return error.CreateTerminalViewFailed;
+        if (self.text_engine) |*engine| engine.setWindow(self.hwnd) catch {
+            engine.deinit();
+            self.text_engine = null;
+        };
     }
 
     pub fn move(self: *View, x: i32, y: i32, width: i32, height: i32) void {
@@ -162,12 +166,62 @@ pub const View = struct {
         const height = client.bottom - client.top;
         if (width <= 0 or height <= 0) return;
 
+        if (self.text_engine != null) {
+            self.paintDirect2D(client, width, height) catch {
+                self.invalidate();
+            };
+            return;
+        }
+
         if (self.ensureBackBuffer(dc, width, height)) {
             self.paintFrame(self.back_dc, client);
             _ = win.BitBlt(dc, 0, 0, width, height, self.back_dc, 0, 0, win.SRCCOPY);
         } else {
             self.paintFrame(dc, client);
         }
+    }
+
+    fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !void {
+        const background = if (self.high_contrast)
+            win.GetSysColor(win.COLOR_WINDOW)
+        else
+            colorRef(self.model.terminal_theme.background);
+        const foreground = if (self.high_contrast)
+            win.GetSysColor(win.COLOR_WINDOWTEXT)
+        else
+            colorRef(self.model.terminal_theme.foreground);
+        const engine = &self.text_engine.?;
+        try engine.beginFrame(@intCast(width), @intCast(height), background);
+        errdefer engine.endFrame() catch {};
+
+        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
+        if (self.model.activeSession()) |session| {
+            var renderer = DirectWriteCellRenderer{
+                .engine = engine,
+                .view = self,
+                .client = client,
+                .origin_x = padding,
+                .origin_y = padding,
+            };
+            session.runtime.?.renderViewport(&renderer) catch {
+                drawDirectWriteMessage(
+                    engine,
+                    "libghostty render state unavailable",
+                    paddedRect(client, padding),
+                    foreground,
+                    background,
+                );
+            };
+        } else {
+            drawDirectWriteMessage(
+                engine,
+                "Open a PowerShell or WSL session.",
+                paddedRect(client, padding),
+                foreground,
+                background,
+            );
+        }
+        try engine.endFrame();
     }
 
     fn ensureBackBuffer(self: *View, dc: win.HDC, width: i32, height: i32) bool {
@@ -391,6 +445,52 @@ const CellRenderer = struct {
     }
 };
 
+const DirectWriteCellRenderer = struct {
+    engine: *TextEngine,
+    view: *View,
+    client: win.RECT,
+    origin_x: i32,
+    origin_y: i32,
+
+    pub fn beginFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
+        _ = self;
+        _ = frame;
+    }
+
+    pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
+        const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
+        const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
+        const foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
+        const background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        var wide: [32]u16 = undefined;
+        const length = encodeUtf16(cell.codepoints, &wide);
+        self.engine.drawCell(
+            wide[0..length],
+            @floatFromInt(left),
+            @floatFromInt(top),
+            @floatFromInt(self.view.cell_width),
+            @floatFromInt(self.view.cell_height),
+            foreground,
+            background,
+            cell.bold,
+            cell.italic,
+        );
+    }
+
+    pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
+        if (!frame.cursor_visible) return;
+        const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
+        const top = self.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.view.cell_height));
+        self.engine.drawCursor(
+            @floatFromInt(left),
+            @floatFromInt(top),
+            @floatFromInt(self.view.cell_width),
+            @floatFromInt(self.view.cell_height),
+            if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(frame.cursor),
+        );
+    }
+};
+
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
     if (message == win.WM_NCCREATE) {
         const create: *win.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
@@ -496,6 +596,45 @@ fn drawText(dc: win.HDC, text: []const u8, rect: *win.RECT, format: win.UINT) vo
     var wide: [16 * 1024]u16 = undefined;
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
     _ = win.DrawTextW(dc, &wide, @intCast(length), rect, format);
+}
+
+fn drawDirectWriteMessage(
+    engine: *TextEngine,
+    text: []const u8,
+    rect: win.RECT,
+    foreground: u32,
+    background: u32,
+) void {
+    var wide: [16 * 1024]u16 = undefined;
+    const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
+    engine.drawCell(
+        wide[0..length],
+        @floatFromInt(rect.left),
+        @floatFromInt(rect.top),
+        @floatFromInt(@max(rect.right - rect.left, 1)),
+        @floatFromInt(@max(rect.bottom - rect.top, 1)),
+        foreground,
+        background,
+        false,
+        false,
+    );
+}
+
+fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
+    var length: usize = 0;
+    for (codepoints) |codepoint| {
+        if (codepoint <= 0xffff) {
+            if (codepoint >= 0xd800 and codepoint <= 0xdfff) continue;
+            output[length] = @intCast(codepoint);
+            length += 1;
+        } else if (codepoint <= 0x10ffff and length + 1 < output.len) {
+            const value = codepoint - 0x10000;
+            output[length] = @intCast(0xd800 + (value >> 10));
+            output[length + 1] = @intCast(0xdc00 + (value & 0x3ff));
+            length += 2;
+        }
+    }
+    return length;
 }
 
 fn paddedRect(rect: win.RECT, padding: i32) win.RECT {

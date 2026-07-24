@@ -46,4 +46,73 @@ pub const Engine = struct {
             .baseline = value.baseline,
         };
     }
+
+    pub fn setWindow(self: *Engine, hwnd: ?*anyopaque) !void {
+        if (native.zigonaut_text_engine_set_window(
+            self.handle,
+            @intFromPtr(hwnd),
+        ) < 0) {
+            return error.DirectWriteWindowFailed;
+        }
+    }
+
+    pub fn beginFrame(self: *Engine, width: u32, height: u32, background: u32) !void {
+        if (native.zigonaut_text_engine_begin_frame(
+            self.handle,
+            width,
+            height,
+            background,
+        ) < 0) return error.Direct2DBeginFrameFailed;
+    }
+
+    pub fn drawCell(
+        self: *Engine,
+        text: []const u16,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        foreground: u32,
+        background: u32,
+        bold: bool,
+        italic: bool,
+    ) void {
+        _ = native.zigonaut_text_engine_draw_cell(
+            self.handle,
+            if (text.len == 0) null else text.ptr,
+            @intCast(text.len),
+            left,
+            top,
+            width,
+            height,
+            foreground,
+            background,
+            @intFromBool(bold),
+            @intFromBool(italic),
+        );
+    }
+
+    pub fn drawCursor(
+        self: *Engine,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        color: u32,
+    ) void {
+        native.zigonaut_text_engine_draw_cursor(
+            self.handle,
+            left,
+            top,
+            width,
+            height,
+            color,
+        );
+    }
+
+    pub fn endFrame(self: *Engine) !void {
+        if (native.zigonaut_text_engine_end_frame(self.handle) < 0) {
+            return error.Direct2DEndFrameFailed;
+        }
+    }
 };
