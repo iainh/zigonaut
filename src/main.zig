@@ -8,6 +8,8 @@ const win = @import("win32.zig").c;
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
 const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
 const font_name = std.unicode.utf8ToUtf16LeStringLiteral("Cascadia Mono");
+const personalize_key = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+const apps_use_light_theme = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
 
 const command_new_powershell = 1001;
 const command_new_wsl = 1002;
@@ -23,6 +25,8 @@ const State = struct {
     model: app_model.App,
     font: win.HFONT,
     dpi: u32,
+    dark_theme: bool,
+    high_contrast: bool,
     terminal_view: TerminalView,
     chrome: ?chrome.Bridge = null,
 };
@@ -65,8 +69,7 @@ pub fn main() !void {
         null,
     ) orelse return error.CreateWindowFailed;
 
-    var dark_mode: win.BOOL = 1;
-    _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
+    updateTheme(hwnd);
 
     var message: win.MSG = undefined;
     while (win.GetMessageW(&message, null, 0, 0) > 0) {
@@ -121,6 +124,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 .model = app_model.App.init(std.heap.page_allocator),
                 .font = font,
                 .dpi = dpi,
+                .dark_theme = false,
+                .high_contrast = false,
                 .terminal_view = undefined,
             };
             state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
@@ -193,6 +198,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 layoutTerminalView(hwnd);
                 _ = win.InvalidateRect(hwnd, null, 0);
             }
+            return 0;
+        },
+        win.WM_SETTINGCHANGE, win.WM_THEMECHANGED => {
+            updateTheme(hwnd);
             return 0;
         },
         win.WM_CLOSE => {
@@ -302,7 +311,8 @@ fn paint(hwnd: win.HWND) void {
 
     var client: win.RECT = undefined;
     _ = win.GetClientRect(hwnd, &client);
-    fill(dc, client, rgb(15, 17, 21));
+    const colors = palette();
+    fill(dc, client, colors.background);
 
     if (state.?.chrome != null) return;
 
@@ -310,9 +320,9 @@ fn paint(hwnd: win.HWND) void {
     _ = win.SetBkMode(dc, win.TRANSPARENT);
     const dpi = state.?.dpi;
 
-    drawButton(dc, scaledRect(.{ .left = 16, .top = 12, .right = 136, .bottom = 44 }, dpi), "PowerShell", rgb(51, 58, 72));
-    drawButton(dc, scaledRect(.{ .left = 144, .top = 12, .right = 220, .bottom = 44 }, dpi), "+ WSL", rgb(51, 58, 72));
-    drawButton(dc, scaledRect(.{ .left = 228, .top = 12, .right = 266, .bottom = 44 }, dpi), "x", rgb(83, 43, 50));
+    drawButton(dc, scaledRect(.{ .left = 16, .top = 12, .right = 136, .bottom = 44 }, dpi), "PowerShell", colors.button, colors.text);
+    drawButton(dc, scaledRect(.{ .left = 144, .top = 12, .right = 220, .bottom = 44 }, dpi), "+ WSL", colors.button, colors.text);
+    drawButton(dc, scaledRect(.{ .left = 228, .top = 12, .right = 266, .bottom = 44 }, dpi), "x", colors.close, colors.text);
 
     const model = &state.?.model;
     for (model.sessions.items, 0..) |session, index| {
@@ -322,15 +332,16 @@ fn paint(hwnd: win.HWND) void {
             dc,
             scaledRect(.{ .left = left, .top = 56, .right = left + 160, .bottom = 94 }, dpi),
             session.shell.title(),
-            if (active) rgb(70, 83, 111) else rgb(31, 35, 43),
+            if (active) colors.active else colors.button,
+            colors.text,
         );
     }
 }
 
-fn drawButton(dc: win.HDC, rect: win.RECT, text: []const u8, color: win.COLORREF) void {
+fn drawButton(dc: win.HDC, rect: win.RECT, text: []const u8, color: win.COLORREF, text_color: win.COLORREF) void {
     fill(dc, rect, color);
     var text_rect = rect;
-    _ = win.SetTextColor(dc, rgb(238, 241, 247));
+    _ = win.SetTextColor(dc, text_color);
     drawText(dc, text, &text_rect, win.DT_CENTER | win.DT_VCENTER | win.DT_SINGLELINE | win.DT_NOPREFIX);
 }
 
@@ -381,4 +392,70 @@ fn scaledRect(rect: win.RECT, dpi: u32) win.RECT {
         .right = scaled(rect.right, dpi),
         .bottom = scaled(rect.bottom, dpi),
     };
+}
+
+const Palette = struct {
+    background: win.COLORREF,
+    text: win.COLORREF,
+    button: win.COLORREF,
+    active: win.COLORREF,
+    close: win.COLORREF,
+};
+
+fn palette() Palette {
+    if (state.?.high_contrast) return .{
+        .background = win.GetSysColor(win.COLOR_WINDOW),
+        .text = win.GetSysColor(win.COLOR_WINDOWTEXT),
+        .button = win.GetSysColor(win.COLOR_BTNFACE),
+        .active = win.GetSysColor(win.COLOR_HIGHLIGHT),
+        .close = win.GetSysColor(win.COLOR_BTNFACE),
+    };
+    if (state.?.dark_theme) return .{
+        .background = rgb(15, 17, 21),
+        .text = rgb(238, 241, 247),
+        .button = rgb(51, 58, 72),
+        .active = rgb(70, 83, 111),
+        .close = rgb(83, 43, 50),
+    };
+    return .{
+        .background = rgb(243, 243, 243),
+        .text = rgb(28, 28, 28),
+        .button = rgb(225, 225, 225),
+        .active = rgb(196, 213, 243),
+        .close = rgb(244, 204, 204),
+    };
+}
+
+fn updateTheme(hwnd: win.HWND) void {
+    if (state == null) return;
+    state.?.dark_theme = appsUseDarkTheme();
+    state.?.high_contrast = highContrastEnabled();
+    var dark_mode: win.BOOL = @intFromBool(state.?.dark_theme and !state.?.high_contrast);
+    _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
+    _ = win.InvalidateRect(hwnd, null, 0);
+}
+
+fn appsUseDarkTheme() bool {
+    var light_theme: win.DWORD = 1;
+    var size: win.DWORD = @sizeOf(win.DWORD);
+    const result = win.RegGetValueW(
+        win.HKEY_CURRENT_USER,
+        personalize_key,
+        apps_use_light_theme,
+        win.RRF_RT_REG_DWORD,
+        null,
+        &light_theme,
+        &size,
+    );
+    return result == win.ERROR_SUCCESS and light_theme == 0;
+}
+
+fn highContrastEnabled() bool {
+    var contrast = win.HIGHCONTRASTW{
+        .cbSize = @sizeOf(win.HIGHCONTRASTW),
+        .dwFlags = 0,
+        .lpszDefaultScheme = null,
+    };
+    return win.SystemParametersInfoW(win.SPI_GETHIGHCONTRAST, contrast.cbSize, &contrast, 0) != 0 and
+        (contrast.dwFlags & win.HCF_HIGHCONTRASTON) != 0;
 }
