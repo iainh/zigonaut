@@ -105,7 +105,7 @@ struct Bridge {
 bool owner(Bridge* bridge) { return bridge && bridge->thread_id == GetCurrentThreadId(); }
 }
 
-extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) {
+extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) noexcept {
     if (!parent || !callback) return nullptr;
     try {
         init_apartment(apartment_type::single_threaded);
@@ -135,27 +135,27 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
     }
 }
 
-extern "C" void __cdecl zigonaut_chrome_update(void* value, const uint8_t* kinds, uint32_t count, int32_t active) {
+extern "C" void __cdecl zigonaut_chrome_update(void* value, const uint8_t* kinds, uint32_t count, int32_t active) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge) || (count && !kinds)) return;
     try { bridge->update(kinds, count, active); } catch (...) {}
 }
 
-extern "C" void __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) {
+extern "C" void __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
     try { bridge->source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1}); } catch (...) {}
 }
 
-extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) {
+extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge) || !message) return FALSE;
-    return ContentPreTranslateMessage(message) ? TRUE : FALSE;
+    try { return ContentPreTranslateMessage(message) ? TRUE : FALSE; } catch (...) { return FALSE; }
 }
 
-extern "C" void __cdecl zigonaut_chrome_close(void* value) {
+extern "C" void __cdecl zigonaut_chrome_close(void* value) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
     try { bridge->close(); } catch (...) {}
 }
 
-extern "C" void __cdecl zigonaut_chrome_destroy(void* value) {
+extern "C" void __cdecl zigonaut_chrome_destroy(void* value) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
     auto dispatcher = bridge->dispatcher;
     try { bridge->close(); } catch (...) {}
