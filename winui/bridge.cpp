@@ -27,6 +27,23 @@ constexpr uint32_t command_new_wsl = 2;
 constexpr uint32_t command_close = 3;
 constexpr uint32_t command_select = 4;
 
+HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
+    wchar_t message[160]{};
+    swprintf_s(message, L"Zigonaut WinUI: %s failed with HRESULT 0x%08X\n", operation, static_cast<unsigned>(result));
+    OutputDebugStringW(message);
+    return result;
+}
+
+HRESULT reportCurrentException(wchar_t const* operation) noexcept {
+    try {
+        throw;
+    } catch (hresult_error const& error) {
+        return reportFailure(operation, error.code());
+    } catch (...) {
+        return reportFailure(operation, E_FAIL);
+    }
+}
+
 struct Bridge {
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
@@ -77,6 +94,10 @@ struct Bridge {
 
     void update(uint8_t const* kinds, uint32_t count, int32_t active) {
         updating = true;
+        struct ResetUpdating {
+            bool& value;
+            ~ResetUpdating() { value = false; }
+        } reset{updating};
         auto items = tabs.TabItems();
         while (items.Size() > count) items.RemoveAtEnd();
         for (uint32_t i = 0; i < count; ++i) {
@@ -86,7 +107,6 @@ struct Bridge {
             if (i == items.Size()) items.Append(item);
         }
         tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
-        updating = false;
     }
 
     void showNewTabMenu() {
@@ -133,6 +153,11 @@ struct Bridge {
 };
 
 bool owner(Bridge* bridge) { return bridge && bridge->thread_id == GetCurrentThreadId(); }
+
+HRESULT validate(Bridge* bridge) {
+    if (!bridge) return E_POINTER;
+    return bridge->thread_id == GetCurrentThreadId() ? S_OK : RPC_E_WRONG_THREAD;
+}
 }
 
 extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) noexcept {
@@ -140,12 +165,15 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
     try {
         init_apartment(apartment_type::single_threaded);
     } catch (...) {
+        reportCurrentException(L"init_apartment");
         return nullptr;
     }
     try {
         PACKAGE_VERSION minimum{};
         minimum.Version = 0;
-        if (FAILED(MddBootstrapInitialize(0x00010008, nullptr, minimum))) {
+        auto const bootstrap_result = MddBootstrapInitialize(0x00010008, nullptr, minimum);
+        if (FAILED(bootstrap_result)) {
+            reportFailure(L"MddBootstrapInitialize", bootstrap_result);
             uninit_apartment();
             return nullptr;
         }
@@ -155,43 +183,52 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
             return new Bridge(parent, callback, context, dispatcher, application);
         }
         catch (...) {
+            reportCurrentException(L"WinUI initialization");
             MddBootstrapShutdown();
             uninit_apartment();
             return nullptr;
         }
     } catch (...) {
+        reportCurrentException(L"Windows App SDK initialization");
         uninit_apartment();
         return nullptr;
     }
 }
 
-extern "C" void __cdecl zigonaut_chrome_update(void* value, const uint8_t* kinds, uint32_t count, int32_t active) noexcept {
-    auto bridge = static_cast<Bridge*>(value); if (!owner(bridge) || (count && !kinds)) return;
-    try { bridge->update(kinds, count, active); } catch (...) {}
+extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const uint8_t* kinds, uint32_t count, int32_t active) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (count && !kinds) return E_INVALIDARG;
+    try { bridge->update(kinds, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
-extern "C" void __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
-    auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
-    try { bridge->source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1}); } catch (...) {}
+extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    try { bridge->source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1}); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
 }
 
 extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {
     auto bridge = static_cast<Bridge*>(value); if (!owner(bridge) || !message) return FALSE;
-    try { return ContentPreTranslateMessage(message) ? TRUE : FALSE; } catch (...) { return FALSE; }
+    try { return ContentPreTranslateMessage(message) ? TRUE : FALSE; } catch (...) { reportCurrentException(L"pretranslate"); return FALSE; }
 }
 
-extern "C" void __cdecl zigonaut_chrome_close(void* value) noexcept {
-    auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
-    try { bridge->close(); } catch (...) {}
+extern "C" HRESULT __cdecl zigonaut_chrome_close(void* value) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    try { bridge->close(); return S_OK; } catch (...) { return reportCurrentException(L"close"); }
 }
 
-extern "C" void __cdecl zigonaut_chrome_destroy(void* value) noexcept {
-    auto bridge = static_cast<Bridge*>(value); if (!owner(bridge)) return;
+extern "C" HRESULT __cdecl zigonaut_chrome_destroy(void* value) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     auto dispatcher = bridge->dispatcher;
-    try { bridge->close(); } catch (...) {}
+    HRESULT result = S_OK;
+    try { bridge->close(); } catch (...) { result = reportCurrentException(L"close during destroy"); }
     delete bridge;
-    try { dispatcher.ShutdownQueue(); } catch (...) {}
+    try { dispatcher.ShutdownQueue(); } catch (...) { if (SUCCEEDED(result)) result = reportCurrentException(L"ShutdownQueue"); }
     dispatcher = nullptr;
     MddBootstrapShutdown();
     uninit_apartment();
+    return result;
 }

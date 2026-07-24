@@ -248,7 +248,12 @@ fn layoutTerminalView(hwnd: win.HWND) void {
     if (win.GetClientRect(hwnd, &client) == 0) return;
     const dpi = state.?.dpi;
     const terminal_top = scaled(if (state.?.chrome != null) winui_terminal_top else fallback_terminal_top, dpi);
-    if (state.?.chrome) |*bridge| bridge.move(0, 0, client.right, terminal_top);
+    var chrome_failed = false;
+    if (state.?.chrome) |*bridge| chrome_failed = !bridge.move(0, 0, client.right, terminal_top);
+    if (chrome_failed) {
+        disableChrome(hwnd);
+        return;
+    }
     state.?.terminal_view.move(
         scaled(terminal_left, dpi),
         terminal_top,
@@ -266,8 +271,15 @@ fn syncChrome() void {
         for (state.?.model.sessions.items, 0..) |session, index| {
             kinds[index] = @intFromEnum(session.shell);
         }
-        bridge.update(kinds, state.?.model.active);
+        if (!bridge.update(kinds, state.?.model.active)) disableChrome(state.?.hwnd);
     }
+}
+
+fn disableChrome(hwnd: win.HWND) void {
+    if (state.?.chrome) |*bridge| bridge.deinit();
+    state.?.chrome = null;
+    layoutTerminalView(hwnd);
+    _ = win.InvalidateRect(hwnd, null, 0);
 }
 
 fn chromeCommand(_: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
