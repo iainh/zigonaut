@@ -68,6 +68,7 @@ pub fn main() !void {
 
     var message: win.MSG = undefined;
     while (win.GetMessageW(&message, null, 0, 0) > 0) {
+        if (handleShortcut(&message)) continue;
         if (state) |*current| {
             if (current.chrome) |*bridge| {
                 if (bridge.pretranslate(&message)) continue;
@@ -80,6 +81,32 @@ pub fn main() !void {
         if (current.chrome) |*bridge| bridge.deinit();
     }
     state = null;
+}
+
+fn handleShortcut(message: *const win.MSG) bool {
+    if (message.message != win.WM_KEYDOWN and message.message != win.WM_SYSKEYDOWN) return false;
+    if (win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_MENU) < 0) return false;
+
+    const shift = win.GetKeyState(win.VK_SHIFT) < 0;
+    const repeated = (message.lParam & (@as(win.LPARAM, 1) << 30)) != 0;
+    const hwnd = state.?.hwnd;
+    if (shift and message.wParam == 'T') {
+        if (!repeated) sendCommand(hwnd, command_new_powershell);
+        return true;
+    }
+    if (shift and message.wParam == 'W') {
+        if (!repeated) sendCommand(hwnd, command_close_tab);
+        return true;
+    }
+    if (message.wParam != win.VK_TAB) return false;
+
+    const count = state.?.model.sessions.items.len;
+    const active = state.?.model.active orelse return true;
+    if (count > 1) {
+        const next = if (shift) (active + count - 1) % count else (active + 1) % count;
+        sendCommand(hwnd, command_tab_base + @as(u16, @intCast(next)));
+    }
+    return true;
 }
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
