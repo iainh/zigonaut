@@ -436,10 +436,14 @@ fn updateTheme(hwnd: win.HWND) void {
 }
 
 fn appsUseDarkTheme() bool {
+    var current_user: win.HKEY = null;
+    if (win.RegOpenCurrentUser(win.KEY_QUERY_VALUE, &current_user) != win.ERROR_SUCCESS) return false;
+    defer _ = win.RegCloseKey(current_user);
+
     var light_theme: win.DWORD = 1;
     var size: win.DWORD = @sizeOf(win.DWORD);
     const result = win.RegGetValueW(
-        win.HKEY_CURRENT_USER,
+        current_user,
         personalize_key,
         apps_use_light_theme,
         win.RRF_RT_REG_DWORD,
