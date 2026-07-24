@@ -33,6 +33,7 @@ const State = struct {
     dpi: u32,
     dark_theme: bool,
     high_contrast: bool,
+    terminal_ready: bool = false,
     terminal_view: TerminalView,
     chrome: ?chrome.Bridge = null,
     fallback_powershell: win.HWND = null,
@@ -144,6 +145,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             };
             state.?.terminal_view = TerminalView.init(hwnd, &state.?.model, font);
             state.?.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch return -1;
+            state.?.terminal_ready = true;
             _ = state.?.model.addSession(.powershell) catch return -1;
             state.?.chrome = chrome.Bridge.load(hwnd, chromeCommand, null);
             if (state.?.chrome == null) createFallbackControls(hwnd, win.GetModuleHandleW(null)) catch return -1;
@@ -425,6 +427,7 @@ fn updateTheme(hwnd: win.HWND) void {
     if (state == null) return;
     state.?.dark_theme = appsUseDarkTheme();
     state.?.high_contrast = highContrastEnabled();
+    if (state.?.terminal_ready) state.?.terminal_view.updateTheme(state.?.dark_theme, state.?.high_contrast);
     var dark_mode: win.BOOL = @intFromBool(state.?.dark_theme and !state.?.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);

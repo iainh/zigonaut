@@ -18,6 +18,8 @@ pub const View = struct {
     cell_height: u32,
     columns: u16 = 0,
     rows: u16 = 0,
+    dark_theme: bool = true,
+    high_contrast: bool = false,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -88,6 +90,12 @@ pub const View = struct {
         _ = win.InvalidateRect(self.hwnd, null, 0);
     }
 
+    pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool) void {
+        self.dark_theme = dark_theme;
+        self.high_contrast = high_contrast;
+        self.invalidate();
+    }
+
     fn resizeSessions(self: *View) void {
         var client: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &client) == 0) return;
@@ -113,11 +121,23 @@ pub const View = struct {
 
         var client: win.RECT = undefined;
         _ = win.GetClientRect(self.hwnd, &client);
-        fill(dc, client, rgb(9, 10, 13));
+        const background = if (self.high_contrast)
+            win.GetSysColor(win.COLOR_WINDOW)
+        else if (self.dark_theme)
+            rgb(9, 10, 13)
+        else
+            rgb(255, 255, 255);
+        const foreground = if (self.high_contrast)
+            win.GetSysColor(win.COLOR_WINDOWTEXT)
+        else if (self.dark_theme)
+            rgb(198, 206, 220)
+        else
+            rgb(32, 32, 32);
+        fill(dc, client, background);
 
         _ = win.SelectObject(dc, self.font);
         _ = win.SetBkMode(dc, win.TRANSPARENT);
-        _ = win.SetTextColor(dc, rgb(198, 206, 220));
+        _ = win.SetTextColor(dc, foreground);
         var text_rect = client;
         const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
         text_rect.left += padding;
