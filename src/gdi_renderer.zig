@@ -19,6 +19,7 @@ pub const Context = struct {
     hover_row: ?u16 = null,
     hover_start: u16 = 0,
     hover_end: u16 = 0,
+    copy_flash: bool = false,
 };
 
 pub const Owner = struct {
@@ -133,7 +134,7 @@ const CellRenderer = struct {
         else if (search_kind == 1)
             rgb(255, 255, 255)
         else if (cell.selected)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+            (if (self.context.copy_flash and !self.context.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
         else if (solid_cursor)
             normal_background
         else
@@ -145,7 +146,7 @@ const CellRenderer = struct {
         else if (search_kind == 1)
             rgb(110, 90, 20)
         else if (cell.selected)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
+            (if (self.context.copy_flash and !self.context.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
         else if (solid_cursor)
             (if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
         else

@@ -15,6 +15,8 @@ const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
+const copy_flash_timer = 2;
+const copy_flash_duration_ms = 150;
 const logical_padding = 8;
 const wheel_rows = 3;
 
@@ -42,6 +44,7 @@ pub const View = struct {
     scrollbar_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
     suppressed_search_character: ?u16 = null,
+    copy_flash: bool = false,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -288,6 +291,7 @@ pub const View = struct {
             .hover_row = if (self.hovered_link) |hovered| hovered.link.row else null,
             .hover_start = if (self.hovered_link) |hovered| hovered.link.start_column else 0,
             .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
+            .copy_flash = self.copy_flash,
         });
     }
 
@@ -511,6 +515,9 @@ pub const View = struct {
         const text = try runtime.selectedTextAlloc(std.heap.page_allocator);
         defer std.heap.page_allocator.free(text);
         try setClipboardText(self.hwnd, text);
+        self.copy_flash = true;
+        _ = win.SetTimer(self.hwnd, copy_flash_timer, copy_flash_duration_ms, null);
+        self.invalidate();
     }
 
     fn pasteClipboard(self: *View) !void {
@@ -674,7 +681,7 @@ const DirectWriteCellRenderer = struct {
         else if (search_kind == 1)
             rgb(255, 255, 255)
         else if (cell.selected)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+            (if (self.view.copy_flash and !self.view.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
         else if (solid_cursor)
             normal_background
         else
@@ -686,7 +693,7 @@ const DirectWriteCellRenderer = struct {
         else if (search_kind == 1)
             rgb(110, 90, 20)
         else if (cell.selected)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
+            (if (self.view.copy_flash and !self.view.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
         else if (solid_cursor)
             (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
         else
@@ -844,6 +851,12 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_TIMER => {
             if (wparam == refresh_timer) {
                 if (view) |current| current.refreshIfNeeded();
+            } else if (wparam == copy_flash_timer) {
+                _ = win.KillTimer(hwnd, copy_flash_timer);
+                if (view) |current| {
+                    current.copy_flash = false;
+                    current.invalidate();
+                }
             }
             return 0;
         },
@@ -854,6 +867,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
+            _ = win.KillTimer(hwnd, copy_flash_timer);
             if (view) |current| current.deinitResources();
             return 0;
         },
