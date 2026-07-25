@@ -86,6 +86,17 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+          use-cache: false
+
+      - name: Fetch Zig dependencies
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            zig build --fetch -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { exit $LASTEXITCODE }
+            Start-Sleep -Seconds (10 * $attempt)
+          }
 
       - name: Run tests
         run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
@@ -166,7 +177,7 @@ jobs:
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   release:
     name: Create draft GitHub release
