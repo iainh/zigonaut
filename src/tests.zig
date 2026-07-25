@@ -10,6 +10,7 @@ const modules = .{
     @import("pty.zig"),
     @import("search.zig"),
     @import("session.zig"),
+    @import("shell_quote.zig"),
     @import("terminal.zig"),
     @import("terminal_view.zig"),
     @import("theme.zig"),

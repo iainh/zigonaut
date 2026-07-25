@@ -5,6 +5,7 @@ const Terminal = @import("terminal.zig").Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
 const GdiRenderer = @import("gdi_renderer.zig");
 const input = @import("input.zig");
+const shell_quote = @import("shell_quote.zig");
 const theme = @import("theme.zig");
 const SearchMatch = @import("search.zig").Match;
 
@@ -109,6 +110,7 @@ pub const View = struct {
             engine.deinit();
             self.text_engine = null;
         };
+        win.DragAcceptFiles(self.hwnd, 1);
     }
 
     fn deinitResources(self: *View) void {
@@ -520,6 +522,34 @@ pub const View = struct {
         try runtime.paste(text);
     }
 
+    fn pasteDroppedFiles(self: *View, drop: win.HDROP) !void {
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        const shell: shell_quote.Shell = switch (session.shell) {
+            .powershell => .powershell,
+            .wsl => .wsl,
+        };
+        const count = win.DragQueryFileW(drop, 0xffffffff, null, 0);
+        var command = std.ArrayList(u8).empty;
+        defer command.deinit(std.heap.page_allocator);
+        var index: win.UINT = 0;
+        while (index < count) : (index += 1) {
+            const length = win.DragQueryFileW(drop, index, null, 0);
+            const wide = try std.heap.page_allocator.alloc(u16, @as(usize, length) + 1);
+            defer std.heap.page_allocator.free(wide);
+            if (win.DragQueryFileW(drop, index, wide.ptr, length + 1) != length) continue;
+            const path = try std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, wide[0..length]);
+            defer std.heap.page_allocator.free(path);
+            const quoted = try shell_quote.pathAlloc(std.heap.page_allocator, path, shell);
+            defer std.heap.page_allocator.free(quoted);
+            if (command.items.len != 0) try command.append(std.heap.page_allocator, ' ');
+            try command.appendSlice(std.heap.page_allocator, quoted);
+        }
+        if (command.items.len == 0) return;
+        self.clearSelection();
+        try runtime.paste(command.items);
+    }
+
     fn updateHoveredLink(self: *View, lparam: win.LPARAM) void {
         if (win.GetKeyState(win.VK_CONTROL) >= 0) {
             self.clearHoveredLink();
@@ -744,6 +774,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_LBUTTONDOWN => {
             _ = win.SetFocus(hwnd);
             if (view) |current| current.beginSelection(lparam);
+            return 0;
+        },
+        win.WM_DROPFILES => {
+            const drop = win32.handleFromInt(win.HDROP, wparam);
+            defer win.DragFinish(drop);
+            if (view) |current| current.pasteDroppedFiles(drop) catch |err| {
+                log.debug("unable to paste dropped files: {}", .{err});
+            };
             return 0;
         },
         win.WM_MOUSEMOVE => {
