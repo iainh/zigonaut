@@ -17,7 +17,6 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView"
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const copy_flash_duration_ms = 150;
-const logical_padding = 8;
 const wheel_rows = 3;
 
 pub const View = struct {
@@ -50,6 +49,9 @@ pub const View = struct {
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
     copy_flash: bool = false,
+    padding_horizontal: u16,
+    padding_vertical: u16,
+    background_opacity: u8,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -76,6 +78,9 @@ pub const View = struct {
         font_family: []const u8,
         font_size: u16,
         dpi: u32,
+        padding_horizontal: u16,
+        padding_vertical: u16,
+        background_opacity: u8,
         titles_changed_message: win.UINT,
         shell_exited_message: win.UINT,
         scrollbar_changed_message: win.UINT,
@@ -93,6 +98,9 @@ pub const View = struct {
             .text_engine = text_engine,
             .cell_width = cell_size.width,
             .cell_height = cell_size.height,
+            .padding_horizontal = padding_horizontal,
+            .padding_vertical = padding_vertical,
+            .background_opacity = background_opacity,
             .titles_changed_message = titles_changed_message,
             .shell_exited_message = shell_exited_message,
             .scrollbar_changed_message = scrollbar_changed_message,
@@ -214,9 +222,19 @@ pub const View = struct {
         self.invalidate();
     }
 
-    pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool) void {
+    pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool, background_opacity: u8) void {
         self.dark_theme = dark_theme;
         self.high_contrast = high_contrast;
+        self.background_opacity = background_opacity;
+        self.invalidate();
+    }
+
+    pub fn updatePadding(self: *View, horizontal: u16, vertical: u16) void {
+        self.padding_horizontal = horizontal;
+        self.padding_vertical = vertical;
+        self.columns = 0;
+        self.rows = 0;
+        self.resizeSessions();
         self.invalidate();
     }
 
@@ -224,9 +242,10 @@ pub const View = struct {
         var client: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &client) == 0) return;
 
-        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
-        const inner_width = @max(client.right - 2 * padding, 1);
-        const inner_height = @max(client.bottom - 2 * padding, 1);
+        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
+        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
+        const inner_width = @max(client.right - 2 * padding_x, 1);
+        const inner_height = @max(client.bottom - 2 * padding_y, 1);
         const columns: u16 = @intCast(@min(@divTrunc(inner_width, @as(i32, @intCast(self.cell_width))), std.math.maxInt(u16)));
         const rows: u16 = @intCast(@min(@divTrunc(inner_height, @as(i32, @intCast(self.cell_height))), std.math.maxInt(u16)));
         const safe_columns = @max(columns, 1);
@@ -297,19 +316,22 @@ pub const View = struct {
             return;
         }
 
-        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
+        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
+        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
         const session = self.model.activeSession();
         self.gdi_renderer.present(dc, client, .{
             .font = self.font,
             .foreground = self.model.terminal_theme.foreground,
             .background = self.activeBackground(),
+            .background_opacity = self.background_opacity,
+            .dark_theme = self.dark_theme,
             .runtime = if (session) |active| active.runtime else null,
             .cell_width = self.cell_width,
             .cell_height = self.cell_height,
             .focused = self.focused,
             .high_contrast = self.high_contrast,
-            .origin_x = padding,
-            .origin_y = padding,
+            .origin_x = padding_x,
+            .origin_y = padding_y,
             .hover_row = if (self.hovered_link) |hovered| hovered.link.row else null,
             .hover_start = if (self.hovered_link) |hovered| hovered.link.start_column else 0,
             .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
@@ -321,7 +343,7 @@ pub const View = struct {
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else
-            colorRef(self.activeBackground());
+            self.backgroundColorRef(self.activeBackground());
         const foreground = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOWTEXT)
         else
@@ -330,20 +352,21 @@ pub const View = struct {
         try engine.beginFrame(@intCast(width), @intCast(height), background);
         errdefer engine.endFrame() catch {};
 
-        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
+        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
+        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
         if (self.model.activeSession()) |session| {
             var renderer = DirectWriteCellRenderer{
                 .engine = engine,
                 .view = self,
                 .client = client,
-                .origin_x = padding,
-                .origin_y = padding,
+                .origin_x = padding_x,
+                .origin_y = padding_y,
             };
             session.runtime.?.renderViewport(&renderer) catch {
                 drawDirectWriteMessage(
                     engine,
                     "libghostty render state unavailable",
-                    paddedRect(client, padding),
+                    paddedRect(client, padding_x, padding_y),
                     foreground,
                     background,
                 );
@@ -352,12 +375,21 @@ pub const View = struct {
             drawDirectWriteMessage(
                 engine,
                 "Open a PowerShell or WSL session.",
-                paddedRect(client, padding),
+                paddedRect(client, padding_x, padding_y),
                 foreground,
                 background,
             );
         }
         try engine.endFrame();
+    }
+
+    fn backgroundColorRef(self: *const View, color: theme.Color) win.COLORREF {
+        return translucentColorRef(color, self.background_opacity, self.dark_theme);
+    }
+
+    fn cellBackgroundColorRef(self: *const View, color: theme.Color, default: theme.Color) win.COLORREF {
+        if (!std.meta.eql(color, default)) return colorRef(color);
+        return self.backgroundColorRef(color);
     }
 
     fn activeBackground(self: *View) theme.Color {
@@ -536,9 +568,9 @@ pub const View = struct {
 
     fn mousePoint(self: *View, lparam: win.LPARAM, clamp_to_grid: bool) ?Terminal.Point {
         if (self.columns == 0 or self.rows == 0) return null;
-        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
-        var x = mouseCoordinate(lparam, 0) - padding;
-        var y = mouseCoordinate(lparam, 16) - padding;
+        const dpi = win.GetDpiForWindow(self.hwnd);
+        var x = mouseCoordinate(lparam, 0) - scaled(@intCast(self.padding_horizontal), dpi);
+        var y = mouseCoordinate(lparam, 16) - scaled(@intCast(self.padding_vertical), dpi);
         const width = @as(i32, self.columns) * @as(i32, @intCast(self.cell_width));
         const height = @as(i32, self.rows) * @as(i32, @intCast(self.cell_height));
         if (!clamp_to_grid and (x < 0 or y < 0 or x >= width or y >= height)) return null;
@@ -724,7 +756,7 @@ const DirectWriteCellRenderer = struct {
             cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and
             cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, self.frame.?.background);
         const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
         const foreground = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
@@ -1088,12 +1120,12 @@ fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
     return length;
 }
 
-fn paddedRect(rect: win.RECT, padding: i32) win.RECT {
+fn paddedRect(rect: win.RECT, padding_x: i32, padding_y: i32) win.RECT {
     return .{
-        .left = rect.left + padding,
-        .top = rect.top + padding,
-        .right = rect.right - padding,
-        .bottom = rect.bottom - padding,
+        .left = rect.left + padding_x,
+        .top = rect.top + padding_y,
+        .right = rect.right - padding_x,
+        .bottom = rect.bottom - padding_y,
     };
 }
 
@@ -1103,6 +1135,17 @@ fn colorRef(color: theme.Color) win.COLORREF {
 
 fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
     return @as(win.COLORREF, red) | (@as(win.COLORREF, green) << 8) | (@as(win.COLORREF, blue) << 16);
+}
+
+fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.COLORREF {
+    if (opacity_percent == 100) return colorRef(color);
+    const backdrop = if (dark) theme.Color{ .red = 0x20, .green = 0x20, .blue = 0x20 } else theme.Color{ .red = 0xf3, .green = 0xf3, .blue = 0xf3 };
+    const opacity: u16 = opacity_percent;
+    return rgb(
+        @intCast((@as(u16, color.red) * opacity + @as(u16, backdrop.red) * (100 - opacity)) / 100),
+        @intCast((@as(u16, color.green) * opacity + @as(u16, backdrop.green) * (100 - opacity)) / 100),
+        @intCast((@as(u16, color.blue) * opacity + @as(u16, backdrop.blue) * (100 - opacity)) / 100),
+    );
 }
 
 fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {

@@ -38,7 +38,12 @@ On first launch Zigonaut creates `%APPDATA%\spiralpoint\zigonaut\zigonaut.conf`:
 ```ini
 font_family=Cascadia Mono
 font_size=18
-theme=rasmus
+dark_theme=rasmus
+light_theme=campbell-light
+padding_horizontal=8
+padding_vertical=8
+background_opacity=100
+backdrop=mica
 default_shell=powershell
 custom_profile_name=Custom
 custom_command=
@@ -47,7 +52,13 @@ hold_on_exit=false
 randomize_tab_background=true
 ```
 
-Supported themes are `rasmus`, `campbell`, and `solarized-dark`; `default_shell` may be
+Supported themes are `rasmus`, `campbell`, `campbell-light`, and `solarized-dark`.
+`dark_theme` and `light_theme` follow the Windows application theme; high contrast always
+uses Windows system colors and disables the configured `none`, `mica`, or `acrylic`
+backdrop. `background_opacity` is a percentage, and horizontal and vertical terminal
+padding are configured independently. Override palette entries with `foreground`,
+`background`, `cursor`, and `ansi0` through `ansi15`, using `#RRGGBB` values.
+The legacy `theme` key remains an alias for `dark_theme`. `default_shell` may be
 `powershell`, `pwsh`, `cmd`, `wsl`, or `custom`. The custom profile is available only
 when `custom_command` is nonempty; an invalid custom default safely falls back to Windows
 PowerShell. `custom_profile_name` names that profile, and `custom_command` is its complete
@@ -62,6 +73,10 @@ their named profiles. Clicking Custom while it is unconfigured is rejected witho
 By default, each new tab receives a random background hue with the same perceived
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.
+
+Use Ctrl+Plus or Ctrl+Minus to zoom the terminal font (main keyboard and numpad keys
+are supported), and Ctrl+0 to restore the configured font size. Zoom is kept between
+6 and 72 points and does not rewrite the configuration file.
 
 ## Terminal workflows
 

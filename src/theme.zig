@@ -13,6 +13,30 @@ pub const Theme = struct {
     ansi: [16]Color,
 };
 
+pub const Overrides = struct {
+    foreground: ?Color = null,
+    background: ?Color = null,
+    cursor: ?Color = null,
+    ansi: [16]?Color = @splat(null),
+
+    pub fn apply(self: Overrides, base: Theme) Theme {
+        var result = base;
+        if (self.foreground) |value| result.foreground = value;
+        if (self.background) |value| result.background = value;
+        if (self.cursor) |value| result.cursor = value;
+        for (self.ansi, 0..) |value, index| if (value) |color| {
+            result.ansi[index] = color;
+        };
+        return result;
+    }
+};
+
+pub fn parseColor(text: []const u8) ?Color {
+    const digits = if (text.len == 7 and text[0] == '#') text[1..] else if (text.len == 6) text else return null;
+    const value = std.fmt.parseInt(u24, digits, 16) catch return null;
+    return hex(value);
+}
+
 pub fn randomizedBackground(value: Theme, random: u16) Theme {
     var result = value;
     const hue: u16 = random % (6 * 256);
@@ -49,11 +73,13 @@ fn scaledChannel(channel: u8, target: u32, source: u32) u8 {
 pub const Name = enum {
     rasmus,
     campbell,
+    campbell_light,
     solarized_dark,
 
     pub fn parse(name: []const u8) ?Name {
         if (std.ascii.eqlIgnoreCase(name, "rasmus")) return .rasmus;
         if (std.ascii.eqlIgnoreCase(name, "campbell")) return .campbell;
+        if (std.ascii.eqlIgnoreCase(name, "campbell-light")) return .campbell_light;
         if (std.ascii.eqlIgnoreCase(name, "solarized-dark")) return .solarized_dark;
         return null;
     }
@@ -62,9 +88,17 @@ pub const Name = enum {
         return switch (self) {
             .rasmus => rasmus,
             .campbell => campbell,
+            .campbell_light => campbell_light,
             .solarized_dark => solarized_dark,
         };
     }
+};
+
+pub const campbell_light = Theme{
+    .background = hex(0xf3f3f3),
+    .foreground = hex(0x0c0c0c),
+    .cursor = hex(0x0c0c0c),
+    .ansi = campbell.ansi,
 };
 
 pub const rasmus = Theme{
@@ -115,6 +149,18 @@ test "Rasmus theme exposes its Alacritty palette" {
     try std.testing.expectEqual(Color{ .red = 0x1a, .green = 0x1a, .blue = 0x19 }, rasmus.background);
     try std.testing.expectEqual(Color{ .red = 0xff, .green = 0x96, .blue = 0x8c }, rasmus.ansi[1]);
     try std.testing.expectEqual(Color{ .red = 0xea, .green = 0xea, .blue = 0xea }, rasmus.ansi[15]);
+}
+
+test "colors parse and palette overrides are applied independently" {
+    try std.testing.expectEqual(Color{ .red = 0x12, .green = 0xab, .blue = 0xef }, parseColor("#12abef").?);
+    try std.testing.expect(parseColor("#1234") == null);
+    var overrides = Overrides{};
+    overrides.foreground = parseColor("ffffff");
+    overrides.ansi[3] = parseColor("#010203");
+    const value = overrides.apply(rasmus);
+    try std.testing.expectEqual(hex(0xffffff), value.foreground);
+    try std.testing.expectEqual(hex(0x010203), value.ansi[3]);
+    try std.testing.expectEqual(rasmus.background, value.background);
 }
 
 test "random backgrounds retain the theme background darkness" {

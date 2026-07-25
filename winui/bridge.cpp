@@ -414,6 +414,19 @@ struct Bridge {
         scheduleScrollbarHide();
     }
 
+    void updateAppearance(uint32_t kind, bool high_contrast) {
+        source.SystemBackdrop(nullptr);
+        backdrop = nullptr;
+        if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) return;
+        if (kind == ZIGONAUT_BACKDROP_ACRYLIC) {
+            source.SystemBackdrop(Microsoft::UI::Xaml::Media::DesktopAcrylicBackdrop{});
+            return;
+        }
+        backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
+        backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
+        source.SystemBackdrop(backdrop);
+    }
+
     void scheduleScrollbarHide() {
         if (!scrollbar_timer) return;
         scrollbar_timer.Stop();
@@ -651,6 +664,13 @@ extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t 
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     try { bridge->move(x, y, width, height); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32_t backdrop, BOOL high_contrast) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
+    try { bridge->updateAppearance(backdrop, high_contrast != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
 }
 
 extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {

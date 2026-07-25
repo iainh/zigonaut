@@ -35,12 +35,19 @@ typedef enum zigonaut_taskbar_progress_state {
     ZIGONAUT_TASKBAR_PROGRESS_PAUSED = 8,
 } zigonaut_taskbar_progress_state;
 
+typedef enum zigonaut_backdrop_kind {
+    ZIGONAUT_BACKDROP_NONE = 0,
+    ZIGONAUT_BACKDROP_MICA = 1,
+    ZIGONAUT_BACKDROP_ACRYLIC = 2,
+} zigonaut_backdrop_kind;
+
 __declspec(dllexport) void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update(void* bridge, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active_index) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* bridge, uint32_t total, uint32_t page, uint32_t position, BOOL show) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* bridge, uint32_t state, uint32_t value) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_notification(void* bridge, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_move(void* bridge, int32_t x, int32_t y, int32_t width, int32_t height) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) BOOL __cdecl zigonaut_chrome_pretranslate(void* bridge, MSG* message) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_close(void* bridge) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_destroy(void* bridge) ZIGONAUT_NOEXCEPT;

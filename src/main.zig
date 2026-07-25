@@ -33,6 +33,8 @@ const Application = struct {
     dpi: u32 = 96,
     dark_theme: bool = false,
     high_contrast: bool = false,
+    zoomed_font_size: u16,
+    consumed_zoom_key: ?win.WPARAM = null,
     taskbar_button_created_message: win.UINT = 0,
     taskbar_ready: bool = false,
     terminal_ready: bool = false,
@@ -45,7 +47,8 @@ const Application = struct {
         return .{
             .settings = loaded.value,
             .loaded = loaded,
-            .model = app_model.App.init(std.heap.page_allocator, loaded.value.theme.value(), loaded.value.randomize_tab_background),
+            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, true), loaded.value.randomize_tab_background),
+            .zoomed_font_size = loaded.value.font_size,
         };
     }
 
@@ -69,6 +72,7 @@ const Application = struct {
     const addProfile = addProfileImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
+    const setZoomedFontSize = setZoomedFontSizeImpl;
 };
 
 pub fn main() !void {
@@ -142,6 +146,13 @@ pub fn main() !void {
 }
 
 fn handleShortcutImpl(self: *Application, message: *const win.MSG) bool {
+    if (message.message == win.WM_KEYUP or message.message == win.WM_SYSKEYUP) {
+        if (self.consumed_zoom_key == message.wParam) {
+            self.consumed_zoom_key = null;
+            return true;
+        }
+        return false;
+    }
     if (message.message != win.WM_KEYDOWN and message.message != win.WM_SYSKEYDOWN) return false;
     const control = win.GetKeyState(win.VK_CONTROL) < 0;
     const alt = win.GetKeyState(win.VK_MENU) < 0;
@@ -149,6 +160,24 @@ fn handleShortcutImpl(self: *Application, message: *const win.MSG) bool {
     const repeated = (message.lParam & (@as(win.LPARAM, 1) << 30)) != 0;
     const hwnd = self.hwnd.?;
     if (!control or alt) return false;
+
+    const key = message.wParam;
+    const zoom_delta: i8 = if (key == win.VK_ADD or key == win.VK_OEM_PLUS)
+        1
+    else if (key == win.VK_SUBTRACT or key == win.VK_OEM_MINUS)
+        -1
+    else
+        0;
+    if (zoom_delta != 0) {
+        self.consumed_zoom_key = key;
+        if (!repeated) self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, zoom_delta));
+        return true;
+    }
+    if (key == '0' or key == win.VK_NUMPAD0) {
+        self.consumed_zoom_key = key;
+        if (!repeated) self.setZoomedFontSize(self.settings.font_size);
+        return true;
+    }
 
     if (shift and message.wParam == 'T') {
         if (!repeated) self.addDefaultSession() catch |err| log.err("unable to open default session: {}", .{err});
@@ -217,6 +246,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 self.settings.font_family,
                 self.settings.font_size,
                 dpi,
+                self.settings.padding_horizontal,
+                self.settings.padding_vertical,
+                self.settings.background_opacity,
                 titles_changed_message,
                 shell_exited_message,
                 scrollbar_changed_message,
@@ -346,7 +378,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 win.SWP_NOACTIVATE | win.SWP_NOZORDER,
             );
             const new_dpi: u32 = @intCast(wparam & 0xffff);
-            const new_font = createFontFor(self.settings, new_dpi);
+            const new_font = createFont(self.settings.font_family, self.zoomed_font_size, new_dpi);
             self.terminal_view.updateFont(new_font, new_dpi);
             _ = win.DeleteObject(self.font);
             self.font = new_font;
@@ -509,10 +541,14 @@ fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) voi
 }
 
 fn createFontFor(value: config.Config, dpi: u32) win.HFONT {
+    return createFont(value.font_family, value.font_size, dpi);
+}
+
+fn createFont(font_family: []const u8, font_size: u16, dpi: u32) win.HFONT {
     var wide_name = std.mem.zeroes([128]u16);
-    _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], value.font_family) catch 0;
+    _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], font_family) catch 0;
     return win.CreateFontW(
-        -scaled(value.font_size, dpi),
+        -scaled(font_size, dpi),
         0,
         0,
         0,
@@ -551,6 +587,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     }
     if (new_font != null) {
         try self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi);
+        self.zoomed_font_size = next.font_size;
     }
 
     const old_font = self.font;
@@ -561,8 +598,10 @@ fn reloadSettingsImpl(self: *Application) !void {
     previous.deinit();
 
     if (changed.theme) {
-        self.model.applySettings(self.settings.theme.value(), self.settings.randomize_tab_background);
+        self.model.applySettings(config.terminalTheme(self.settings, self.dark_theme), self.settings.randomize_tab_background);
     }
+    self.terminal_view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
+    self.updateTheme();
     if (new_font != null) {
         _ = win.DeleteObject(old_font);
         self.layoutTerminalView();
@@ -576,12 +615,29 @@ fn scaled(value: anytype, dpi: u32) i32 {
 
 fn updateThemeImpl(self: *Application) void {
     const hwnd = self.hwnd orelse return;
+    const previous_dark_theme = self.dark_theme;
     self.dark_theme = appsUseDarkTheme();
     self.high_contrast = highContrastEnabled();
-    if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast);
+    if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, self.dark_theme), self.settings.randomize_tab_background);
+    if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
+    if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast);
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);
+}
+
+fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
+    if (size == self.zoomed_font_size) return;
+    const new_font = createFont(self.settings.font_family, size, self.dpi);
+    if (new_font == null) return;
+    self.terminal_view.reloadFont(new_font, self.settings.font_family, size, self.dpi) catch {
+        _ = win.DeleteObject(new_font);
+        return;
+    };
+    _ = win.DeleteObject(self.font);
+    self.font = new_font;
+    self.zoomed_font_size = size;
+    self.layoutTerminalView();
 }
 
 fn appsUseDarkTheme() bool {

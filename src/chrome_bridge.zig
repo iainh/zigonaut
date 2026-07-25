@@ -30,6 +30,7 @@ const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callcon
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
+const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL) callconv(.c) win.HRESULT;
 const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 const Destroy = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
@@ -45,6 +46,7 @@ pub const Bridge = struct {
     update_taskbar_progress_fn: UpdateTaskbarProgress,
     show_notification_fn: ShowNotification,
     move_fn: Move,
+    update_appearance_fn: UpdateAppearance,
     pretranslate_fn: Pretranslate,
     close_fn: Close,
     destroy_fn: Destroy,
@@ -73,12 +75,13 @@ pub const Bridge = struct {
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const move_fn = symbol(Move, module, "zigonaut_chrome_move") orelse return null;
+        const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
         const pretranslate_fn = symbol(Pretranslate, module, "zigonaut_chrome_pretranslate") orelse return null;
         const close_fn = symbol(Close, module, "zigonaut_chrome_close") orelse return null;
         const destroy_fn = symbol(Destroy, module, "zigonaut_chrome_destroy") orelse return null;
         const instance = initialize(parent, callback, context) orelse return null;
         loaded = true;
-        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .show_notification_fn = show_notification_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
+        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .show_notification_fn = show_notification_fn, .move_fn = move_fn, .update_appearance_fn = update_appearance_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
@@ -104,6 +107,11 @@ pub const Bridge = struct {
     pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.move_fn(instance, x, y, width, height));
+    }
+
+    pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast)));
     }
 
     pub fn pretranslate(self: *Bridge, message: *win.MSG) bool {

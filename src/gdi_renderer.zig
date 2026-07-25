@@ -9,6 +9,8 @@ pub const Context = struct {
     font: win.HFONT,
     foreground: theme.Color,
     background: theme.Color,
+    background_opacity: u8,
+    dark_theme: bool,
     runtime: ?*SessionRuntime,
     cell_width: u32,
     cell_height: u32,
@@ -69,7 +71,7 @@ fn paintFrame(dc: win.HDC, client: win.RECT, context: Context) void {
     defer {
         if (saved_dc != 0) _ = win.RestoreDC(dc, saved_dc);
     }
-    const background = if (context.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(context.background);
+    const background = if (context.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else translucentColorRef(context.background, context.background_opacity, context.dark_theme);
     const foreground = if (context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(context.foreground);
     fill(dc, client, background);
     _ = win.SelectObject(dc, context.font);
@@ -110,7 +112,7 @@ const CellRenderer = struct {
 
     pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
-        if (!self.context.high_contrast) fill(self.dc, self.client, colorRef(frame.background));
+        if (!self.context.high_contrast) fill(self.dc, self.client, translucentColorRef(frame.background, self.context.background_opacity, self.context.dark_theme));
         _ = win.SelectObject(self.dc, self.context.font);
         _ = win.SetBkMode(self.dc, win.OPAQUE);
     }
@@ -125,7 +127,12 @@ const CellRenderer = struct {
         const rect = win.RECT{ .left = left, .top = top, .right = left + span * @as(i32, @intCast(self.context.cell_width)), .bottom = top + @as(i32, @intCast(self.context.cell_height)) };
         const solid_cursor = self.context.focused and self.frame.?.cursor_visible and self.frame.?.cursor_style == .block and cell.x >= self.frame.?.cursor_x and cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const normal_background = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
+        const normal_background = if (self.context.high_contrast)
+            win.GetSysColor(win.COLOR_WINDOW)
+        else if (std.meta.eql(cell.background, self.frame.?.background))
+            translucentColorRef(cell.background, self.context.background_opacity, self.context.dark_theme)
+        else
+            colorRef(cell.background);
         const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
         const foreground = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
@@ -248,6 +255,16 @@ fn colorRef(color: theme.Color) win.COLORREF {
 }
 fn rgb(r: u8, g: u8, b: u8) win.COLORREF {
     return @as(win.COLORREF, r) | (@as(win.COLORREF, g) << 8) | (@as(win.COLORREF, b) << 16);
+}
+fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.COLORREF {
+    if (opacity_percent == 100) return colorRef(color);
+    const backdrop = if (dark) theme.Color{ .red = 0x20, .green = 0x20, .blue = 0x20 } else theme.Color{ .red = 0xf3, .green = 0xf3, .blue = 0xf3 };
+    const opacity: u16 = opacity_percent;
+    return rgb(
+        @intCast((@as(u16, color.red) * opacity + @as(u16, backdrop.red) * (100 - opacity)) / 100),
+        @intCast((@as(u16, color.green) * opacity + @as(u16, backdrop.green) * (100 - opacity)) / 100),
+        @intCast((@as(u16, color.blue) * opacity + @as(u16, backdrop.blue) * (100 - opacity)) / 100),
+    );
 }
 fn blend(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {
     return rgb(@intCast(((foreground & 0xff) + (background & 0xff)) / 2), @intCast((((foreground >> 8) & 0xff) + ((background >> 8) & 0xff)) / 2), @intCast((((foreground >> 16) & 0xff) + ((background >> 16) & 0xff)) / 2));
