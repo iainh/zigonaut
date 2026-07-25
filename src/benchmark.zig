@@ -21,9 +21,18 @@ pub fn main() !void {
     for (0..render_iterations) |_| try terminal.renderViewport(&renderer);
     const render_ns = timer.lap();
 
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.heap.page_allocator);
+    try snapshot.capture(std.heap.page_allocator, &terminal);
+    for (0..render_iterations) |_| try snapshot.capture(std.heap.page_allocator, &terminal);
+    const capture_ns = timer.lap();
+    for (0..render_iterations) |_| snapshot.replay(&renderer);
+    const replay_ns = timer.lap();
+
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
-            "render: {d} frames in {d:.2} ms ({d:.2} us/frame), checksum={d}\n",
+            "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
+            "snapshot capture: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -31,6 +40,8 @@ pub fn main() !void {
             render_iterations,
             milliseconds(render_ns),
             @as(f64, @floatFromInt(render_ns)) / @as(f64, render_iterations) / 1_000.0,
+            @as(f64, @floatFromInt(capture_ns)) / @as(f64, render_iterations) / 1_000.0,
+            @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0,
             renderer.checksum,
         },
     );

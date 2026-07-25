@@ -93,6 +93,103 @@ pub const Terminal = struct {
         cursor_columns: u8,
     };
 
+    pub const RenderSnapshot = struct {
+        frame: ?Frame = null,
+        cells: std.ArrayList(OwnedCell) = .empty,
+        rows: std.ArrayList(Row) = .empty,
+
+        const Row = struct {
+            y: u16,
+            start: usize,
+            len: usize,
+        };
+
+        const OwnedCell = struct {
+            cell: Cell,
+            codepoints: [16]u32 = undefined,
+            codepoint_count: u8,
+
+            fn init(cell: Cell) OwnedCell {
+                var result = OwnedCell{
+                    .cell = cell,
+                    .codepoint_count = @intCast(@min(cell.codepoints.len, 16)),
+                };
+                result.cell.codepoints = &.{};
+                @memcpy(result.codepoints[0..result.codepoint_count], cell.codepoints[0..result.codepoint_count]);
+                return result;
+            }
+
+            fn value(self: *const OwnedCell) Cell {
+                var result = self.cell;
+                result.codepoints = self.codepoints[0..self.codepoint_count];
+                return result;
+            }
+        };
+
+        const Recorder = struct {
+            allocator: std.mem.Allocator,
+            snapshot: *RenderSnapshot,
+            row_start: usize = 0,
+            failed: ?anyerror = null,
+
+            pub fn beginFrame(self: *Recorder, frame: Frame) void {
+                self.snapshot.frame = frame;
+            }
+
+            pub fn beginRow(self: *Recorder, _: u16) void {
+                self.row_start = self.snapshot.cells.items.len;
+            }
+
+            pub fn drawCell(self: *Recorder, cell: Cell) void {
+                if (self.failed != null) return;
+                self.snapshot.cells.append(self.allocator, .init(cell)) catch |err| {
+                    self.failed = err;
+                };
+            }
+
+            pub fn endRow(self: *Recorder, y: u16) void {
+                if (self.failed != null) return;
+                self.snapshot.rows.append(self.allocator, .{
+                    .y = y,
+                    .start = self.row_start,
+                    .len = self.snapshot.cells.items.len - self.row_start,
+                }) catch |err| {
+                    self.failed = err;
+                };
+            }
+
+            pub fn endFrame(_: *Recorder, _: Frame) void {}
+        };
+
+        pub fn deinit(self: *RenderSnapshot, allocator: std.mem.Allocator) void {
+            self.cells.deinit(allocator);
+            self.rows.deinit(allocator);
+            self.* = .{};
+        }
+
+        pub fn capture(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
+            self.frame = null;
+            self.cells.clearRetainingCapacity();
+            self.rows.clearRetainingCapacity();
+            try self.cells.ensureTotalCapacity(allocator, @as(usize, terminal.columns) * @as(usize, terminal.rows));
+            try self.rows.ensureTotalCapacity(allocator, terminal.rows);
+            var recorder = Recorder{ .allocator = allocator, .snapshot = self };
+            try terminal.renderViewport(&recorder);
+            if (recorder.failed) |err| return err;
+        }
+
+        pub fn replay(self: *const RenderSnapshot, renderer: anytype) void {
+            const frame = self.frame orelse return;
+            renderer.beginFrame(frame);
+            for (self.rows.items) |row| {
+                renderer.beginRow(row.y);
+                for (self.cells.items[row.start..][0..row.len]) |*cell| renderer.drawCell(cell.value());
+                renderer.endRow(row.y);
+            }
+            renderer.endFrame(frame);
+        }
+    };
+
     pub const Scrollbar = struct {
         total: u64,
         offset: u64,
@@ -1465,6 +1562,21 @@ test "render state exposes text decorations and wide occupancy" {
     try std.testing.expectEqual(theme.Color{ .red = 10, .green = 20, .blue = 30 }, renderer.x_underline_color.?);
     try std.testing.expectEqual(@as(usize, 1), renderer.wide_cells);
     try std.testing.expectEqual(@as(usize, 1), renderer.wide_tails);
+}
+
+test "render snapshots own cell graphemes" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("X");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    terminal.feed("\rY");
+
+    var renderer = TestRenderer{};
+    snapshot.replay(&renderer);
+    try std.testing.expectEqual(theme.rasmus.foreground, renderer.x_foreground.?);
 }
 
 test "libghostty encodes navigation keys" {

@@ -27,6 +27,9 @@ pub const SessionRuntime = struct {
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: std.ArrayList(Notification) = .empty,
+    render_snapshot: Terminal.RenderSnapshot = .{},
+    render_query: std.ArrayList(u8) = .empty,
+    render_matches: std.ArrayList(SearchMatch) = .empty,
 
     pub const Refresh = struct {
         callback: ?*const fn (?*anyopaque) void = null,
@@ -105,6 +108,9 @@ pub const SessionRuntime = struct {
         for (self.notifications.items) |notification| notification.deinit(self.allocator);
         self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
+        self.render_snapshot.deinit(self.allocator);
+        self.render_query.deinit(self.allocator);
+        self.render_matches.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -202,10 +208,30 @@ pub const SessionRuntime = struct {
 
     pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
         self.terminal_mutex.lock();
-        defer self.terminal_mutex.unlock();
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
-        renderer.searchState(self.search.enabled, self.search.query.items, self.search.matches.items, self.search.active, scroll_state.offset, self.search.scanning);
-        try self.terminal.renderViewport(renderer);
+        self.render_query.ensureTotalCapacity(self.allocator, self.search.query.items.len) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.render_matches.ensureTotalCapacity(self.allocator, self.search.matches.items.len) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.render_query.clearRetainingCapacity();
+        self.render_query.appendSliceAssumeCapacity(self.search.query.items);
+        self.render_matches.clearRetainingCapacity();
+        self.render_matches.appendSliceAssumeCapacity(self.search.matches.items);
+        const search_enabled = self.search.enabled;
+        const search_active = self.search.active;
+        const search_scanning = self.search.scanning;
+        self.render_snapshot.capture(self.allocator, &self.terminal) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.terminal_mutex.unlock();
+
+        renderer.searchState(search_enabled, self.render_query.items, self.render_matches.items, search_active, scroll_state.offset, search_scanning);
+        self.render_snapshot.replay(renderer);
     }
 
     pub fn scrollbar(self: *SessionRuntime) !Terminal.Scrollbar {
