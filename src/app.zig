@@ -8,45 +8,20 @@ test {
 }
 const theme = @import("theme.zig");
 
-pub const Shell = enum {
-    powershell,
-    pwsh,
-    cmd,
-    wsl,
-    custom,
-
-    pub fn title(self: Shell) []const u8 {
-        return switch (self) {
-            .powershell => "PowerShell",
-            .pwsh => "PowerShell 7",
-            .cmd => "Command Prompt",
-            .wsl => "WSL",
-            .custom => "Custom",
-        };
-    }
-
-    pub fn command(self: Shell) []const u8 {
-        return switch (self) {
-            .powershell => "powershell.exe",
-            .pwsh => "pwsh.exe",
-            .cmd => "cmd.exe",
-            .wsl => "wsl.exe",
-            .custom => "",
-        };
-    }
-};
+pub const Shell = enum { powershell, windows, wsl };
 
 pub const Session = struct {
     id: u32,
     shell: Shell,
     runtime: ?*SessionRuntime,
     background: theme.Color,
+    profile_title: std.ArrayList(u8) = .empty,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
     hold_on_exit: bool = false,
 
     pub fn displayTitle(self: *const Session) []const u8 {
-        return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.shell.title();
+        return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.profile_title.items;
     }
 };
 
@@ -78,6 +53,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         for (self.sessions.items) |*session| {
             if (session.runtime) |runtime| runtime.destroy();
+            session.profile_title.deinit(self.allocator);
             session.title.deinit(self.allocator);
         }
         self.sessions.deinit(self.allocator);
@@ -88,30 +64,32 @@ pub const App = struct {
     }
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
-        if (command.len == 0) return error.ProfileNotConfigured;
         const terminal_theme = if (self.randomize_tab_background)
             theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16))
         else
             self.terminal_theme;
         const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh);
-        const index = self.addSessionRecord(shell, runtime, terminal_theme.background) catch |err| {
+        const index = self.addSessionRecord(shell, profile_title, runtime, terminal_theme.background) catch |err| {
             runtime.destroy();
             return err;
         };
         errdefer self.closeSession(index);
-        if (shell == .custom) try self.sessions.items[index].title.appendSlice(self.allocator, profile_title);
         self.sessions.items[index].hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
         return index;
     }
 
-    fn addSessionRecord(self: *App, shell: Shell, runtime: ?*SessionRuntime, background: theme.Color) !usize {
+    fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, runtime: ?*SessionRuntime, background: theme.Color) !usize {
         const index = self.sessions.items.len;
+        var owned_profile_title = std.ArrayList(u8).empty;
+        errdefer owned_profile_title.deinit(self.allocator);
+        try owned_profile_title.appendSlice(self.allocator, profile_title);
         try self.sessions.append(self.allocator, .{
             .id = self.next_id,
             .shell = shell,
             .runtime = runtime,
             .background = background,
+            .profile_title = owned_profile_title,
         });
         self.next_id +%= 1;
         self.active = index;
@@ -123,6 +101,7 @@ pub const App = struct {
         const active = self.active;
         var removed = self.sessions.orderedRemove(index);
         if (removed.runtime) |runtime| runtime.destroy();
+        removed.profile_title.deinit(self.allocator);
         removed.title.deinit(self.allocator);
 
         if (self.sessions.items.len == 0) {
@@ -243,9 +222,9 @@ test "sessions are added and selected" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
 
-    try std.testing.expectEqual(@as(usize, 0), try app.addSessionRecord(.powershell, null, theme.rasmus.background));
-    try std.testing.expectEqual(@as(usize, 1), try app.addSessionRecord(.wsl, null, theme.rasmus.background));
-    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+    try std.testing.expectEqual(@as(usize, 0), try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background));
+    try std.testing.expectEqual(@as(usize, 1), try app.addSessionRecord(.wsl, "Linux", null, theme.rasmus.background));
+    try std.testing.expectEqualStrings("Linux", app.activeSession().?.displayTitle());
 
     app.activate(0);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
@@ -259,8 +238,8 @@ test "closing the active session selects its nearest neighbor" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
 
-    _ = try app.addSessionRecord(.powershell, null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "WSL", null, theme.rasmus.background);
     app.closeSession(1);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
 
@@ -272,8 +251,8 @@ test "closing a session before the active session preserves the selection" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
 
-    _ = try app.addSessionRecord(.powershell, null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "WSL", null, theme.rasmus.background);
     app.closeSession(0);
 
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
@@ -283,7 +262,7 @@ test "applying settings updates existing session backgrounds" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
 
-    _ = try app.addSessionRecord(.powershell, null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
     app.applySettings(theme.campbell, false);
 
     try std.testing.expectEqual(theme.campbell.background, app.sessions.items[0].background);

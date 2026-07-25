@@ -12,9 +12,11 @@ pub const default_contents =
     \\padding_vertical=8
     \\background_opacity=100
     \\backdrop=mica
-    \\default_shell=powershell
-    \\custom_profile_name=Custom
-    \\custom_command=
+    \\default_profile=PowerShell
+    \\profile.PowerShell=powershell|powershell.exe
+    \\profile.PowerShell 7=powershell|pwsh.exe
+    \\profile.Command Prompt=windows|cmd.exe
+    \\profile.WSL=wsl|wsl.exe
     \\working_directory=
     \\hold_on_exit=false
     \\randomize_tab_background=true
@@ -23,11 +25,24 @@ pub const default_contents =
 
 pub const Shell = enum {
     powershell,
-    pwsh,
-    cmd,
+    windows,
     wsl,
-    custom,
 };
+
+pub const max_profiles = 32;
+
+pub const Profile = struct {
+    name: []const u8,
+    shell: Shell,
+    command: []const u8,
+};
+
+const default_profiles = [4]Profile{
+    .{ .name = "PowerShell", .shell = .powershell, .command = "powershell.exe" },
+    .{ .name = "PowerShell 7", .shell = .powershell, .command = "pwsh.exe" },
+    .{ .name = "Command Prompt", .shell = .windows, .command = "cmd.exe" },
+    .{ .name = "WSL", .shell = .wsl, .command = "wsl.exe" },
+} ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "" }} ** (max_profiles - 4);
 
 pub const Backdrop = enum { none, mica, acrylic };
 
@@ -41,18 +56,28 @@ pub const Config = struct {
     background_opacity: u8 = 100,
     backdrop: Backdrop = .mica,
     palette: theme.Overrides = .{},
-    default_shell: Shell = .powershell,
-    custom_profile_name: []const u8 = "Custom",
-    custom_command: []const u8 = "",
+    default_profile: []const u8 = "PowerShell",
+    profiles: [max_profiles]Profile = default_profiles,
+    profile_count: usize = 4,
     working_directory: []const u8 = "",
     hold_on_exit: bool = false,
     randomize_tab_background: bool = true,
+
+    pub fn profileSlice(self: *const Config) []const Profile {
+        return self.profiles[0..self.profile_count];
+    }
+
+    pub fn defaultProfile(self: *const Config) Profile {
+        for (self.profileSlice()) |profile| {
+            if (std.ascii.eqlIgnoreCase(profile.name, self.default_profile)) return profile;
+        }
+        return self.profiles[0];
+    }
 };
 
 pub const Changes = struct {
     font: bool,
     theme: bool,
-    default_shell: bool,
 };
 
 pub fn changes(previous: Config, next: Config) Changes {
@@ -62,7 +87,6 @@ pub fn changes(previous: Config, next: Config) Changes {
         .theme = previous.dark_theme != next.dark_theme or previous.light_theme != next.light_theme or
             !std.meta.eql(previous.palette, next.palette) or
             previous.randomize_tab_background != next.randomize_tab_background,
-        .default_shell = previous.default_shell != next.default_shell,
     };
 }
 
@@ -121,6 +145,7 @@ pub fn loadOrCreate(allocator: std.mem.Allocator) !Loaded {
 
 pub fn parse(contents: []const u8) Config {
     var result = Config{};
+    var declared_profiles = false;
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
@@ -158,22 +183,30 @@ pub fn parse(contents: []const u8) Config {
         } else if (key.len > 4 and std.ascii.eqlIgnoreCase(key[0..4], "ansi")) {
             const index = std.fmt.parseInt(u8, key[4..], 10) catch continue;
             if (index < 16) result.palette.ansi[index] = theme.parseColor(value) orelse result.palette.ansi[index];
-        } else if (std.ascii.eqlIgnoreCase(key, "default_shell")) {
-            if (std.ascii.eqlIgnoreCase(value, "powershell")) {
-                result.default_shell = .powershell;
-            } else if (std.ascii.eqlIgnoreCase(value, "wsl")) {
-                result.default_shell = .wsl;
-            } else if (std.ascii.eqlIgnoreCase(value, "pwsh")) {
-                result.default_shell = .pwsh;
-            } else if (std.ascii.eqlIgnoreCase(value, "cmd")) {
-                result.default_shell = .cmd;
-            } else if (std.ascii.eqlIgnoreCase(value, "custom")) {
-                result.default_shell = .custom;
+        } else if (std.ascii.eqlIgnoreCase(key, "default_profile")) {
+            if (value.len > 0 and value.len < 128) result.default_profile = value;
+        } else if (key.len > "profile.".len and std.ascii.eqlIgnoreCase(key[0.."profile.".len], "profile.")) {
+            const name = std.mem.trim(u8, key["profile.".len..], " \t");
+            const kind_end = std.mem.indexOfScalar(u8, value, '|') orelse continue;
+            const kind = std.mem.trim(u8, value[0..kind_end], " \t");
+            const command = std.mem.trim(u8, value[kind_end + 1 ..], " \t");
+            const shell: Shell = if (std.ascii.eqlIgnoreCase(kind, "powershell"))
+                .powershell
+            else if (std.ascii.eqlIgnoreCase(kind, "windows"))
+                .windows
+            else if (std.ascii.eqlIgnoreCase(kind, "wsl"))
+                .wsl
+            else
+                continue;
+            if (name.len == 0 or name.len >= 128 or !std.unicode.utf8ValidateSlice(name) or command.len == 0) continue;
+            if (!declared_profiles) {
+                result.profile_count = 0;
+                declared_profiles = true;
             }
-        } else if (std.ascii.eqlIgnoreCase(key, "custom_profile_name")) {
-            if (value.len > 0 and value.len < 128) result.custom_profile_name = value;
-        } else if (std.ascii.eqlIgnoreCase(key, "custom_command")) {
-            result.custom_command = value;
+            if (result.profile_count < max_profiles) {
+                result.profiles[result.profile_count] = .{ .name = name, .shell = shell, .command = command };
+                result.profile_count += 1;
+            }
         } else if (std.ascii.eqlIgnoreCase(key, "working_directory")) {
             result.working_directory = value;
         } else if (std.ascii.eqlIgnoreCase(key, "hold_on_exit")) {
@@ -200,7 +233,7 @@ test "configuration parses supported values and ignores invalid ones" {
         \\background_opacity=82
         \\backdrop=acrylic
         \\ansi15=#abcdef
-        \\default_shell=WSL
+        \\default_profile=WSL
         \\randomize_tab_background=false
     );
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
@@ -212,28 +245,31 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(@as(u8, 82), parsed.background_opacity);
     try std.testing.expectEqual(Backdrop.acrylic, parsed.backdrop);
     try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, parsed.palette.ansi[15].?);
-    try std.testing.expectEqual(Shell.wsl, parsed.default_shell);
+    try std.testing.expectEqualStrings("WSL", parsed.defaultProfile().name);
     try std.testing.expect(!parsed.randomize_tab_background);
 
-    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=fish\nrandomize_tab_background=perhaps\n");
+    const invalid = parse("font_size=500\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
     try std.testing.expectEqual(theme.Name.rasmus, invalid.dark_theme);
-    try std.testing.expectEqual(Shell.powershell, invalid.default_shell);
+    try std.testing.expectEqualStrings("PowerShell", invalid.defaultProfile().name);
     try std.testing.expect(invalid.randomize_tab_background);
 }
 
-test "configuration parses launch profile settings" {
-    const parsed = parse("default_shell=custom\ncustom_profile_name=Dev Shell\ncustom_command=tool.exe --flag\nworking_directory=C:\\work\nhold_on_exit=true\n");
-    try std.testing.expectEqual(Shell.custom, parsed.default_shell);
-    try std.testing.expectEqualStrings("Dev Shell", parsed.custom_profile_name);
-    try std.testing.expectEqualStrings("tool.exe --flag", parsed.custom_command);
+test "configuration parses launch profiles" {
+    const parsed = parse("default_profile=Dev Shell\nprofile.Dev Shell=windows|tool.exe --flag\nprofile.Linux=wsl|ubuntu.exe\nworking_directory=C:\\work\nhold_on_exit=true\n");
+    try std.testing.expectEqual(@as(usize, 2), parsed.profile_count);
+    try std.testing.expectEqualStrings("Dev Shell", parsed.defaultProfile().name);
+    try std.testing.expectEqual(Shell.windows, parsed.defaultProfile().shell);
+    try std.testing.expectEqualStrings("tool.exe --flag", parsed.defaultProfile().command);
+    try std.testing.expectEqualStrings("Linux", parsed.profiles[1].name);
+    try std.testing.expectEqual(Shell.wsl, parsed.profiles[1].shell);
     try std.testing.expectEqualStrings("C:\\work", parsed.working_directory);
     try std.testing.expect(parsed.hold_on_exit);
 }
 
 test "configuration changes are classified by subsystem" {
     const original = Config{};
-    try std.testing.expectEqual(Changes{ .font = false, .theme = false, .default_shell = false }, changes(original, original));
+    try std.testing.expectEqual(Changes{ .font = false, .theme = false }, changes(original, original));
 
     var modified = original;
     modified.font_size = 20;
@@ -242,10 +278,6 @@ test "configuration changes are classified by subsystem" {
     modified = original;
     modified.dark_theme = .campbell;
     try std.testing.expect(changes(original, modified).theme);
-
-    modified = original;
-    modified.default_shell = .wsl;
-    try std.testing.expect(changes(original, modified).default_shell);
 }
 
 test "terminal theme selection follows app mode and applies overrides" {

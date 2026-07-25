@@ -874,8 +874,8 @@ pub const View = struct {
         const session = self.model.activeSession() orelse return;
         const runtime = session.runtime orelse return;
         const shell: shell_quote.Shell = switch (session.shell) {
-            .powershell, .pwsh => .powershell,
-            .cmd, .custom => .windows,
+            .powershell => .powershell,
+            .windows => .windows,
             .wsl => .wsl,
         };
         const count = win.DragQueryFileW(drop, 0xffffffff, null, 0);

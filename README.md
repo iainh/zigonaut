@@ -48,9 +48,11 @@ padding_horizontal=8
 padding_vertical=8
 background_opacity=100
 backdrop=mica
-default_shell=powershell
-custom_profile_name=Custom
-custom_command=
+default_profile=PowerShell
+profile.PowerShell=powershell|powershell.exe
+profile.PowerShell 7=powershell|pwsh.exe
+profile.Command Prompt=windows|cmd.exe
+profile.WSL=wsl|wsl.exe
 working_directory=
 hold_on_exit=false
 randomize_tab_background=true
@@ -62,18 +64,18 @@ uses Windows system colors and disables the configured `none`, `mica`, or `acryl
 backdrop. `background_opacity` is a percentage, and horizontal and vertical terminal
 padding are configured independently. Override palette entries with `foreground`,
 `background`, `cursor`, and `ansi0` through `ansi15`, using `#RRGGBB` values.
-The legacy `theme` key remains an alias for `dark_theme`. `default_shell` may be
-`powershell`, `pwsh`, `cmd`, `wsl`, or `custom`. The custom profile is available only
-when `custom_command` is nonempty; an invalid custom default safely falls back to Windows
-PowerShell. `custom_profile_name` names that profile, and `custom_command` is its complete
-CreateProcess command line. `working_directory` sets the current directory for new processes;
+The legacy `theme` key remains an alias for `dark_theme`. Profiles are ordered `profile.<name>`
+entries whose values contain a shell type and complete CreateProcess command line separated by
+`|`. The supported shell types are `powershell`, `windows`, and `wsl`; they control how dropped
+file paths are quoted. Add, remove, rename, or reorder profile entries to control the new-tab
+menu, and set `default_profile` to the name used for the initial tab and Ctrl+Shift+T. If that
+name does not exist, the first configured profile is used. Up to 32 profiles are supported.
+`working_directory` sets the current directory for new processes;
 leave it empty to inherit Zigonaut's directory. Set `hold_on_exit=true` to retain newly created
 tabs after a clean process exit. Reloading these settings affects subsequent sessions only.
 Use **Open Settings** and **Reload Settings** from the title-bar
-menu to edit and apply changes without restarting Zigonaut. The configured shell is
-used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
-PowerShell, PowerShell 7, Command Prompt, WSL, and Custom entries in the new-tab menu open
-their named profiles. Clicking Custom while it is unconfigured is rejected without creating a tab.
+menu to edit and apply changes without restarting Zigonaut. Reloading also rebuilds the new-tab
+menu from the configured profiles.
 By default, each new tab receives a random background hue with the same perceived
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.

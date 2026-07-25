@@ -7,8 +7,8 @@ All notable changes to Zigonaut will be documented in this file.
 ### Added
 
 - Native WinUI 3 terminal shell for Windows on x64 and ARM64.
-- Isolated ConPTY sessions for PowerShell, PowerShell 7, Command Prompt, WSL,
-  and configurable custom profiles.
+- Configuration-defined ConPTY profiles with user-selected names, commands, ordering,
+  shell quoting behavior, and default profile.
 - Tabbed terminal sessions with shell-provided titles, keyboard shortcuts, a
   new-tab profile menu, and automatic cleanup when shells exit.
 - Direct2D and DirectWrite rendering with Unicode shaping, system font fallback,

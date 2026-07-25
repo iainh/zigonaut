@@ -71,6 +71,7 @@ const Application = struct {
     const showPendingNotifications = showPendingNotificationsImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
+    const syncProfiles = syncProfilesImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
     const setZoomedFontSize = setZoomedFontSizeImpl;
@@ -293,6 +294,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 build_options.version,
                 build_options.git_hash,
             ) orelse return -1;
+            self.syncProfiles(&self.settings) catch |err| {
+                log.err("unable to populate profile menu: {}", .{err});
+                return -1;
+            };
             self.layoutTerminalView();
             self.addDefaultSession() catch |err| {
                 log.err("unable to create initial session: {}", .{err});
@@ -304,17 +309,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                .new_powershell => self.addProfile(.powershell) catch |err| {
-                    log.err("unable to open PowerShell session: {}", .{err});
-                    return 0;
+                .new_profile => {
+                    if (argument >= @as(u32, @intCast(self.settings.profile_count))) return 0;
+                    self.addProfile(self.settings.profiles[argument]) catch |err| log.err("unable to open profile: {}", .{err});
                 },
-                .new_wsl => self.addProfile(.wsl) catch |err| {
-                    log.err("unable to open WSL session: {}", .{err});
-                    return 0;
-                },
-                .new_pwsh => self.addProfile(.pwsh) catch |err| log.err("unable to open PowerShell 7 session: {}", .{err}),
-                .new_cmd => self.addProfile(.cmd) catch |err| log.err("unable to open Command Prompt session: {}", .{err}),
-                .new_custom => self.addProfile(.custom) catch |err| log.err("unable to open custom session: {}", .{err}),
                 .new_default => {
                     self.addDefaultSession() catch |err| log.err("unable to open default shell session: {}", .{err});
                     return 0;
@@ -565,24 +563,31 @@ fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c)
 }
 
 fn addDefaultSessionImpl(self: *Application) !void {
-    const shell: app_model.Shell = switch (self.settings.default_shell) {
-        .powershell => .powershell,
-        .pwsh => .pwsh,
-        .cmd => .cmd,
-        .wsl => .wsl,
-        .custom => if (self.settings.custom_command.len > 0) .custom else .powershell,
-    };
-    try self.addProfile(shell);
+    try self.addProfile(self.settings.defaultProfile());
     self.terminal_view.syncSessions();
     self.terminal_view.invalidate();
     self.syncChrome();
 }
 
-fn addProfileImpl(self: *Application, shell: app_model.Shell) !void {
+fn addProfileImpl(self: *Application, profile: config.Profile) !void {
     self.terminal_view.resetInteraction();
-    const command = if (shell == .custom) self.settings.custom_command else shell.command();
-    const title = if (shell == .custom) self.settings.custom_profile_name else shell.title();
-    _ = try self.model.addSession(shell, title, command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
+    const shell: app_model.Shell = switch (profile.shell) {
+        .powershell => .powershell,
+        .windows => .windows,
+        .wsl => .wsl,
+    };
+    _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
+}
+
+fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {
+    const bridge = if (self.chrome) |*value| value else return;
+    var names: [config.max_profiles][*]const u8 = undefined;
+    var lengths: [config.max_profiles]u32 = undefined;
+    for (settings.profileSlice(), 0..) |profile, index| {
+        names[index] = profile.name.ptr;
+        lengths[index] = @intCast(profile.name.len);
+    }
+    if (!bridge.updateProfiles(names[0..settings.profile_count], lengths[0..settings.profile_count])) return error.UpdateProfilesFailed;
 }
 
 fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) void {
@@ -634,6 +639,10 @@ fn reloadSettingsImpl(self: *Application) !void {
     errdefer {
         if (new_font != null) _ = win.DeleteObject(new_font);
     }
+    errdefer self.syncProfiles(&self.settings) catch {
+        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+    };
+    try self.syncProfiles(&next);
     if (new_font != null) {
         try self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi);
         self.zoomed_font_size = next.font_size;
