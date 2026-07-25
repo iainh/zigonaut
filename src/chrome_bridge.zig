@@ -16,6 +16,7 @@ pub const Command = enum(u32) {
     new_pwsh = win.ZIGONAUT_CHROME_NEW_PWSH,
     new_cmd = win.ZIGONAUT_CHROME_NEW_CMD,
     new_custom = win.ZIGONAUT_CHROME_NEW_CUSTOM,
+    notification_activate = win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -27,6 +28,7 @@ const Initialize = *const fn (win.HWND, Callback, ?*anyopaque) callconv(.c) ?*an
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
 const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
+const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
 const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
@@ -41,6 +43,7 @@ pub const Bridge = struct {
     update_fn: Update,
     update_scrollbar_fn: UpdateScrollbar,
     update_taskbar_progress_fn: UpdateTaskbarProgress,
+    show_notification_fn: ShowNotification,
     move_fn: Move,
     pretranslate_fn: Pretranslate,
     close_fn: Close,
@@ -68,13 +71,14 @@ pub const Bridge = struct {
         const update_fn = symbol(Update, module, "zigonaut_chrome_update") orelse return null;
         const update_scrollbar_fn = symbol(UpdateScrollbar, module, "zigonaut_chrome_update_scrollbar") orelse return null;
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
+        const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const move_fn = symbol(Move, module, "zigonaut_chrome_move") orelse return null;
         const pretranslate_fn = symbol(Pretranslate, module, "zigonaut_chrome_pretranslate") orelse return null;
         const close_fn = symbol(Close, module, "zigonaut_chrome_close") orelse return null;
         const destroy_fn = symbol(Destroy, module, "zigonaut_chrome_destroy") orelse return null;
         const instance = initialize(parent, callback, context) orelse return null;
         loaded = true;
-        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
+        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .show_notification_fn = show_notification_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
@@ -90,6 +94,11 @@ pub const Bridge = struct {
     pub fn updateTaskbarProgress(self: *Bridge, state: u32, value: u32) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.update_taskbar_progress_fn(instance, state, value));
+    }
+
+    pub fn showNotification(self: *Bridge, session_id: u32, title: []const u8, body: []const u8) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.show_notification_fn(instance, session_id, title.ptr, @intCast(title.len), body.ptr, @intCast(body.len)));
     }
 
     pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {
@@ -135,5 +144,6 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.new_pwsh, commandFromInt(win.ZIGONAUT_CHROME_NEW_PWSH).?);
     try std.testing.expectEqual(Command.new_cmd, commandFromInt(win.ZIGONAUT_CHROME_NEW_CMD).?);
     try std.testing.expectEqual(Command.new_custom, commandFromInt(win.ZIGONAUT_CHROME_NEW_CUSTOM).?);
-    try std.testing.expect(commandFromInt(13) == null);
+    try std.testing.expectEqual(Command.notification_activate, commandFromInt(win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE).?);
+    try std.testing.expect(commandFromInt(14) == null);
 }

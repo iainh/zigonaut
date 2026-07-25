@@ -23,11 +23,22 @@ pub const SessionRuntime = struct {
     progress_parser: progress.Parser = .{},
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    notifications: std.ArrayList(Notification) = .empty,
 
     pub const TaskbarProgress = struct {
         state: progress.State,
         value: u8,
         updated_tick: u64,
+    };
+
+    pub const Notification = struct {
+        title: []u8,
+        body: []u8,
+
+        pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
+            allocator.free(self.title);
+            allocator.free(self.body);
+        }
     };
 
     pub fn create(
@@ -77,6 +88,8 @@ pub const SessionRuntime = struct {
             pty.finishClose();
         }
         self.title.deinit(self.allocator);
+        for (self.notifications.items) |notification| notification.deinit(self.allocator);
+        self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
@@ -244,6 +257,23 @@ pub const SessionRuntime = struct {
         return self.taskbar_progress;
     }
 
+    pub fn takeNotification(self: *SessionRuntime) ?Notification {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (self.notifications.items.len == 0) return null;
+        return self.notifications.orderedRemove(0);
+    }
+
+    pub fn hasPendingNotification(self: *SessionRuntime) bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.notifications.items.len > 0;
+    }
+
+    pub fn freeNotification(self: *SessionRuntime, notification: Notification) void {
+        notification.deinit(self.allocator);
+    }
+
     pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
@@ -310,7 +340,25 @@ pub const SessionRuntime = struct {
             if (count == 0) break;
 
             self.terminal_mutex.lock();
-            if (self.progress_parser.feed(buffer[0..count])) |update| {
+            for (buffer[0..count]) |byte| {
+                const update = self.progress_parser.feedByte(byte) orelse continue;
+                if (update == .notification) {
+                    const event = update.notification;
+                    const title = self.allocator.dupe(u8, event.title) catch continue;
+                    const body = self.allocator.dupe(u8, event.body) catch {
+                        self.allocator.free(title);
+                        continue;
+                    };
+                    if (self.notifications.items.len == 32) {
+                        self.notifications.orderedRemove(0).deinit(self.allocator);
+                    }
+                    self.notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
+                        self.allocator.free(title);
+                        self.allocator.free(body);
+                        continue;
+                    };
+                    continue;
+                }
                 self.taskbar_progress = switch (update) {
                     .remove => null,
                     .report => |report| value: {
@@ -321,6 +369,7 @@ pub const SessionRuntime = struct {
                             .updated_tick = win.GetTickCount64(),
                         };
                     },
+                    .notification => unreachable,
                 };
                 _ = self.progress_generation.fetchAdd(1, .release);
             }

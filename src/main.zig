@@ -19,6 +19,7 @@ const titles_changed_message = win.WM_APP + 2;
 const shell_exited_message = win.WM_APP + 3;
 const scrollbar_changed_message = win.WM_APP + 4;
 const progress_changed_message = win.WM_APP + 5;
+const notification_changed_message = win.WM_APP + 6;
 const winui_terminal_top: i32 = 48;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
@@ -63,6 +64,7 @@ const Application = struct {
     const syncChrome = syncChromeImpl;
     const syncScrollbar = syncScrollbarImpl;
     const syncTaskbarProgress = syncTaskbarProgressImpl;
+    const showPendingNotifications = showPendingNotificationsImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
     const reloadSettings = reloadSettingsImpl;
@@ -219,6 +221,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 shell_exited_message,
                 scrollbar_changed_message,
                 progress_changed_message,
+                notification_changed_message,
             );
             self.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
                 log.err("unable to create terminal view: {}", .{err});
@@ -276,6 +279,16 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.terminal_view.handleMouseWheelDelta(@bitCast(argument));
                     return 0;
                 },
+                .notification_activate => {
+                    if (!self.model.activateSessionId(argument)) return 0;
+                    self.terminal_view.syncSessions();
+                    self.terminal_view.invalidate();
+                    self.syncChrome();
+                    _ = win.ShowWindow(hwnd, win.SW_RESTORE);
+                    _ = win.SetForegroundWindow(hwnd);
+                    _ = win.SetFocus(self.terminal_view.hwnd);
+                    return 0;
+                },
             }
             self.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
@@ -304,6 +317,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         },
         progress_changed_message => {
             self.syncTaskbarProgress();
+            return 0;
+        },
+        notification_changed_message => {
+            self.showPendingNotifications();
             return 0;
         },
         win.WM_TIMER => {
@@ -445,6 +462,19 @@ fn syncTaskbarProgressImpl(self: *Application) void {
     };
     _ = bridge.updateTaskbarProgress(state, value.value);
     _ = win.SetTimer(hwnd, taskbar_progress_timer, @intCast(taskbar_progress_timeout_ms - age), null);
+}
+
+fn showPendingNotificationsImpl(self: *Application) void {
+    const bridge = if (self.chrome) |*value| value else return;
+    for (self.model.sessions.items) |*session| {
+        const runtime = session.runtime orelse continue;
+        while (runtime.takeNotification()) |notification| {
+            defer runtime.freeNotification(notification);
+            const title = if (notification.title.len > 0) notification.title else session.displayTitle();
+            if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body)) continue;
+            _ = bridge.showNotification(session.id, title, notification.body);
+        }
+    }
 }
 
 fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {

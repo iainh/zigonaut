@@ -15,7 +15,10 @@ pub const Report = struct {
 pub const Update = union(enum) {
     remove,
     report: Report,
+    notification: Notification,
 };
+
+pub const Notification = struct { title: []const u8, body: []const u8 };
 
 pub fn resolvedValue(report: Report, previous: u8) u8 {
     return report.value orelse if (report.state == .normal) 0 else previous;
@@ -23,7 +26,7 @@ pub fn resolvedValue(report: Report, previous: u8) u8 {
 
 pub const Parser = struct {
     phase: Phase = .text,
-    payload: [64]u8 = undefined,
+    payload: [4096]u8 = undefined,
     length: usize = 0,
     overflow: bool = false,
 
@@ -31,31 +34,43 @@ pub const Parser = struct {
 
     pub fn feed(self: *Parser, bytes: []const u8) ?Update {
         var latest: ?Update = null;
-        for (bytes) |byte| switch (self.phase) {
+        for (bytes) |byte| {
+            if (self.feedByte(byte)) |update| latest = update;
+        }
+        return latest;
+    }
+
+    pub fn feedByte(self: *Parser, byte: u8) ?Update {
+        return switch (self.phase) {
             .text => if (byte == 0x1b) {
                 self.phase = .escape;
-            },
+                return null;
+            } else null,
             .escape => if (byte == ']') {
                 self.beginOsc();
+                return null;
             } else {
                 self.phase = if (byte == 0x1b) .escape else .text;
+                return null;
             },
             .osc => if (byte == 0x07 or byte == 0x9c) {
-                if (self.finish()) |update| latest = update;
+                return self.finish();
             } else if (byte == 0x1b) {
                 self.phase = .osc_escape;
+                return null;
             } else {
                 self.append(byte);
+                return null;
             },
             .osc_escape => if (byte == '\\') {
-                if (self.finish()) |update| latest = update;
+                return self.finish();
             } else {
                 self.append(0x1b);
                 self.append(byte);
                 self.phase = .osc;
+                return null;
             },
         };
-        return latest;
     }
 
     fn beginOsc(self: *Parser) void {
@@ -85,6 +100,19 @@ pub const Parser = struct {
 };
 
 fn parse(payload: []const u8) ?Update {
+    if (parseProgress(payload)) |update| return update;
+    if (std.mem.startsWith(u8, payload, "777;notify;")) {
+        const content = payload[11..];
+        const separator = std.mem.indexOfScalar(u8, content, ';') orelse return null;
+        return .{ .notification = .{ .title = content[0..separator], .body = content[separator + 1 ..] } };
+    }
+    if (std.mem.startsWith(u8, payload, "9;") and !isConEmu(payload[2..])) {
+        return .{ .notification = .{ .title = "", .body = payload[2..] } };
+    }
+    return null;
+}
+
+fn parseProgress(payload: []const u8) ?Update {
     if (!std.mem.startsWith(u8, payload, "9;4;")) return null;
     var fields = std.mem.splitScalar(u8, payload[4..], ';');
     const state = fields.next() orelse return null;
@@ -97,6 +125,16 @@ fn parse(payload: []const u8) ?Update {
         '4' => .{ .report = .{ .state = .paused, .value = parseValue(&fields) catch return null } },
         else => null,
     };
+}
+
+fn isConEmu(body: []const u8) bool {
+    if (std.mem.startsWith(u8, body, "1;") or std.mem.startsWith(u8, body, "2;") or
+        std.mem.startsWith(u8, body, "3;") or std.mem.startsWith(u8, body, "6;") or
+        std.mem.startsWith(u8, body, "7;") or std.mem.startsWith(u8, body, "8;") or
+        std.mem.startsWith(u8, body, "9;") or std.mem.startsWith(u8, body, "11;")) return true;
+    if (body.len > 0 and (body[0] == '5' or std.mem.startsWith(u8, body, "12"))) return true;
+    return std.mem.eql(u8, body, "10") or
+        (body.len == 4 and std.mem.startsWith(u8, body, "10;") and body[3] >= '0' and body[3] <= '3');
 }
 
 fn parseValue(fields: *std.mem.SplitIterator(u8, .scalar)) !?u8 {
@@ -128,4 +166,19 @@ test "omitted progress follows protocol state defaults" {
     try std.testing.expectEqual(@as(u8, 0), resolvedValue(.{ .state = .normal, .value = null }, 60));
     try std.testing.expectEqual(@as(u8, 60), resolvedValue(.{ .state = .paused, .value = null }, 60));
     try std.testing.expectEqual(@as(u8, 60), resolvedValue(.{ .state = .error_state, .value = null }, 60));
+}
+
+test "parses OSC 9 and OSC 777 notifications" {
+    var parser = Parser{};
+    const simple = parser.feed("\x1b]9;build finished\x07").?.notification;
+    try std.testing.expectEqualStrings("", simple.title);
+    try std.testing.expectEqualStrings("build finished", simple.body);
+    const titled = parser.feed("\x1b]777;notify;Build;finished; successfully\x1b\\").?.notification;
+    try std.testing.expectEqualStrings("Build", titled.title);
+    try std.testing.expectEqualStrings("finished; successfully", titled.body);
+    try std.testing.expect(parser.feed("\x1b]9;2;ConEmu message box\x07") == null);
+    try std.testing.expectEqualStrings("4;5", parser.feed("\x1b]9;4;5\x07").?.notification.body);
+    try std.testing.expectEqualStrings("10;4", parser.feed("\x1b]9;10;4\x07").?.notification.body);
+    try std.testing.expect(parser.feed("\x1b]9;5\x07") == null);
+    try std.testing.expect(parser.feed("\x1b]9;12\x07") == null);
 }

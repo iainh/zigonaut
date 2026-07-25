@@ -130,6 +130,24 @@ pub const App = struct {
         return &self.sessions.items[index];
     }
 
+    pub fn activateSessionId(self: *App, id: u32) bool {
+        for (self.sessions.items, 0..) |session, index| {
+            if (session.id != id) continue;
+            self.active = index;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn hasPendingNotification(self: *App) bool {
+        for (self.sessions.items) |session| {
+            if (session.runtime) |runtime| {
+                if (runtime.hasPendingNotification()) return true;
+            }
+        }
+        return false;
+    }
+
     pub fn resizeSessions(self: *App, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
         for (self.sessions.items) |session| {
             if (session.runtime) |runtime| runtime.resize(columns, rows, cell_width, cell_height);
@@ -205,6 +223,10 @@ test "sessions are added and selected" {
 
     app.activate(0);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
+    const wsl_id = app.sessions.items[1].id;
+    try std.testing.expect(app.activateSessionId(wsl_id));
+    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+    try std.testing.expect(!app.activateSessionId(999_999));
 }
 
 test "closing the active session selects its nearest neighbor" {

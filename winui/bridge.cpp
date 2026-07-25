@@ -21,10 +21,14 @@
 #include <winrt/base.h>
 #include <Microsoft.UI.Dispatching.Interop.h>
 #include <winrt/Microsoft.UI.Interop.h>
+#include <winrt/Microsoft.Windows.AppNotifications.h>
+#include <winrt/Microsoft.Windows.AppNotifications.Builder.h>
 #include <shobjidl.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <atomic>
+#include <memory>
 #include <string_view>
 
 using namespace winrt;
@@ -32,8 +36,18 @@ using namespace Microsoft::UI;
 using namespace Microsoft::UI::Xaml;
 using namespace Microsoft::UI::Xaml::Controls;
 using namespace Microsoft::UI::Xaml::Hosting;
+using namespace Microsoft::Windows::AppNotifications;
+using namespace Microsoft::Windows::AppNotifications::Builder;
 
 namespace {
+struct NotificationActivationState {
+    std::atomic_bool active{true};
+    zigonaut_chrome_command callback{};
+    void* context{};
+    Microsoft::UI::Dispatching::DispatcherQueue queue{nullptr};
+    hstring nonce;
+};
+
 HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
     wchar_t message[160]{};
     swprintf_s(message, L"Zigonaut WinUI: %s failed with HRESULT 0x%08X\n", operation, static_cast<unsigned>(result));
@@ -128,12 +142,25 @@ struct Bridge {
     bool closed = false;
     bool custom_title_bar = false;
     com_ptr<ITaskbarList3> taskbar;
+    AppNotificationManager notification_manager{nullptr};
+    AppNotificationManager::NotificationInvoked_revoker notification_revoker{};
+    bool notifications_registered = false;
+    std::shared_ptr<NotificationActivationState> notification_activation;
 
     Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
            Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
            Application const& app)
         : callback(cb), context(ctx), dispatcher(controller), application(app) {
         this->parent = parent;
+        GUID nonce{};
+        check_hresult(CoCreateGuid(&nonce));
+        wchar_t nonce_text[40]{};
+        if (!StringFromGUID2(nonce, nonce_text, static_cast<int>(std::size(nonce_text)))) throw hresult_error(E_FAIL);
+        notification_activation = std::make_shared<NotificationActivationState>();
+        notification_activation->callback = callback;
+        notification_activation->context = context;
+        notification_activation->queue = dispatcher.DispatcherQueue();
+        notification_activation->nonce = nonce_text;
         source = DesktopWindowXamlSource{};
         source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
         root = Grid{};
@@ -266,6 +293,32 @@ struct Bridge {
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
         source.SystemBackdrop(backdrop);
         enableTitleBar();
+        try {
+            notification_manager = AppNotificationManager::Default();
+            auto const activation = notification_activation;
+            notification_revoker = notification_manager.NotificationInvoked(auto_revoke, [activation](auto const&, AppNotificationActivatedEventArgs const& args) {
+                auto const values = args.Arguments();
+                if (!values.HasKey(L"session") || !values.HasKey(L"process") || !values.HasKey(L"nonce")) return;
+                wchar_t* process_end{};
+                auto const process = wcstoul(values.Lookup(L"process").c_str(), &process_end, 10);
+                if (!process_end || *process_end != L'\0' || process != GetCurrentProcessId()) return;
+                if (values.Lookup(L"nonce") != activation->nonce) return;
+                auto const text = values.Lookup(L"session");
+                wchar_t* end{};
+                auto const id = wcstoul(text.c_str(), &end, 10);
+                if (!end || *end != L'\0' || id > UINT32_MAX) return;
+                activation->queue.TryEnqueue([activation, id] {
+                    if (!activation->active.load(std::memory_order_acquire) || !activation->callback) return;
+                    activation->callback(activation->context, ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE, static_cast<uint32_t>(id));
+                });
+            });
+            notification_manager.Register();
+            notifications_registered = true;
+        } catch (...) {
+            reportCurrentException(L"register app notifications");
+            notification_revoker.revoke();
+            notification_manager = nullptr;
+        }
     }
 
     void enableTitleBar() {
@@ -406,6 +459,22 @@ struct Bridge {
         return taskbar->SetProgressValue(parent, std::min(value, 100u), 100);
     }
 
+    HRESULT showNotification(uint32_t session_id, std::string_view title, std::string_view body) noexcept {
+        if (!notifications_registered) return E_NOTIMPL;
+        try {
+            auto builder = AppNotificationBuilder{}
+                .AddArgument(L"session", to_hstring(session_id))
+                .AddArgument(L"process", to_hstring(static_cast<uint32_t>(GetCurrentProcessId())))
+                .AddArgument(L"nonce", notification_activation->nonce)
+                .AddText(to_hstring(title))
+                .AddText(to_hstring(body));
+            notification_manager.Show(builder.BuildNotification());
+            return S_OK;
+        } catch (...) {
+            return reportCurrentException(L"show app notification");
+        }
+    }
+
     void notify(zigonaut_chrome_command_id command, uint32_t argument) const {
         if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
@@ -439,10 +508,17 @@ struct Bridge {
 
     HRESULT close() noexcept {
         if (closed) return S_OK;
+        notification_activation->active.store(false, std::memory_order_release);
         callback = nullptr;
         context = nullptr;
 
         HRESULT result = S_OK;
+        if (notifications_registered) {
+            cleanup(L"unregister app notifications", [&] { notification_manager.Unregister(); }, result);
+            notifications_registered = false;
+        }
+        notification_revoker.revoke();
+        notification_manager = nullptr;
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
         powershell_revoker.revoke();
@@ -562,6 +638,13 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* value, 
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (state != TBPF_NOPROGRESS && state != TBPF_INDETERMINATE && state != TBPF_NORMAL && state != TBPF_ERROR && state != TBPF_PAUSED) return E_INVALIDARG;
     return bridge->updateTaskbarProgress(state, progress);
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_show_notification(void* value, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if ((title_length && !title) || (body_length && !body)) return E_INVALIDARG;
+    return bridge->showNotification(session_id, std::string_view(title ? title : "", title_length), std::string_view(body ? body : "", body_length));
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {

@@ -45,6 +45,7 @@ pub const View = struct {
     shell_exited_message: win.UINT,
     scrollbar_changed_message: win.UINT,
     progress_changed_message: win.UINT,
+    notification_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
@@ -79,6 +80,7 @@ pub const View = struct {
         shell_exited_message: win.UINT,
         scrollbar_changed_message: win.UINT,
         progress_changed_message: win.UINT,
+        notification_changed_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
@@ -95,6 +97,7 @@ pub const View = struct {
             .shell_exited_message = shell_exited_message,
             .scrollbar_changed_message = scrollbar_changed_message,
             .progress_changed_message = progress_changed_message,
+            .notification_changed_message = notification_changed_message,
         };
     }
 
@@ -181,6 +184,9 @@ pub const View = struct {
         if (titles_generation != self.last_titles_generation) {
             self.last_titles_generation = titles_generation;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.titles_changed_message, 0, 0);
+        }
+        if (self.model.hasPendingNotification()) {
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.notification_changed_message, 0, 0);
         }
         const session = self.model.activeSession() orelse {
             if (self.last_progress_runtime != null) {
