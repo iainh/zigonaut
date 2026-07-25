@@ -29,7 +29,11 @@ winget install -e --id Microsoft.WindowsAppRuntime.1.8
 zig build
 zig build test
 zig build run
+zig build benchmark -Doptimize=ReleaseFast
 ```
+
+The benchmark feeds a fixed colorized transcript into a 120×40 terminal and measures
+VT ingestion and render-state traversal without relying on interactive timing.
 
 ## Configuration
 
