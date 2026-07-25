@@ -605,8 +605,7 @@ pub const View = struct {
         _ = win.KillTimer(self.hwnd, selection_scroll_timer);
         if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         if (!self.selection.?.moved and self.selection.?.unit == .cell) {
-            self.selection = null;
-            self.invalidate();
+            self.clearSelection();
             return;
         }
         self.copySelection() catch |err| log.debug("unable to copy terminal selection: {}", .{err});
