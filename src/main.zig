@@ -94,6 +94,31 @@ pub fn main() !void {
     const instance = win.GetModuleHandleW(null);
     const arrow_cursor: win.LPCWSTR = @ptrFromInt(32512);
     const cursor = win.LoadCursorW(null, arrow_cursor);
+    const icon_resource = win32.handleFromInt(win.LPCWSTR, 1);
+    const large_image = win.LoadImageW(
+        instance,
+        icon_resource,
+        win.IMAGE_ICON,
+        win.GetSystemMetrics(win.SM_CXICON),
+        win.GetSystemMetrics(win.SM_CYICON),
+        win.LR_SHARED,
+    );
+    const large_icon: win.HICON = if (large_image) |handle|
+        win32.handleFromInt(win.HICON, @intFromPtr(handle))
+    else
+        null;
+    const small_image = win.LoadImageW(
+        instance,
+        icon_resource,
+        win.IMAGE_ICON,
+        win.GetSystemMetrics(win.SM_CXSMICON),
+        win.GetSystemMetrics(win.SM_CYSMICON),
+        win.LR_SHARED,
+    );
+    const small_icon: win.HICON = if (small_image) |handle|
+        win32.handleFromInt(win.HICON, @intFromPtr(handle))
+    else
+        null;
     try TerminalView.registerClass(instance, cursor);
     const window_class = win.WNDCLASSEXW{
         .cbSize = @sizeOf(win.WNDCLASSEXW),
@@ -102,12 +127,12 @@ pub fn main() !void {
         .cbClsExtra = 0,
         .cbWndExtra = 0,
         .hInstance = instance,
-        .hIcon = null,
+        .hIcon = large_icon,
         .hCursor = cursor,
         .hbrBackground = null,
         .lpszMenuName = null,
         .lpszClassName = class_name,
-        .hIconSm = null,
+        .hIconSm = small_icon,
     };
     if (win.RegisterClassExW(&window_class) == 0) return error.RegisterWindowClassFailed;
 

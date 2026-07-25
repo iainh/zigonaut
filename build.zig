@@ -23,6 +23,9 @@ pub fn build(b: *std.Build) void {
         .root_module = app_module,
         .win32_manifest = b.path("zigonaut.manifest"),
     });
+    exe.root_module.addWin32ResourceFile(.{
+        .file = b.path("zigonaut.rc"),
+    });
     exe.subsystem = .Windows;
     exe.linkLibC();
     exe.linkLibCpp();
