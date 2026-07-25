@@ -138,6 +138,7 @@ struct ZigonautTextEngine {
     std::map<LayoutKey, IDWriteTextLayout*> layouts;
     std::vector<RowCell> row_cells;
     RowSegment row_segment;
+    GridTextRenderer* grid_renderer = nullptr;
     std::wstring family;
     std::wstring locale;
     HWND hwnd = nullptr;
@@ -148,19 +149,10 @@ struct ZigonautTextEngine {
     float row_top = 0.0f;
     float row_cell_width = 0.0f;
     float row_cell_height = 0.0f;
+    uint32_t frame_background = 0;
     bool row_active = false;
 
-    ~ZigonautTextEngine() {
-        discardTarget();
-        release(d2d_factory);
-        clearLayouts();
-        for (auto*& format : formats) release(format);
-        release(normal_face);
-        release(fonts);
-        release(rendering_params);
-        release(factory2);
-        release(factory);
-    }
+    ~ZigonautTextEngine();
 
     HRESULT initialize(const wchar_t* requested_family) {
         HRESULT hr = DWriteCreateFactory(
@@ -269,6 +261,42 @@ struct ZigonautTextEngine {
         layouts.clear();
     }
 
+    HRESULT layoutFor(
+        const char16_t* text,
+        size_t text_length,
+        uint32_t width,
+        uint32_t height,
+        size_t format_index,
+        IDWriteTextLayout** result) {
+        if (result == nullptr || text_length > UINT32_MAX || format_index >= std::size(formats)) {
+            return E_INVALIDARG;
+        }
+        LayoutKey key{
+            std::u16string(text, text + text_length),
+            width,
+            height,
+            static_cast<uint8_t>(format_index),
+        };
+        auto existing = layouts.find(key);
+        if (existing != layouts.end()) {
+            *result = existing->second;
+            return S_OK;
+        }
+        if (layouts.size() >= max_layout_cache_entries) clearLayouts();
+        IDWriteTextLayout* layout = nullptr;
+        const HRESULT hr = factory->CreateTextLayout(
+            reinterpret_cast<const wchar_t*>(text),
+            static_cast<UINT32>(text_length),
+            formats[format_index],
+            static_cast<float>(width),
+            static_cast<float>(height),
+            &layout);
+        if (FAILED(hr)) return hr;
+        layouts.emplace(std::move(key), layout);
+        *result = layout;
+        return S_OK;
+    }
+
     HRESULT refreshRenderingParams() {
         IDWriteRenderingParams* updated = nullptr;
         const HMONITOR monitor = hwnd == nullptr
@@ -363,8 +391,10 @@ struct ZigonautTextEngine {
         ZigonautCellOccupancy occupancy) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
-        brush->SetColor(color(background));
-        target->FillRectangle(rect, brush);
+        if (background != frame_background) {
+            brush->SetColor(color(background));
+            target->FillRectangle(rect, brush);
+        }
         if (faint) {
             foreground = blend(foreground, background);
             underline_color = blend(underline_color, background);
@@ -432,30 +462,15 @@ struct ZigonautTextEngine {
         if (text_length == 0) return S_OK;
 
         const size_t format_index = (bold ? 1u : 0u) | (italic ? 2u : 0u);
-        LayoutKey key{
-            std::u16string(
-                reinterpret_cast<const char16_t*>(text),
-                reinterpret_cast<const char16_t*>(text) + text_length),
+        IDWriteTextLayout* layout = nullptr;
+        const HRESULT hr = layoutFor(
+            reinterpret_cast<const char16_t*>(text),
+            text_length,
             static_cast<uint32_t>(std::lround(width)),
             static_cast<uint32_t>(std::lround(height)),
-            static_cast<uint8_t>(format_index),
-        };
-        auto existing = layouts.find(key);
-        IDWriteTextLayout* layout = nullptr;
-        if (existing != layouts.end()) {
-            layout = existing->second;
-        } else {
-            if (layouts.size() >= max_layout_cache_entries) clearLayouts();
-            HRESULT hr = factory->CreateTextLayout(
-                reinterpret_cast<const wchar_t*>(text),
-                text_length,
-                formats[format_index],
-                width,
-                height,
-                &layout);
-            if (FAILED(hr)) return hr;
-            layouts.emplace(std::move(key), layout);
-        }
+            format_index,
+            &layout);
+        if (FAILED(hr)) return hr;
         brush->SetColor(color(foreground));
         target->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
         target->DrawTextLayout(
@@ -487,8 +502,12 @@ struct ZigonautTextEngine {
 
 class GridTextRenderer final : public IDWriteTextRenderer {
 public:
-    GridTextRenderer(ZigonautTextEngine* engine, const RowSegment& segment)
-        : engine_(engine), segment_(segment) {}
+    explicit GridTextRenderer(ZigonautTextEngine* engine)
+        : engine_(engine) {}
+
+    void setSegment(const RowSegment* segment) {
+        segment_ = segment;
+    }
 
     IFACEMETHOD(QueryInterface)(REFIID iid, void** object) override {
         if (object == nullptr) return E_POINTER;
@@ -543,9 +562,10 @@ public:
         const DWRITE_GLYPH_RUN* glyph_run,
         const DWRITE_GLYPH_RUN_DESCRIPTION* description,
         IUnknown*) override {
-        if (glyph_run == nullptr || engine_->target == nullptr || engine_->brush == nullptr) {
+        if (glyph_run == nullptr || segment_ == nullptr || engine_->target == nullptr || engine_->brush == nullptr) {
             return E_INVALIDARG;
         }
+        const auto& segment = *segment_;
 
         std::vector<FLOAT> advances(
             glyph_run->glyphAdvances,
@@ -563,7 +583,7 @@ public:
             uint32_t run_end_column = 0;
             for (UINT32 index = 0; index < description->stringLength; ++index) {
                 const uint32_t text_index = description->textPosition + index;
-                if (text_index >= segment_.start_columns.size()) break;
+                if (text_index >= segment.start_columns.size()) break;
                 const UINT16 glyph_start = description->clusterMap[index];
                 if (glyph_start >= glyph_run->glyphCount) continue;
                 auto& span = spans[glyph_start];
@@ -573,10 +593,10 @@ public:
                 }
                 span.start_column = std::min(
                     span.start_column,
-                    segment_.start_columns[text_index]);
+                    segment.start_columns[text_index]);
                 span.end_column = std::max(
                     span.end_column,
-                    segment_.end_columns[text_index]);
+                    segment.end_columns[text_index]);
                 span.first_text_index = std::min(span.first_text_index, text_index);
                 span.text_end = std::max(span.text_end, text_index + 1);
                 run_start_column = std::min(run_start_column, span.start_column);
@@ -591,12 +611,12 @@ public:
                     : glyph_run->glyphCount;
                 if (glyph_start >= glyph_end) continue;
                 const auto& span = spans[glyph_start];
-                const uint32_t cluster_left = segment_.start_columns[
+                const uint32_t cluster_left = segment.start_columns[
                     span.first_text_index];
                 const uint32_t cluster_right =
-                    span.text_end < segment_.start_columns.size()
-                    ? segment_.start_columns[span.text_end]
-                    : segment_.end_columns[span.text_end - 1];
+                    span.text_end < segment.start_columns.size()
+                    ? segment.start_columns[span.text_end]
+                    : segment.end_columns[span.text_end - 1];
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
                 zigonaut_fit_cluster_advances(
@@ -676,7 +696,7 @@ public:
                 if (enumeration_complete) {
                     for (const auto& layer : owned_layers) {
                         if (layer->palette_index == 0xffff) {
-                            engine_->brush->SetColor(color(segment_.foreground));
+                            engine_->brush->SetColor(color(segment.foreground));
                         } else {
                             engine_->brush->SetColor(D2D1::ColorF(
                                 layer->run_color.r,
@@ -697,7 +717,7 @@ public:
             }
         }
         if (!rendered_color) {
-            engine_->brush->SetColor(color(segment_.foreground));
+            engine_->brush->SetColor(color(segment.foreground));
             engine_->target->DrawGlyphRun(
                 D2D1::Point2F(origin_x, origin_y),
                 &adjusted,
@@ -725,8 +745,21 @@ public:
 private:
     std::atomic<ULONG> references_{1};
     ZigonautTextEngine* engine_;
-    const RowSegment& segment_;
+    const RowSegment* segment_ = nullptr;
 };
+
+ZigonautTextEngine::~ZigonautTextEngine() {
+    delete grid_renderer;
+    discardTarget();
+    release(d2d_factory);
+    clearLayouts();
+    for (auto*& format : formats) release(format);
+    release(normal_face);
+    release(fonts);
+    release(rendering_params);
+    release(factory2);
+    release(factory);
+}
 
 HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     if (segment.text.empty()) return S_OK;
@@ -741,24 +774,24 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     IDWriteTextLayout* layout = nullptr;
     const size_t format_index = (segment.bold ? 1u : 0u) |
         (segment.italic ? 2u : 0u);
-    HRESULT hr = factory->CreateTextLayout(
-        reinterpret_cast<const wchar_t*>(segment.text.data()),
-        static_cast<UINT32>(segment.text.size()),
-        formats[format_index],
-        static_cast<float>(end_column - start_column) * row_cell_width,
-        row_cell_height,
+    const uint32_t width = static_cast<uint32_t>(std::lround(
+        static_cast<float>(end_column - start_column) * row_cell_width));
+    const uint32_t height = static_cast<uint32_t>(std::lround(row_cell_height));
+    HRESULT hr = layoutFor(
+        segment.text.data(),
+        segment.text.size(),
+        width,
+        height,
+        format_index,
         &layout);
     if (FAILED(hr)) return hr;
 
-    auto* renderer = new (std::nothrow) GridTextRenderer(this, segment);
-    if (renderer == nullptr) {
-        release(layout);
-        return E_OUTOFMEMORY;
+    if (grid_renderer == nullptr) {
+        grid_renderer = new (std::nothrow) GridTextRenderer(this);
+        if (grid_renderer == nullptr) return E_OUTOFMEMORY;
     }
-    hr = layout->Draw(nullptr, renderer, 0.0f, 0.0f);
-    renderer->Release();
-    release(layout);
-    return hr;
+    grid_renderer->setSegment(&segment);
+    return layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
 }
 
 void ZigonautTextEngine::endRow() {
@@ -885,6 +918,7 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     if (engine == nullptr || width == 0 || height == 0) return E_INVALIDARG;
     const HRESULT hr = engine->ensureTarget(width, height);
     if (FAILED(hr)) return hr;
+    engine->frame_background = background;
     engine->target->BeginDraw();
     engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
     engine->target->Clear(color(background));
