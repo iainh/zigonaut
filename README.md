@@ -54,6 +54,28 @@ to use the theme background unchanged for every tab.
 
 The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 1.8 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
 
+## Releases
+
+Releases use semantic versions and are built from tags such as `v0.1.0`. Before tagging,
+update both the `.version` field in `build.zig.zon` and the four-part version in
+`zigonaut.manifest`. For example, version `0.2.0` uses manifest version `0.2.0.0`.
+
+Push the tag after its commit has passed CI:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow tests, builds, packages, and launches the x64 and ARM64 archives on
+clean native GitHub-hosted runners. It then creates a draft GitHub Release containing both
+portable ZIPs and their SHA-256 checksum files. Download and smoke-test the draft artifacts
+on representative Windows machines before publishing the release. The portable build
+requires the matching Windows App Runtime 1.8 architecture to be installed.
+
+The release workflow can also be run manually with a version to exercise the clean-runner
+build and smoke tests without creating a tag or GitHub Release.
+
 ## MVP path
 
 1. Add full physical-key mapping, key releases, and IME composition support.

@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build and smoke-test (without a leading v)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate version
+    runs-on: windows-2025
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Match tag, package, and manifest versions
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            if ($env:RELEASE_TAG -notmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$') {
+              throw "Release tag '$env:RELEASE_TAG' must have the form v1.2.3 or v1.2.3-rc.1."
+            }
+            $version = $Matches.version
+          } else {
+            $version = $env:DISPATCH_VERSION
+            if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$') {
+              throw "Version '$version' must have the form 1.2.3 or 1.2.3-rc.1."
+            }
+          }
+
+          $zon = Get-Content build.zig.zon -Raw
+          $zonMatch = [regex]::Match($zon, '(?m)^\s*\.version\s*=\s*"([^"]+)"')
+          if (-not $zonMatch.Success -or $zonMatch.Groups[1].Value -ne $version) {
+            throw "build.zig.zon version must be '$version'."
+          }
+
+          $manifest = [xml](Get-Content zigonaut.manifest -Raw)
+          $manifestVersion = $manifest.assembly.assemblyIdentity.version
+          $numericVersion = $version.Split('-')[0]
+          $expectedManifestVersion = "$numericVersion.0"
+          if ($manifestVersion -ne $expectedManifestVersion) {
+            throw "zigonaut.manifest version must be '$expectedManifestVersion'."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+  build:
+    name: Package Windows (${{ matrix.package_arch }})
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-windows
+            runtime_arch: x64
+            package_arch: x64
+          - runner: windows-11-arm
+            target: aarch64-windows
+            runtime_arch: arm64
+            package_arch: arm64
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run tests
+        run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Install Windows App Runtime 1.8
+        shell: pwsh
+        env:
+          RUNTIME_ARCH: ${{ matrix.runtime_arch }}
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "WindowsAppRuntimeInstall-$env:RUNTIME_ARCH.exe"
+          Invoke-WebRequest `
+            -Uri "https://aka.ms/windowsappsdk/1.8/1.8.260508005/windowsappruntimeinstall-$env:RUNTIME_ARCH.exe" `
+            -OutFile $installer
+          & $installer --quiet
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows App Runtime installation failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Build complete release application
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Create portable archive and checksum
+        id: package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          $name = "zigonaut-v$env:VERSION-windows-$env:PACKAGE_ARCH"
+          $staging = Join-Path $env:RUNNER_TEMP $name
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Force $staging, $dist | Out-Null
+
+          $releaseFiles = @(
+            'zigonaut.exe',
+            'Zigonaut.WinUI.Bridge.dll',
+            'Microsoft.WindowsAppRuntime.Bootstrap.dll',
+            'resources.pri'
+          )
+          foreach ($file in $releaseFiles) {
+            $source = Join-Path $env:GITHUB_WORKSPACE "zig-out\bin\$file"
+            if (-not (Test-Path $source -PathType Leaf)) {
+              throw "Release build did not produce $file."
+            }
+            Copy-Item $source $staging
+          }
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'README.md') $staging
+
+          $archive = Join-Path $dist "$name.zip"
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash *$name.zip" | Set-Content -Encoding ascii "$archive.sha256"
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+
+      - name: Smoke-test packaged application
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP 'zigonaut-smoke-test'
+          Expand-Archive -Path $env:ARCHIVE -DestinationPath $smoke
+          $process = Start-Process `
+            -FilePath (Join-Path $smoke 'zigonaut.exe') `
+            -WorkingDirectory $smoke `
+            -PassThru
+          Start-Sleep -Seconds 8
+          $process.Refresh()
+          if ($process.HasExited) {
+            throw "Packaged Zigonaut exited during startup with code $($process.ExitCode)."
+          }
+          taskkill /PID $process.Id /T /F | Out-Null
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zigonaut-windows-${{ matrix.package_arch }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create draft GitHub release
+    if: github.event_name == 'push'
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested packages
+        uses: actions/download-artifact@v5
+        with:
+          pattern: zigonaut-windows-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          args=(
+            "$RELEASE_TAG"
+            dist/*
+            --verify-tag
+            --draft
+            --generate-notes
+            --title "Zigonaut $VERSION"
+          )
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
