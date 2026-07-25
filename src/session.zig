@@ -31,6 +31,10 @@ pub const SessionRuntime = struct {
     render_query: std.ArrayList(u8) = .empty,
     render_matches: std.ArrayList(SearchMatch) = .empty,
     search_scratch: Terminal.SearchScratch = .{},
+    columns: u16,
+    rows: u16,
+    cell_width: u32 = 0,
+    cell_height: u32 = 0,
 
     pub const Refresh = struct {
         callback: ?*const fn (?*anyopaque) void = null,
@@ -78,6 +82,8 @@ pub const SessionRuntime = struct {
             .allocator = allocator,
             .terminal = try Terminal.init(columns, rows, terminal_theme),
             .refresh = refresh,
+            .columns = columns,
+            .rows = rows,
         };
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
@@ -408,14 +414,25 @@ pub const SessionRuntime = struct {
     }
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
+        if (self.columns == columns and self.rows == rows and self.cell_width == cell_width and self.cell_height == cell_height) return;
+        const grid_changed = self.columns != columns or self.rows != rows;
         self.terminal_mutex.lock();
-        self.terminal.resize(columns, rows, cell_width, cell_height) catch |err| {
-            log.warn("unable to resize terminal grid: {}", .{err});
+        const resized = resized: {
+            self.terminal.resize(columns, rows, cell_width, cell_height) catch |err| {
+                log.warn("unable to resize terminal grid: {}", .{err});
+                break :resized false;
+            };
+            break :resized true;
         };
         self.terminal_mutex.unlock();
-        if (self.pty) |*pty| pty.resize(columns, rows) catch |err| {
+        if (!resized) return;
+        if (grid_changed) if (self.pty) |*pty| pty.resize(columns, rows) catch |err| {
             log.warn("unable to resize pseudoconsole: {}", .{err});
         };
+        self.columns = columns;
+        self.rows = rows;
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
     }
 
     pub fn setTheme(self: *SessionRuntime, value: theme.Theme) void {

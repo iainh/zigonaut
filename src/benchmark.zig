@@ -7,6 +7,9 @@ const columns = 120;
 const rows = 40;
 const feed_iterations = 10_000;
 const render_iterations = 500;
+const resize_session_count = 8;
+const resize_iterations = 50;
+const resize_feed_iterations = 2_000;
 const line = "\x1b[38;2;120;180;255mcompile\x1b[0m src/terminal_view.zig:123:45 " ++
     "abcdefghijklmnopqrstuvwxyz 0123456789\r\n";
 
@@ -38,11 +41,34 @@ pub fn main() !void {
     for (0..total_rows) |row| try terminal.searchRow(std.heap.page_allocator, &search_scratch, @intCast(row), "terminal_view", &matches);
     const search_ns = timer.lap();
 
+    var resize_terminals: [resize_session_count]Terminal = undefined;
+    var initialized: usize = 0;
+    defer for (resize_terminals[0..initialized]) |*resize_terminal| resize_terminal.deinit();
+    for (&resize_terminals) |*resize_terminal| {
+        resize_terminal.* = try Terminal.init(columns, rows, theme.rasmus);
+        initialized += 1;
+        for (0..resize_feed_iterations) |_| resize_terminal.feed(line);
+    }
+    _ = timer.lap();
+    for (0..resize_iterations) |iteration| {
+        const target_columns: u16 = if (iteration % 2 == 0) columns - 1 else columns;
+        const target_rows: u16 = if (iteration % 2 == 0) rows - 1 else rows;
+        for (&resize_terminals) |*resize_terminal| try resize_terminal.resize(target_columns, target_rows, 9, 18);
+    }
+    const all_resize_ns = timer.lap();
+    for (0..resize_iterations) |iteration| {
+        const target_columns: u16 = if (iteration % 2 == 0) columns - 1 else columns;
+        const target_rows: u16 = if (iteration % 2 == 0) rows - 1 else rows;
+        try resize_terminals[0].resize(target_columns, target_rows, 9, 18);
+    }
+    const active_resize_ns = timer.lap();
+
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
             "snapshot capture: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n" ++
-            "search: {d} rows, {d} matches in {d:.2} ms\n",
+            "search: {d} rows, {d} matches in {d:.2} ms\n" ++
+            "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -56,6 +82,12 @@ pub fn main() !void {
             total_rows,
             matches.items.len,
             milliseconds(search_ns),
+            resize_session_count,
+            resize_iterations,
+            milliseconds(all_resize_ns),
+            @as(f64, @floatFromInt(all_resize_ns)) / resize_iterations / 1_000.0,
+            milliseconds(active_resize_ns),
+            @as(f64, @floatFromInt(active_resize_ns)) / resize_iterations / 1_000.0,
         },
     );
 }

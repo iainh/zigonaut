@@ -58,6 +58,14 @@ pub const App = struct {
     active: ?usize = null,
     next_id: u32 = 1,
     refresh: SessionRuntime.Refresh = .{},
+    terminal_size: ?TerminalSize = null,
+
+    const TerminalSize = struct {
+        columns: u16,
+        rows: u16,
+        cell_width: u32,
+        cell_height: u32,
+    };
 
     pub fn init(allocator: std.mem.Allocator, terminal_theme: theme.Theme, randomize_tab_background: bool) App {
         return .{
@@ -93,6 +101,7 @@ pub const App = struct {
         errdefer self.closeSession(index);
         if (shell == .custom) try self.sessions.items[index].title.appendSlice(self.allocator, profile_title);
         self.sessions.items[index].hold_on_exit = hold_on_exit;
+        self.resizeActiveSession();
         return index;
     }
 
@@ -124,10 +133,14 @@ pub const App = struct {
             else
                 @min(active_index, self.sessions.items.len - 1);
         }
+        self.resizeActiveSession();
     }
 
     pub fn activate(self: *App, index: usize) void {
-        if (index < self.sessions.items.len) self.active = index;
+        if (index < self.sessions.items.len) {
+            self.active = index;
+            self.resizeActiveSession();
+        }
     }
 
     pub fn activeSession(self: *App) ?*Session {
@@ -139,6 +152,7 @@ pub const App = struct {
         for (self.sessions.items, 0..) |session, index| {
             if (session.id != id) continue;
             self.active = index;
+            self.resizeActiveSession();
             return true;
         }
         return false;
@@ -154,9 +168,16 @@ pub const App = struct {
     }
 
     pub fn resizeSessions(self: *App, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
-        for (self.sessions.items) |session| {
-            if (session.runtime) |runtime| runtime.resize(columns, rows, cell_width, cell_height);
-        }
+        self.terminal_size = .{ .columns = columns, .rows = rows, .cell_width = cell_width, .cell_height = cell_height };
+        // Hidden tabs keep their existing grid until activation so a window drag
+        // never reflows every scrollback buffer on the UI thread.
+        self.resizeActiveSession();
+    }
+
+    fn resizeActiveSession(self: *App) void {
+        const size = self.terminal_size orelse return;
+        const session = self.activeSession() orelse return;
+        if (session.runtime) |runtime| runtime.resize(size.columns, size.rows, size.cell_width, size.cell_height);
     }
 
     pub fn applySettings(self: *App, terminal_theme: theme.Theme, randomize_tab_background: bool) void {
