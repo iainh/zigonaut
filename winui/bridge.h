@@ -23,6 +23,7 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_NEW_CMD = 11,
     ZIGONAUT_CHROME_NEW_CUSTOM = 12,
     ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE = 13,
+    ZIGONAUT_CHROME_NEW_DEFAULT = 14,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

@@ -77,18 +77,6 @@ bool cleanup(wchar_t const* operation, Action&& action, HRESULT& result) noexcep
     }
 }
 
-FrameworkElement findDescendant(DependencyObject const& root, wchar_t const* name) {
-    auto const count = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChildrenCount(root);
-    for (int32_t index = 0; index < count; ++index) {
-        auto const child = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChild(root, index);
-        if (auto const element = child.try_as<FrameworkElement>(); element && element.Name() == name) {
-            return element;
-        }
-        if (auto const found = findDescendant(child, name)) return found;
-    }
-    return nullptr;
-}
-
 struct Bridge {
     // All XAML objects and event revocation must stay on this creating STA thread.
     DWORD thread_id = GetCurrentThreadId();
@@ -105,6 +93,7 @@ struct Bridge {
     Grid root{nullptr};
     Grid scrollbar_root{nullptr};
     TabView tabs{nullptr};
+    SplitButton new_tab_button{nullptr};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
@@ -119,7 +108,7 @@ struct Bridge {
     MenuFlyoutItem wsl_item{nullptr};
     MenuFlyoutItem custom_item{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
-    TabView::AddTabButtonClick_revoker add_tab_revoker{};
+    SplitButton::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
@@ -211,12 +200,21 @@ struct Bridge {
         auto const resources = application.Resources();
         root.Background(resources.Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
 
-        tabs.IsAddTabButtonVisible(true);
+        tabs.IsAddTabButtonVisible(false);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
-        add_tab_revoker = tabs.AddTabButtonClick(auto_revoke, [this](auto&&, auto&&) { showNewTabMenu(); });
+        new_tab_button = SplitButton{};
+        new_tab_button.Height(40);
+        auto const new_tab_icon = FontIcon{};
+        new_tab_icon.Glyph(L"\xE710");
+        new_tab_icon.FontSize(12);
+        new_tab_button.Content(new_tab_icon);
+        new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
+            notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
+        });
+        tabs.TabStripFooter(new_tab_button);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
                 notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
@@ -284,6 +282,7 @@ struct Bridge {
         new_tab_menu.Items().Append(cmd_item);
         new_tab_menu.Items().Append(wsl_item);
         new_tab_menu.Items().Append(custom_item);
+        new_tab_button.Flyout(new_tab_menu);
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
@@ -380,8 +379,12 @@ struct Bridge {
             occupied_width += width;
         }
         if (items_measured) {
-            constexpr double add_button_width = 48;
-            auto const drag_start = static_cast<int32_t>((occupied_width + add_button_width) * dpi / 96.0 + 0.5);
+            auto const new_tab_width = new_tab_button.ActualWidth();
+            if (new_tab_width <= 0) items_measured = false;
+            occupied_width += new_tab_width;
+        }
+        if (items_measured) {
+            auto const drag_start = static_cast<int32_t>(occupied_width * dpi / 96.0 + 0.5);
             if (drag_right > drag_start && drag_height > 0) {
                 drag_areas[drag_area_count] = {drag_start, 0, drag_right - drag_start, drag_height};
                 ++drag_area_count;
@@ -514,11 +517,6 @@ struct Bridge {
         updateTitleBarLayout();
     }
 
-    void showNewTabMenu() {
-        auto const add_button = findDescendant(tabs, L"AddButton");
-        new_tab_menu.ShowAt(add_button ? add_button : tabs);
-    }
-
     HRESULT close() noexcept {
         if (closed) return S_OK;
         notification_activation->active.store(false, std::memory_order_release);
@@ -542,7 +540,7 @@ struct Bridge {
         open_settings_revoker.revoke();
         reload_settings_revoker.revoke();
         quit_revoker.revoke();
-        add_tab_revoker.revoke();
+        new_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
         scrollbar_scroll_revoker.revoke();
@@ -554,6 +552,7 @@ struct Bridge {
         handlers_detached = true;
         if (!restoreTitleBar(result)) return result;
         closed = true;
+        cleanup(L"detach new-tab menu", [&] { new_tab_button.Flyout(nullptr); }, result);
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         powershell_item = nullptr;
         pwsh_item = nullptr;
@@ -567,6 +566,8 @@ struct Bridge {
         reload_settings_item = nullptr;
         quit_item = nullptr;
         app_menu = nullptr;
+        cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
+        new_tab_button = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach scrollbar content", [&] { scrollbar_source.Content(nullptr); }, result);
         cleanup(L"clear scrollbar content", [&] { scrollbar_root.Children().Clear(); }, result);

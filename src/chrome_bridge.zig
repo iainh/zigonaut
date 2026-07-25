@@ -17,6 +17,7 @@ pub const Command = enum(u32) {
     new_cmd = win.ZIGONAUT_CHROME_NEW_CMD,
     new_custom = win.ZIGONAUT_CHROME_NEW_CUSTOM,
     notification_activate = win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE,
+    new_default = win.ZIGONAUT_CHROME_NEW_DEFAULT,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -153,5 +154,6 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.new_cmd, commandFromInt(win.ZIGONAUT_CHROME_NEW_CMD).?);
     try std.testing.expectEqual(Command.new_custom, commandFromInt(win.ZIGONAUT_CHROME_NEW_CUSTOM).?);
     try std.testing.expectEqual(Command.notification_activate, commandFromInt(win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE).?);
-    try std.testing.expect(commandFromInt(14) == null);
+    try std.testing.expectEqual(Command.new_default, commandFromInt(win.ZIGONAUT_CHROME_NEW_DEFAULT).?);
+    try std.testing.expect(commandFromInt(15) == null);
 }

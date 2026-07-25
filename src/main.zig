@@ -308,6 +308,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 .new_pwsh => self.addProfile(.pwsh) catch |err| log.err("unable to open PowerShell 7 session: {}", .{err}),
                 .new_cmd => self.addProfile(.cmd) catch |err| log.err("unable to open Command Prompt session: {}", .{err}),
                 .new_custom => self.addProfile(.custom) catch |err| log.err("unable to open custom session: {}", .{err}),
+                .new_default => {
+                    self.addDefaultSession() catch |err| log.err("unable to open default shell session: {}", .{err});
+                    return 0;
+                },
                 .close => {
                     self.terminal_view.resetInteraction();
                     self.model.closeSession(argument);
