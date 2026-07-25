@@ -4,6 +4,8 @@ const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const Search = @import("search.zig").State;
 const SearchMatch = @import("search.zig").Match;
+const progress = @import("progress.zig");
+const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
@@ -18,6 +20,15 @@ pub const SessionRuntime = struct {
     title: std.ArrayList(u8) = .empty,
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     search: Search = .{},
+    progress_parser: progress.Parser = .{},
+    taskbar_progress: ?TaskbarProgress = null,
+    progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    pub const TaskbarProgress = struct {
+        state: progress.State,
+        value: u8,
+        updated_tick: u64,
+    };
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -223,6 +234,16 @@ pub const SessionRuntime = struct {
         return self.title_generation.load(.acquire);
     }
 
+    pub fn progressGeneration(self: *const SessionRuntime) u64 {
+        return self.progress_generation.load(.acquire);
+    }
+
+    pub fn taskbarProgress(self: *SessionRuntime) ?TaskbarProgress {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.taskbar_progress;
+    }
+
     pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
@@ -289,6 +310,20 @@ pub const SessionRuntime = struct {
             if (count == 0) break;
 
             self.terminal_mutex.lock();
+            if (self.progress_parser.feed(buffer[0..count])) |update| {
+                self.taskbar_progress = switch (update) {
+                    .remove => null,
+                    .report => |report| value: {
+                        const previous = if (self.taskbar_progress) |current| current.value else 0;
+                        break :value .{
+                            .state = report.state,
+                            .value = progress.resolvedValue(report, previous),
+                            .updated_tick = win.GetTickCount64(),
+                        };
+                    },
+                };
+                _ = self.progress_generation.fetchAdd(1, .release);
+            }
             self.terminal.feed(buffer[0..count]);
             self.terminal_mutex.unlock();
             _ = self.content_generation.fetchAdd(1, .monotonic);

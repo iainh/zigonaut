@@ -36,12 +36,15 @@ pub const View = struct {
     gdi_renderer: GdiRenderer.Owner = .{},
     last_runtime: ?*SessionRuntime = null,
     last_content_generation: u64 = 0,
+    last_progress_runtime: ?*SessionRuntime = null,
+    last_progress_generation: u64 = 0,
     last_titles_generation: u64 = 0,
     selection: ?MouseSelection = null,
     hovered_link: ?HoveredLink = null,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
     scrollbar_changed_message: win.UINT,
+    progress_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
@@ -75,6 +78,7 @@ pub const View = struct {
         titles_changed_message: win.UINT,
         shell_exited_message: win.UINT,
         scrollbar_changed_message: win.UINT,
+        progress_changed_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
@@ -90,6 +94,7 @@ pub const View = struct {
             .titles_changed_message = titles_changed_message,
             .shell_exited_message = shell_exited_message,
             .scrollbar_changed_message = scrollbar_changed_message,
+            .progress_changed_message = progress_changed_message,
         };
     }
 
@@ -178,10 +183,20 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.titles_changed_message, 0, 0);
         }
         const session = self.model.activeSession() orelse {
+            if (self.last_progress_runtime != null) {
+                self.last_progress_runtime = null;
+                _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
+            }
             self.notifyScrollbar(false);
             return;
         };
         const runtime = session.runtime orelse return;
+        const progress_generation = runtime.progressGeneration();
+        if (runtime != self.last_progress_runtime or progress_generation != self.last_progress_generation) {
+            self.last_progress_runtime = runtime;
+            self.last_progress_generation = progress_generation;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
+        }
         runtime.searchTick(32);
         if (runtime.searchEnabled()) self.invalidate();
         const generation = runtime.contentGeneration();

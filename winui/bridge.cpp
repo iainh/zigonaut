@@ -21,6 +21,7 @@
 #include <winrt/base.h>
 #include <Microsoft.UI.Dispatching.Interop.h>
 #include <winrt/Microsoft.UI.Interop.h>
+#include <shobjidl.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -126,6 +127,7 @@ struct Bridge {
     bool pointer_over_scrollbar = false;
     bool closed = false;
     bool custom_title_bar = false;
+    com_ptr<ITaskbarList3> taskbar;
 
     Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
            Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
@@ -387,6 +389,23 @@ struct Bridge {
         }
     }
 
+    HRESULT updateTaskbarProgress(uint32_t state, uint32_t value) noexcept {
+        if (!taskbar) {
+            auto const created = CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                                                   IID_PPV_ARGS(taskbar.put()));
+            if (FAILED(created)) return created;
+            auto const initialized = taskbar->HrInit();
+            if (FAILED(initialized)) {
+                taskbar = nullptr;
+                return initialized;
+            }
+        }
+        auto const flag = static_cast<TBPFLAG>(state);
+        auto result = taskbar->SetProgressState(parent, flag);
+        if (FAILED(result) || flag == TBPF_NOPROGRESS || flag == TBPF_INDETERMINATE) return result;
+        return taskbar->SetProgressValue(parent, std::min(value, 100u), 100);
+    }
+
     void notify(zigonaut_chrome_command_id command, uint32_t argument) const {
         if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
@@ -536,6 +555,13 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* value, uint32_
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     try { bridge->updateScrollbar(total, page, position, show != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update scrollbar"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* value, uint32_t state, uint32_t progress) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (state != TBPF_NOPROGRESS && state != TBPF_INDETERMINATE && state != TBPF_NORMAL && state != TBPF_ERROR && state != TBPF_PAUSED) return E_INVALIDARG;
+    return bridge->updateTaskbarProgress(state, progress);
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {

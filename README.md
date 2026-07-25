@@ -69,6 +69,8 @@ to use the theme background unchanged for every tab.
   move through matches.
 - `Ctrl+Shift+Up` and `Ctrl+Shift+Down` move between OSC 133 shell prompts.
 - `Ctrl+Shift+G` copies the most recent OSC 133 command output.
+- OSC 9;4 progress from the active tab appears in the Windows taskbar, including
+  paused, error, and indeterminate states; stale reports clear after 15 seconds.
 - Hold Ctrl while hovering or clicking a terminal link to identify or open it.
 - `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
   the active PowerShell, CMD, WSL, or custom profile.

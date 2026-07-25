@@ -18,7 +18,10 @@ const chrome_message = win.WM_APP + 1;
 const titles_changed_message = win.WM_APP + 2;
 const shell_exited_message = win.WM_APP + 3;
 const scrollbar_changed_message = win.WM_APP + 4;
+const progress_changed_message = win.WM_APP + 5;
 const winui_terminal_top: i32 = 48;
+const taskbar_progress_timer = 1;
+const taskbar_progress_timeout_ms = 15_000;
 
 const Application = struct {
     loaded: config.Loaded,
@@ -29,6 +32,8 @@ const Application = struct {
     dpi: u32 = 96,
     dark_theme: bool = false,
     high_contrast: bool = false,
+    taskbar_button_created_message: win.UINT = 0,
+    taskbar_ready: bool = false,
     terminal_ready: bool = false,
     terminal_view: TerminalView = undefined,
     chrome: ?chrome.Bridge = null,
@@ -57,6 +62,7 @@ const Application = struct {
     const layoutTerminalView = layoutTerminalViewImpl;
     const syncChrome = syncChromeImpl;
     const syncScrollbar = syncScrollbarImpl;
+    const syncTaskbarProgress = syncTaskbarProgressImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
     const reloadSettings = reloadSettingsImpl;
@@ -190,8 +196,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
 
 fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) win.LRESULT {
     const hwnd = self.hwnd.?;
+    if (self.taskbar_button_created_message != 0 and message == self.taskbar_button_created_message) {
+        self.taskbar_ready = true;
+        self.syncTaskbarProgress();
+        return 0;
+    }
     switch (message) {
         win.WM_CREATE => {
+            self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
             const dpi = win.GetDpiForWindow(hwnd);
             const font = createFontFor(self.settings, dpi);
             self.font = font;
@@ -206,6 +218,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 titles_changed_message,
                 shell_exited_message,
                 scrollbar_changed_message,
+                progress_changed_message,
             );
             self.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
                 log.err("unable to create terminal view: {}", .{err});
@@ -289,6 +302,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             self.syncScrollbar(wparam != 0);
             return 0;
         },
+        progress_changed_message => {
+            self.syncTaskbarProgress();
+            return 0;
+        },
+        win.WM_TIMER => {
+            if (wparam == taskbar_progress_timer) {
+                self.syncTaskbarProgress();
+                return 0;
+            }
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
+        },
         win.WM_SIZE => {
             self.layoutTerminalView();
             return 0;
@@ -319,6 +343,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         win.WM_CLOSE => {
+            _ = win.KillTimer(hwnd, taskbar_progress_timer);
+            if (self.taskbar_ready) {
+                if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
+            }
             if (self.chrome) |*bridge| bridge.close();
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
@@ -373,6 +401,7 @@ fn syncChromeImpl(self: *Application) void {
         return;
     }
     self.syncScrollbar(false);
+    self.syncTaskbarProgress();
 }
 
 fn syncScrollbarImpl(self: *Application, show: bool) void {
@@ -387,6 +416,35 @@ fn syncScrollbarImpl(self: *Application, show: bool) void {
     )) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
     }
+}
+
+fn syncTaskbarProgressImpl(self: *Application) void {
+    const hwnd = self.hwnd orelse return;
+    const bridge = if (self.chrome) |*value| value else return;
+    if (!self.taskbar_ready) return;
+    const current = if (self.model.activeSession()) |session|
+        if (session.runtime) |runtime| runtime.taskbarProgress() else null
+    else
+        null;
+    _ = win.KillTimer(hwnd, taskbar_progress_timer);
+    const value = current orelse {
+        _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
+        return;
+    };
+    const now = win.GetTickCount64();
+    const age = now -| value.updated_tick;
+    if (age >= taskbar_progress_timeout_ms) {
+        _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
+        return;
+    }
+    const state: u32 = switch (value.state) {
+        .normal => win.ZIGONAUT_TASKBAR_PROGRESS_NORMAL,
+        .error_state => win.ZIGONAUT_TASKBAR_PROGRESS_ERROR,
+        .indeterminate => win.ZIGONAUT_TASKBAR_PROGRESS_INDETERMINATE,
+        .paused => win.ZIGONAUT_TASKBAR_PROGRESS_PAUSED,
+    };
+    _ = bridge.updateTaskbarProgress(state, value.value);
+    _ = win.SetTimer(hwnd, taskbar_progress_timer, @intCast(taskbar_progress_timeout_ms - age), null);
 }
 
 fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
