@@ -23,8 +23,17 @@ pub fn build(b: *std.Build) void {
         .root_module = app_module,
         .win32_manifest = b.path("zigonaut.manifest"),
     });
+    const icon_bytes = b.build_root.handle.readFileAlloc(
+        b.allocator,
+        "assets/icons/zigonaut.ico",
+        1024 * 1024,
+    ) catch @panic("unable to read application icon");
+    const icon_hash = std.hash.Wyhash.hash(0, icon_bytes);
     exe.root_module.addWin32ResourceFile(.{
         .file = b.path("zigonaut.rc"),
+        // The resource compiler does not report files referenced by an RC file
+        // to Zig's cache. Vary a harmless define so icon edits rebuild the RES.
+        .flags = &.{b.fmt("/DAPP_ICON_HASH={x}", .{icon_hash})},
     });
     exe.subsystem = .Windows;
     exe.linkLibC();
