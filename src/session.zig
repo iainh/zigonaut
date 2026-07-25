@@ -115,6 +115,19 @@ pub const SessionRuntime = struct {
         self.terminal.scrollViewport(delta);
     }
 
+    pub fn navigatePrompt(self: *SessionRuntime, forward: bool) !bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        try self.terminal.setSelection(null);
+        return self.terminal.navigatePrompt(forward);
+    }
+
+    pub fn lastCommandOutputAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) !?[]u8 {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.lastCommandOutputAlloc(allocator);
+    }
+
     pub fn searchBegin(self: *SessionRuntime) void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();

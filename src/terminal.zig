@@ -231,10 +231,110 @@ pub const Terminal = struct {
         });
     }
 
+    pub fn navigatePrompt(self: *Terminal, forward: bool) !bool {
+        const state = try self.scrollbar();
+        const limit = state.total -| state.len;
+        var target: ?u64 = null;
+        var row_index: u64 = 0;
+        while (row_index < state.total) : (row_index += 1) {
+            if (!try self.isPrimaryPromptRow(@intCast(row_index))) continue;
+            if (forward) {
+                if (row_index > state.offset) {
+                    target = row_index;
+                    break;
+                }
+            } else if (row_index < state.offset) {
+                target = row_index;
+            }
+        }
+        const destination = @min(target orelse return false, limit);
+        const delta: isize = if (destination >= state.offset)
+            @intCast(destination - state.offset)
+        else
+            -@as(isize, @intCast(state.offset - destination));
+        self.scrollViewport(delta);
+        return true;
+    }
+
+    pub fn lastCommandOutputAlloc(self: *Terminal, allocator: std.mem.Allocator) !?[]u8 {
+        const total = try self.totalRows();
+        var latest_prompt: ?u32 = null;
+        var previous_prompt: ?u32 = null;
+        var row_index: usize = 0;
+        while (row_index < total) : (row_index += 1) {
+            if (!try self.isPrimaryPromptRow(@intCast(row_index))) continue;
+            previous_prompt = latest_prompt;
+            latest_prompt = @intCast(row_index);
+        }
+        var owner_prompt = latest_prompt orelse return null;
+        var output_ref = try self.findOutputInRows(owner_prompt, @intCast(total));
+        if (output_ref == null) {
+            owner_prompt = previous_prompt orelse return null;
+            output_ref = try self.findOutputInRows(owner_prompt, latest_prompt.?);
+        }
+        const reference = output_ref orelse return null;
+
+        var selection = std.mem.zeroes(vt.GhosttySelection);
+        selection.size = @sizeOf(vt.GhosttySelection);
+        const selected = vt.ghostty_terminal_select_output(self.terminal, reference, &selection);
+        if (selected == vt.GHOSTTY_NO_VALUE) return null;
+        try check(selected);
+        var selection_start = std.mem.zeroes(vt.GhosttyPointCoordinate);
+        try check(vt.ghostty_terminal_point_from_grid_ref(self.terminal, &selection.start, vt.GHOSTTY_POINT_TAG_SCREEN, &selection_start));
+        if (selection_start.y < owner_prompt) return null;
+        return try self.formatSelectionAlloc(allocator, &selection, false);
+    }
+
     pub fn totalRows(self: *Terminal) !usize {
         var total: usize = 0;
         try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, &total));
         return total;
+    }
+
+    fn screenGridRef(self: *Terminal, x: u16, y: u32) !vt.GhosttyGridRef {
+        var reference = std.mem.zeroes(vt.GhosttyGridRef);
+        reference.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, .{
+            .tag = vt.GHOSTTY_POINT_TAG_SCREEN,
+            .value = .{ .coordinate = .{ .x = x, .y = y } },
+        }, &reference));
+        return reference;
+    }
+
+    fn isPrimaryPromptRow(self: *Terminal, y: u32) !bool {
+        var reference = try self.screenGridRef(0, y);
+        var row = std.mem.zeroes(vt.GhosttyRow);
+        try check(vt.ghostty_grid_ref_row(&reference, &row));
+        var semantic: vt.GhosttyRowSemanticPrompt = vt.GHOSTTY_ROW_SEMANTIC_NONE;
+        try check(vt.ghostty_row_get(row, vt.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &semantic));
+        return semantic == vt.GHOSTTY_ROW_SEMANTIC_PROMPT;
+    }
+
+    fn findOutputInRows(self: *Terminal, start: u32, end: u32) !?vt.GhosttyGridRef {
+        var row = end;
+        while (row > start) {
+            row -= 1;
+            var column: usize = self.columns;
+            while (column > 0) {
+                column -= 1;
+                var reference = std.mem.zeroes(vt.GhosttyGridRef);
+                reference.size = @sizeOf(vt.GhosttyGridRef);
+                const resolved = vt.ghostty_terminal_grid_ref(self.terminal, .{
+                    .tag = vt.GHOSTTY_POINT_TAG_SCREEN,
+                    .value = .{ .coordinate = .{ .x = @intCast(column), .y = row } },
+                }, &reference);
+                if (resolved == vt.GHOSTTY_INVALID_VALUE) continue;
+                try check(resolved);
+                var cell = std.mem.zeroes(vt.GhosttyCell);
+                try check(vt.ghostty_grid_ref_cell(&reference, &cell));
+                var semantic: vt.GhosttyCellSemanticContent = vt.GHOSTTY_CELL_SEMANTIC_OUTPUT;
+                var has_text = false;
+                try check(vt.ghostty_cell_get(cell, vt.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, &semantic));
+                try check(vt.ghostty_cell_get(cell, vt.GHOSTTY_CELL_DATA_HAS_TEXT, &has_text));
+                if (semantic == vt.GHOSTTY_CELL_SEMANTIC_OUTPUT and has_text) return reference;
+            }
+        }
+        return null;
     }
 
     /// Appends byte-exact UTF-8 matches in one screen row. Kept row-at-a-time so
@@ -642,11 +742,16 @@ pub const Terminal = struct {
     }
 
     pub fn selectedTextAlloc(self: *Terminal, allocator: std.mem.Allocator) ![]u8 {
+        return self.formatSelectionAlloc(allocator, null, true);
+    }
+
+    fn formatSelectionAlloc(self: *Terminal, allocator: std.mem.Allocator, selection: ?*const vt.GhosttySelection, trim: bool) ![]u8 {
         var options = std.mem.zeroes(vt.GhosttyTerminalSelectionFormatOptions);
         options.size = @sizeOf(vt.GhosttyTerminalSelectionFormatOptions);
         options.emit = vt.GHOSTTY_FORMATTER_FORMAT_PLAIN;
         options.unwrap = true;
-        options.trim = true;
+        options.trim = trim;
+        options.selection = selection;
         var required: usize = 0;
         const query = vt.ghostty_terminal_selection_format_buf(
             self.terminal,
@@ -782,6 +887,50 @@ test "scrollbar tracks and scrolls the viewport" {
     terminal.scrollViewport(-1);
     const scrolled = try terminal.scrollbar();
     try std.testing.expectEqual(@as(u64, 1), scrolled.offset);
+}
+
+test "OSC 133 primary prompts navigate through scrollback" {
+    var terminal = try Terminal.init(12, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b]133;A\x07PS> \x1b]133;B\x07one\x1b]133;C\x07\r\nfirst\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07two\x1b]133;C\x07\r\nsecond\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
+
+    try std.testing.expect(try terminal.navigatePrompt(false));
+    const previous = try terminal.scrollbar();
+    try std.testing.expect(previous.offset < previous.total - previous.len);
+    try std.testing.expect(try terminal.navigatePrompt(true));
+    const next = try terminal.scrollbar();
+    try std.testing.expect(next.offset > previous.offset);
+}
+
+test "last command output uses OSC 133 semantic boundaries" {
+    var terminal = try Terminal.init(20, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("banner\r\n\x1b]133;A\x07PS> \x1b]133;B\x07echo one\x1b]133;C\x07\r\none\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07echo two\x1b]133;C\x07\r\ntwo\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
+
+    const output = (try terminal.lastCommandOutputAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("two", output);
+}
+
+test "empty latest OSC 133 command does not reuse older output" {
+    var terminal = try Terminal.init(24, 5, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b]133;A\x07PS> \x1b]133;B\x07echo old\x1b]133;C\x07\r\nold\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07\x1b]133;C\x07\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
+    try std.testing.expect((try terminal.lastCommandOutputAlloc(std.testing.allocator)) == null);
+}
+
+test "startup text is not command output for an empty integrated command" {
+    var terminal = try Terminal.init(24, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("startup banner\r\n\x1b]133;A\x07PS> \x1b]133;B\x07\x1b]133;C\x07\r\n\x1b]133;D;0\x07\x1b]133;A\x07PS> ");
+    try std.testing.expect((try terminal.lastCommandOutputAlloc(std.testing.allocator)) == null);
+}
+
+test "text without semantic prompts has no command output" {
+    var terminal = try Terminal.init(12, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("ordinary output");
+    try std.testing.expect((try terminal.lastCommandOutputAlloc(std.testing.allocator)) == null);
 }
 
 test "search row resolves UTF-8 matches in scrollback screen coordinates" {

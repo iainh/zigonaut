@@ -63,6 +63,16 @@ By default, each new tab receives a random background hue with the same perceive
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.
 
+## Terminal workflows
+
+- `Ctrl+Shift+F` searches live scrollback; Enter/`Ctrl+N` and Shift+Enter/`Ctrl+P`
+  move through matches.
+- `Ctrl+Shift+Up` and `Ctrl+Shift+Down` move between OSC 133 shell prompts.
+- `Ctrl+Shift+G` copies the most recent OSC 133 command output.
+- Hold Ctrl while hovering or clicking a terminal link to identify or open it.
+- `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
+  the active PowerShell, CMD, WSL, or custom profile.
+
 The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 1.8 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
 
 ## Releases

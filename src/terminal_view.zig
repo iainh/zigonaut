@@ -44,6 +44,7 @@ pub const View = struct {
     scrollbar_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
     suppressed_search_character: ?u16 = null,
+    consumed_prompt_key: ?win.WPARAM = null,
     copy_flash: bool = false,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
@@ -345,6 +346,10 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (self.consumed_prompt_key == wparam) {
+            if (released) self.consumed_prompt_key = null;
+            return true;
+        }
         if (released and (wparam == win.VK_CONTROL or wparam == win.VK_LCONTROL or wparam == win.VK_RCONTROL)) {
             self.clearHoveredLink();
         }
@@ -353,7 +358,24 @@ pub const View = struct {
             return true;
         }
         const runtime = if (self.model.activeSession()) |s| s.runtime else null;
-        if (!released and win.GetKeyState(win.VK_CONTROL) < 0 and win.GetKeyState(win.VK_SHIFT) < 0 and wparam == 'F') {
+        const control_shift = win.GetKeyState(win.VK_CONTROL) < 0 and win.GetKeyState(win.VK_SHIFT) < 0;
+        if (!released and control_shift and (wparam == win.VK_UP or wparam == win.VK_DOWN)) {
+            self.consumed_prompt_key = wparam;
+            if (runtime) |r| {
+                if (r.navigatePrompt(wparam == win.VK_DOWN) catch false) self.notifyScrollbar(true);
+            }
+            self.clearSelection();
+            self.invalidate();
+            return true;
+        }
+        if (control_shift and wparam == 'G') {
+            if (!released) {
+                self.copyLastCommandOutput() catch |err| log.debug("unable to copy last command output: {}", .{err});
+                self.suppressed_search_character = 0x07;
+            }
+            return true;
+        }
+        if (!released and control_shift and wparam == 'F') {
             if (runtime) |r| r.searchBegin();
             self.suppressed_search_character = 0x06;
             self.invalidate();
@@ -518,6 +540,14 @@ pub const View = struct {
         self.copy_flash = true;
         _ = win.SetTimer(self.hwnd, copy_flash_timer, copy_flash_duration_ms, null);
         self.invalidate();
+    }
+
+    fn copyLastCommandOutput(self: *View) !void {
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        const text = try runtime.lastCommandOutputAlloc(std.heap.page_allocator) orelse return;
+        defer std.heap.page_allocator.free(text);
+        try setClipboardText(self.hwnd, text);
     }
 
     fn pasteClipboard(self: *View) !void {
@@ -814,6 +844,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_KILLFOCUS => {
             if (view) |current| {
                 current.focused = false;
+                current.consumed_prompt_key = null;
                 current.invalidate();
             }
             return 0;
