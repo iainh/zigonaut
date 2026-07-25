@@ -106,8 +106,13 @@ const CellRenderer = struct {
         const solid_cursor = self.context.focused and self.frame.?.cursor_visible and self.frame.?.cursor_style == .block and cell.x >= self.frame.?.cursor_x and cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        const foreground = if (solid_cursor) normal_background else normal_foreground;
-        const background = if (solid_cursor) (if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor)) else normal_background;
+        const foreground = if (cell.selected) win.GetSysColor(win.COLOR_HIGHLIGHTTEXT) else if (solid_cursor) normal_background else normal_foreground;
+        const background = if (cell.selected)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (solid_cursor)
+            (if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
+        else
+            normal_background;
         const text_foreground = if (cell.faint and !self.context.high_contrast) blend(foreground, background) else foreground;
         const underline = if (self.context.high_contrast) foreground else colorRef(cell.underline_color);
         const decoration = if (cell.faint and !self.context.high_contrast) blend(underline, background) else underline;

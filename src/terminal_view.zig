@@ -31,6 +31,7 @@ pub const View = struct {
     last_runtime: ?*SessionRuntime = null,
     last_content_generation: u64 = 0,
     last_titles_generation: u64 = 0,
+    selection: ?MouseSelection = null,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
 
@@ -278,6 +279,7 @@ pub const View = struct {
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
         if (input.keyFromVirtualKey(wparam) == null) return false;
+        if (!released) self.clearSelection();
         const session = self.model.activeSession() orelse return true;
         const event = self.input_state.keyEvent(wparam, lparam, released).?;
         session.runtime.?.sendKey(event.key, event.action, input.currentModifiers()) catch |err| {
@@ -288,6 +290,7 @@ pub const View = struct {
 
     fn handleCharacter(self: *View, code_unit: u16) void {
         if (self.input_state.suppressCharacter(code_unit)) return;
+        self.clearSelection();
         const session = self.model.activeSession() orelse return;
         var utf8: [4]u8 = undefined;
         const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
@@ -295,6 +298,117 @@ pub const View = struct {
             log.debug("unable to write terminal input: {}", .{err});
         };
     }
+
+    fn beginSelection(self: *View, lparam: win.LPARAM) void {
+        const point = self.mousePoint(lparam, false) orelse {
+            self.clearSelection();
+            return;
+        };
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        self.clearSelection();
+        self.selection = .{
+            .range = .{ .anchor = point, .focus = point },
+            .runtime = runtime,
+            .dragging = true,
+        };
+        _ = win.SetCapture(self.hwnd);
+        self.invalidate();
+    }
+
+    fn updateSelection(self: *View, lparam: win.LPARAM) void {
+        const point = self.mousePoint(lparam, true) orelse return;
+        const current = self.selection orelse return;
+        if (!current.dragging or current.range.focus.x == point.x and current.range.focus.y == point.y) return;
+        const session = self.model.activeSession() orelse {
+            self.abandonSelection();
+            return;
+        };
+        if (session.runtime != current.runtime) {
+            self.abandonSelection();
+            return;
+        }
+        if (self.selection) |*selection| {
+            selection.range.focus = point;
+            selection.runtime.setSelection(selection.range) catch |err| {
+                log.debug("unable to update terminal selection: {}", .{err});
+                return;
+            };
+            selection.moved = true;
+            self.invalidate();
+        }
+    }
+
+    fn finishSelection(self: *View, lparam: win.LPARAM) void {
+        if (self.selection == null or !self.selection.?.dragging) return;
+        self.updateSelection(lparam);
+        if (self.selection == null) return;
+        self.selection.?.dragging = false;
+        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
+        if (!self.selection.?.moved) {
+            self.selection = null;
+            self.invalidate();
+            return;
+        }
+        self.copySelection() catch |err| log.debug("unable to copy terminal selection: {}", .{err});
+    }
+
+    fn cancelSelectionDrag(self: *View) void {
+        if (self.selection) |*selection| selection.dragging = false;
+    }
+
+    fn abandonSelection(self: *View) void {
+        self.selection = null;
+        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
+        self.invalidate();
+    }
+
+    fn clearSelection(self: *View) void {
+        if (self.selection == null) return;
+        const selection = self.selection.?;
+        self.selection = null;
+        if (self.model.activeSession()) |session| {
+            if (session.runtime == selection.runtime) {
+                selection.runtime.setSelection(null) catch |err| {
+                    log.debug("unable to clear terminal selection: {}", .{err});
+                };
+            }
+        }
+        self.invalidate();
+    }
+
+    fn mousePoint(self: *View, lparam: win.LPARAM, clamp_to_grid: bool) ?Terminal.Point {
+        if (self.columns == 0 or self.rows == 0) return null;
+        const padding = scaled(logical_padding, win.GetDpiForWindow(self.hwnd));
+        var x = mouseCoordinate(lparam, 0) - padding;
+        var y = mouseCoordinate(lparam, 16) - padding;
+        const width = @as(i32, self.columns) * @as(i32, @intCast(self.cell_width));
+        const height = @as(i32, self.rows) * @as(i32, @intCast(self.cell_height));
+        if (!clamp_to_grid and (x < 0 or y < 0 or x >= width or y >= height)) return null;
+        x = std.math.clamp(x, 0, width - 1);
+        y = std.math.clamp(y, 0, height - 1);
+        return .{
+            .x = @intCast(@divTrunc(x, @as(i32, @intCast(self.cell_width)))),
+            .y = @intCast(@divTrunc(y, @as(i32, @intCast(self.cell_height)))),
+        };
+    }
+
+    fn copySelection(self: *View) !void {
+        const selection = self.selection orelse return;
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        if (runtime != selection.runtime) return;
+        const text = try runtime.selectedTextAlloc(std.heap.page_allocator);
+        defer std.heap.page_allocator.free(text);
+        try setClipboardText(self.hwnd, text);
+    }
+};
+
+const MouseSelection = struct {
+    range: Terminal.Selection,
+    runtime: *SessionRuntime,
+    dragging: bool,
+    moved: bool = false,
 };
 
 const DirectWriteCellRenderer = struct {
@@ -330,8 +444,10 @@ const DirectWriteCellRenderer = struct {
             cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        const foreground = if (solid_cursor) normal_background else normal_foreground;
-        const background = if (solid_cursor)
+        const foreground = if (cell.selected) win.GetSysColor(win.COLOR_HIGHLIGHTTEXT) else if (solid_cursor) normal_background else normal_foreground;
+        const background = if (cell.selected)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (solid_cursor)
             (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
         else
             normal_background;
@@ -402,6 +518,19 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_LBUTTONDOWN => {
             _ = win.SetFocus(hwnd);
+            if (view) |current| current.beginSelection(lparam);
+            return 0;
+        },
+        win.WM_MOUSEMOVE => {
+            if (view) |current| current.updateSelection(lparam);
+            return 0;
+        },
+        win.WM_LBUTTONUP => {
+            if (view) |current| current.finishSelection(lparam);
+            return 0;
+        },
+        win.WM_CAPTURECHANGED, win.WM_CANCELMODE => {
+            if (view) |current| current.cancelSelectionDrag();
             return 0;
         },
         win.WM_SETFOCUS => {
@@ -490,6 +619,49 @@ fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
 
 fn scaled(value: i32, dpi: u32) i32 {
     return win.MulDiv(value, @intCast(dpi), 96);
+}
+
+fn mouseCoordinate(lparam: win.LPARAM, shift: u6) i32 {
+    const bits: usize = @bitCast(lparam);
+    const word: u16 = @truncate(bits >> shift);
+    return @as(i16, @bitCast(word));
+}
+
+fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    const extra = std.mem.count(u8, text, "\n");
+    const windows_text = try allocator.alloc(u8, text.len + extra);
+    defer allocator.free(windows_text);
+    var index: usize = 0;
+    for (text) |byte| {
+        if (byte == '\n') {
+            windows_text[index] = '\r';
+            index += 1;
+        }
+        windows_text[index] = byte;
+        index += 1;
+    }
+
+    const wide = try allocator.alloc(u16, windows_text.len + 1);
+    defer allocator.free(wide);
+    const length = try std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], windows_text);
+    wide[length] = 0;
+
+    const memory = win.GlobalAlloc(win.GMEM_MOVEABLE, (length + 1) * @sizeOf(u16)) orelse return error.ClipboardAllocationFailed;
+    var transferred = false;
+    defer if (!transferred) {
+        _ = win.GlobalFree(memory);
+    };
+    const raw = win.GlobalLock(memory) orelse return error.ClipboardLockFailed;
+    const destination: [*]u16 = @ptrCast(@alignCast(raw));
+    @memcpy(destination[0 .. length + 1], wide[0 .. length + 1]);
+    _ = win.GlobalUnlock(memory);
+
+    if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
+    defer _ = win.CloseClipboard();
+    if (win.EmptyClipboard() == 0) return error.EmptyClipboardFailed;
+    if (win.SetClipboardData(win.CF_UNICODETEXT, memory) == null) return error.SetClipboardDataFailed;
+    transferred = true;
 }
 
 fn drawDirectWriteMessage(

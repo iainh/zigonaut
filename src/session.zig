@@ -72,6 +72,18 @@ pub const SessionRuntime = struct {
         return self.terminal.writeViewportText(output);
     }
 
+    pub fn setSelection(self: *SessionRuntime, selection: ?Terminal.Selection) !void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        try self.terminal.setSelection(selection);
+    }
+
+    pub fn selectedTextAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.selectedTextAlloc(allocator);
+    }
+
     pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();

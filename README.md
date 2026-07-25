@@ -57,5 +57,5 @@ The default build discovers MSBuild through Visual Studio Installer, builds the 
 ## MVP path
 
 1. Add full physical-key mapping, key releases, and IME composition support.
-2. Add terminal selection, links, and clipboard integration on top of the fixed-grid renderer.
+2. Add terminal links and clipboard paste on top of the fixed-grid renderer.
 3. Add WinUI 3 packaging without coupling terminal state to XAML controls.

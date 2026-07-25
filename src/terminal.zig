@@ -41,6 +41,17 @@ pub const Terminal = struct {
         strikethrough: bool,
         overline: bool,
         underline: u8,
+        selected: bool,
+    };
+
+    pub const Point = struct {
+        x: u16,
+        y: u16,
+    };
+
+    pub const Selection = struct {
+        anchor: Point,
+        focus: Point,
     };
 
     pub const Frame = struct {
@@ -299,6 +310,12 @@ pub const Terminal = struct {
                         &codepoints,
                     ));
                 }
+                var selected = false;
+                try check(vt.ghostty_render_state_row_cells_get(
+                    self.row_cells,
+                    vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED,
+                    &selected,
+                ));
                 renderer.drawCell(Cell{
                     .x = x,
                     .y = y,
@@ -313,6 +330,7 @@ pub const Terminal = struct {
                     .strikethrough = style.strikethrough,
                     .overline = style.overline,
                     .underline = @intCast(@max(style.underline, 0)),
+                    .selected = selected,
                 });
             }
         }
@@ -423,7 +441,64 @@ pub const Terminal = struct {
 
         return std.mem.trimRight(u8, stream.getWritten(), " \n");
     }
+
+    pub fn setSelection(self: *Terminal, selection: ?Selection) !void {
+        const value = selection orelse {
+            try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SELECTION, null));
+            return;
+        };
+        var start = std.mem.zeroes(vt.GhosttyGridRef);
+        start.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(value.anchor), &start));
+        var end = std.mem.zeroes(vt.GhosttyGridRef);
+        end.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(value.focus), &end));
+        var native_selection = std.mem.zeroes(vt.GhosttySelection);
+        native_selection.size = @sizeOf(vt.GhosttySelection);
+        native_selection.start = start;
+        native_selection.end = end;
+        try check(vt.ghostty_terminal_set(
+            self.terminal,
+            vt.GHOSTTY_TERMINAL_OPT_SELECTION,
+            &native_selection,
+        ));
+    }
+
+    pub fn selectedTextAlloc(self: *Terminal, allocator: std.mem.Allocator) ![]u8 {
+        var options = std.mem.zeroes(vt.GhosttyTerminalSelectionFormatOptions);
+        options.size = @sizeOf(vt.GhosttyTerminalSelectionFormatOptions);
+        options.emit = vt.GHOSTTY_FORMATTER_FORMAT_PLAIN;
+        options.unwrap = true;
+        options.trim = true;
+        var required: usize = 0;
+        const query = vt.ghostty_terminal_selection_format_buf(
+            self.terminal,
+            options,
+            null,
+            0,
+            &required,
+        );
+        if (query != vt.GHOSTTY_OUT_OF_SPACE and query != vt.GHOSTTY_SUCCESS) return error.LibGhosttyFailure;
+        const output = try allocator.alloc(u8, required);
+        errdefer allocator.free(output);
+        var written: usize = 0;
+        try check(vt.ghostty_terminal_selection_format_buf(
+            self.terminal,
+            options,
+            output.ptr,
+            output.len,
+            &written,
+        ));
+        return allocator.realloc(output, written);
+    }
 };
+
+fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
+    return .{
+        .tag = vt.GHOSTTY_POINT_TAG_VIEWPORT,
+        .value = .{ .coordinate = .{ .x = point.x, .y = point.y } },
+    };
+}
 
 fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
@@ -514,6 +589,42 @@ test "wide cell tails do not add spaces to viewport text" {
     const viewport = try terminal.writeViewportText(&buffer);
 
     try std.testing.expectEqualStrings("中X", viewport);
+}
+
+test "selected text follows a forward or backward viewport range" {
+    var terminal = try Terminal.init(8, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("abcdef\r\nsecond\r\nthird");
+
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 2, .y = 0 },
+        .focus = .{ .x = 2, .y = 1 },
+    });
+    const forward = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(forward);
+    try std.testing.expectEqualStrings("cdef\nsec", forward);
+
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 2, .y = 1 },
+        .focus = .{ .x = 2, .y = 0 },
+    });
+    const backward = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(backward);
+    try std.testing.expectEqualStrings(forward, backward);
+}
+
+test "selecting either half of a wide cell copies the grapheme once" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("中X");
+
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 1, .y = 0 },
+        .focus = .{ .x = 1, .y = 0 },
+    });
+    const selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("中", selected);
 }
 
 test "shrinking rows and columns keeps a bottom-row cursor in bounds" {
