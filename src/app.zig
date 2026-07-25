@@ -57,6 +57,7 @@ pub const App = struct {
     sessions: std.ArrayList(Session) = .empty,
     active: ?usize = null,
     next_id: u32 = 1,
+    refresh: SessionRuntime.Refresh = .{},
 
     pub fn init(allocator: std.mem.Allocator, terminal_theme: theme.Theme, randomize_tab_background: bool) App {
         return .{
@@ -74,13 +75,17 @@ pub const App = struct {
         self.sessions.deinit(self.allocator);
     }
 
+    pub fn setRefresh(self: *App, refresh: SessionRuntime.Refresh) void {
+        self.refresh = refresh;
+    }
+
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
         if (command.len == 0) return error.ProfileNotConfigured;
         const terminal_theme = if (self.randomize_tab_background)
             theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16))
         else
             self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows);
+        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh);
         const index = self.addSessionRecord(shell, runtime, terminal_theme.background) catch |err| {
             runtime.destroy();
             return err;

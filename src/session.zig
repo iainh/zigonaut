@@ -17,6 +17,7 @@ pub const SessionRuntime = struct {
     terminal: Terminal,
     pty: ?Pty = null,
     reader_thread: ?std.Thread = null,
+    refresh: Refresh,
     terminal_mutex: std.Thread.Mutex = .{},
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     title: std.ArrayList(u8) = .empty,
@@ -26,6 +27,15 @@ pub const SessionRuntime = struct {
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: std.ArrayList(Notification) = .empty,
+
+    pub const Refresh = struct {
+        callback: ?*const fn (?*anyopaque) void = null,
+        context: ?*anyopaque = null,
+
+        fn request(self: Refresh) void {
+            if (self.callback) |callback| callback(self.context);
+        }
+    };
 
     pub const TaskbarProgress = struct {
         state: progress.State,
@@ -50,6 +60,7 @@ pub const SessionRuntime = struct {
         terminal_theme: theme.Theme,
         columns: u16,
         rows: u16,
+        refresh: Refresh,
     ) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
         errdefer allocator.destroy(self);
@@ -57,6 +68,7 @@ pub const SessionRuntime = struct {
         self.* = .{
             .allocator = allocator,
             .terminal = try Terminal.init(columns, rows, terminal_theme),
+            .refresh = refresh,
         };
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
@@ -413,9 +425,11 @@ pub const SessionRuntime = struct {
             while (offset < count) {
                 const end = @min(offset + feed_chunk_bytes, count);
                 self.processOutputChunk(buffer[offset..end]);
+                self.refresh.request();
                 offset = end;
             }
         }
+        self.refresh.request();
     }
 
     fn processOutputChunk(self: *SessionRuntime, bytes: []const u8) void {

@@ -14,6 +14,7 @@ const win = win32.c;
 const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
+const refresh_message = win.WM_APP + 1;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
@@ -22,6 +23,8 @@ const wheel_rows = 3;
 
 pub const View = struct {
     hwnd: win.HWND = null,
+    refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     model: *App,
     font: win.HFONT,
     text_engine: ?TextEngine,
@@ -134,6 +137,8 @@ pub const View = struct {
             instance,
             self,
         ) orelse return error.CreateTerminalViewFailed;
+        self.refresh_hwnd.store(@intFromPtr(self.hwnd), .release);
+        self.model.setRefresh(.{ .callback = requestRefresh, .context = self });
         if (self.text_engine) |*engine| engine.setWindow(self.hwnd) catch |err| {
             log.warn("DirectWrite window initialization failed; using GDI fallback: {}", .{err});
             engine.deinit();
@@ -221,6 +226,15 @@ pub const View = struct {
 
     pub fn invalidate(self: *View) void {
         _ = win.InvalidateRect(self.hwnd, null, 0);
+    }
+
+    fn requestRefresh(context: ?*anyopaque) void {
+        const self: *View = @ptrCast(@alignCast(context orelse return));
+        if (self.refresh_pending.swap(true, .acq_rel)) return;
+        const value = self.refresh_hwnd.load(.acquire);
+        if (value == 0 or win.PostMessageW(win32.handleFromInt(win.HWND, value), refresh_message, 0, 0) == 0) {
+            self.refresh_pending.store(false, .release);
+        }
     }
 
     fn refreshIfNeeded(self: *View) void {
@@ -1079,6 +1093,13 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
     const view: ?*View = if (userdata == 0) null else @ptrFromInt(@as(usize, @intCast(userdata)));
 
     switch (message) {
+        refresh_message => {
+            if (view) |current| {
+                current.refresh_pending.store(false, .release);
+                current.refreshIfNeeded();
+            }
+            return 0;
+        },
         win.WM_CREATE => {
             _ = win.SetTimer(hwnd, refresh_timer, 33, null);
             _ = win.SetFocus(hwnd);
@@ -1204,7 +1225,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_NCDESTROY => {
             const result = win.DefWindowProcW(hwnd, message, wparam, lparam);
             _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, 0);
-            if (view) |current| current.hwnd = null;
+            if (view) |current| {
+                current.refresh_hwnd.store(0, .release);
+                current.refresh_pending.store(false, .release);
+                current.hwnd = null;
+            }
             return result;
         },
         else => return win.DefWindowProcW(hwnd, message, wparam, lparam),
