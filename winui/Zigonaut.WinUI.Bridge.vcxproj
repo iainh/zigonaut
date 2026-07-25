@@ -27,6 +27,7 @@
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
     <Language>C++</Language>
+    <_NuGetTargetFallbackMoniker>$(_NuGetTargetFallbackMoniker);native,Version=v0.0</_NuGetTargetFallbackMoniker>
     <XamlLanguage>CppWinRT</XamlLanguage>
     <ManagedAssembly>false</ManagedAssembly>
     <DefaultLanguageSourceExtension>.cpp</DefaultLanguageSourceExtension>
