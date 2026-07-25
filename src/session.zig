@@ -90,6 +90,18 @@ pub const SessionRuntime = struct {
         try self.terminal.renderViewport(renderer);
     }
 
+    pub fn scrollbar(self: *SessionRuntime) !Terminal.Scrollbar {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.scrollbar();
+    }
+
+    pub fn scrollViewport(self: *SessionRuntime, delta: isize) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.scrollViewport(delta);
+    }
+
     pub fn contentGeneration(self: *const SessionRuntime) u64 {
         return self.content_generation.load(.monotonic);
     }

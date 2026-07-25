@@ -17,6 +17,7 @@ const apps_use_light_theme = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLigh
 const chrome_message = win.WM_APP + 1;
 const titles_changed_message = win.WM_APP + 2;
 const shell_exited_message = win.WM_APP + 3;
+const scrollbar_changed_message = win.WM_APP + 4;
 const winui_terminal_top: i32 = 48;
 
 const Application = struct {
@@ -55,6 +56,7 @@ const Application = struct {
     const windowMessage = windowMessageImpl;
     const layoutTerminalView = layoutTerminalViewImpl;
     const syncChrome = syncChromeImpl;
+    const syncScrollbar = syncScrollbarImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
@@ -202,6 +204,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 dpi,
                 titles_changed_message,
                 shell_exited_message,
+                scrollbar_changed_message,
             );
             self.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
                 log.err("unable to create terminal view: {}", .{err});
@@ -248,6 +251,14 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                     return 0;
                 },
+                .scroll => {
+                    self.terminal_view.scrollTo(argument);
+                    return 0;
+                },
+                .scroll_wheel => {
+                    self.terminal_view.handleMouseWheelDelta(@bitCast(argument));
+                    return 0;
+                },
             }
             self.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
@@ -268,6 +279,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             self.terminal_view.syncSessions();
             self.terminal_view.invalidate();
             self.syncChrome();
+            return 0;
+        },
+        scrollbar_changed_message => {
+            self.syncScrollbar(wparam != 0);
             return 0;
         },
         win.WM_SIZE => {
@@ -350,6 +365,22 @@ fn syncChromeImpl(self: *Application) void {
         self.chrome_title_lengths.items[index] = @intCast(title.len);
     }
     if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.model.active)) {
+        _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
+        return;
+    }
+    self.syncScrollbar(false);
+}
+
+fn syncScrollbarImpl(self: *Application, show: bool) void {
+    const bridge = if (self.chrome) |*value| value else return;
+    const state = self.terminal_view.scrollbar();
+    const limit = std.math.maxInt(u32);
+    if (!bridge.updateScrollbar(
+        @intCast(@min(state.total, limit)),
+        @intCast(@min(state.len, limit)),
+        @intCast(@min(state.offset, limit)),
+        show,
+    )) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
     }
 }

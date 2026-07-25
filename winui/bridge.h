@@ -17,12 +17,15 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_OPEN_SETTINGS = 5,
     ZIGONAUT_CHROME_RELOAD_SETTINGS = 6,
     ZIGONAUT_CHROME_QUIT = 7,
+    ZIGONAUT_CHROME_SCROLL = 8,
+    ZIGONAUT_CHROME_SCROLL_WHEEL = 9,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);
 
 __declspec(dllexport) void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update(void* bridge, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active_index) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* bridge, uint32_t total, uint32_t page, uint32_t position, BOOL show) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_move(void* bridge, int32_t x, int32_t y, int32_t width, int32_t height) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) BOOL __cdecl zigonaut_chrome_pretranslate(void* bridge, MSG* message) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_close(void* bridge) ZIGONAUT_NOEXCEPT;

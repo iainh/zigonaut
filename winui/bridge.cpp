@@ -2,6 +2,7 @@
 #include "App.xaml.h"
 #include "bridge.h"
 #include <MddBootstrap.h>
+#include <winrt/Microsoft.UI.Input.h>
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Content.h>
@@ -11,6 +12,7 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
+#include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -21,6 +23,7 @@
 #include <winrt/Microsoft.UI.Interop.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <string_view>
 
 using namespace winrt;
@@ -82,10 +85,14 @@ struct Bridge {
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     DesktopWindowXamlSource source{nullptr};
+    DesktopWindowXamlSource scrollbar_source{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     Grid root{nullptr};
+    Grid scrollbar_root{nullptr};
     TabView tabs{nullptr};
+    Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
     Button menu_button{nullptr};
+    Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
     MenuFlyoutItem open_settings_item{nullptr};
     MenuFlyoutItem reload_settings_item{nullptr};
@@ -93,6 +100,7 @@ struct Bridge {
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
     MenuFlyoutItem wsl_item{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
     TabView::AddTabButtonClick_revoker add_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
@@ -101,8 +109,15 @@ struct Bridge {
     MenuFlyoutItem::Click_revoker quit_revoker{};
     MenuFlyoutItem::Click_revoker powershell_revoker{};
     MenuFlyoutItem::Click_revoker wsl_revoker{};
+    Microsoft::UI::Xaml::Controls::Primitives::ScrollBar::Scroll_revoker scrollbar_scroll_revoker{};
+    UIElement::PointerEntered_revoker scrollbar_entered_revoker{};
+    UIElement::PointerExited_revoker scrollbar_exited_revoker{};
+    UIElement::PointerWheelChanged_revoker scrollbar_wheel_revoker{};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker scrollbar_tick_revoker{};
     bool handlers_detached = false;
     bool updating = false;
+    bool updating_scrollbar = false;
+    bool pointer_over_scrollbar = false;
     bool closed = false;
     bool custom_title_bar = false;
 
@@ -116,8 +131,54 @@ struct Bridge {
         root = Grid{};
         tabs = TabView{};
 
+        scrollbar_source = DesktopWindowXamlSource{};
+        scrollbar_source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
+        scrollbar_root = Grid{};
+        scrollbar_root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        scrollbar = Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{};
+        scrollbar.Orientation(Orientation::Vertical);
+        scrollbar.HorizontalAlignment(HorizontalAlignment::Right);
+        scrollbar.Width(12);
+        scrollbar.SmallChange(1);
+        scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+        scrollbar.Visibility(Visibility::Collapsed);
+        scrollbar_scroll_revoker = scrollbar.Scroll(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Controls::Primitives::ScrollEventArgs const& args) {
+            if (updating_scrollbar) return;
+            showScrollbar();
+            notify(ZIGONAUT_CHROME_SCROLL, static_cast<uint32_t>(std::clamp(args.NewValue(), 0.0, static_cast<double>(UINT32_MAX))));
+        });
+        scrollbar_entered_revoker = scrollbar_root.PointerEntered(auto_revoke, [this](auto&&, auto&&) {
+            pointer_over_scrollbar = true;
+            showScrollbar();
+        });
+        scrollbar_exited_revoker = scrollbar_root.PointerExited(auto_revoke, [this](auto&&, auto&&) {
+            pointer_over_scrollbar = false;
+            scheduleScrollbarHide();
+        });
+        scrollbar_wheel_revoker = scrollbar_root.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            auto const delta = args.GetCurrentPoint(scrollbar_root).Properties().MouseWheelDelta();
+            showScrollbar();
+            notify(ZIGONAUT_CHROME_SCROLL_WHEEL, static_cast<uint32_t>(delta));
+            args.Handled(true);
+        });
+        scrollbar_root.Children().Append(scrollbar);
+        scrollbar_source.Content(scrollbar_root);
+
+        scrollbar_timer = dispatcher.DispatcherQueue().CreateTimer();
+        scrollbar_timer.IsRepeating(false);
+        scrollbar_timer.Interval(std::chrono::seconds(2));
+        scrollbar_tick_revoker = scrollbar_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
+            if (!pointer_over_scrollbar && scrollbar) {
+                scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+            }
+        });
+
+        auto const resources = application.Resources();
+        root.Background(resources.Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
+
         tabs.IsAddTabButtonVisible(true);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
+        tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         add_tab_revoker = tabs.AddTabButtonClick(auto_revoke, [this](auto&&, auto&&) { showNewTabMenu(); });
@@ -141,7 +202,14 @@ struct Bridge {
         menu_button.CornerRadius(CornerRadius{});
         auto const menu_icon = FontIcon{};
         menu_icon.Glyph(L"\xE700");
+        menu_icon.FontSize(12);
         menu_button.Content(menu_icon);
+
+        bottom_border = Border{};
+        bottom_border.Height(1);
+        bottom_border.VerticalAlignment(VerticalAlignment::Bottom);
+        bottom_border.IsHitTestVisible(false);
+        bottom_border.Background(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
 
         app_menu = MenuFlyout{};
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
@@ -172,6 +240,7 @@ struct Bridge {
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
+        root.Children().Append(bottom_border);
         source.Content(root);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
@@ -251,7 +320,53 @@ struct Bridge {
     void move(int32_t x, int32_t y, int32_t width, int32_t height) {
         if (IsIconic(parent)) return;
         source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1});
+        RECT client{};
+        if (GetClientRect(parent, &client)) {
+            auto const dpi = GetDpiForWindow(parent);
+            auto const overlay_width = std::max(1, MulDiv(16, dpi, 96));
+            auto const terminal_top = y + height;
+            scrollbar_source.SiteBridge().MoveAndResize({
+                std::max(x, x + width - overlay_width),
+                terminal_top,
+                std::min(std::max(width, 1), overlay_width),
+                std::max(static_cast<int32_t>(client.bottom) - terminal_top, 1),
+            });
+        }
         updateTitleBarLayout();
+    }
+
+    void showScrollbar() {
+        if (!scrollbar || scrollbar.Visibility() != Visibility::Visible) return;
+        scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::MouseIndicator);
+        scheduleScrollbarHide();
+    }
+
+    void scheduleScrollbarHide() {
+        if (!scrollbar_timer) return;
+        scrollbar_timer.Stop();
+        if (!pointer_over_scrollbar) scrollbar_timer.Start();
+    }
+
+    void updateScrollbar(uint32_t total, uint32_t page, uint32_t position, bool show) {
+        updating_scrollbar = true;
+        struct ResetUpdating {
+            bool& value;
+            ~ResetUpdating() { value = false; }
+        } reset{updating_scrollbar};
+        auto const maximum = total > page ? total - page : 0;
+        scrollbar.Minimum(0);
+        scrollbar.Maximum(maximum);
+        scrollbar.LargeChange(std::max(page, 1u));
+        scrollbar.ViewportSize(page);
+        scrollbar.Value(std::min(position, maximum));
+        scrollbar.IsEnabled(maximum > 0);
+        scrollbar.Visibility(maximum > 0 ? Visibility::Visible : Visibility::Collapsed);
+        if (maximum == 0) {
+            scrollbar_timer.Stop();
+            scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+        } else if (show) {
+            showScrollbar();
+        }
     }
 
     void notify(zigonaut_chrome_command_id command, uint32_t argument) const {
@@ -270,6 +385,8 @@ struct Bridge {
             TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
             item.Header(box_value(to_hstring(std::string_view{titles[i], title_lengths[i]})));
             item.MinHeight(40);
+            item.MaxWidth(240);
+            item.FontSize(12);
             item.IsClosable(true);
             if (i == items.Size()) items.Append(item);
         }
@@ -299,6 +416,12 @@ struct Bridge {
         add_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
+        scrollbar_scroll_revoker.revoke();
+        scrollbar_entered_revoker.revoke();
+        scrollbar_exited_revoker.revoke();
+        scrollbar_wheel_revoker.revoke();
+        scrollbar_tick_revoker.revoke();
+        if (scrollbar_timer) scrollbar_timer.Stop();
         handlers_detached = true;
         if (!restoreTitleBar(result)) return result;
         closed = true;
@@ -313,8 +436,16 @@ struct Bridge {
         quit_item = nullptr;
         app_menu = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
+        cleanup(L"detach scrollbar content", [&] { scrollbar_source.Content(nullptr); }, result);
+        cleanup(L"clear scrollbar content", [&] { scrollbar_root.Children().Clear(); }, result);
+        scrollbar = nullptr;
+        scrollbar_root = nullptr;
+        cleanup(L"close scrollbar XAML source", [&] { scrollbar_source.Close(); }, result);
+        scrollbar_source = nullptr;
+        scrollbar_timer = nullptr;
         cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
+        bottom_border = nullptr;
         menu_button = nullptr;
         tabs = nullptr;
         root = nullptr;
@@ -375,6 +506,12 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (count && (!titles || !title_lengths)) return E_INVALIDARG;
     try { bridge->update(titles, title_lengths, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* value, uint32_t total, uint32_t page, uint32_t position, BOOL show) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    try { bridge->updateScrollbar(total, page, position, show != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update scrollbar"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {

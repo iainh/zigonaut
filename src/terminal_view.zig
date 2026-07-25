@@ -12,7 +12,8 @@ const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
-const logical_padding = 24;
+const logical_padding = 8;
+const wheel_rows = 3;
 
 pub const View = struct {
     hwnd: win.HWND = null,
@@ -34,6 +35,8 @@ pub const View = struct {
     selection: ?MouseSelection = null,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
+    scrollbar_changed_message: win.UINT,
+    wheel_remainder: i32 = 0,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -62,6 +65,7 @@ pub const View = struct {
         dpi: u32,
         titles_changed_message: win.UINT,
         shell_exited_message: win.UINT,
+        scrollbar_changed_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
@@ -76,6 +80,7 @@ pub const View = struct {
             .cell_height = cell_size.height,
             .titles_changed_message = titles_changed_message,
             .shell_exited_message = shell_exited_message,
+            .scrollbar_changed_message = scrollbar_changed_message,
         };
     }
 
@@ -161,12 +166,16 @@ pub const View = struct {
             self.last_titles_generation = titles_generation;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.titles_changed_message, 0, 0);
         }
-        const session = self.model.activeSession() orelse return;
+        const session = self.model.activeSession() orelse {
+            self.notifyScrollbar(false);
+            return;
+        };
         const runtime = session.runtime orelse return;
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
         self.last_runtime = runtime;
         self.last_content_generation = generation;
+        self.notifyScrollbar(false);
         self.invalidate();
     }
 
@@ -192,6 +201,47 @@ pub const View = struct {
         self.columns = safe_columns;
         self.rows = safe_rows;
         self.syncSessions();
+        self.notifyScrollbar(false);
+    }
+
+    pub fn scrollbar(self: *View) Terminal.Scrollbar {
+        const session = self.model.activeSession() orelse return .{ .total = 0, .offset = 0, .len = 0 };
+        const runtime = session.runtime orelse return .{ .total = 0, .offset = 0, .len = 0 };
+        return runtime.scrollbar() catch .{ .total = 0, .offset = 0, .len = 0 };
+    }
+
+    pub fn notifyScrollbar(self: *View, show: bool) void {
+        _ = win.PostMessageW(win.GetParent(self.hwnd), self.scrollbar_changed_message, @intFromBool(show), 0);
+    }
+
+    fn scrollViewport(self: *View, delta: isize) void {
+        if (delta == 0) return;
+        const session = self.model.activeSession() orelse return;
+        session.runtime.?.scrollViewport(delta);
+        self.notifyScrollbar(true);
+        self.invalidate();
+    }
+
+    pub fn scrollTo(self: *View, requested: u32) void {
+        const state = self.scrollbar();
+        const target = @min(@as(usize, requested), state.total -| state.len);
+        const delta: isize = if (target >= state.offset)
+            @intCast(@min(target - state.offset, std.math.maxInt(isize)))
+        else
+            -@as(isize, @intCast(@min(state.offset - target, std.math.maxInt(isize))));
+        self.scrollViewport(delta);
+    }
+
+    pub fn handleMouseWheelDelta(self: *View, delta: i32) void {
+        self.wheel_remainder += delta;
+        const steps = @divTrunc(self.wheel_remainder, win.WHEEL_DELTA);
+        self.wheel_remainder -= steps * win.WHEEL_DELTA;
+        self.scrollViewport(-@as(isize, steps * wheel_rows));
+    }
+
+    fn handleMouseWheel(self: *View, wparam: usize) void {
+        const raw_delta: u16 = @truncate(wparam >> 16);
+        self.handleMouseWheelDelta(@as(i16, @bitCast(raw_delta)));
     }
 
     fn paint(self: *View) void {
@@ -572,6 +622,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_SIZE => {
             if (view) |current| current.resizeSessions();
+            return 0;
+        },
+        win.WM_MOUSEWHEEL => {
+            if (view) |current| current.handleMouseWheel(wparam);
             return 0;
         },
         win.WM_TIMER => {
