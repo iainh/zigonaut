@@ -2,6 +2,7 @@ const std = @import("std");
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
+const SearchMatch = @import("search.zig").Match;
 const win = @import("win32.zig").c;
 
 pub const Context = struct {
@@ -90,6 +91,21 @@ const CellRenderer = struct {
     context: Context,
     client: win.RECT,
     frame: ?Terminal.Frame = null,
+    search_matches: []const SearchMatch = &.{},
+    search_active: ?usize = null,
+    search_offset: u64 = 0,
+    search_enabled: bool = false,
+    search_query: []const u8 = "",
+    search_scanning: bool = false,
+
+    pub fn searchState(self: *CellRenderer, enabled: bool, query: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, scanning: bool) void {
+        self.search_enabled = enabled;
+        self.search_query = query;
+        self.search_matches = matches;
+        self.search_active = active;
+        self.search_offset = offset;
+        self.search_scanning = scanning;
+    }
 
     pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
@@ -109,8 +125,26 @@ const CellRenderer = struct {
         const solid_cursor = self.context.focused and self.frame.?.cursor_visible and self.frame.?.cursor_style == .block and cell.x >= self.frame.?.cursor_x and cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        const foreground = if (cell.selected) win.GetSysColor(win.COLOR_HIGHLIGHTTEXT) else if (solid_cursor) normal_background else normal_foreground;
-        const background = if (cell.selected)
+        const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
+        const foreground = if (search_kind != 0 and self.context.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 2)
+            rgb(0, 0, 0)
+        else if (search_kind == 1)
+            rgb(255, 255, 255)
+        else if (cell.selected)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (solid_cursor)
+            normal_background
+        else
+            normal_foreground;
+        const background = if (search_kind != 0 and self.context.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 2)
+            rgb(255, 140, 0)
+        else if (search_kind == 1)
+            rgb(110, 90, 20)
+        else if (cell.selected)
             win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (solid_cursor)
             (if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
@@ -137,6 +171,17 @@ const CellRenderer = struct {
     }
 
     pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
+        if (self.search_enabled) {
+            var status: [512]u8 = undefined;
+            const text = std.fmt.bufPrint(&status, " Find: {s}  {d} match{s}{s} ", .{ self.search_query, self.search_matches.len, if (self.search_matches.len == 1) "" else "es", if (self.search_scanning) " (scanning)" else "" }) catch " Find ";
+            var rect = self.client;
+            rect.left = self.context.origin_x;
+            rect.top = rect.bottom - self.context.origin_y - @as(i32, @intCast(self.context.cell_height));
+            fill(self.dc, rect, win.GetSysColor(win.COLOR_HIGHLIGHT));
+            _ = win.SetTextColor(self.dc, win.GetSysColor(win.COLOR_HIGHLIGHTTEXT));
+            _ = win.SetBkMode(self.dc, win.TRANSPARENT);
+            drawText(self.dc, text, &rect);
+        }
         if (!frame.cursor_visible) return;
         const left = self.context.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.context.cell_width));
         const top = self.context.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.context.cell_height));
@@ -156,6 +201,12 @@ const CellRenderer = struct {
         }
     }
 };
+
+fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
+    const row = offset + y;
+    for (matches, 0..) |match, index| if (match.row == row and x >= match.start and x < match.end) return if (active == index) 2 else 1;
+    return 0;
+}
 
 fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
     var length: usize = 0;

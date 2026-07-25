@@ -8,6 +8,7 @@ const modules = .{
     @import("gdi_renderer.zig"),
     @import("input.zig"),
     @import("pty.zig"),
+    @import("search.zig"),
     @import("session.zig"),
     @import("terminal.zig"),
     @import("terminal_view.zig"),

@@ -6,6 +6,7 @@ const TextEngine = @import("directwrite_renderer.zig").Engine;
 const GdiRenderer = @import("gdi_renderer.zig");
 const input = @import("input.zig");
 const theme = @import("theme.zig");
+const SearchMatch = @import("search.zig").Match;
 
 const win32 = @import("win32.zig");
 const win = win32.c;
@@ -39,6 +40,7 @@ pub const View = struct {
     shell_exited_message: win.UINT,
     scrollbar_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
+    suppressed_search_character: ?u16 = null,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -174,6 +176,8 @@ pub const View = struct {
             return;
         };
         const runtime = session.runtime orelse return;
+        runtime.searchTick(32);
+        if (runtime.searchEnabled()) self.invalidate();
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
         self.clearHoveredLink();
@@ -342,6 +346,34 @@ pub const View = struct {
             if (!released) self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err});
             return true;
         }
+        const runtime = if (self.model.activeSession()) |s| s.runtime else null;
+        if (!released and win.GetKeyState(win.VK_CONTROL) < 0 and win.GetKeyState(win.VK_SHIFT) < 0 and wparam == 'F') {
+            if (runtime) |r| r.searchBegin();
+            self.suppressed_search_character = 0x06;
+            self.invalidate();
+            return true;
+        }
+        if (runtime) |r| if (r.searchEnabled()) {
+            if (released) return true;
+            const control = win.GetKeyState(win.VK_CONTROL) < 0;
+            if (wparam == win.VK_ESCAPE or control and (wparam == 'C' or wparam == 'G')) {
+                r.searchCancel();
+            } else if (wparam == win.VK_BACK) {
+                r.searchBackspace();
+            } else if (control and wparam == 'U') {
+                r.searchClear();
+            } else if (wparam == win.VK_RETURN or control and wparam == 'N') {
+                _ = r.searchNavigate(!(wparam == win.VK_RETURN and win.GetKeyState(win.VK_SHIFT) < 0));
+            } else if (control and wparam == 'P') {
+                _ = r.searchNavigate(false);
+            } else {
+                return true;
+            }
+            self.suppressed_search_character = searchControlCharacter(wparam, control);
+            self.notifyScrollbar(true);
+            self.invalidate();
+            return true;
+        };
         if (input.keyFromVirtualKey(wparam) == null) return false;
         if (!released) self.clearSelection();
         const session = self.model.activeSession() orelse return true;
@@ -353,11 +385,21 @@ pub const View = struct {
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
+        if (self.suppressed_search_character == code_unit) {
+            self.suppressed_search_character = null;
+            return;
+        }
+        self.suppressed_search_character = null;
         if (self.input_state.suppressCharacter(code_unit)) return;
         self.clearSelection();
         const session = self.model.activeSession() orelse return;
         var utf8: [4]u8 = undefined;
         const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
+        if (session.runtime.?.searchEnabled()) {
+            session.runtime.?.searchAppend(encoded) catch {};
+            self.invalidate();
+            return;
+        }
         session.runtime.?.write(encoded) catch |err| {
             log.debug("unable to write terminal input: {}", .{err});
         };
@@ -553,6 +595,21 @@ const DirectWriteCellRenderer = struct {
     origin_x: i32,
     origin_y: i32,
     frame: ?Terminal.Frame = null,
+    search_matches: []const SearchMatch = &.{},
+    search_active: ?usize = null,
+    search_offset: u64 = 0,
+    search_enabled: bool = false,
+    search_query: []const u8 = "",
+    search_scanning: bool = false,
+
+    pub fn searchState(self: *DirectWriteCellRenderer, enabled: bool, query: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, scanning: bool) void {
+        self.search_enabled = enabled;
+        self.search_query = query;
+        self.search_matches = matches;
+        self.search_active = active;
+        self.search_offset = offset;
+        self.search_scanning = scanning;
+    }
 
     pub fn beginFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
@@ -579,8 +636,26 @@ const DirectWriteCellRenderer = struct {
             cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else colorRef(cell.background);
-        const foreground = if (cell.selected) win.GetSysColor(win.COLOR_HIGHLIGHTTEXT) else if (solid_cursor) normal_background else normal_foreground;
-        const background = if (cell.selected)
+        const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
+        const foreground = if (search_kind != 0 and self.view.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 2)
+            rgb(0, 0, 0)
+        else if (search_kind == 1)
+            rgb(255, 255, 255)
+        else if (cell.selected)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (solid_cursor)
+            normal_background
+        else
+            normal_foreground;
+        const background = if (search_kind != 0 and self.view.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 2)
+            rgb(255, 140, 0)
+        else if (search_kind == 1)
+            rgb(110, 90, 20)
+        else if (cell.selected)
             win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (solid_cursor)
             (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
@@ -617,6 +692,11 @@ const DirectWriteCellRenderer = struct {
     }
 
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
+        if (self.search_enabled) {
+            var status: [512]u8 = undefined;
+            const text = std.fmt.bufPrint(&status, " Find: {s}  {d} match{s}{s} ", .{ self.search_query, self.search_matches.len, if (self.search_matches.len == 1) "" else "es", if (self.search_scanning) " (scanning)" else "" }) catch " Find ";
+            drawDirectWriteMessage(self.engine, text, .{ .left = self.origin_x, .top = self.client.bottom - self.origin_y - @as(i32, @intCast(self.view.cell_height)), .right = self.client.right - self.origin_x, .bottom = self.client.bottom - self.origin_y }, win.GetSysColor(win.COLOR_HIGHLIGHTTEXT), win.GetSysColor(win.COLOR_HIGHLIGHT));
+        }
         if (!frame.cursor_visible) return;
         if (self.view.focused and frame.cursor_style == .block) return;
         const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
@@ -638,6 +718,12 @@ const DirectWriteCellRenderer = struct {
         );
     }
 };
+
+fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
+    const screen_row = offset + y;
+    for (matches, 0..) |match, index| if (match.row == screen_row and x >= match.start and x < match.end) return if (active == index) 2 else 1;
+    return 0;
+}
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
     if (message == win.WM_NCCREATE) {
@@ -774,6 +860,15 @@ fn isPasteShortcut(key: win.WPARAM) bool {
     const control = win.GetKeyState(win.VK_CONTROL) < 0;
     const shift = win.GetKeyState(win.VK_SHIFT) < 0;
     return shift and (key == win.VK_INSERT or control and key == 'V');
+}
+
+fn searchControlCharacter(key: win.WPARAM, control: bool) ?u16 {
+    return switch (key) {
+        win.VK_ESCAPE => 0x1b,
+        win.VK_BACK => 0x08,
+        win.VK_RETURN => 0x0d,
+        else => if (control and key >= 'A' and key <= 'Z') @intCast(key - 'A' + 1) else null,
+    };
 }
 
 fn clipboardTextAlloc(hwnd: win.HWND, allocator: std.mem.Allocator) ![]u8 {

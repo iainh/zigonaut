@@ -2,6 +2,8 @@ const std = @import("std");
 const Pty = @import("pty.zig").Pty;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
+const Search = @import("search.zig").State;
+const SearchMatch = @import("search.zig").Match;
 const log = std.log.scoped(.session);
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
@@ -15,6 +17,7 @@ pub const SessionRuntime = struct {
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     title: std.ArrayList(u8) = .empty,
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    search: Search = .{},
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -62,6 +65,7 @@ pub const SessionRuntime = struct {
             pty.finishClose();
         }
         self.title.deinit(self.allocator);
+        self.search.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -93,6 +97,8 @@ pub const SessionRuntime = struct {
     pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
+        const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
+        renderer.searchState(self.search.enabled, self.search.query.items, self.search.matches.items, self.search.active, scroll_state.offset, self.search.scanning);
         try self.terminal.renderViewport(renderer);
     }
 
@@ -106,6 +112,93 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         self.terminal.scrollViewport(delta);
+    }
+
+    pub fn searchBegin(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (!self.search.enabled) {
+            self.search.saved_offset = if (self.terminal.scrollbar()) |state| state.offset else |_| null;
+        }
+        self.search.enabled = true;
+        self.search.reset();
+    }
+
+    pub fn searchCancel(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (self.search.saved_offset) |target| {
+            if (self.terminal.scrollbar()) |state| {
+                const delta: isize = if (target >= state.offset)
+                    @intCast(target - state.offset)
+                else
+                    -@as(isize, @intCast(state.offset - target));
+                self.terminal.scrollViewport(delta);
+            } else |_| {}
+        }
+        self.search.enabled = false;
+        self.search.saved_offset = null;
+        self.search.query.clearRetainingCapacity();
+        self.search.reset();
+    }
+
+    pub fn searchAppend(self: *SessionRuntime, bytes: []const u8) !void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        try self.search.query.appendSlice(self.allocator, bytes);
+        self.search.reset();
+    }
+    pub fn searchBackspace(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (self.search.query.items.len > 0) {
+            var end = self.search.query.items.len - 1;
+            while (end > 0 and self.search.query.items[end] & 0xc0 == 0x80) end -= 1;
+            self.search.query.shrinkRetainingCapacity(end);
+            self.search.reset();
+        }
+    }
+
+    pub fn searchClear(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.search.query.clearRetainingCapacity();
+        self.search.reset();
+    }
+
+    pub fn searchEnabled(self: *SessionRuntime) bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.search.enabled;
+    }
+
+    pub fn searchTick(self: *SessionRuntime, rows_budget: usize) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (self.search.query.items.len == 0) return;
+        const generation = self.contentGeneration();
+        if (!self.search.scanning and generation != self.search.scanned_generation) self.search.reset();
+        const total = self.terminal.totalRows() catch return;
+        var count: usize = 0;
+        while (self.search.scanning and self.search.next_row < total and count < rows_budget) : (count += 1) {
+            self.terminal.searchRow(self.allocator, self.search.next_row, self.search.query.items, &self.search.matches) catch return;
+            self.search.next_row += 1;
+        }
+        if (self.search.next_row >= total) {
+            self.search.scanning = false;
+            self.search.scanned_generation = generation;
+        }
+    }
+
+    pub fn searchNavigate(self: *SessionRuntime, forward: bool) ?SearchMatch {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        const match = self.search.navigate(forward) orelse return null;
+        const state = self.terminal.scrollbar() catch return match;
+        const target = @min(@as(u64, match.row), state.total -| state.len);
+        const delta: isize = if (target >= state.offset) @intCast(target - state.offset) else -@as(isize, @intCast(state.offset - target));
+        self.terminal.scrollViewport(delta);
+        return match;
     }
 
     pub fn contentGeneration(self: *const SessionRuntime) u64 {
