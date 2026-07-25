@@ -86,6 +86,7 @@ struct Bridge {
     Grid root{nullptr};
     TabView tabs{nullptr};
     Button menu_button{nullptr};
+    Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
     MenuFlyoutItem open_settings_item{nullptr};
     MenuFlyoutItem reload_settings_item{nullptr};
@@ -116,8 +117,12 @@ struct Bridge {
         root = Grid{};
         tabs = TabView{};
 
+        auto const resources = application.Resources();
+        root.Background(resources.Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
+
         tabs.IsAddTabButtonVisible(true);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
+        tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         add_tab_revoker = tabs.AddTabButtonClick(auto_revoke, [this](auto&&, auto&&) { showNewTabMenu(); });
@@ -141,7 +146,14 @@ struct Bridge {
         menu_button.CornerRadius(CornerRadius{});
         auto const menu_icon = FontIcon{};
         menu_icon.Glyph(L"\xE700");
+        menu_icon.FontSize(12);
         menu_button.Content(menu_icon);
+
+        bottom_border = Border{};
+        bottom_border.Height(1);
+        bottom_border.VerticalAlignment(VerticalAlignment::Bottom);
+        bottom_border.IsHitTestVisible(false);
+        bottom_border.Background(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
 
         app_menu = MenuFlyout{};
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
@@ -172,6 +184,7 @@ struct Bridge {
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
+        root.Children().Append(bottom_border);
         source.Content(root);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
@@ -270,6 +283,8 @@ struct Bridge {
             TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
             item.Header(box_value(to_hstring(std::string_view{titles[i], title_lengths[i]})));
             item.MinHeight(40);
+            item.MaxWidth(240);
+            item.FontSize(12);
             item.IsClosable(true);
             if (i == items.Size()) items.Append(item);
         }
@@ -315,6 +330,7 @@ struct Bridge {
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
+        bottom_border = nullptr;
         menu_button = nullptr;
         tabs = nullptr;
         root = nullptr;

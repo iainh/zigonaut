@@ -12,7 +12,7 @@ const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
-const logical_padding = 24;
+const logical_padding = 8;
 
 pub const View = struct {
     hwnd: win.HWND = null,

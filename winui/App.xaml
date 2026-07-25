@@ -8,6 +8,22 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
+
+            <Thickness x:Key="TabViewHeaderPadding">0</Thickness>
+            <Thickness x:Key="TabViewItemBorderThickness">1,1,1,0</Thickness>
+
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="TabViewBackground" Color="#2E2E2E" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="TabViewBackground" Color="#E8E8E8" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <StaticResource x:Key="TabViewBackground"
+                                    ResourceKey="SystemColorButtonFaceColorBrush" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
