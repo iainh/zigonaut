@@ -36,6 +36,12 @@ pub const Engine = struct {
         }
     }
 
+    pub fn refreshRenderingParams(self: *Engine) !void {
+        if (native.zigonaut_text_engine_refresh_rendering_params(self.handle) < 0) {
+            return error.DirectWriteRenderingParamsUpdateFailed;
+        }
+    }
+
     pub fn metrics(self: *const Engine) Metrics {
         const value = native.zigonaut_text_engine_get_cell_metrics(self.handle);
         return .{

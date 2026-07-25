@@ -128,6 +128,7 @@ class GridTextRenderer;
 struct ZigonautTextEngine {
     IDWriteFactory* factory = nullptr;
     IDWriteFactory2* factory2 = nullptr;
+    IDWriteRenderingParams* rendering_params = nullptr;
     IDWriteFontCollection* fonts = nullptr;
     IDWriteFontFace* normal_face = nullptr;
     IDWriteTextFormat* formats[4] = {};
@@ -138,6 +139,7 @@ struct ZigonautTextEngine {
     std::vector<RowCell> row_cells;
     RowSegment row_segment;
     std::wstring family;
+    std::wstring locale;
     HWND hwnd = nullptr;
     uint32_t font_size = 18;
     uint32_t dpi = 96;
@@ -155,6 +157,7 @@ struct ZigonautTextEngine {
         for (auto*& format : formats) release(format);
         release(normal_face);
         release(fonts);
+        release(rendering_params);
         release(factory2);
         release(factory);
     }
@@ -167,6 +170,14 @@ struct ZigonautTextEngine {
         if (FAILED(hr)) return hr;
         factory->QueryInterface(__uuidof(IDWriteFactory2),
             reinterpret_cast<void**>(&factory2));
+
+        hr = refreshRenderingParams();
+        if (FAILED(hr)) return hr;
+
+        wchar_t locale_name[LOCALE_NAME_MAX_LENGTH] = {};
+        if (GetUserDefaultLocaleName(locale_name, LOCALE_NAME_MAX_LENGTH) != 0) {
+            locale = locale_name;
+        }
 
         hr = factory->GetSystemFontCollection(&fonts, FALSE);
         if (FAILED(hr)) return hr;
@@ -240,7 +251,7 @@ struct ZigonautTextEngine {
                 styles[index],
                 DWRITE_FONT_STRETCH_NORMAL,
                 em_size,
-                L"en-us",
+                locale.c_str(),
                 &formats[index]);
             if (FAILED(hr)) return hr;
             formats[index]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -258,6 +269,21 @@ struct ZigonautTextEngine {
         layouts.clear();
     }
 
+    HRESULT refreshRenderingParams() {
+        IDWriteRenderingParams* updated = nullptr;
+        const HMONITOR monitor = hwnd == nullptr
+            ? nullptr
+            : MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        const HRESULT hr = monitor == nullptr
+            ? factory->CreateRenderingParams(&updated)
+            : factory->CreateMonitorRenderingParams(monitor, &updated);
+        if (FAILED(hr)) return hr;
+        release(rendering_params);
+        rendering_params = updated;
+        if (target != nullptr) target->SetTextRenderingParams(rendering_params);
+        return S_OK;
+    }
+
     HRESULT ensureTarget(uint32_t width, uint32_t height) {
         if (hwnd == nullptr) return E_HANDLE;
         const D2D1_SIZE_U size = D2D1::SizeU(width, height);
@@ -269,6 +295,7 @@ struct ZigonautTextEngine {
                 &target);
             if (FAILED(hr)) return hr;
             target->SetDpi(96.0f, 96.0f);
+            target->SetTextRenderingParams(rendering_params);
             hr = target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f), &brush);
             if (FAILED(hr)) {
                 discardTarget();
@@ -826,7 +853,13 @@ extern "C" HRESULT zigonaut_text_engine_set_dpi(
     const HRESULT hr = engine->createFormats();
     if (FAILED(hr)) return hr;
     engine->updateMetrics();
-    return S_OK;
+    return engine->refreshRenderingParams();
+}
+
+extern "C" HRESULT zigonaut_text_engine_refresh_rendering_params(
+    ZigonautTextEngine* engine) {
+    if (engine == nullptr) return E_INVALIDARG;
+    return engine->refreshRenderingParams();
 }
 
 extern "C" ZigonautCellMetrics zigonaut_text_engine_get_cell_metrics(
@@ -841,7 +874,7 @@ extern "C" HRESULT zigonaut_text_engine_set_window(
     if (engine == nullptr || hwnd == 0) return E_INVALIDARG;
     engine->discardTarget();
     engine->hwnd = reinterpret_cast<HWND>(hwnd);
-    return S_OK;
+    return engine->refreshRenderingParams();
 }
 
 extern "C" HRESULT zigonaut_text_engine_begin_frame(

@@ -161,6 +161,13 @@ pub const View = struct {
         self.updateCellSize(font);
     }
 
+    pub fn refreshTextRenderingSettings(self: *View) void {
+        if (self.text_engine) |*engine| engine.refreshRenderingParams() catch |err| {
+            log.warn("unable to refresh DirectWrite rendering settings: {}", .{err});
+        };
+        self.invalidate();
+    }
+
     pub fn reloadFont(self: *View, font: win.HFONT, font_family: []const u8, font_size: u16, dpi: u32) !void {
         var text_engine = try TextEngine.init(font_family, font_size, dpi);
         errdefer text_engine.deinit();

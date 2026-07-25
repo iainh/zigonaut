@@ -418,7 +418,12 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             _ = win.InvalidateRect(hwnd, null, 0);
             return 0;
         },
-        win.WM_SETTINGCHANGE, win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
+        win.WM_SETTINGCHANGE => {
+            self.terminal_view.refreshTextRenderingSettings();
+            self.updateTheme();
+            return 0;
+        },
+        win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
             self.updateTheme();
             return 0;
         },
@@ -592,7 +597,7 @@ fn createFont(font_family: []const u8, font_size: u16, dpi: u32) win.HFONT {
         win.DEFAULT_CHARSET,
         win.OUT_DEFAULT_PRECIS,
         win.CLIP_DEFAULT_PRECIS,
-        win.CLEARTYPE_QUALITY,
+        win.DEFAULT_QUALITY,
         win.FIXED_PITCH | win.FF_MODERN,
         &wide_name,
     );

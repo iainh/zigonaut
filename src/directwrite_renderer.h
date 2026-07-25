@@ -32,6 +32,8 @@ void zigonaut_text_engine_destroy(ZigonautTextEngine* engine);
 
 HRESULT zigonaut_text_engine_set_dpi(ZigonautTextEngine* engine, uint32_t dpi);
 
+HRESULT zigonaut_text_engine_refresh_rendering_params(ZigonautTextEngine* engine);
+
 ZigonautCellMetrics zigonaut_text_engine_get_cell_metrics(
     const ZigonautTextEngine* engine);
 
