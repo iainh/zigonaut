@@ -11,6 +11,8 @@ pub const Command = enum(u32) {
     open_settings = win.ZIGONAUT_CHROME_OPEN_SETTINGS,
     reload_settings = win.ZIGONAUT_CHROME_RELOAD_SETTINGS,
     quit = win.ZIGONAUT_CHROME_QUIT,
+    scroll = win.ZIGONAUT_CHROME_SCROLL,
+    scroll_wheel = win.ZIGONAUT_CHROME_SCROLL_WHEEL,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -20,6 +22,7 @@ pub fn commandFromInt(value: u32) ?Command {
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
 const Initialize = *const fn (win.HWND, Callback, ?*anyopaque) callconv(.c) ?*anyopaque;
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
+const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
 const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
@@ -32,6 +35,7 @@ pub const Bridge = struct {
     module: win.HMODULE,
     instance: ?*anyopaque,
     update_fn: Update,
+    update_scrollbar_fn: UpdateScrollbar,
     move_fn: Move,
     pretranslate_fn: Pretranslate,
     close_fn: Close,
@@ -57,18 +61,24 @@ pub const Bridge = struct {
         }
         const initialize: Initialize = symbol(Initialize, module, "zigonaut_chrome_initialize") orelse return null;
         const update_fn = symbol(Update, module, "zigonaut_chrome_update") orelse return null;
+        const update_scrollbar_fn = symbol(UpdateScrollbar, module, "zigonaut_chrome_update_scrollbar") orelse return null;
         const move_fn = symbol(Move, module, "zigonaut_chrome_move") orelse return null;
         const pretranslate_fn = symbol(Pretranslate, module, "zigonaut_chrome_pretranslate") orelse return null;
         const close_fn = symbol(Close, module, "zigonaut_chrome_close") orelse return null;
         const destroy_fn = symbol(Destroy, module, "zigonaut_chrome_destroy") orelse return null;
         const instance = initialize(parent, callback, context) orelse return null;
         loaded = true;
-        return .{ .module = module, .instance = instance, .update_fn = update_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
+        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .move_fn = move_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, @intCast(titles.len), if (active) |index| @intCast(index) else -1));
+    }
+
+    pub fn updateScrollbar(self: *Bridge, total: u32, page: u32, position: u32, show: bool) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.update_scrollbar_fn(instance, total, page, position, @intFromBool(show)));
     }
 
     pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {
@@ -109,5 +119,7 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.open_settings, commandFromInt(win.ZIGONAUT_CHROME_OPEN_SETTINGS).?);
     try std.testing.expectEqual(Command.quit, commandFromInt(win.ZIGONAUT_CHROME_QUIT).?);
     try std.testing.expect(commandFromInt(0) == null);
-    try std.testing.expect(commandFromInt(8) == null);
+    try std.testing.expectEqual(Command.scroll, commandFromInt(win.ZIGONAUT_CHROME_SCROLL).?);
+    try std.testing.expectEqual(Command.scroll_wheel, commandFromInt(win.ZIGONAUT_CHROME_SCROLL_WHEEL).?);
+    try std.testing.expect(commandFromInt(10) == null);
 }
