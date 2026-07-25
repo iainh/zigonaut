@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.theme);
 
 pub const Color = struct {
     red: u8,
@@ -70,36 +71,87 @@ fn scaledChannel(channel: u8, target: u32, source: u32) u8 {
     return @intCast((@as(u64, channel) * target + source / 2) / source);
 }
 
-pub const Name = enum {
-    rasmus,
-    campbell,
-    campbell_light,
-    solarized_dark,
+const max_themes = 64;
+const max_name_length = 63;
 
-    pub fn parse(name: []const u8) ?Name {
-        if (std.ascii.eqlIgnoreCase(name, "rasmus")) return .rasmus;
-        if (std.ascii.eqlIgnoreCase(name, "campbell")) return .campbell;
-        if (std.ascii.eqlIgnoreCase(name, "campbell-light")) return .campbell_light;
-        if (std.ascii.eqlIgnoreCase(name, "solarized-dark")) return .solarized_dark;
-        return null;
-    }
+const Entry = struct {
+    name: [max_name_length]u8,
+    name_length: u8,
+    value: Theme,
 
-    pub fn value(self: Name) Theme {
-        return switch (self) {
-            .rasmus => rasmus,
-            .campbell => campbell,
-            .campbell_light => campbell_light,
-            .solarized_dark => solarized_dark,
-        };
+    fn nameSlice(self: *const Entry) []const u8 {
+        return self.name[0..self.name_length];
     }
 };
 
-pub const campbell_light = Theme{
-    .background = hex(0xf3f3f3),
-    .foreground = hex(0x0c0c0c),
-    .cursor = hex(0x0c0c0c),
-    .ansi = campbell.ansi,
+pub const Catalog = struct {
+    entries: [max_themes]Entry = undefined,
+    count: usize = 0,
+
+    pub fn load(allocator: std.mem.Allocator) Catalog {
+        var result = Catalog{};
+        const executable_directory = std.fs.selfExeDirPathAlloc(allocator) catch return result;
+        defer allocator.free(executable_directory);
+        const path = std.fs.path.join(allocator, &.{ executable_directory, "themes" }) catch return result;
+        defer allocator.free(path);
+        var directory = std.fs.openDirAbsolute(path, .{ .iterate = true }) catch return result;
+        defer directory.close();
+        result.loadDirectory(allocator, directory) catch |err| log.warn("unable to load themes: {}", .{err});
+        return result;
+    }
+
+    pub fn find(self: *const Catalog, name: []const u8) Theme {
+        for (self.entries[0..self.count]) |*entry| {
+            if (std.ascii.eqlIgnoreCase(name, entry.nameSlice())) return entry.value;
+        }
+        return rasmus;
+    }
+
+    fn loadDirectory(self: *Catalog, allocator: std.mem.Allocator, directory: std.fs.Dir) !void {
+        var iterator = directory.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind != .file or !std.ascii.endsWithIgnoreCase(entry.name, ".json")) continue;
+            const name = entry.name[0 .. entry.name.len - ".json".len];
+            if (name.len == 0 or name.len > max_name_length or self.count == max_themes) continue;
+            const contents = directory.readFileAlloc(allocator, entry.name, 64 * 1024) catch |err| {
+                log.warn("unable to read theme {s}: {}", .{ entry.name, err });
+                continue;
+            };
+            defer allocator.free(contents);
+            const value = parseJson(allocator, contents) catch |err| {
+                log.warn("unable to parse theme {s}: {}", .{ entry.name, err });
+                continue;
+            };
+            var destination = &self.entries[self.count];
+            @memcpy(destination.name[0..name.len], name);
+            destination.name_length = @intCast(name.len);
+            destination.value = value;
+            self.count += 1;
+        }
+    }
 };
+
+const JsonTheme = struct {
+    foreground: []const u8,
+    background: []const u8,
+    cursor: []const u8,
+    ansi: [16][]const u8,
+};
+
+fn parseJson(allocator: std.mem.Allocator, contents: []const u8) !Theme {
+    const parsed = try std.json.parseFromSlice(JsonTheme, allocator, contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    var result = Theme{
+        .foreground = parseColor(parsed.value.foreground) orelse return error.InvalidColor,
+        .background = parseColor(parsed.value.background) orelse return error.InvalidColor,
+        .cursor = parseColor(parsed.value.cursor) orelse return error.InvalidColor,
+        .ansi = undefined,
+    };
+    for (parsed.value.ansi, 0..) |color, index| {
+        result.ansi[index] = parseColor(color) orelse return error.InvalidColor;
+    }
+    return result;
+}
 
 pub const rasmus = Theme{
     .background = hex(0x1a1a19),
@@ -110,30 +162,6 @@ pub const rasmus = Theme{
         hex(0x8db4d4), hex(0xde9bc8), hex(0x7bb099), hex(0xd1d1d1),
         hex(0x4c4c4b), hex(0xffafa5), hex(0x7aae98), hex(0xffdeaa),
         hex(0xa6cded), hex(0xf7b4e1), hex(0x94c9b2), hex(0xeaeaea),
-    },
-};
-
-pub const campbell = Theme{
-    .background = hex(0x0c0c0c),
-    .foreground = hex(0xcccccc),
-    .cursor = hex(0xffffff),
-    .ansi = .{
-        hex(0x0c0c0c), hex(0xc50f1f), hex(0x13a10e), hex(0xc19c00),
-        hex(0x0037da), hex(0x881798), hex(0x3a96dd), hex(0xcccccc),
-        hex(0x767676), hex(0xe74856), hex(0x16c60c), hex(0xf9f1a5),
-        hex(0x3b78ff), hex(0xb4009e), hex(0x61d6d6), hex(0xf2f2f2),
-    },
-};
-
-pub const solarized_dark = Theme{
-    .background = hex(0x002b36),
-    .foreground = hex(0x839496),
-    .cursor = hex(0x93a1a1),
-    .ansi = .{
-        hex(0x073642), hex(0xdc322f), hex(0x859900), hex(0xb58900),
-        hex(0x268bd2), hex(0xd33682), hex(0x2aa198), hex(0xeee8d5),
-        hex(0x002b36), hex(0xcb4b16), hex(0x586e75), hex(0x657b83),
-        hex(0x839496), hex(0x6c71c4), hex(0x93a1a1), hex(0xfdf6e3),
     },
 };
 
@@ -161,6 +189,18 @@ test "colors parse and palette overrides are applied independently" {
     try std.testing.expectEqual(hex(0xffffff), value.foreground);
     try std.testing.expectEqual(hex(0x010203), value.ansi[3]);
     try std.testing.expectEqual(rasmus.background, value.background);
+}
+
+test "JSON themes parse complete color palettes" {
+    const value = try parseJson(std.testing.allocator,
+        \\{
+        \\  "foreground":"#010203", "background":"#040506", "cursor":"#070809",
+        \\  "ansi":["#000000","#000001","#000002","#000003","#000004","#000005","#000006","#000007",
+        \\          "#000008","#000009","#00000a","#00000b","#00000c","#00000d","#00000e","#00000f"]
+        \\}
+    );
+    try std.testing.expectEqual(Color{ .red = 1, .green = 2, .blue = 3 }, value.foreground);
+    try std.testing.expectEqual(Color{ .red = 0, .green = 0, .blue = 15 }, value.ansi[15]);
 }
 
 test "random backgrounds retain the theme background darkness" {

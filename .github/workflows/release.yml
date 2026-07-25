@@ -143,6 +143,11 @@ jobs:
             }
             Copy-Item $source $staging
           }
+          $themes = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\themes'
+          if (-not (Test-Path $themes -PathType Container)) {
+            throw 'Release build did not produce the themes directory.'
+          }
+          Copy-Item $themes $staging -Recurse
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'README.md') $staging
 
           $archive = Join-Path $dist "$name.zip"

@@ -58,7 +58,11 @@ hold_on_exit=false
 randomize_tab_background=true
 ```
 
-Supported themes are `rasmus`, `campbell`, `campbell-light`, and `solarized-dark`.
+Themes are loaded at startup from the `themes` directory beside `zigonaut.exe`. Each JSON
+filename is its theme name; the bundled themes are `campbell`, `campbell-light`, and
+`solarized-dark`. Rasmus is built in and is used whenever the configured theme cannot be found
+or no JSON themes can be loaded. A theme JSON file contains `foreground`, `background`, and
+`cursor` `#RRGGBB` strings plus an `ansi` array of exactly 16 colors.
 `dark_theme` and `light_theme` follow the Windows application theme; high contrast always
 uses Windows system colors and disables the configured `none`, `mica`, or `acrylic`
 backdrop. `background_opacity` is a percentage, and horizontal and vertical terminal

@@ -263,10 +263,12 @@ test "applying settings updates existing session backgrounds" {
     defer app.deinit();
 
     _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
-    app.applySettings(theme.campbell, false);
+    var replacement = theme.rasmus;
+    replacement.background = .{ .red = 12, .green = 12, .blue = 12 };
+    app.applySettings(replacement, false);
 
-    try std.testing.expectEqual(theme.campbell.background, app.sessions.items[0].background);
-    try std.testing.expectEqual(theme.campbell, app.terminal_theme);
+    try std.testing.expectEqual(replacement.background, app.sessions.items[0].background);
+    try std.testing.expectEqual(replacement, app.terminal_theme);
     try std.testing.expect(!app.randomize_tab_background);
 }
 

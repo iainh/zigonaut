@@ -70,6 +70,12 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&exe.step);
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
+    const install_themes = b.addInstallDirectory(.{
+        .source_dir = b.path("themes"),
+        .install_dir = .bin,
+        .install_subdir = "themes",
+    });
+    b.getInstallStep().dependOn(&install_themes.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

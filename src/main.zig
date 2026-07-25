@@ -3,6 +3,7 @@ const app_model = @import("app.zig");
 const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
+const theme = @import("theme.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
 const win32 = @import("win32.zig");
@@ -27,6 +28,7 @@ const taskbar_progress_timeout_ms = 15_000;
 
 const Application = struct {
     loaded: config.Loaded,
+    themes: theme.Catalog,
     settings: config.Config,
     hwnd: ?win.HWND = null,
     model: app_model.App,
@@ -44,11 +46,12 @@ const Application = struct {
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
-    fn init(loaded: config.Loaded) Application {
+    fn init(loaded: config.Loaded, themes: theme.Catalog) Application {
         return .{
             .settings = loaded.value,
             .loaded = loaded,
-            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, true), loaded.value.randomize_tab_background),
+            .themes = themes,
+            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, &themes, true), loaded.value.randomize_tab_background),
             .zoomed_font_size = loaded.value.font_size,
         };
     }
@@ -79,11 +82,12 @@ const Application = struct {
 
 pub fn main() !void {
     var loaded = try config.loadOrCreate(std.heap.page_allocator);
+    const themes = theme.Catalog.load(std.heap.page_allocator);
     const application = std.heap.page_allocator.create(Application) catch |err| {
         loaded.deinit();
         return err;
     };
-    application.* = Application.init(loaded);
+    application.* = Application.init(loaded, themes);
     defer {
         // If synchronous window destruction fails, retain the owner until
         // process exit rather than leave GWLP_USERDATA pointing at freed memory.
@@ -656,7 +660,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     previous.deinit();
 
     if (changed.theme) {
-        self.model.applySettings(config.terminalTheme(self.settings, self.dark_theme), self.settings.randomize_tab_background);
+        self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
     self.terminal_view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
     self.updateTheme();
@@ -676,7 +680,7 @@ fn updateThemeImpl(self: *Application) void {
     const previous_dark_theme = self.dark_theme;
     self.dark_theme = appsUseDarkTheme();
     self.high_contrast = highContrastEnabled();
-    if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, self.dark_theme), self.settings.randomize_tab_background);
+    if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast);
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
