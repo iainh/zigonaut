@@ -86,6 +86,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+          use-cache: false
 
       - name: Run tests
         run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
@@ -166,7 +167,7 @@ jobs:
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   release:
     name: Create draft GitHub release
