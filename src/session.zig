@@ -7,6 +7,8 @@ const SearchMatch = @import("search.zig").Match;
 const progress = @import("progress.zig");
 const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
+const reader_buffer_bytes = 16 * 1024;
+const feed_chunk_bytes = 4 * 1024;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `destroy` only after no caller can submit input or rendering work.
@@ -401,49 +403,58 @@ pub const SessionRuntime = struct {
     }
 
     fn readerMain(self: *SessionRuntime) void {
-        var buffer: [16 * 1024]u8 = undefined;
+        var buffer: [reader_buffer_bytes]u8 = undefined;
         while (true) {
             const count = self.pty.?.read(&buffer) catch break;
             if (count == 0) break;
 
-            self.terminal_mutex.lock();
-            for (buffer[0..count]) |byte| {
-                const update = self.progress_parser.feedByte(byte) orelse continue;
-                if (update == .notification) {
-                    const event = update.notification;
-                    const title = self.allocator.dupe(u8, event.title) catch continue;
-                    const body = self.allocator.dupe(u8, event.body) catch {
-                        self.allocator.free(title);
-                        continue;
-                    };
-                    if (self.notifications.items.len == 32) {
-                        self.notifications.orderedRemove(0).deinit(self.allocator);
-                    }
-                    self.notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
-                        self.allocator.free(title);
-                        self.allocator.free(body);
-                        continue;
-                    };
-                    continue;
-                }
-                self.taskbar_progress = switch (update) {
-                    .remove => null,
-                    .report => |report| value: {
-                        const previous = if (self.taskbar_progress) |current| current.value else 0;
-                        break :value .{
-                            .state = report.state,
-                            .value = progress.resolvedValue(report, previous),
-                            .updated_tick = win.GetTickCount64(),
-                        };
-                    },
-                    .notification => unreachable,
-                };
-                _ = self.progress_generation.fetchAdd(1, .release);
+            var offset: usize = 0;
+            while (offset < count) {
+                const end = @min(offset + feed_chunk_bytes, count);
+                self.processOutputChunk(buffer[offset..end]);
+                offset = end;
             }
-            self.terminal.feed(buffer[0..count]);
-            self.terminal_mutex.unlock();
-            _ = self.content_generation.fetchAdd(1, .monotonic);
         }
+    }
+
+    fn processOutputChunk(self: *SessionRuntime, bytes: []const u8) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        for (bytes) |byte| {
+            const update = self.progress_parser.feedByte(byte) orelse continue;
+            if (update == .notification) {
+                const event = update.notification;
+                const title = self.allocator.dupe(u8, event.title) catch continue;
+                const body = self.allocator.dupe(u8, event.body) catch {
+                    self.allocator.free(title);
+                    continue;
+                };
+                if (self.notifications.items.len == 32) {
+                    self.notifications.orderedRemove(0).deinit(self.allocator);
+                }
+                self.notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
+                    self.allocator.free(title);
+                    self.allocator.free(body);
+                    continue;
+                };
+                continue;
+            }
+            self.taskbar_progress = switch (update) {
+                .remove => null,
+                .report => |report| value: {
+                    const previous = if (self.taskbar_progress) |current| current.value else 0;
+                    break :value .{
+                        .state = report.state,
+                        .value = progress.resolvedValue(report, previous),
+                        .updated_tick = win.GetTickCount64(),
+                    };
+                },
+                .notification => unreachable,
+            };
+            _ = self.progress_generation.fetchAdd(1, .release);
+        }
+        self.terminal.feed(bytes);
+        _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
