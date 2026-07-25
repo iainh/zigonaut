@@ -222,6 +222,23 @@ pub const Terminal = struct {
         });
     }
 
+    pub fn encodePasteAlloc(self: *Terminal, allocator: std.mem.Allocator, data: []u8) ![]u8 {
+        var bracketed = false;
+        try check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2004, false), &bracketed));
+
+        var required: usize = data.len + 12;
+        var encoded = try allocator.alloc(u8, required);
+        errdefer allocator.free(encoded);
+        const result = vt.ghostty_paste_encode(data.ptr, data.len, bracketed, encoded.ptr, encoded.len, &required);
+        if (result == vt.GHOSTTY_OUT_OF_SPACE) {
+            encoded = try allocator.realloc(encoded, required);
+            try check(vt.ghostty_paste_encode(data.ptr, data.len, bracketed, encoded.ptr, encoded.len, &required));
+        } else {
+            try check(result);
+        }
+        return allocator.realloc(encoded, required);
+    }
+
     pub fn setTitleChanged(self: *Terminal, callback: TitleChanged, context: ?*anyopaque) !void {
         self.title_changed = callback;
         self.title_context = context;

@@ -328,6 +328,10 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (isPasteShortcut(wparam)) {
+            if (!released) self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err});
+            return true;
+        }
         if (input.keyFromVirtualKey(wparam) == null) return false;
         if (!released) self.clearSelection();
         const session = self.model.activeSession() orelse return true;
@@ -451,6 +455,15 @@ pub const View = struct {
         const text = try runtime.selectedTextAlloc(std.heap.page_allocator);
         defer std.heap.page_allocator.free(text);
         try setClipboardText(self.hwnd, text);
+    }
+
+    fn pasteClipboard(self: *View) !void {
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        const text = try clipboardTextAlloc(self.hwnd, std.heap.page_allocator);
+        defer std.heap.page_allocator.free(text);
+        self.clearSelection();
+        try runtime.paste(text);
     }
 };
 
@@ -681,6 +694,34 @@ fn mouseCoordinate(lparam: win.LPARAM, shift: u6) i32 {
     return @as(i16, @bitCast(word));
 }
 
+fn isPasteShortcut(key: win.WPARAM) bool {
+    const control = win.GetKeyState(win.VK_CONTROL) < 0;
+    const shift = win.GetKeyState(win.VK_SHIFT) < 0;
+    return shift and (key == win.VK_INSERT or control and key == 'V');
+}
+
+fn clipboardTextAlloc(hwnd: win.HWND, allocator: std.mem.Allocator) ![]u8 {
+    if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
+    defer _ = win.CloseClipboard();
+    const memory = win.GetClipboardData(win.CF_UNICODETEXT) orelse return error.ClipboardTextUnavailable;
+    const raw = win.GlobalLock(memory) orelse return error.ClipboardLockFailed;
+    defer _ = win.GlobalUnlock(memory);
+    const source: [*:0]const u16 = @ptrCast(@alignCast(raw));
+    const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.span(source));
+    return allocator.realloc(utf8, normalizeClipboardNewlines(utf8).len);
+}
+
+fn normalizeClipboardNewlines(text: []u8) []u8 {
+    var read: usize = 0;
+    var write: usize = 0;
+    while (read < text.len) : (read += 1) {
+        if (text[read] == '\r' and read + 1 < text.len and text[read + 1] == '\n') continue;
+        text[write] = text[read];
+        write += 1;
+    }
+    return text[0..write];
+}
+
 fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {
     const allocator = std.heap.page_allocator;
     const extra = std.mem.count(u8, text, "\n");
@@ -786,4 +827,9 @@ fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORRE
         @intCast((((foreground >> 8) & 0xff) + ((background >> 8) & 0xff)) / 2),
         @intCast((((foreground >> 16) & 0xff) + ((background >> 16) & 0xff)) / 2),
     );
+}
+
+test "clipboard newlines normalize without changing lone carriage returns" {
+    var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
+    try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
 }

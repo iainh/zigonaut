@@ -142,6 +142,17 @@ pub const SessionRuntime = struct {
         return error.ShellNotRunning;
     }
 
+    pub fn paste(self: *SessionRuntime, data: []u8) !void {
+        self.terminal_mutex.lock();
+        const encoded = self.terminal.encodePasteAlloc(self.allocator, data) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.terminal_mutex.unlock();
+        defer self.allocator.free(encoded);
+        try self.write(encoded);
+    }
+
     pub fn exitedCleanly(self: *const SessionRuntime) bool {
         const pty = self.pty orelse return false;
         return pty.exitedCleanly();
