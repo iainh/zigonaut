@@ -1,8 +1,9 @@
 const std = @import("std");
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
+const search = @import("search.zig");
 const theme = @import("theme.zig");
-const SearchMatch = @import("search.zig").Match;
+const SearchMatch = search.Match;
 const win = @import("win32.zig").c;
 
 pub const Context = struct {
@@ -211,9 +212,7 @@ const CellRenderer = struct {
 };
 
 fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
-    const row = offset + y;
-    for (matches, 0..) |match, index| if (match.row == row and x >= match.start and x < match.end) return if (active == index) 2 else 1;
-    return 0;
+    return search.highlight(matches, active, offset + y, x);
 }
 
 fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {

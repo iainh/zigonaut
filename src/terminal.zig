@@ -190,6 +190,17 @@ pub const Terminal = struct {
         }
     };
 
+    pub const SearchScratch = struct {
+        text: std.ArrayList(u8) = .empty,
+        starts: std.ArrayList(usize) = .empty,
+
+        pub fn deinit(self: *SearchScratch, allocator: std.mem.Allocator) void {
+            self.text.deinit(allocator);
+            self.starts.deinit(allocator);
+            self.* = .{};
+        }
+    };
+
     pub const Scrollbar = struct {
         total: u64,
         offset: u64,
@@ -595,15 +606,16 @@ pub const Terminal = struct {
 
     /// Appends byte-exact UTF-8 matches in one screen row. Kept row-at-a-time so
     /// callers can bound terminal lock time and continue processing PTY output.
-    pub fn searchRow(self: *Terminal, allocator: std.mem.Allocator, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
+    pub fn searchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         if (query.len == 0) return;
-        var text = std.ArrayList(u8).empty;
-        defer text.deinit(allocator);
-        const starts = try allocator.alloc(usize, @as(usize, self.columns) + 1);
-        defer allocator.free(starts);
+        scratch.text.clearRetainingCapacity();
+        scratch.starts.clearRetainingCapacity();
+        try scratch.starts.ensureTotalCapacity(allocator, @as(usize, self.columns) + 1);
+        scratch.starts.items.len = @as(usize, self.columns) + 1;
+        const starts = scratch.starts.items;
         var x: u16 = 0;
         while (x < self.columns) : (x += 1) {
-            starts[x] = text.items.len;
+            starts[x] = scratch.text.items.len;
             var reference = std.mem.zeroes(vt.GhosttyGridRef);
             reference.size = @sizeOf(vt.GhosttyGridRef);
             try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = x, .y = row_index } } }, &reference));
@@ -613,32 +625,45 @@ pub const Terminal = struct {
             if (result == vt.GHOSTTY_OUT_OF_SPACE) continue;
             try check(result);
             if (count == 0) {
-                try text.append(allocator, ' ');
+                try scratch.text.append(allocator, ' ');
             } else {
                 for (codepoints[0..count]) |cp| {
                     var encoded: [4]u8 = undefined;
                     const scalar = std.math.cast(u21, cp) orelse continue;
                     const len = try std.unicode.utf8Encode(scalar, &encoded);
-                    try text.appendSlice(allocator, encoded[0..len]);
+                    try scratch.text.appendSlice(allocator, encoded[0..len]);
                 }
             }
         }
-        starts[self.columns] = text.items.len;
+        starts[self.columns] = scratch.text.items.len;
         var from: usize = 0;
-        while (std.mem.indexOfPos(u8, text.items, from, query)) |at| {
+        while (std.mem.indexOfPos(u8, scratch.text.items, from, query)) |at| {
             const finish = at + query.len;
-            var start_column: u16 = 0;
-            var end_column: u16 = self.columns;
-            for (starts[0..self.columns], 0..) |offset, column| if (offset <= at) {
-                start_column = @intCast(column);
-            };
-            for (starts[0 .. @as(usize, self.columns) + 1], 0..) |offset, column| if (offset >= finish) {
-                end_column = @intCast(column);
-                break;
-            };
+            const start_column = searchStartColumn(starts[0..self.columns], at);
+            const end_column = searchEndColumn(starts, finish);
             try output.append(allocator, .{ .row = row_index, .start = start_column, .end = @max(end_column, start_column + 1) });
             from = at + @max(query.len, 1);
         }
+    }
+
+    fn searchStartColumn(starts: []const usize, offset: usize) u16 {
+        var low: usize = 0;
+        var high = starts.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (starts[middle] <= offset) low = middle + 1 else high = middle;
+        }
+        return @intCast(low -| 1);
+    }
+
+    fn searchEndColumn(starts: []const usize, offset: usize) u16 {
+        var low: usize = 0;
+        var high = starts.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (starts[middle] < offset) low = middle + 1 else high = middle;
+        }
+        return @intCast(low);
     }
 
     pub fn encodePasteAlloc(self: *Terminal, allocator: std.mem.Allocator, data: []u8) ![]u8 {
@@ -1428,8 +1453,10 @@ test "search row resolves UTF-8 matches in scrollback screen coordinates" {
     terminal.feed("old needle\r\nnew\r\nlast needle");
     var matches = std.ArrayList(SearchMatch).empty;
     defer matches.deinit(std.testing.allocator);
+    var scratch = Terminal.SearchScratch{};
+    defer scratch.deinit(std.testing.allocator);
     const total = try terminal.totalRows();
-    for (0..total) |row| try terminal.searchRow(std.testing.allocator, @intCast(row), "needle", &matches);
+    for (0..total) |row| try terminal.searchRow(std.testing.allocator, &scratch, @intCast(row), "needle", &matches);
     try std.testing.expectEqual(@as(usize, 2), matches.items.len);
     try std.testing.expectEqual(@as(u32, 0), matches.items[0].row);
     try std.testing.expectEqual(@as(u16, 4), matches.items[0].start);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const SearchMatch = @import("search.zig").Match;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 
@@ -29,10 +30,19 @@ pub fn main() !void {
     for (0..render_iterations) |_| snapshot.replay(&renderer);
     const replay_ns = timer.lap();
 
+    var matches = std.ArrayList(SearchMatch).empty;
+    defer matches.deinit(std.heap.page_allocator);
+    var search_scratch = Terminal.SearchScratch{};
+    defer search_scratch.deinit(std.heap.page_allocator);
+    const total_rows = try terminal.totalRows();
+    for (0..total_rows) |row| try terminal.searchRow(std.heap.page_allocator, &search_scratch, @intCast(row), "terminal_view", &matches);
+    const search_ns = timer.lap();
+
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
-            "snapshot capture: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n",
+            "snapshot capture: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n" ++
+            "search: {d} rows, {d} matches in {d:.2} ms\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -43,6 +53,9 @@ pub fn main() !void {
             @as(f64, @floatFromInt(capture_ns)) / @as(f64, render_iterations) / 1_000.0,
             @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0,
             renderer.checksum,
+            total_rows,
+            matches.items.len,
+            milliseconds(search_ns),
         },
     );
 }

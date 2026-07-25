@@ -30,6 +30,7 @@ pub const SessionRuntime = struct {
     render_snapshot: Terminal.RenderSnapshot = .{},
     render_query: std.ArrayList(u8) = .empty,
     render_matches: std.ArrayList(SearchMatch) = .empty,
+    search_scratch: Terminal.SearchScratch = .{},
 
     pub const Refresh = struct {
         callback: ?*const fn (?*anyopaque) void = null,
@@ -44,6 +45,11 @@ pub const SessionRuntime = struct {
         state: progress.State,
         value: u8,
         updated_tick: u64,
+    };
+
+    pub const SearchTickResult = struct {
+        changed: bool,
+        scanning: bool,
     };
 
     pub const Notification = struct {
@@ -111,6 +117,7 @@ pub const SessionRuntime = struct {
         self.render_snapshot.deinit(self.allocator);
         self.render_query.deinit(self.allocator);
         self.render_matches.deinit(self.allocator);
+        self.search_scratch.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -317,22 +324,35 @@ pub const SessionRuntime = struct {
         return self.search.enabled;
     }
 
-    pub fn searchTick(self: *SessionRuntime, rows_budget: usize) void {
+    pub fn searchTick(self: *SessionRuntime, time_budget_ns: u64) SearchTickResult {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        if (self.search.query.items.len == 0) return;
+        if (self.search.query.items.len == 0) return .{ .changed = false, .scanning = false };
+        const previous_matches = self.search.matches.items.len;
+        const previous_scanning = self.search.scanning;
         const generation = self.contentGeneration();
         if (!self.search.scanning and generation != self.search.scanned_generation) self.search.reset();
-        const total = self.terminal.totalRows() catch return;
+        const total = self.terminal.totalRows() catch return .{
+            .changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning,
+            .scanning = self.search.scanning,
+        };
+        var timer = std.time.Timer.start() catch null;
         var count: usize = 0;
-        while (self.search.scanning and self.search.next_row < total and count < rows_budget) : (count += 1) {
-            self.terminal.searchRow(self.allocator, self.search.next_row, self.search.query.items, &self.search.matches) catch return;
+        while (self.search.scanning and self.search.next_row < total) : (count += 1) {
+            self.terminal.searchRow(self.allocator, &self.search_scratch, self.search.next_row, self.search.query.items, &self.search.matches) catch break;
             self.search.next_row += 1;
+            if (timer) |*clock| {
+                if (clock.read() >= time_budget_ns) break;
+            } else if (count >= 31) break;
         }
         if (self.search.next_row >= total) {
             self.search.scanning = false;
             self.search.scanned_generation = generation;
         }
+        return .{
+            .changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning,
+            .scanning = self.search.scanning,
+        };
     }
 
     pub fn searchNavigate(self: *SessionRuntime, forward: bool) ?SearchMatch {

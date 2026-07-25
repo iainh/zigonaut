@@ -5,9 +5,10 @@ const Terminal = @import("terminal.zig").Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
 const GdiRenderer = @import("gdi_renderer.zig");
 const input = @import("input.zig");
+const search = @import("search.zig");
 const shell_quote = @import("shell_quote.zig");
 const theme = @import("theme.zig");
-const SearchMatch = @import("search.zig").Match;
+const SearchMatch = search.Match;
 
 const win32 = @import("win32.zig");
 const win = win32.c;
@@ -18,6 +19,9 @@ const refresh_message = win.WM_APP + 1;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
+const idle_refresh_interval_ms = 250;
+const search_refresh_interval_ms = 33;
+const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
 const wheel_rows = 3;
 
@@ -25,6 +29,7 @@ pub const View = struct {
     hwnd: win.HWND = null,
     refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    refresh_interval_ms: u32 = idle_refresh_interval_ms,
     model: *App,
     font: win.HFONT,
     text_engine: ?TextEngine,
@@ -237,6 +242,12 @@ pub const View = struct {
         }
     }
 
+    fn setRefreshInterval(self: *View, interval_ms: u32) void {
+        if (self.refresh_interval_ms == interval_ms or self.hwnd == null) return;
+        self.refresh_interval_ms = interval_ms;
+        _ = win.SetTimer(self.hwnd, refresh_timer, interval_ms, null);
+    }
+
     fn refreshIfNeeded(self: *View) void {
         if (self.model.hasCleanlyExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
@@ -250,6 +261,7 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.notification_changed_message, 0, 0);
         }
         const session = self.model.activeSession() orelse {
+            self.setRefreshInterval(idle_refresh_interval_ms);
             if (self.last_progress_runtime != null) {
                 self.last_progress_runtime = null;
                 _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
@@ -257,15 +269,19 @@ pub const View = struct {
             self.notifyScrollbar(false);
             return;
         };
-        const runtime = session.runtime orelse return;
+        const runtime = session.runtime orelse {
+            self.setRefreshInterval(idle_refresh_interval_ms);
+            return;
+        };
         const progress_generation = runtime.progressGeneration();
         if (runtime != self.last_progress_runtime or progress_generation != self.last_progress_generation) {
             self.last_progress_runtime = runtime;
             self.last_progress_generation = progress_generation;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
         }
-        runtime.searchTick(32);
-        if (runtime.searchEnabled()) self.invalidate();
+        const search_tick = runtime.searchTick(search_time_budget_ns);
+        self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else idle_refresh_interval_ms);
+        if (search_tick.changed) self.invalidate();
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
         self.clearHoveredLink();
@@ -484,7 +500,10 @@ pub const View = struct {
             return true;
         }
         if (!released and control_shift and wparam == 'F') {
-            if (runtime) |r| r.searchBegin();
+            if (runtime) |r| {
+                r.searchBegin();
+                self.setRefreshInterval(search_refresh_interval_ms);
+            }
             self.suppressed_search_character = 0x06;
             self.invalidate();
             return true;
@@ -494,10 +513,13 @@ pub const View = struct {
             const control = win.GetKeyState(win.VK_CONTROL) < 0;
             if (wparam == win.VK_ESCAPE or control and (wparam == 'C' or wparam == 'G')) {
                 r.searchCancel();
+                self.setRefreshInterval(idle_refresh_interval_ms);
             } else if (wparam == win.VK_BACK) {
                 r.searchBackspace();
+                self.setRefreshInterval(search_refresh_interval_ms);
             } else if (control and wparam == 'U') {
                 r.searchClear();
+                self.setRefreshInterval(search_refresh_interval_ms);
             } else if (wparam == win.VK_RETURN or control and wparam == 'N') {
                 _ = r.searchNavigate(!(wparam == win.VK_RETURN and win.GetKeyState(win.VK_SHIFT) < 0));
             } else if (control and wparam == 'P') {
@@ -560,6 +582,7 @@ pub const View = struct {
         const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
         if (session.runtime.?.searchEnabled()) {
             session.runtime.?.searchAppend(encoded) catch {};
+            self.setRefreshInterval(search_refresh_interval_ms);
             self.invalidate();
             return;
         }
@@ -1077,9 +1100,7 @@ const DirectWriteCellRenderer = struct {
 };
 
 fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
-    const screen_row = offset + y;
-    for (matches, 0..) |match, index| if (match.row == screen_row and x >= match.start and x < match.end) return if (active == index) 2 else 1;
-    return 0;
+    return search.highlight(matches, active, offset + y, x);
 }
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
@@ -1101,7 +1122,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_CREATE => {
-            _ = win.SetTimer(hwnd, refresh_timer, 33, null);
+            _ = win.SetTimer(hwnd, refresh_timer, idle_refresh_interval_ms, null);
             _ = win.SetFocus(hwnd);
             return 0;
         },
