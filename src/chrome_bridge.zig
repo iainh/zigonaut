@@ -25,7 +25,7 @@ pub fn commandFromInt(value: u32) ?Command {
 }
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
-const Initialize = *const fn (win.HWND, Callback, ?*anyopaque) callconv(.c) ?*anyopaque;
+const Initialize = *const fn (win.HWND, Callback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) ?*anyopaque;
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
 const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
@@ -52,7 +52,13 @@ pub const Bridge = struct {
     close_fn: Close,
     destroy_fn: Destroy,
 
-    pub fn load(parent: win.HWND, callback: Callback, context: ?*anyopaque) ?Bridge {
+    pub fn load(
+        parent: win.HWND,
+        callback: Callback,
+        context: ?*anyopaque,
+        version: []const u8,
+        git_hash: []const u8,
+    ) ?Bridge {
         var path: [win.MAX_PATH]u16 = undefined;
         const path_length = win.GetModuleFileNameW(null, &path, path.len);
         if (path_length == 0 or path_length >= path.len) return null;
@@ -80,7 +86,15 @@ pub const Bridge = struct {
         const pretranslate_fn = symbol(Pretranslate, module, "zigonaut_chrome_pretranslate") orelse return null;
         const close_fn = symbol(Close, module, "zigonaut_chrome_close") orelse return null;
         const destroy_fn = symbol(Destroy, module, "zigonaut_chrome_destroy") orelse return null;
-        const instance = initialize(parent, callback, context) orelse return null;
+        const instance = initialize(
+            parent,
+            callback,
+            context,
+            version.ptr,
+            @intCast(version.len),
+            git_hash.ptr,
+            @intCast(git_hash.len),
+        ) orelse return null;
         loaded = true;
         return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .show_notification_fn = show_notification_fn, .move_fn = move_fn, .update_appearance_fn = update_appearance_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
     }

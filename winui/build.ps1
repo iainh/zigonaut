@@ -2,7 +2,8 @@ param(
     [ValidateSet('x86_64', 'arm64')]
     [string]$TargetArch = 'x86_64',
     [ValidateSet('Debug', 'Release')]
-    [string]$Configuration = 'Release'
+    [string]$Configuration = 'Release',
+    [switch]$DebugIcon
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +32,12 @@ New-Item -ItemType Directory -Force $destination | Out-Null
 Copy-Item (Join-Path $output 'Zigonaut.WinUI.Bridge.dll') $destination -Force
 Copy-Item (Join-Path $output 'Microsoft.WindowsAppRuntime.Bootstrap.dll') $destination -Force
 Copy-Item (Join-Path $output 'Zigonaut.WinUI.Bridge.pri') (Join-Path $destination 'resources.pri') -Force
+$aboutIcon = if ($DebugIcon -or $Configuration -eq 'Debug') {
+    'assets\icons\zigonaut-debug-master.png'
+} else {
+    'assets\icons\zigonaut-about-1024.png'
+}
+Copy-Item (Join-Path $repository $aboutIcon) (Join-Path $destination 'zigonaut-about-1024.png') -Force
 
 $runtime = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction SilentlyContinue |
     Where-Object Architecture -eq $runtimeArchitecture |

@@ -11,9 +11,11 @@
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Microsoft.UI.Xaml.Documents.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
+#include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Graphics.h>
@@ -29,6 +31,7 @@
 #include <chrono>
 #include <atomic>
 #include <memory>
+#include <string>
 #include <string_view>
 
 using namespace winrt;
@@ -100,7 +103,9 @@ struct Bridge {
     MenuFlyout app_menu{nullptr};
     MenuFlyoutItem open_settings_item{nullptr};
     MenuFlyoutItem reload_settings_item{nullptr};
+    MenuFlyoutItem about_item{nullptr};
     MenuFlyoutItem quit_item{nullptr};
+    Window about_window{nullptr};
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
     MenuFlyoutItem pwsh_item{nullptr};
@@ -113,7 +118,10 @@ struct Bridge {
     TabView::TabCloseRequested_revoker close_tab_revoker{};
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
     MenuFlyoutItem::Click_revoker reload_settings_revoker{};
+    MenuFlyoutItem::Click_revoker about_revoker{};
     MenuFlyoutItem::Click_revoker quit_revoker{};
+    Button::Click_revoker about_ok_revoker{};
+    Window::Closed_revoker about_closed_revoker{};
     MenuFlyoutItem::Click_revoker powershell_revoker{};
     MenuFlyoutItem::Click_revoker pwsh_revoker{};
     MenuFlyoutItem::Click_revoker cmd_revoker{};
@@ -135,11 +143,14 @@ struct Bridge {
     AppNotificationManager::NotificationInvoked_revoker notification_revoker{};
     bool notifications_registered = false;
     std::shared_ptr<NotificationActivationState> notification_activation;
+    hstring app_version;
+    hstring git_hash;
 
     Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
            Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
-           Application const& app)
-        : callback(cb), context(ctx), dispatcher(controller), application(app) {
+           Application const& app, std::string_view version, std::string_view hash)
+        : callback(cb), context(ctx), dispatcher(controller), application(app),
+          app_version(to_hstring(version)), git_hash(to_hstring(hash)) {
         this->parent = parent;
         GUID nonce{};
         check_hresult(CoCreateGuid(&nonce));
@@ -252,11 +263,16 @@ struct Bridge {
         reload_settings_item = MenuFlyoutItem{};
         reload_settings_item.Text(L"Reload Settings");
         reload_settings_revoker = reload_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
+        about_item = MenuFlyoutItem{};
+        about_item.Text(L"About Zigonaut");
+        about_revoker = about_item.Click(auto_revoke, [this](auto&&, auto&&) { showAboutWindow(); });
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Quit");
         quit_revoker = quit_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
         app_menu.Items().Append(open_settings_item);
         app_menu.Items().Append(reload_settings_item);
+        app_menu.Items().Append(MenuFlyoutSeparator{});
+        app_menu.Items().Append(about_item);
         app_menu.Items().Append(quit_item);
         menu_button.Flyout(app_menu);
 
@@ -342,6 +358,120 @@ struct Bridge {
             app_window = nullptr;
             title_bar = nullptr;
         }
+    }
+
+    void showAboutWindow() {
+        if (about_window) {
+            about_window.Activate();
+            return;
+        }
+
+        auto window = Window{};
+        window.Title(L"About Zigonaut");
+
+        auto root = Grid{};
+        auto content = StackPanel{};
+        content.Width(320);
+        content.Spacing(10);
+        content.Padding(Thickness{0, 32, 0, 32});
+        content.HorizontalAlignment(HorizontalAlignment::Center);
+
+        wchar_t module_path[MAX_PATH]{};
+        auto const module_path_length = GetModuleFileNameW(nullptr, module_path, static_cast<DWORD>(std::size(module_path)));
+        if (module_path_length && module_path_length < std::size(module_path)) {
+            std::wstring path(module_path, module_path_length);
+            auto const separator = path.find_last_of(L"\\/");
+            path.resize(separator == std::wstring::npos ? 0 : separator + 1);
+            path += L"zigonaut-about-1024.png";
+            std::replace(path.begin(), path.end(), L'\\', L'/');
+
+            auto bitmap = Microsoft::UI::Xaml::Media::Imaging::BitmapImage{};
+            bitmap.UriSource(Windows::Foundation::Uri{hstring{L"file:///" + path}});
+            auto image = Image{};
+            image.Source(bitmap);
+            image.Width(192);
+            image.Height(192);
+            image.Stretch(Microsoft::UI::Xaml::Media::Stretch::Uniform);
+            image.HorizontalAlignment(HorizontalAlignment::Center);
+            content.Children().Append(image);
+        }
+
+        auto name = TextBlock{};
+        name.Text(L"Zigonaut");
+        name.FontSize(24);
+        name.HorizontalAlignment(HorizontalAlignment::Stretch);
+        name.TextAlignment(TextAlignment::Center);
+        content.Children().Append(name);
+
+        auto version = TextBlock{};
+        version.Text(hstring{L"Version " + std::wstring{app_version}});
+        version.HorizontalAlignment(HorizontalAlignment::Stretch);
+        version.TextAlignment(TextAlignment::Center);
+        content.Children().Append(version);
+
+        auto hash = TextBlock{};
+        hash.HorizontalAlignment(HorizontalAlignment::Stretch);
+        hash.TextAlignment(TextAlignment::Center);
+        auto hash_label = Microsoft::UI::Xaml::Documents::Run{};
+        hash_label.Text(L"Git commit ");
+        hash.Inlines().Append(hash_label);
+        auto hash_link = Microsoft::UI::Xaml::Documents::Hyperlink{};
+        auto hash_text = Microsoft::UI::Xaml::Documents::Run{};
+        auto const abbreviated_hash = std::wstring_view{git_hash}.substr(0, std::min<size_t>(12, git_hash.size()));
+        hash_text.Text(hstring{abbreviated_hash});
+        hash_link.Inlines().Append(hash_text);
+        hash_link.NavigateUri(Windows::Foundation::Uri{
+            hstring{L"https://github.com/iainh/zigonaut/commit/" + std::wstring{git_hash}},
+        });
+        hash.Inlines().Append(hash_link);
+        content.Children().Append(hash);
+
+        auto ok = Button{};
+        ok.Content(box_value(L"OK"));
+        ok.Width(100);
+        ok.Margin(Thickness{0, 12, 0, 0});
+        ok.HorizontalAlignment(HorizontalAlignment::Center);
+        content.Children().Append(ok);
+
+        root.Children().Append(content);
+        window.Content(root);
+        auto const about_app_window = window.AppWindow();
+        auto const about_hwnd = Microsoft::UI::GetWindowFromWindowId(about_app_window.Id());
+        SetWindowLongPtrW(about_hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(parent));
+        if (auto const presenter = about_app_window.Presenter().try_as<Microsoft::UI::Windowing::OverlappedPresenter>()) {
+            presenter.IsResizable(false);
+            presenter.IsMaximizable(false);
+            presenter.IsMinimizable(false);
+        }
+        auto const owner_dpi = GetDpiForWindow(parent);
+        auto const about_width = MulDiv(400, owner_dpi, 96);
+        auto const about_height = MulDiv(430, owner_dpi, 96);
+        RECT owner_rect{};
+        if (GetWindowRect(parent, &owner_rect)) {
+            about_app_window.MoveAndResize({
+                owner_rect.left + ((owner_rect.right - owner_rect.left) - about_width) / 2,
+                owner_rect.top + ((owner_rect.bottom - owner_rect.top) - about_height) / 2,
+                about_width,
+                about_height,
+            });
+        } else {
+            about_app_window.Resize({about_width, about_height});
+        }
+
+        about_window = window;
+        about_ok_revoker = ok.Click(auto_revoke, [this](auto&&, auto&&) {
+            if (about_window) about_window.Close();
+        });
+        about_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
+            about_ok_revoker.revoke();
+            about_window = nullptr;
+            if (IsWindow(parent)) {
+                EnableWindow(parent, TRUE);
+                SetForegroundWindow(parent);
+            }
+        });
+        EnableWindow(parent, FALSE);
+        window.Activate();
     }
 
     bool restoreTitleBar(HRESULT& result) noexcept {
@@ -532,6 +662,11 @@ struct Bridge {
         notification_manager = nullptr;
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
+        about_closed_revoker.revoke();
+        about_ok_revoker.revoke();
+        if (about_window) cleanup(L"close About window", [&] { about_window.Close(); }, result);
+        about_window = nullptr;
+        if (IsWindow(parent)) EnableWindow(parent, TRUE);
         powershell_revoker.revoke();
         pwsh_revoker.revoke();
         cmd_revoker.revoke();
@@ -539,6 +674,7 @@ struct Bridge {
         custom_revoker.revoke();
         open_settings_revoker.revoke();
         reload_settings_revoker.revoke();
+        about_revoker.revoke();
         quit_revoker.revoke();
         new_tab_revoker.revoke();
         selection_revoker.revoke();
@@ -564,6 +700,7 @@ struct Bridge {
         cleanup(L"clear application menu", [&] { app_menu.Items().Clear(); }, result);
         open_settings_item = nullptr;
         reload_settings_item = nullptr;
+        about_item = nullptr;
         quit_item = nullptr;
         app_menu = nullptr;
         cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
@@ -599,8 +736,8 @@ HRESULT validate(Bridge* bridge) {
 }
 }
 
-extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context) noexcept {
-    if (!parent || !callback) return nullptr;
+extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) noexcept {
+    if (!parent || !callback || (version_length && !version) || (git_hash_length && !git_hash)) return nullptr;
     try {
         init_apartment(apartment_type::single_threaded);
     } catch (...) {
@@ -619,7 +756,14 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
         try {
             auto dispatcher = Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
             auto application = make<ZigonautWinUIBridge::implementation::App>();
-            return new Bridge(parent, callback, context, dispatcher, application);
+            return new Bridge(
+                parent,
+                callback,
+                context,
+                dispatcher,
+                application,
+                std::string_view{version ? version : "", version_length},
+                std::string_view{git_hash ? git_hash : "", git_hash_length});
         }
         catch (...) {
             reportCurrentException(L"WinUI initialization");

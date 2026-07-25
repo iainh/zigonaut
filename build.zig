@@ -1,8 +1,13 @@
 const std = @import("std");
 
+const app_version = "0.1.0";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", app_version);
+    build_options.addOption([]const u8, "git_hash", gitHash(b));
     const ghostty = b.dependency("ghostty", .{
         .target = target,
         .optimize = optimize,
@@ -15,6 +20,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    app_module.addOptions("build_options", build_options);
     app_module.addIncludePath(b.path("winui"));
     configureGhostty(app_module, ghostty);
 
@@ -78,6 +84,7 @@ pub fn build(b: *std.Build) void {
         winui_cmd.addFileArg(b.path("winui/build.ps1"));
         const target_arch: []const u8 = if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64";
         winui_cmd.addArgs(&.{ "-TargetArch", target_arch, "-Configuration", "Release" });
+        if (debug_build) winui_cmd.addArg("-DebugIcon");
         winui_cmd.step.dependOn(&install_exe.step);
         winui_step.dependOn(&winui_cmd.step);
         b.getInstallStep().dependOn(&winui_cmd.step);
@@ -94,6 +101,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    tests.root_module.addOptions("build_options", build_options);
     tests.linkLibC();
     tests.linkLibCpp();
     tests.addIncludePath(b.path("src"));
@@ -129,4 +137,14 @@ fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) v
     module.addIncludePath(ghostty.path("include"));
     module.addCMacro("GHOSTTY_STATIC", "1");
     module.linkLibrary(ghostty.artifact("ghostty-vt-static"));
+}
+
+fn gitHash(b: *std.Build) []const u8 {
+    var exit_code: u8 = 0;
+    const output = b.runAllowFail(
+        &.{ "git", "rev-parse", "HEAD" },
+        &exit_code,
+        .Ignore,
+    ) catch return "unknown";
+    return std.mem.trim(u8, output, " \t\r\n");
 }

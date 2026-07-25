@@ -1,5 +1,6 @@
 const std = @import("std");
 const app_model = @import("app.zig");
+const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
 const TerminalView = @import("terminal_view.zig").View;
@@ -285,7 +286,13 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 return -1;
             };
             self.terminal_ready = true;
-            self.chrome = chrome.Bridge.load(hwnd, chromeCommand, self) orelse return -1;
+            self.chrome = chrome.Bridge.load(
+                hwnd,
+                chromeCommand,
+                self,
+                build_options.version,
+                build_options.git_hash,
+            ) orelse return -1;
             self.layoutTerminalView();
             self.addDefaultSession() catch |err| {
                 log.err("unable to create initial session: {}", .{err});
