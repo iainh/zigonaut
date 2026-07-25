@@ -15,6 +15,9 @@ pub const Terminal = struct {
     row_cells: vt.GhosttyRenderStateRowCells,
     key_encoder: vt.GhosttyKeyEncoder,
     key_event: vt.GhosttyKeyEvent,
+    mouse_encoder: vt.GhosttyMouseEncoder,
+    mouse_event: vt.GhosttyMouseEvent,
+    selection_anchor: vt.GhosttyTrackedGridRef = null,
     title_changed: ?TitleChanged = null,
     title_context: ?*anyopaque = null,
     columns: u16,
@@ -54,7 +57,23 @@ pub const Terminal = struct {
     pub const Selection = struct {
         anchor: Point,
         focus: Point,
+        rectangle: bool = false,
     };
+
+    pub const SelectionUnit = enum { cell, word, line };
+    pub const PixelPoint = struct { x: i32, y: i32 };
+    pub const MouseGeometry = struct {
+        screen_width: u32,
+        screen_height: u32,
+        cell_width: u32,
+        cell_height: u32,
+        padding_top: u32,
+        padding_bottom: u32,
+        padding_left: u32,
+        padding_right: u32,
+    };
+    pub const MouseAction = enum { press, release, motion };
+    pub const MouseButton = enum { none, left, middle, right, wheel_up, wheel_down, wheel_left, wheel_right };
 
     pub const Frame = struct {
         pub const CursorStyle = enum(u8) {
@@ -158,6 +177,13 @@ pub const Terminal = struct {
         try check(vt.ghostty_key_event_new(null, &key_event));
         errdefer vt.ghostty_key_event_free(key_event);
 
+        var mouse_encoder: vt.GhosttyMouseEncoder = null;
+        try check(vt.ghostty_mouse_encoder_new(null, &mouse_encoder));
+        errdefer vt.ghostty_mouse_encoder_free(mouse_encoder);
+        var mouse_event: vt.GhosttyMouseEvent = null;
+        try check(vt.ghostty_mouse_event_new(null, &mouse_event));
+        errdefer vt.ghostty_mouse_event_free(mouse_event);
+
         try applyTheme(terminal, terminal_theme);
 
         return .{
@@ -167,12 +193,17 @@ pub const Terminal = struct {
             .row_cells = row_cells,
             .key_encoder = key_encoder,
             .key_event = key_event,
+            .mouse_encoder = mouse_encoder,
+            .mouse_event = mouse_event,
             .columns = columns,
             .rows = rows,
         };
     }
 
     pub fn deinit(self: *Terminal) void {
+        vt.ghostty_tracked_grid_ref_free(self.selection_anchor);
+        vt.ghostty_mouse_event_free(self.mouse_event);
+        vt.ghostty_mouse_encoder_free(self.mouse_encoder);
         vt.ghostty_key_event_free(self.key_event);
         vt.ghostty_key_encoder_free(self.key_encoder);
         vt.ghostty_render_state_row_cells_free(self.row_cells);
@@ -734,11 +765,116 @@ pub const Terminal = struct {
         native_selection.size = @sizeOf(vt.GhosttySelection);
         native_selection.start = start;
         native_selection.end = end;
+        native_selection.rectangle = value.rectangle;
         try check(vt.ghostty_terminal_set(
             self.terminal,
             vt.GHOSTTY_TERMINAL_OPT_SELECTION,
             &native_selection,
         ));
+    }
+
+    pub fn beginSelectionAnchor(self: *Terminal, point: Point) !void {
+        if (self.selection_anchor) |anchor| {
+            try check(vt.ghostty_tracked_grid_ref_set(anchor, self.terminal, viewportPoint(point)));
+        } else {
+            try check(vt.ghostty_terminal_grid_ref_track(self.terminal, viewportPoint(point), &self.selection_anchor));
+        }
+    }
+
+    pub fn endSelectionAnchor(self: *Terminal) void {
+        vt.ghostty_tracked_grid_ref_free(self.selection_anchor);
+        self.selection_anchor = null;
+    }
+
+    pub fn setDerivedSelection(self: *Terminal, focus: Point, unit: SelectionUnit, rectangle: bool) !void {
+        const tracked = self.selection_anchor orelse return error.SelectionAnchorLost;
+        var a = std.mem.zeroes(vt.GhosttyGridRef);
+        a.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_tracked_grid_ref_snapshot(tracked, &a));
+        var f = std.mem.zeroes(vt.GhosttyGridRef);
+        f.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(focus), &f));
+        var focus_screen = std.mem.zeroes(vt.GhosttyPointCoordinate);
+        try check(vt.ghostty_terminal_point_from_grid_ref(self.terminal, &f, vt.GHOSTTY_POINT_TAG_SCREEN, &focus_screen));
+        var anchor_screen = std.mem.zeroes(vt.GhosttyPointCoordinate);
+        try check(vt.ghostty_tracked_grid_ref_point(tracked, vt.GHOSTTY_POINT_TAG_SCREEN, &anchor_screen));
+        const forward = anchor_screen.y < focus_screen.y or anchor_screen.y == focus_screen.y and anchor_screen.x <= focus_screen.x;
+        var selection = std.mem.zeroes(vt.GhosttySelection);
+        selection.size = @sizeOf(vt.GhosttySelection);
+        if (unit == .cell) {
+            selection.start = a;
+            selection.end = f;
+            selection.rectangle = rectangle;
+            try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SELECTION, &selection));
+            return;
+        }
+        var first = std.mem.zeroes(vt.GhosttySelection);
+        first.size = @sizeOf(vt.GhosttySelection);
+        var last = std.mem.zeroes(vt.GhosttySelection);
+        last.size = @sizeOf(vt.GhosttySelection);
+        if (unit == .word) {
+            var options = std.mem.zeroes(vt.GhosttyTerminalSelectWordBetweenOptions);
+            options.size = @sizeOf(vt.GhosttyTerminalSelectWordBetweenOptions);
+            options.start = a;
+            options.end = f;
+            try check(vt.ghostty_terminal_select_word_between(self.terminal, &options, &first));
+            options.start = f;
+            options.end = a;
+            try check(vt.ghostty_terminal_select_word_between(self.terminal, &options, &last));
+        } else {
+            var options = std.mem.zeroes(vt.GhosttyTerminalSelectLineOptions);
+            options.size = @sizeOf(vt.GhosttyTerminalSelectLineOptions);
+            options.semantic_prompt_boundary = false;
+            options.ref = a;
+            try check(vt.ghostty_terminal_select_line(self.terminal, &options, &first));
+            options.ref = f;
+            try check(vt.ghostty_terminal_select_line(self.terminal, &options, &last));
+        }
+        selection.start = if (forward) first.start else first.end;
+        selection.end = if (forward) last.end else last.start;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SELECTION, &selection));
+    }
+
+    pub fn mouseTracking(self: *Terminal) bool {
+        var tracking = false;
+        check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &tracking)) catch return false;
+        return tracking;
+    }
+
+    pub fn encodeMouse(self: *Terminal, action: MouseAction, button: MouseButton, position: PixelPoint, modifiers: u16, geometry: MouseGeometry, any_button_pressed: bool, output: []u8) ![]const u8 {
+        vt.ghostty_mouse_encoder_setopt_from_terminal(self.mouse_encoder, self.terminal);
+        var size = std.mem.zeroes(vt.GhosttyMouseEncoderSize);
+        size.size = @sizeOf(vt.GhosttyMouseEncoderSize);
+        size.screen_width = geometry.screen_width;
+        size.screen_height = geometry.screen_height;
+        size.cell_width = geometry.cell_width;
+        size.cell_height = geometry.cell_height;
+        size.padding_top = geometry.padding_top;
+        size.padding_bottom = geometry.padding_bottom;
+        size.padding_left = geometry.padding_left;
+        size.padding_right = geometry.padding_right;
+        vt.ghostty_mouse_encoder_setopt(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+        vt.ghostty_mouse_encoder_setopt(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
+        vt.ghostty_mouse_event_set_action(self.mouse_event, switch (action) {
+            .press => vt.GHOSTTY_MOUSE_ACTION_PRESS,
+            .release => vt.GHOSTTY_MOUSE_ACTION_RELEASE,
+            .motion => vt.GHOSTTY_MOUSE_ACTION_MOTION,
+        });
+        if (button == .none) vt.ghostty_mouse_event_clear_button(self.mouse_event) else vt.ghostty_mouse_event_set_button(self.mouse_event, switch (button) {
+            .left => vt.GHOSTTY_MOUSE_BUTTON_LEFT,
+            .middle => vt.GHOSTTY_MOUSE_BUTTON_MIDDLE,
+            .right => vt.GHOSTTY_MOUSE_BUTTON_RIGHT,
+            .wheel_up => vt.GHOSTTY_MOUSE_BUTTON_FOUR,
+            .wheel_down => vt.GHOSTTY_MOUSE_BUTTON_FIVE,
+            .wheel_left => vt.GHOSTTY_MOUSE_BUTTON_SIX,
+            .wheel_right => vt.GHOSTTY_MOUSE_BUTTON_SEVEN,
+            .none => unreachable,
+        });
+        vt.ghostty_mouse_event_set_mods(self.mouse_event, modifiers);
+        vt.ghostty_mouse_event_set_position(self.mouse_event, .{ .x = @floatFromInt(position.x), .y = @floatFromInt(position.y) });
+        var written: usize = 0;
+        try check(vt.ghostty_mouse_encoder_encode(self.mouse_encoder, self.mouse_event, output.ptr, output.len, &written));
+        return output[0..written];
     }
 
     pub fn selectedTextAlloc(self: *Terminal, allocator: std.mem.Allocator) ![]u8 {

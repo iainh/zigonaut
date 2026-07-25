@@ -16,6 +16,7 @@ const log = std.log.scoped(.terminal_view);
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
 const copy_flash_timer = 2;
+const selection_scroll_timer = 3;
 const copy_flash_duration_ms = 150;
 const wheel_rows = 3;
 
@@ -46,6 +47,13 @@ pub const View = struct {
     progress_changed_message: win.UINT,
     notification_changed_message: win.UINT,
     wheel_remainder: i32 = 0,
+    protocol_wheel_remainder: i32 = 0,
+    protocol_hwheel_remainder: i32 = 0,
+    protocol_button: ?Terminal.MouseButton = null,
+    protocol_runtime: ?*SessionRuntime = null,
+    last_click_tick: u64 = 0,
+    click_count: u2 = 0,
+    last_click_point: ?Terminal.Point = null,
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
     copy_flash: bool = false,
@@ -56,7 +64,7 @@ pub const View = struct {
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
             .cbSize = @sizeOf(win.WNDCLASSEXW),
-            .style = win.CS_HREDRAW | win.CS_VREDRAW,
+            .style = win.CS_HREDRAW | win.CS_VREDRAW | win.CS_DBLCLKS,
             .lpfnWndProc = windowProc,
             .cbClsExtra = 0,
             .cbWndExtra = 0,
@@ -180,6 +188,29 @@ pub const View = struct {
         self.model.resizeSessions(self.columns, self.rows, self.cell_width, self.cell_height);
     }
 
+    /// Must be called before the model changes or destroys its active runtime.
+    pub fn resetInteraction(self: *View) void {
+        _ = win.KillTimer(self.hwnd, selection_scroll_timer);
+        if (self.selection) |selection| {
+            selection.runtime.setSelection(null) catch {};
+            selection.runtime.endSelectionAnchor();
+        }
+        self.selection = null;
+        if (self.protocol_runtime) |runtime| if (self.protocol_button) |button| {
+            _ = self.sendMouseTo(runtime, .release, button, self.lastMouseClientPoint(), false);
+        };
+        self.protocol_button = null;
+        self.protocol_runtime = null;
+        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
+        self.clearHoveredLink();
+        self.wheel_remainder = 0;
+        self.protocol_wheel_remainder = 0;
+        self.protocol_hwheel_remainder = 0;
+        self.last_click_tick = 0;
+        self.click_count = 0;
+        self.last_click_point = null;
+    }
+
     pub fn invalidate(self: *View) void {
         _ = win.InvalidateRect(self.hwnd, null, 0);
     }
@@ -288,14 +319,16 @@ pub const View = struct {
 
     pub fn handleMouseWheelDelta(self: *View, delta: i32) void {
         self.wheel_remainder += delta;
-        const steps = @divTrunc(self.wheel_remainder, win.WHEEL_DELTA);
-        self.wheel_remainder -= steps * win.WHEEL_DELTA;
-        self.scrollViewport(-@as(isize, steps * wheel_rows));
+        const row_delta = @divTrunc(self.wheel_remainder, @divExact(win.WHEEL_DELTA, wheel_rows));
+        self.wheel_remainder -= row_delta * @divExact(win.WHEEL_DELTA, wheel_rows);
+        self.scrollViewport(-@as(isize, row_delta));
     }
 
-    fn handleMouseWheel(self: *View, wparam: usize) void {
+    fn handleMouseWheel(self: *View, wparam: usize, lparam: win.LPARAM) void {
         const raw_delta: u16 = @truncate(wparam >> 16);
-        self.handleMouseWheelDelta(@as(i16, @bitCast(raw_delta)));
+        const delta: i32 = @as(i16, @bitCast(raw_delta));
+        if (win.GetKeyState(win.VK_SHIFT) >= 0 and self.sendWheel(delta, false, screenLparamToClient(self.hwnd, lparam))) return;
+        self.handleMouseWheelDelta(delta);
     }
 
     fn paint(self: *View) void {
@@ -488,6 +521,10 @@ pub const View = struct {
 
     fn beginSelection(self: *View, lparam: win.LPARAM) void {
         if (win.GetKeyState(win.VK_CONTROL) < 0 and self.openLinkAt(lparam)) return;
+        if (win.GetKeyState(win.VK_SHIFT) >= 0 and self.beginProtocolButton(.left, lparam)) {
+            _ = win.SetCapture(self.hwnd);
+            return;
+        }
         const point = self.mousePoint(lparam, false) orelse {
             self.clearSelection();
             return;
@@ -495,20 +532,42 @@ pub const View = struct {
         const session = self.model.activeSession() orelse return;
         const runtime = session.runtime orelse return;
         self.clearSelection();
+        const now = win.GetTickCount64();
+        if (self.last_click_point != null and std.meta.eql(self.last_click_point.?, point) and now - self.last_click_tick <= win.GetDoubleClickTime())
+            self.click_count = saturatingClick(self.click_count)
+        else
+            self.click_count = 1;
+        self.last_click_tick = now;
+        self.last_click_point = point;
+        const unit: Terminal.SelectionUnit = if (self.click_count >= 3) .line else if (self.click_count == 2) .word else .cell;
+        runtime.beginSelectionAnchor(point) catch return;
+        runtime.setDerivedSelection(point, unit, unit == .cell and win.GetKeyState(win.VK_MENU) < 0) catch {
+            runtime.endSelectionAnchor();
+            return;
+        };
         self.selection = .{
-            .range = .{ .anchor = point, .focus = point },
             .runtime = runtime,
             .dragging = true,
+            .unit = unit,
+            .focus = point,
         };
         _ = win.SetCapture(self.hwnd);
+        _ = win.SetTimer(self.hwnd, selection_scroll_timer, 33, null);
         self.invalidate();
     }
 
     fn updateSelection(self: *View, lparam: win.LPARAM) void {
+        if (self.protocol_runtime) |runtime| {
+            _ = self.sendMouseTo(runtime, .motion, self.protocol_button orelse .none, clientPoint(lparam), self.protocol_button != null);
+            return;
+        }
+        if (win.GetKeyState(win.VK_SHIFT) >= 0) if (self.model.activeSession()) |session| if (session.runtime) |runtime| {
+            _ = self.sendMouseTo(runtime, .motion, .none, clientPoint(lparam), false);
+        };
         if (self.selection == null or !self.selection.?.dragging) self.updateHoveredLink(lparam);
         const point = self.mousePoint(lparam, true) orelse return;
         const current = self.selection orelse return;
-        if (!current.dragging or current.range.focus.x == point.x and current.range.focus.y == point.y) return;
+        if (!current.dragging or std.meta.eql(current.focus, point)) return;
         const session = self.model.activeSession() orelse {
             self.abandonSelection();
             return;
@@ -518,23 +577,34 @@ pub const View = struct {
             return;
         }
         if (self.selection) |*selection| {
-            selection.range.focus = point;
-            selection.runtime.setSelection(selection.range) catch |err| {
+            selection.runtime.setDerivedSelection(point, selection.unit, selection.unit == .cell and win.GetKeyState(win.VK_MENU) < 0) catch |err| {
                 log.debug("unable to update terminal selection: {}", .{err});
+                self.abandonSelection();
                 return;
             };
+            selection.focus = point;
             selection.moved = true;
             self.invalidate();
         }
     }
 
-    fn finishSelection(self: *View, lparam: win.LPARAM) void {
+    fn finishSelection(self: *View, button: Terminal.MouseButton, lparam: win.LPARAM) void {
+        if (self.protocol_runtime) |runtime| {
+            if (self.protocol_button != button) return;
+            _ = self.sendMouseTo(runtime, .release, button, clientPoint(lparam), false);
+            self.protocol_button = null;
+            self.protocol_runtime = null;
+            if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
+            return;
+        }
         if (self.selection == null or !self.selection.?.dragging) return;
         self.updateSelection(lparam);
         if (self.selection == null) return;
         self.selection.?.dragging = false;
+        self.selection.?.runtime.endSelectionAnchor();
+        _ = win.KillTimer(self.hwnd, selection_scroll_timer);
         if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
-        if (!self.selection.?.moved) {
+        if (!self.selection.?.moved and self.selection.?.unit == .cell) {
             self.selection = null;
             self.invalidate();
             return;
@@ -543,10 +613,124 @@ pub const View = struct {
     }
 
     fn cancelSelectionDrag(self: *View) void {
-        if (self.selection) |*selection| selection.dragging = false;
+        if (self.selection) |*selection| {
+            selection.dragging = false;
+            selection.runtime.endSelectionAnchor();
+        }
+        if (self.protocol_runtime) |runtime| if (self.protocol_button) |button| {
+            _ = self.sendMouseTo(runtime, .release, button, self.lastMouseClientPoint(), false);
+        };
+        self.protocol_button = null;
+        self.protocol_runtime = null;
+        _ = win.KillTimer(self.hwnd, selection_scroll_timer);
+        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
+    }
+
+    fn beginProtocolButton(self: *View, button: Terminal.MouseButton, lparam: win.LPARAM) bool {
+        if (self.protocol_button != null) return true;
+        const session = self.model.activeSession() orelse return false;
+        const runtime = session.runtime orelse return false;
+        if (!self.sendMouseTo(runtime, .press, button, clientPoint(lparam), true)) return false;
+        self.protocol_button = button;
+        self.protocol_runtime = runtime;
+        _ = win.SetCapture(self.hwnd);
+        return true;
+    }
+
+    fn sendMouseTo(self: *View, runtime: *SessionRuntime, action: Terminal.MouseAction, button: Terminal.MouseButton, point: Terminal.PixelPoint, pressed: bool) bool {
+        const geometry = self.mouseGeometry() orelse return false;
+        return runtime.sendMouse(action, button, point, input.currentModifiers(), geometry, pressed) catch false;
+    }
+
+    fn mouseGeometry(self: *View) ?Terminal.MouseGeometry {
+        var rect: win.RECT = undefined;
+        if (win.GetClientRect(self.hwnd, &rect) == 0) return null;
+        const dpi = win.GetDpiForWindow(self.hwnd);
+        const px: u32 = @intCast(@max(scaled(@intCast(self.padding_horizontal), dpi), 0));
+        const py: u32 = @intCast(@max(scaled(@intCast(self.padding_vertical), dpi), 0));
+        const width: u32 = @intCast(@max(rect.right - rect.left, 1));
+        const height: u32 = @intCast(@max(rect.bottom - rect.top, 1));
+        const grid_width = @as(u32, self.columns) * self.cell_width;
+        const grid_height = @as(u32, self.rows) * self.cell_height;
+        return .{
+            .screen_width = width,
+            .screen_height = height,
+            .cell_width = self.cell_width,
+            .cell_height = self.cell_height,
+            .padding_top = py,
+            .padding_bottom = height -| py -| grid_height,
+            .padding_left = px,
+            .padding_right = width -| px -| grid_width,
+        };
+    }
+
+    fn lastMouseClientPoint(self: *View) Terminal.PixelPoint {
+        var point: win.POINT = undefined;
+        if (win.GetCursorPos(&point) == 0 or win.ScreenToClient(self.hwnd, &point) == 0) return .{ .x = 0, .y = 0 };
+        return .{ .x = point.x, .y = point.y };
+    }
+
+    fn sendWheel(self: *View, delta: i32, horizontal: bool, point: Terminal.PixelPoint) bool {
+        const session = self.model.activeSession() orelse return false;
+        const runtime = session.runtime orelse return false;
+        const remainder = if (horizontal) &self.protocol_hwheel_remainder else &self.protocol_wheel_remainder;
+        const accumulated = wheelAccumulation(remainder.*, delta);
+        if (accumulated.steps == 0) {
+            if (runtime.mouseTracking()) {
+                remainder.* = accumulated.remainder;
+            } else {
+                remainder.* = 0;
+                if (!horizontal) self.handleMouseWheelDelta(accumulated.remainder);
+            }
+            return true;
+        }
+        const steps = accumulated.steps;
+        const button: Terminal.MouseButton = if (horizontal)
+            (if (steps > 0) .wheel_right else .wheel_left)
+        else
+            (if (steps > 0) .wheel_up else .wheel_down);
+        const geometry = self.mouseGeometry() orelse return false;
+        if (runtime.sendMouseWheel(button, @intCast(@abs(steps)), point, input.currentModifiers(), geometry) catch false) {
+            remainder.* = accumulated.remainder;
+        } else {
+            remainder.* = 0;
+            if (!horizontal) self.handleMouseWheelDelta(steps * win.WHEEL_DELTA + accumulated.remainder);
+        }
+        return true;
+    }
+
+    fn pixelPoint(self: *View, x: i32, y: i32) Terminal.Point {
+        const px = std.math.clamp(x, 0, @as(i32, self.columns) * @as(i32, @intCast(self.cell_width)) - 1);
+        const py = std.math.clamp(y, 0, @as(i32, self.rows) * @as(i32, @intCast(self.cell_height)) - 1);
+        return .{ .x = @intCast(@divTrunc(px, @as(i32, @intCast(self.cell_width)))), .y = @intCast(@divTrunc(py, @as(i32, @intCast(self.cell_height)))) };
+    }
+
+    fn selectionAutoscroll(self: *View) void {
+        if (self.selection == null or !self.selection.?.dragging) return;
+        const active = self.model.activeSession() orelse return self.abandonSelection();
+        if (active.runtime != self.selection.?.runtime) return self.abandonSelection();
+        var cursor: win.POINT = undefined;
+        if (win.GetCursorPos(&cursor) == 0 or win.ScreenToClient(self.hwnd, &cursor) == 0) return;
+        const dpi = win.GetDpiForWindow(self.hwnd);
+        const top = scaled(@intCast(self.padding_vertical), dpi);
+        const bottom = top + @as(i32, self.rows) * @as(i32, @intCast(self.cell_height));
+        const distance = if (cursor.y < top) cursor.y - top else if (cursor.y >= bottom) cursor.y - bottom + 1 else return;
+        const rows_per_tick: isize = @intCast(@min(@divTrunc(@abs(distance), self.cell_height) + 1, 8));
+        self.scrollViewport(if (distance < 0) -rows_per_tick else rows_per_tick);
+        const point = self.pixelPoint(cursor.x - scaled(@intCast(self.padding_horizontal), dpi), cursor.y - top);
+        if (self.selection) |*selection| {
+            selection.runtime.setDerivedSelection(point, selection.unit, selection.unit == .cell and win.GetKeyState(win.VK_MENU) < 0) catch return self.abandonSelection();
+            selection.focus = point;
+            selection.moved = true;
+        }
     }
 
     fn abandonSelection(self: *View) void {
+        _ = win.KillTimer(self.hwnd, selection_scroll_timer);
+        if (self.selection) |selection| {
+            selection.runtime.setSelection(null) catch {};
+            selection.runtime.endSelectionAnchor();
+        }
         self.selection = null;
         if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         self.invalidate();
@@ -556,6 +740,9 @@ pub const View = struct {
         if (self.selection == null) return;
         const selection = self.selection.?;
         self.selection = null;
+        _ = win.KillTimer(self.hwnd, selection_scroll_timer);
+        selection.runtime.endSelectionAnchor();
+        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         if (self.model.activeSession()) |session| {
             if (session.runtime == selection.runtime) {
                 selection.runtime.setSelection(null) catch |err| {
@@ -696,10 +883,11 @@ pub const View = struct {
 };
 
 const MouseSelection = struct {
-    range: Terminal.Selection,
     runtime: *SessionRuntime,
     dragging: bool,
     moved: bool = false,
+    unit: Terminal.SelectionUnit,
+    focus: Terminal.Point,
 };
 
 const HoveredLink = struct {
@@ -862,10 +1050,17 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.SetFocus(hwnd);
             return 0;
         },
-        win.WM_LBUTTONDOWN => {
+        win.WM_LBUTTONDOWN, win.WM_LBUTTONDBLCLK => {
             _ = win.SetFocus(hwnd);
             if (view) |current| current.beginSelection(lparam);
             return 0;
+        },
+        win.WM_MBUTTONDOWN, win.WM_RBUTTONDOWN => {
+            _ = win.SetFocus(hwnd);
+            if (win.GetKeyState(win.VK_SHIFT) >= 0) if (view) |current| {
+                if (current.beginProtocolButton(if (message == win.WM_MBUTTONDOWN) .middle else .right, lparam)) return 0;
+            };
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_DROPFILES => {
             const drop = win32.handleFromInt(win.HDROP, wparam);
@@ -879,8 +1074,12 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| current.updateSelection(lparam);
             return 0;
         },
-        win.WM_LBUTTONUP => {
-            if (view) |current| current.finishSelection(lparam);
+        win.WM_LBUTTONUP, win.WM_MBUTTONUP, win.WM_RBUTTONUP => {
+            if (view) |current| current.finishSelection(switch (message) {
+                win.WM_LBUTTONUP => .left,
+                win.WM_MBUTTONUP => .middle,
+                else => .right,
+            }, lparam);
             return 0;
         },
         win.WM_CAPTURECHANGED, win.WM_CANCELMODE => {
@@ -930,7 +1129,15 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_MOUSEWHEEL => {
-            if (view) |current| current.handleMouseWheel(wparam);
+            if (view) |current| current.handleMouseWheel(wparam, lparam);
+            return 0;
+        },
+        win.WM_MOUSEHWHEEL => {
+            if (view) |current| {
+                const raw: u16 = @truncate(wparam >> 16);
+                const delta: i32 = @as(i16, @bitCast(raw));
+                if (win.GetKeyState(win.VK_SHIFT) >= 0) _ = current.sendWheel(delta, true, screenLparamToClient(hwnd, lparam));
+            }
             return 0;
         },
         win.WM_TIMER => {
@@ -942,6 +1149,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                     current.copy_flash = false;
                     current.invalidate();
                 }
+            } else if (wparam == selection_scroll_timer) {
+                if (view) |current| current.selectionAutoscroll();
             }
             return 0;
         },
@@ -953,6 +1162,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_DESTROY => {
             _ = win.KillTimer(hwnd, refresh_timer);
             _ = win.KillTimer(hwnd, copy_flash_timer);
+            _ = win.KillTimer(hwnd, selection_scroll_timer);
             if (view) |current| current.deinitResources();
             return 0;
         },
@@ -991,6 +1201,27 @@ fn mouseCoordinate(lparam: win.LPARAM, shift: u6) i32 {
     const bits: usize = @bitCast(lparam);
     const word: u16 = @truncate(bits >> shift);
     return @as(i16, @bitCast(word));
+}
+
+fn clientPoint(lparam: win.LPARAM) Terminal.PixelPoint {
+    return .{ .x = mouseCoordinate(lparam, 0), .y = mouseCoordinate(lparam, 16) };
+}
+
+fn screenLparamToClient(hwnd: win.HWND, lparam: win.LPARAM) Terminal.PixelPoint {
+    var point = win.POINT{ .x = mouseCoordinate(lparam, 0), .y = mouseCoordinate(lparam, 16) };
+    _ = win.ScreenToClient(hwnd, &point);
+    return .{ .x = point.x, .y = point.y };
+}
+
+fn saturatingClick(value: u2) u2 {
+    return if (value < 3) value + 1 else 3;
+}
+
+const WheelAccumulation = struct { steps: i32, remainder: i32 };
+fn wheelAccumulation(remainder: i32, delta: i32) WheelAccumulation {
+    const total = remainder + delta;
+    const steps = @divTrunc(total, win.WHEEL_DELTA);
+    return .{ .steps = steps, .remainder = total - steps * win.WHEEL_DELTA };
 }
 
 fn isPasteShortcut(key: win.WPARAM) bool {
@@ -1159,4 +1390,15 @@ fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORRE
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
+}
+
+test "click count saturates" {
+    try std.testing.expectEqual(@as(u2, 3), saturatingClick(3));
+    try std.testing.expectEqual(@as(u2, 3), saturatingClick(2));
+}
+
+test "protocol wheel accumulation keeps partial deltas" {
+    try std.testing.expectEqual(WheelAccumulation{ .steps = 0, .remainder = 80 }, wheelAccumulation(40, 40));
+    try std.testing.expectEqual(WheelAccumulation{ .steps = 1, .remainder = 0 }, wheelAccumulation(80, 40));
+    try std.testing.expectEqual(WheelAccumulation{ .steps = -1, .remainder = -20 }, wheelAccumulation(0, -140));
 }

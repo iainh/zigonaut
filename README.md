@@ -89,6 +89,12 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
 - OSC 9 and OSC 777 desktop notifications use the emitting tab's title and return
   to that tab when activated during the same Zigonaut process.
 - Hold Ctrl while hovering or clicking a terminal link to identify or open it.
+- Drag to select and automatically copy; hold Alt for a rectangular selection.
+  Double-click selects words and triple-click selects logical lines, and either may be
+  extended by dragging. Selection drags autoscroll beyond the top or bottom edge.
+- Programs that enable terminal mouse reporting receive clicks, motion, and wheel input.
+  Hold Shift to override mouse reporting and select or scroll local scrollback instead;
+  Ctrl+click links retains priority.
 - `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
   the active PowerShell, CMD, WSL, or custom profile.
 

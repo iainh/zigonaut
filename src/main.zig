@@ -284,13 +284,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 .new_cmd => self.addProfile(.cmd) catch |err| log.err("unable to open Command Prompt session: {}", .{err}),
                 .new_custom => self.addProfile(.custom) catch |err| log.err("unable to open custom session: {}", .{err}),
                 .close => {
+                    self.terminal_view.resetInteraction();
                     self.model.closeSession(argument);
                     if (self.model.sessions.items.len == 0) {
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
                 },
-                .select => self.model.activate(argument),
+                .select => {
+                    self.terminal_view.resetInteraction();
+                    self.model.activate(argument);
+                },
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
                     return 0;
@@ -312,6 +316,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .notification_activate => {
+                    self.terminal_view.resetInteraction();
                     if (!self.model.activateSessionId(argument)) return 0;
                     self.terminal_view.syncSessions();
                     self.terminal_view.invalidate();
@@ -333,6 +338,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         shell_exited_message => {
+            self.terminal_view.resetInteraction();
             if (!self.model.closeCleanlyExitedSessions()) return 0;
             if (self.model.sessions.items.len == 0) {
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
@@ -392,6 +398,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         win.WM_CLOSE => {
+            if (self.terminal_ready) self.terminal_view.resetInteraction();
             _ = win.KillTimer(hwnd, taskbar_progress_timer);
             if (self.taskbar_ready) {
                 if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
@@ -531,6 +538,7 @@ fn addDefaultSessionImpl(self: *Application) !void {
 }
 
 fn addProfileImpl(self: *Application, shell: app_model.Shell) !void {
+    self.terminal_view.resetInteraction();
     const command = if (shell == .custom) self.settings.custom_command else shell.command();
     const title = if (shell == .custom) self.settings.custom_profile_name else shell.title();
     _ = try self.model.addSession(shell, title, command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);

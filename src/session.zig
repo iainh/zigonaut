@@ -107,6 +107,73 @@ pub const SessionRuntime = struct {
         try self.terminal.setSelection(selection);
     }
 
+    pub fn beginSelectionAnchor(self: *SessionRuntime, point: Terminal.Point) !void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.beginSelectionAnchor(point);
+    }
+
+    pub fn endSelectionAnchor(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.endSelectionAnchor();
+    }
+
+    pub fn setDerivedSelection(self: *SessionRuntime, focus: Terminal.Point, unit: Terminal.SelectionUnit, rectangle: bool) !void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.setDerivedSelection(focus, unit, rectangle);
+    }
+
+    pub fn sendMouse(self: *SessionRuntime, action: Terminal.MouseAction, button: Terminal.MouseButton, position: Terminal.PixelPoint, modifiers: u16, geometry: Terminal.MouseGeometry, any_button_pressed: bool) !bool {
+        var buffer: [128]u8 = undefined;
+        self.terminal_mutex.lock();
+        if (!self.terminal.mouseTracking()) {
+            self.terminal_mutex.unlock();
+            return false;
+        }
+        const encoded = self.terminal.encodeMouse(action, button, position, modifiers, geometry, any_button_pressed, &buffer) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.terminal_mutex.unlock();
+        if (encoded.len == 0) return false;
+        try self.write(encoded);
+        return true;
+    }
+
+    pub fn mouseTracking(self: *SessionRuntime) bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.mouseTracking();
+    }
+
+    pub fn sendMouseWheel(self: *SessionRuntime, button: Terminal.MouseButton, count: usize, position: Terminal.PixelPoint, modifiers: u16, geometry: Terminal.MouseGeometry) !bool {
+        if (count == 0) return true;
+        const output = try self.allocator.alloc(u8, count * 128);
+        defer self.allocator.free(output);
+        var written: usize = 0;
+        self.terminal_mutex.lock();
+        if (!self.terminal.mouseTracking()) {
+            self.terminal_mutex.unlock();
+            return false;
+        }
+        for (0..count) |_| {
+            const encoded = self.terminal.encodeMouse(.press, button, position, modifiers, geometry, false, output[written .. written + 128]) catch |err| {
+                self.terminal_mutex.unlock();
+                return err;
+            };
+            if (encoded.len == 0) {
+                self.terminal_mutex.unlock();
+                return false;
+            }
+            written += encoded.len;
+        }
+        self.terminal_mutex.unlock();
+        try self.write(output[0..written]);
+        return true;
+    }
+
     pub fn selectedTextAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
