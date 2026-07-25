@@ -12,6 +12,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "CHANGELOG.md",
         "src",
         "winui",
         "zigonaut.manifest",
