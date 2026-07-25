@@ -1,1 +1,5 @@
+#ifdef DEBUG_BUILD
+1 ICON "assets/icons/zigonaut-debug.ico"
+#else
 1 ICON "assets/icons/zigonaut.ico"
+#endif
