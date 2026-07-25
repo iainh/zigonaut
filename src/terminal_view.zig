@@ -488,7 +488,7 @@ pub const View = struct {
             self.invalidate();
             return true;
         };
-        if (input.keyFromVirtualKey(wparam) == null) return false;
+        if (input.keyFromMessage(wparam, lparam) == null) return false;
         if (!released) self.clearSelection();
         const session = self.model.activeSession() orelse return true;
         const event = self.input_state.keyEvent(wparam, lparam, released).?;
