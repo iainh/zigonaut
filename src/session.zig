@@ -22,6 +22,7 @@ pub const SessionRuntime = struct {
     pub fn create(
         allocator: std.mem.Allocator,
         command: []const u8,
+        working_directory: []const u8,
         terminal_theme: theme.Theme,
         columns: u16,
         rows: u16,
@@ -36,7 +37,7 @@ pub const SessionRuntime = struct {
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
 
-        self.pty = Pty.spawn(allocator, command, columns, rows) catch |err| {
+        self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
             var message: [256]u8 = undefined;
             const text = std.fmt.bufPrint(
                 &message,

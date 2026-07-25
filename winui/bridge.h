@@ -19,6 +19,9 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_QUIT = 7,
     ZIGONAUT_CHROME_SCROLL = 8,
     ZIGONAUT_CHROME_SCROLL_WHEEL = 9,
+    ZIGONAUT_CHROME_NEW_PWSH = 10,
+    ZIGONAUT_CHROME_NEW_CMD = 11,
+    ZIGONAUT_CHROME_NEW_CUSTOM = 12,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

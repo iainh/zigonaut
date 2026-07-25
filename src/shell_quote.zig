@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Shell = enum { powershell, wsl };
+pub const Shell = enum { powershell, windows, wsl };
 
 pub fn pathAlloc(allocator: std.mem.Allocator, path: []const u8, shell: Shell) ![]u8 {
     var normalized = std.ArrayList(u8).empty;
@@ -13,6 +13,12 @@ pub fn pathAlloc(allocator: std.mem.Allocator, path: []const u8, shell: Shell) !
 
     var quoted = std.ArrayList(u8).empty;
     errdefer quoted.deinit(allocator);
+    if (shell == .windows) {
+        try quoted.append(allocator, '"');
+        try quoted.appendSlice(allocator, normalized.items);
+        try quoted.append(allocator, '"');
+        return quoted.toOwnedSlice(allocator);
+    }
     try quoted.append(allocator, '\'');
     for (normalized.items) |byte| {
         if (byte == '\'') {
@@ -27,6 +33,12 @@ pub fn pathAlloc(allocator: std.mem.Allocator, path: []const u8, shell: Shell) !
     }
     try quoted.append(allocator, '\'');
     return quoted.toOwnedSlice(allocator);
+}
+
+test "quotes Windows-style paths for cmd and custom profiles" {
+    const quoted = try pathAlloc(std.testing.allocator, "C:\\My Files\\it's.txt", .windows);
+    defer std.testing.allocator.free(quoted);
+    try std.testing.expectEqualStrings("\"C:\\My Files\\it's.txt\"", quoted);
 }
 
 fn appendWslPath(allocator: std.mem.Allocator, output: *std.ArrayList(u8), path: []const u8) !void {

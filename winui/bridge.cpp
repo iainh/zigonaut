@@ -99,7 +99,10 @@ struct Bridge {
     MenuFlyoutItem quit_item{nullptr};
     MenuFlyout new_tab_menu{nullptr};
     MenuFlyoutItem powershell_item{nullptr};
+    MenuFlyoutItem pwsh_item{nullptr};
+    MenuFlyoutItem cmd_item{nullptr};
     MenuFlyoutItem wsl_item{nullptr};
+    MenuFlyoutItem custom_item{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
     TabView::AddTabButtonClick_revoker add_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
@@ -108,7 +111,10 @@ struct Bridge {
     MenuFlyoutItem::Click_revoker reload_settings_revoker{};
     MenuFlyoutItem::Click_revoker quit_revoker{};
     MenuFlyoutItem::Click_revoker powershell_revoker{};
+    MenuFlyoutItem::Click_revoker pwsh_revoker{};
+    MenuFlyoutItem::Click_revoker cmd_revoker{};
     MenuFlyoutItem::Click_revoker wsl_revoker{};
+    MenuFlyoutItem::Click_revoker custom_revoker{};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar::Scroll_revoker scrollbar_scroll_revoker{};
     UIElement::PointerEntered_revoker scrollbar_entered_revoker{};
     UIElement::PointerExited_revoker scrollbar_exited_revoker{};
@@ -232,11 +238,23 @@ struct Bridge {
         powershell_item = MenuFlyoutItem{};
         powershell_item.Text(L"PowerShell");
         powershell_revoker = powershell_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_POWERSHELL, 0); });
+        pwsh_item = MenuFlyoutItem{};
+        pwsh_item.Text(L"PowerShell 7");
+        pwsh_revoker = pwsh_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_PWSH, 0); });
+        cmd_item = MenuFlyoutItem{};
+        cmd_item.Text(L"Command Prompt");
+        cmd_revoker = cmd_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_CMD, 0); });
         wsl_item = MenuFlyoutItem{};
         wsl_item.Text(L"WSL");
         wsl_revoker = wsl_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WSL, 0); });
+        custom_item = MenuFlyoutItem{};
+        custom_item.Text(L"Custom");
+        custom_revoker = custom_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_CUSTOM, 0); });
         new_tab_menu.Items().Append(powershell_item);
+        new_tab_menu.Items().Append(pwsh_item);
+        new_tab_menu.Items().Append(cmd_item);
         new_tab_menu.Items().Append(wsl_item);
+        new_tab_menu.Items().Append(custom_item);
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
@@ -409,7 +427,10 @@ struct Bridge {
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
         powershell_revoker.revoke();
+        pwsh_revoker.revoke();
+        cmd_revoker.revoke();
         wsl_revoker.revoke();
+        custom_revoker.revoke();
         open_settings_revoker.revoke();
         reload_settings_revoker.revoke();
         quit_revoker.revoke();
@@ -427,7 +448,10 @@ struct Bridge {
         closed = true;
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         powershell_item = nullptr;
+        pwsh_item = nullptr;
+        cmd_item = nullptr;
         wsl_item = nullptr;
+        custom_item = nullptr;
         new_tab_menu = nullptr;
         cleanup(L"detach application menu", [&] { menu_button.Flyout(nullptr); }, result);
         cleanup(L"clear application menu", [&] { app_menu.Items().Clear(); }, result);

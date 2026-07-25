@@ -7,7 +7,7 @@ pub const Pty = struct {
     output: win.HANDLE,
     process: win.HANDLE,
 
-    pub fn spawn(allocator: std.mem.Allocator, command: []const u8, columns: u16, rows: u16) !Pty {
+    pub fn spawn(allocator: std.mem.Allocator, command: []const u8, working_directory: []const u8, columns: u16, rows: u16) !Pty {
         var input_read: win.HANDLE = null;
         var input_write: win.HANDLE = null;
         if (win.CreatePipe(&input_read, &input_write, null, 0) == 0) return windowsError();
@@ -64,6 +64,8 @@ pub const Pty = struct {
         var process_info: win.PROCESS_INFORMATION = std.mem.zeroes(win.PROCESS_INFORMATION);
         const command_line = try std.unicode.utf8ToUtf16LeAllocZ(allocator, command);
         defer allocator.free(command_line);
+        const current_directory = if (working_directory.len == 0) null else try std.unicode.utf8ToUtf16LeAllocZ(allocator, working_directory);
+        defer if (current_directory) |directory| allocator.free(directory);
 
         if (win.CreateProcessW(
             null,
@@ -73,7 +75,7 @@ pub const Pty = struct {
             0,
             win.EXTENDED_STARTUPINFO_PRESENT,
             null,
-            null,
+            if (current_directory) |directory| directory.ptr else null,
             &startup.StartupInfo,
             &process_info,
         ) == 0) return windowsError();

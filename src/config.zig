@@ -8,13 +8,20 @@ pub const default_contents =
     \\font_size=18
     \\theme=rasmus
     \\default_shell=powershell
+    \\custom_profile_name=Custom
+    \\custom_command=
+    \\working_directory=
+    \\hold_on_exit=false
     \\randomize_tab_background=true
     \\
 ;
 
 pub const Shell = enum {
     powershell,
+    pwsh,
+    cmd,
     wsl,
+    custom,
 };
 
 pub const Config = struct {
@@ -22,6 +29,10 @@ pub const Config = struct {
     font_size: u16 = 18,
     theme: theme.Name = .rasmus,
     default_shell: Shell = .powershell,
+    custom_profile_name: []const u8 = "Custom",
+    custom_command: []const u8 = "",
+    working_directory: []const u8 = "",
+    hold_on_exit: bool = false,
     randomize_tab_background: bool = true,
 };
 
@@ -107,7 +118,21 @@ pub fn parse(contents: []const u8) Config {
                 result.default_shell = .powershell;
             } else if (std.ascii.eqlIgnoreCase(value, "wsl")) {
                 result.default_shell = .wsl;
+            } else if (std.ascii.eqlIgnoreCase(value, "pwsh")) {
+                result.default_shell = .pwsh;
+            } else if (std.ascii.eqlIgnoreCase(value, "cmd")) {
+                result.default_shell = .cmd;
+            } else if (std.ascii.eqlIgnoreCase(value, "custom")) {
+                result.default_shell = .custom;
             }
+        } else if (std.ascii.eqlIgnoreCase(key, "custom_profile_name")) {
+            if (value.len > 0 and value.len < 128) result.custom_profile_name = value;
+        } else if (std.ascii.eqlIgnoreCase(key, "custom_command")) {
+            result.custom_command = value;
+        } else if (std.ascii.eqlIgnoreCase(key, "working_directory")) {
+            result.working_directory = value;
+        } else if (std.ascii.eqlIgnoreCase(key, "hold_on_exit")) {
+            if (std.ascii.eqlIgnoreCase(value, "true")) result.hold_on_exit = true else if (std.ascii.eqlIgnoreCase(value, "false")) result.hold_on_exit = false;
         } else if (std.ascii.eqlIgnoreCase(key, "randomize_tab_background")) {
             if (std.ascii.eqlIgnoreCase(value, "true")) {
                 result.randomize_tab_background = true;
@@ -133,11 +158,20 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(Shell.wsl, parsed.default_shell);
     try std.testing.expect(!parsed.randomize_tab_background);
 
-    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=cmd\nrandomize_tab_background=perhaps\n");
+    const invalid = parse("font_size=500\ntheme=unknown\ndefault_shell=fish\nrandomize_tab_background=perhaps\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
     try std.testing.expectEqual(theme.Name.rasmus, invalid.theme);
     try std.testing.expectEqual(Shell.powershell, invalid.default_shell);
     try std.testing.expect(invalid.randomize_tab_background);
+}
+
+test "configuration parses launch profile settings" {
+    const parsed = parse("default_shell=custom\ncustom_profile_name=Dev Shell\ncustom_command=tool.exe --flag\nworking_directory=C:\\work\nhold_on_exit=true\n");
+    try std.testing.expectEqual(Shell.custom, parsed.default_shell);
+    try std.testing.expectEqualStrings("Dev Shell", parsed.custom_profile_name);
+    try std.testing.expectEqualStrings("tool.exe --flag", parsed.custom_command);
+    try std.testing.expectEqualStrings("C:\\work", parsed.working_directory);
+    try std.testing.expect(parsed.hold_on_exit);
 }
 
 test "configuration changes are classified by subsystem" {

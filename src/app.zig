@@ -10,19 +10,28 @@ const theme = @import("theme.zig");
 
 pub const Shell = enum {
     powershell,
+    pwsh,
+    cmd,
     wsl,
+    custom,
 
     pub fn title(self: Shell) []const u8 {
         return switch (self) {
             .powershell => "PowerShell",
+            .pwsh => "PowerShell 7",
+            .cmd => "Command Prompt",
             .wsl => "WSL",
+            .custom => "Custom",
         };
     }
 
     pub fn command(self: Shell) []const u8 {
         return switch (self) {
             .powershell => "powershell.exe",
+            .pwsh => "pwsh.exe",
+            .cmd => "cmd.exe",
             .wsl => "wsl.exe",
+            .custom => "",
         };
     }
 };
@@ -34,6 +43,7 @@ pub const Session = struct {
     background: theme.Color,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
+    hold_on_exit: bool = false,
 
     pub fn displayTitle(self: *const Session) []const u8 {
         return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.shell.title();
@@ -64,14 +74,21 @@ pub const App = struct {
         self.sessions.deinit(self.allocator);
     }
 
-    pub fn addSession(self: *App, shell: Shell, columns: u16, rows: u16) !usize {
+    pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
+        if (command.len == 0) return error.ProfileNotConfigured;
         const terminal_theme = if (self.randomize_tab_background)
             theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16))
         else
             self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, shell.command(), terminal_theme, columns, rows);
-        errdefer runtime.destroy();
-        return self.addSessionRecord(shell, runtime, terminal_theme.background);
+        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows);
+        const index = self.addSessionRecord(shell, runtime, terminal_theme.background) catch |err| {
+            runtime.destroy();
+            return err;
+        };
+        errdefer self.closeSession(index);
+        if (shell == .custom) try self.sessions.items[index].title.appendSlice(self.allocator, profile_title);
+        self.sessions.items[index].hold_on_exit = hold_on_exit;
+        return index;
     }
 
     fn addSessionRecord(self: *App, shell: Shell, runtime: ?*SessionRuntime, background: theme.Color) !usize {
@@ -155,7 +172,7 @@ pub const App = struct {
         while (index > 0) {
             index -= 1;
             const runtime = self.sessions.items[index].runtime orelse continue;
-            if (!runtime.exitedCleanly()) continue;
+            if (!runtime.exitedCleanly() or self.sessions.items[index].hold_on_exit) continue;
             self.closeSession(index);
             changed = true;
         }

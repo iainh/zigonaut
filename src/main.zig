@@ -58,6 +58,7 @@ const Application = struct {
     const syncChrome = syncChromeImpl;
     const syncScrollbar = syncScrollbarImpl;
     const addDefaultSession = addDefaultSessionImpl;
+    const addProfile = addProfileImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
 };
@@ -223,14 +224,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
             switch (command) {
-                .new_powershell => _ = self.model.addSession(.powershell, self.terminal_view.columns, self.terminal_view.rows) catch |err| {
+                .new_powershell => self.addProfile(.powershell) catch |err| {
                     log.err("unable to open PowerShell session: {}", .{err});
                     return 0;
                 },
-                .new_wsl => _ = self.model.addSession(.wsl, self.terminal_view.columns, self.terminal_view.rows) catch |err| {
+                .new_wsl => self.addProfile(.wsl) catch |err| {
                     log.err("unable to open WSL session: {}", .{err});
                     return 0;
                 },
+                .new_pwsh => self.addProfile(.pwsh) catch |err| log.err("unable to open PowerShell 7 session: {}", .{err}),
+                .new_cmd => self.addProfile(.cmd) catch |err| log.err("unable to open Command Prompt session: {}", .{err}),
+                .new_custom => self.addProfile(.custom) catch |err| log.err("unable to open custom session: {}", .{err}),
                 .close => {
                     self.model.closeSession(argument);
                     if (self.model.sessions.items.len == 0) {
@@ -395,12 +399,21 @@ fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c)
 fn addDefaultSessionImpl(self: *Application) !void {
     const shell: app_model.Shell = switch (self.settings.default_shell) {
         .powershell => .powershell,
+        .pwsh => .pwsh,
+        .cmd => .cmd,
         .wsl => .wsl,
+        .custom => if (self.settings.custom_command.len > 0) .custom else .powershell,
     };
-    _ = try self.model.addSession(shell, self.terminal_view.columns, self.terminal_view.rows);
+    try self.addProfile(shell);
     self.terminal_view.syncSessions();
     self.terminal_view.invalidate();
     self.syncChrome();
+}
+
+fn addProfileImpl(self: *Application, shell: app_model.Shell) !void {
+    const command = if (shell == .custom) self.settings.custom_command else shell.command();
+    const title = if (shell == .custom) self.settings.custom_profile_name else shell.title();
+    _ = try self.model.addSession(shell, title, command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
 }
 
 fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) void {

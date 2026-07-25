@@ -40,14 +40,25 @@ font_family=Cascadia Mono
 font_size=18
 theme=rasmus
 default_shell=powershell
+custom_profile_name=Custom
+custom_command=
+working_directory=
+hold_on_exit=false
 randomize_tab_background=true
 ```
 
 Supported themes are `rasmus`, `campbell`, and `solarized-dark`; `default_shell` may be
-`powershell` or `wsl`. Use **Open Settings** and **Reload Settings** from the title-bar
+`powershell`, `pwsh`, `cmd`, `wsl`, or `custom`. The custom profile is available only
+when `custom_command` is nonempty; an invalid custom default safely falls back to Windows
+PowerShell. `custom_profile_name` names that profile, and `custom_command` is its complete
+CreateProcess command line. `working_directory` sets the current directory for new processes;
+leave it empty to inherit Zigonaut's directory. Set `hold_on_exit=true` to retain newly created
+tabs after a clean process exit. Reloading these settings affects subsequent sessions only.
+Use **Open Settings** and **Reload Settings** from the title-bar
 menu to edit and apply changes without restarting Zigonaut. The configured shell is
 used for the initial tab and for new tabs opened with Ctrl+Shift+T; the
-PowerShell and WSL entries in the new-tab menu open their named profiles.
+PowerShell, PowerShell 7, Command Prompt, WSL, and Custom entries in the new-tab menu open
+their named profiles. Clicking Custom while it is unconfigured is rejected without creating a tab.
 By default, each new tab receives a random background hue with the same perceived
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.
