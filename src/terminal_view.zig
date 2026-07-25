@@ -13,6 +13,7 @@ const log = std.log.scoped(.terminal_view);
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_timer = 1;
 const logical_padding = 8;
+const wheel_rows = 3;
 
 pub const View = struct {
     hwnd: win.HWND = null,
@@ -33,6 +34,7 @@ pub const View = struct {
     last_titles_generation: u64 = 0,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
+    wheel_remainder: i32 = 0,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -84,7 +86,7 @@ pub const View = struct {
             0,
             class_name,
             null,
-            win.WS_CHILD | win.WS_VISIBLE | win.WS_CLIPSIBLINGS | win.WS_TABSTOP,
+            win.WS_CHILD | win.WS_VISIBLE | win.WS_CLIPSIBLINGS | win.WS_TABSTOP | win.WS_VSCROLL,
             0,
             0,
             1,
@@ -160,12 +162,16 @@ pub const View = struct {
             self.last_titles_generation = titles_generation;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.titles_changed_message, 0, 0);
         }
-        const session = self.model.activeSession() orelse return;
+        const session = self.model.activeSession() orelse {
+            self.updateScrollbar();
+            return;
+        };
         const runtime = session.runtime orelse return;
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
         self.last_runtime = runtime;
         self.last_content_generation = generation;
+        self.updateScrollbar();
         self.invalidate();
     }
 
@@ -191,6 +197,64 @@ pub const View = struct {
         self.columns = safe_columns;
         self.rows = safe_rows;
         self.syncSessions();
+        self.updateScrollbar();
+    }
+
+    fn updateScrollbar(self: *View) void {
+        const scrollbar = if (self.model.activeSession()) |session|
+            session.runtime.?.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 }
+        else
+            Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
+        const max_value = if (scrollbar.total == 0) 0 else scrollbar.total - 1;
+        var info = win.SCROLLINFO{
+            .cbSize = @sizeOf(win.SCROLLINFO),
+            .fMask = win.SIF_RANGE | win.SIF_PAGE | win.SIF_POS,
+            .nMin = 0,
+            .nMax = @intCast(@min(max_value, std.math.maxInt(i32))),
+            .nPage = @intCast(@min(scrollbar.len, std.math.maxInt(u32))),
+            .nPos = @intCast(@min(scrollbar.offset, std.math.maxInt(i32))),
+            .nTrackPos = 0,
+        };
+        _ = win.SetScrollInfo(self.hwnd, win.SB_VERT, &info, 1);
+    }
+
+    fn scrollViewport(self: *View, delta: isize) void {
+        if (delta == 0) return;
+        const session = self.model.activeSession() orelse return;
+        session.runtime.?.scrollViewport(delta);
+        self.updateScrollbar();
+        self.invalidate();
+    }
+
+    fn handleVerticalScroll(self: *View, request: usize) void {
+        const session = self.model.activeSession() orelse return;
+        const scrollbar = session.runtime.?.scrollbar() catch return;
+        const page: isize = @intCast(@max(scrollbar.len, 1));
+        const delta: isize = switch (request & 0xffff) {
+            win.SB_LINEUP => -1,
+            win.SB_LINEDOWN => 1,
+            win.SB_PAGEUP => -page,
+            win.SB_PAGEDOWN => page,
+            win.SB_TOP => -@as(isize, @intCast(scrollbar.offset)),
+            win.SB_BOTTOM => @intCast(scrollbar.total -| scrollbar.len -| scrollbar.offset),
+            win.SB_THUMBPOSITION, win.SB_THUMBTRACK => delta: {
+                var info = std.mem.zeroes(win.SCROLLINFO);
+                info.cbSize = @sizeOf(win.SCROLLINFO);
+                info.fMask = win.SIF_TRACKPOS;
+                if (win.GetScrollInfo(self.hwnd, win.SB_VERT, &info) == 0) break :delta 0;
+                break :delta @as(isize, info.nTrackPos) - @as(isize, @intCast(scrollbar.offset));
+            },
+            else => 0,
+        };
+        self.scrollViewport(delta);
+    }
+
+    fn handleMouseWheel(self: *View, wparam: usize) void {
+        const raw_delta: u16 = @truncate(wparam >> 16);
+        self.wheel_remainder += @as(i16, @bitCast(raw_delta));
+        const steps = @divTrunc(self.wheel_remainder, win.WHEEL_DELTA);
+        self.wheel_remainder -= steps * win.WHEEL_DELTA;
+        self.scrollViewport(-@as(isize, steps * wheel_rows));
     }
 
     fn paint(self: *View) void {
@@ -443,6 +507,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_SIZE => {
             if (view) |current| current.resizeSessions();
+            return 0;
+        },
+        win.WM_VSCROLL => {
+            if (view) |current| current.handleVerticalScroll(wparam);
+            return 0;
+        },
+        win.WM_MOUSEWHEEL => {
+            if (view) |current| current.handleMouseWheel(wparam);
             return 0;
         },
         win.WM_TIMER => {

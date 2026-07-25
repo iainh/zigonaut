@@ -61,6 +61,12 @@ pub const Terminal = struct {
         cursor_columns: u8,
     };
 
+    pub const Scrollbar = struct {
+        total: u64,
+        offset: u64,
+        len: u64,
+    };
+
     pub const Key = enum {
         escape,
         backspace,
@@ -186,6 +192,23 @@ pub const Terminal = struct {
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+    }
+
+    pub fn scrollbar(self: *Terminal) !Scrollbar {
+        var state = std.mem.zeroes(vt.GhosttyTerminalScrollbar);
+        try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_SCROLLBAR, &state));
+        return .{
+            .total = state.total,
+            .offset = state.offset,
+            .len = state.len,
+        };
+    }
+
+    pub fn scrollViewport(self: *Terminal, delta: isize) void {
+        vt.ghostty_terminal_scroll_viewport(self.terminal, .{
+            .tag = vt.GHOSTTY_SCROLL_VIEWPORT_DELTA,
+            .value = .{ .delta = delta },
+        });
     }
 
     pub fn setTitleChanged(self: *Terminal, callback: TitleChanged, context: ?*anyopaque) !void {
@@ -503,6 +526,21 @@ test "libghostty parses control sequences into viewport state" {
     const viewport = try terminal.writeViewportText(&buffer);
 
     try std.testing.expectEqualStrings("plain red\nsecond", viewport);
+}
+
+test "scrollbar tracks and scrolls the viewport" {
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    const bottom = try terminal.scrollbar();
+    try std.testing.expectEqual(@as(u64, 5), bottom.total);
+    try std.testing.expectEqual(@as(u64, 3), bottom.len);
+    try std.testing.expectEqual(@as(u64, 2), bottom.offset);
+
+    terminal.scrollViewport(-1);
+    const scrolled = try terminal.scrollbar();
+    try std.testing.expectEqual(@as(u64, 1), scrolled.offset);
 }
 
 test "wide cell tails do not add spaces to viewport text" {
