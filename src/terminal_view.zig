@@ -7,7 +7,8 @@ const GdiRenderer = @import("gdi_renderer.zig");
 const input = @import("input.zig");
 const theme = @import("theme.zig");
 
-const win = @import("win32.zig").c;
+const win32 = @import("win32.zig");
+const win = win32.c;
 const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
@@ -33,6 +34,7 @@ pub const View = struct {
     last_content_generation: u64 = 0,
     last_titles_generation: u64 = 0,
     selection: ?MouseSelection = null,
+    hovered_link: ?HoveredLink = null,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
     scrollbar_changed_message: win.UINT,
@@ -108,6 +110,7 @@ pub const View = struct {
     }
 
     fn deinitResources(self: *View) void {
+        self.clearHoveredLink();
         self.gdi_renderer.release();
         if (self.text_engine) |*engine| engine.deinit();
         self.text_engine = null;
@@ -173,6 +176,7 @@ pub const View = struct {
         const runtime = session.runtime orelse return;
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
+        self.clearHoveredLink();
         self.last_runtime = runtime;
         self.last_content_generation = generation;
         self.notifyScrollbar(false);
@@ -275,6 +279,9 @@ pub const View = struct {
             .high_contrast = self.high_contrast,
             .origin_x = padding,
             .origin_y = padding,
+            .hover_row = if (self.hovered_link) |hovered| hovered.link.row else null,
+            .hover_start = if (self.hovered_link) |hovered| hovered.link.start_column else 0,
+            .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
         });
     }
 
@@ -328,6 +335,9 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (released and (wparam == win.VK_CONTROL or wparam == win.VK_LCONTROL or wparam == win.VK_RCONTROL)) {
+            self.clearHoveredLink();
+        }
         if (isPasteShortcut(wparam)) {
             if (!released) self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err});
             return true;
@@ -354,6 +364,7 @@ pub const View = struct {
     }
 
     fn beginSelection(self: *View, lparam: win.LPARAM) void {
+        if (win.GetKeyState(win.VK_CONTROL) < 0 and self.openLinkAt(lparam)) return;
         const point = self.mousePoint(lparam, false) orelse {
             self.clearSelection();
             return;
@@ -371,6 +382,7 @@ pub const View = struct {
     }
 
     fn updateSelection(self: *View, lparam: win.LPARAM) void {
+        if (self.selection == null or !self.selection.?.dragging) self.updateHoveredLink(lparam);
         const point = self.mousePoint(lparam, true) orelse return;
         const current = self.selection orelse return;
         if (!current.dragging or current.range.focus.x == point.x and current.range.focus.y == point.y) return;
@@ -465,6 +477,59 @@ pub const View = struct {
         self.clearSelection();
         try runtime.paste(text);
     }
+
+    fn updateHoveredLink(self: *View, lparam: win.LPARAM) void {
+        if (win.GetKeyState(win.VK_CONTROL) >= 0) {
+            self.clearHoveredLink();
+            return;
+        }
+        const point = self.mousePoint(lparam, false) orelse {
+            self.clearHoveredLink();
+            return;
+        };
+        const session = self.model.activeSession() orelse return;
+        const runtime = session.runtime orelse return;
+        const generation = runtime.contentGeneration();
+        if (self.hovered_link) |hovered| {
+            if (hovered.runtime == runtime and hovered.generation == generation and
+                hovered.point.x == point.x and hovered.point.y == point.y) return;
+        }
+        self.clearHoveredLink();
+        const found = runtime.linkAtAlloc(std.heap.page_allocator, point) catch |err| {
+            log.debug("unable to inspect terminal link: {}", .{err});
+            return;
+        } orelse return;
+        self.hovered_link = .{
+            .runtime = runtime,
+            .generation = generation,
+            .point = point,
+            .link = found,
+        };
+        _ = win.SetCursor(win.LoadCursorW(null, win32.handleFromInt(win.LPCWSTR, 32649)));
+        self.invalidate();
+    }
+
+    fn clearHoveredLink(self: *View) void {
+        if (self.hovered_link) |hovered| std.heap.page_allocator.free(hovered.link.uri);
+        if (self.hovered_link != null) self.invalidate();
+        self.hovered_link = null;
+    }
+
+    fn openLinkAt(self: *View, lparam: win.LPARAM) bool {
+        const point = self.mousePoint(lparam, false) orelse return false;
+        const session = self.model.activeSession() orelse return false;
+        const runtime = session.runtime orelse return false;
+        const found = runtime.linkAtAlloc(std.heap.page_allocator, point) catch |err| {
+            log.debug("unable to inspect terminal link: {}", .{err});
+            return false;
+        } orelse return false;
+        defer std.heap.page_allocator.free(found.uri);
+        openUri(found.uri) catch |err| {
+            log.debug("unable to open terminal link: {}", .{err});
+            return false;
+        };
+        return true;
+    }
 };
 
 const MouseSelection = struct {
@@ -472,6 +537,13 @@ const MouseSelection = struct {
     runtime: *SessionRuntime,
     dragging: bool,
     moved: bool = false,
+};
+
+const HoveredLink = struct {
+    runtime: *SessionRuntime,
+    generation: u64,
+    point: Terminal.Point,
+    link: Terminal.Link,
 };
 
 const DirectWriteCellRenderer = struct {
@@ -515,6 +587,10 @@ const DirectWriteCellRenderer = struct {
         else
             normal_background;
         const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
+        const hovered = if (self.view.hovered_link) |value|
+            value.link.row == cell.y and cell.x >= value.link.start_column and cell.x < value.link.end_column
+        else
+            false;
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
         self.engine.drawCell(
@@ -531,7 +607,7 @@ const DirectWriteCellRenderer = struct {
             cell.faint and !self.view.high_contrast,
             cell.strikethrough,
             cell.overline,
-            cell.underline,
+            if (hovered) @max(cell.underline, 1) else cell.underline,
             @intFromEnum(cell.occupancy),
         );
     }
@@ -720,6 +796,14 @@ fn normalizeClipboardNewlines(text: []u8) []u8 {
         write += 1;
     }
     return text[0..write];
+}
+
+fn openUri(uri: []const u8) !void {
+    const allocator = std.heap.page_allocator;
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(allocator, uri);
+    defer allocator.free(wide);
+    const result = win.ShellExecuteW(null, std.unicode.utf8ToUtf16LeStringLiteral("open"), wide, null, null, win.SW_SHOWNORMAL);
+    if (@intFromPtr(result) <= 32) return error.ShellExecuteFailed;
 }
 
 fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {

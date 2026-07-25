@@ -1,4 +1,5 @@
 const std = @import("std");
+const link = @import("link.zig");
 const theme = @import("theme.zig");
 
 const vt = @cImport({
@@ -76,6 +77,13 @@ pub const Terminal = struct {
         total: u64,
         offset: u64,
         len: u64,
+    };
+
+    pub const Link = struct {
+        uri: []u8,
+        row: u16,
+        start_column: u16,
+        end_column: u16,
     };
 
     pub const Key = enum {
@@ -237,6 +245,80 @@ pub const Terminal = struct {
             try check(result);
         }
         return allocator.realloc(encoded, required);
+    }
+
+    pub fn linkAtAlloc(self: *Terminal, allocator: std.mem.Allocator, point: Point) !?Link {
+        var reference = std.mem.zeroes(vt.GhosttyGridRef);
+        reference.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
+        if (try hyperlinkAlloc(allocator, &reference)) |uri| {
+            if (!link.hasAllowedScheme(uri)) {
+                allocator.free(uri);
+                return null;
+            }
+            var start = point.x;
+            while (start > 0 and try self.cellHasHyperlink(start - 1, point.y, uri)) start -= 1;
+            var end = point.x + 1;
+            while (end < self.columns and try self.cellHasHyperlink(end, point.y, uri)) end += 1;
+            return .{ .uri = uri, .row = point.y, .start_column = start, .end_column = end };
+        }
+
+        var row = std.ArrayList(u8).empty;
+        defer row.deinit(allocator);
+        const starts = try allocator.alloc(usize, @as(usize, self.columns) + 1);
+        defer allocator.free(starts);
+        var column: u16 = 0;
+        while (column < self.columns) : (column += 1) {
+            starts[column] = row.items.len;
+            try self.appendCellText(allocator, &row, column, point.y);
+        }
+        starts[self.columns] = row.items.len;
+        const offset = starts[point.x];
+        const match = link.detectAt(row.items, offset) orelse return null;
+        var start_column: u16 = 0;
+        while (start_column < self.columns and starts[start_column + 1] <= match.start) start_column += 1;
+        var end_column = start_column;
+        while (end_column < self.columns and starts[end_column] < match.end) end_column += 1;
+        return .{
+            .uri = try allocator.dupe(u8, row.items[match.start..match.end]),
+            .row = point.y,
+            .start_column = start_column,
+            .end_column = end_column,
+        };
+    }
+
+    fn cellHasHyperlink(self: *Terminal, x: u16, y: u16, uri: []const u8) !bool {
+        var reference = std.mem.zeroes(vt.GhosttyGridRef);
+        reference.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(.{ .x = x, .y = y }), &reference));
+        var required: usize = 0;
+        const result = vt.ghostty_grid_ref_hyperlink_uri(&reference, null, 0, &required);
+        if (result != vt.GHOSTTY_OUT_OF_SPACE or required != uri.len) return false;
+        var buffer: [4096]u8 = undefined;
+        if (required > buffer.len) return false;
+        try check(vt.ghostty_grid_ref_hyperlink_uri(&reference, &buffer, buffer.len, &required));
+        return std.mem.eql(u8, uri, buffer[0..required]);
+    }
+
+    fn appendCellText(self: *Terminal, allocator: std.mem.Allocator, row: *std.ArrayList(u8), x: u16, y: u16) !void {
+        var reference = std.mem.zeroes(vt.GhosttyGridRef);
+        reference.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(.{ .x = x, .y = y }), &reference));
+        var codepoints: [16]u32 = undefined;
+        var count: usize = 0;
+        const result = vt.ghostty_grid_ref_graphemes(&reference, &codepoints, codepoints.len, &count);
+        if (result == vt.GHOSTTY_OUT_OF_SPACE) return;
+        try check(result);
+        if (count == 0) {
+            try row.append(allocator, ' ');
+            return;
+        }
+        for (codepoints[0..count]) |codepoint| {
+            var encoded: [4]u8 = undefined;
+            const scalar = std.math.cast(u21, codepoint) orelse continue;
+            const length = try std.unicode.utf8Encode(scalar, &encoded);
+            try row.appendSlice(allocator, encoded[0..length]);
+        }
     }
 
     pub fn setTitleChanged(self: *Terminal, callback: TitleChanged, context: ?*anyopaque) !void {
@@ -533,6 +615,18 @@ pub const Terminal = struct {
     }
 };
 
+fn hyperlinkAlloc(allocator: std.mem.Allocator, reference: *const vt.GhosttyGridRef) !?[]u8 {
+    var required: usize = 0;
+    const result = vt.ghostty_grid_ref_hyperlink_uri(reference, null, 0, &required);
+    if (result == vt.GHOSTTY_SUCCESS and required == 0) return null;
+    if (result != vt.GHOSTTY_OUT_OF_SPACE) try check(result);
+    if (required == 0) return null;
+    const uri = try allocator.alloc(u8, required);
+    errdefer allocator.free(uri);
+    try check(vt.ghostty_grid_ref_hyperlink_uri(reference, uri.ptr, uri.len, &required));
+    return uri;
+}
+
 fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
     return .{
         .tag = vt.GHOSTTY_POINT_TAG_VIEWPORT,
@@ -680,6 +774,22 @@ test "selecting either half of a wide cell copies the grapheme once" {
     const selected = try terminal.selectedTextAlloc(std.testing.allocator);
     defer std.testing.allocator.free(selected);
     try std.testing.expectEqualStrings("中", selected);
+}
+
+test "resolves OSC 8 and detected links at viewport cells" {
+    var terminal = try Terminal.init(80, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b]8;;https://example.com/target\x1b\\label\x1b]8;;\x1b\\\r\nvisit https://ziglang.org/docs now");
+
+    const explicit = (try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 2, .y = 0 })).?;
+    defer std.testing.allocator.free(explicit.uri);
+    try std.testing.expectEqualStrings("https://example.com/target", explicit.uri);
+    try std.testing.expectEqual(@as(u16, 0), explicit.start_column);
+    try std.testing.expectEqual(@as(u16, 5), explicit.end_column);
+
+    const detected = (try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 12, .y = 1 })).?;
+    defer std.testing.allocator.free(detected.uri);
+    try std.testing.expectEqualStrings("https://ziglang.org/docs", detected.uri);
 }
 
 test "shrinking rows and columns keeps a bottom-row cursor in bounds" {

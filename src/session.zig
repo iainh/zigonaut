@@ -84,6 +84,12 @@ pub const SessionRuntime = struct {
         return self.terminal.selectedTextAlloc(allocator);
     }
 
+    pub fn linkAtAlloc(self: *SessionRuntime, allocator: std.mem.Allocator, point: Terminal.Point) !?Terminal.Link {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.linkAtAlloc(allocator, point);
+    }
+
     pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();

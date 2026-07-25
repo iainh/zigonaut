@@ -15,6 +15,9 @@ pub const Context = struct {
     high_contrast: bool,
     origin_x: i32,
     origin_y: i32,
+    hover_row: ?u16 = null,
+    hover_start: u16 = 0,
+    hover_end: u16 = 0,
 };
 
 pub const Owner = struct {
@@ -121,7 +124,8 @@ const CellRenderer = struct {
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
         _ = win.ExtTextOutW(self.dc, left, top, win.ETO_CLIPPED | win.ETO_OPAQUE, &rect, &wide, @intCast(length), null);
-        if (cell.underline != 0) {
+        const hovered = self.context.hover_row == cell.y and cell.x >= self.context.hover_start and cell.x < self.context.hover_end;
+        if (cell.underline != 0 or hovered) {
             fill(self.dc, .{ .left = rect.left, .top = rect.bottom - 2, .right = rect.right, .bottom = rect.bottom - 1 }, decoration);
             if (cell.underline == 2) fill(self.dc, .{ .left = rect.left, .top = rect.bottom - 4, .right = rect.right, .bottom = rect.bottom - 3 }, decoration);
         }
