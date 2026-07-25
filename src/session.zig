@@ -391,15 +391,16 @@ pub const SessionRuntime = struct {
         return pty.exitedCleanly();
     }
 
-    pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16) !void {
+    pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16, unshifted_codepoint: u32) !bool {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();
-        const encoded = self.terminal.encodeKey(key, action, modifiers, &buffer) catch |err| {
+        const encoded = self.terminal.encodeKey(key, action, modifiers, unshifted_codepoint, &buffer) catch |err| {
             self.terminal_mutex.unlock();
             return err;
         };
         self.terminal_mutex.unlock();
         try self.write(encoded);
+        return encoded.len != 0;
     }
 
     fn readerMain(self: *SessionRuntime) void {

@@ -5,25 +5,52 @@ const win = @import("win32.zig").c;
 pub const KeyEvent = struct {
     key: Terminal.Key,
     action: Terminal.KeyAction,
+    unshifted_codepoint: u32,
 };
 
 pub const State = struct {
     pending_high_surrogate: ?u16 = null,
     suppressed_character: ?u16 = null,
+    pressed: [std.enums.values(Terminal.Key).len]bool = @splat(false),
+    unshifted_codepoints: [std.enums.values(Terminal.Key).len]u32 = @splat(0),
+    encoded_character_key: ?Terminal.Key = null,
 
     pub fn keyEvent(self: *State, virtual_key: usize, lparam: isize, released: bool) ?KeyEvent {
         const key = keyFromMessage(virtual_key, lparam) orelse return null;
         const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
-        if (!released) self.suppressed_character = suppressedCodeUnit(virtual_key);
+        const index = @intFromEnum(key);
+        if (released) {
+            if (!self.pressed[index]) return null;
+            self.pressed[index] = false;
+            if (self.encoded_character_key == key) self.encoded_character_key = null;
+        } else {
+            self.pressed[index] = true;
+            self.unshifted_codepoints[index] = unshiftedCodepoint(virtual_key, lparam);
+            self.suppressed_character = suppressedCodeUnit(virtual_key);
+        }
         return .{
             .key = key,
             .action = if (released) .release else if (repeated) .repeat else .press,
+            .unshifted_codepoint = self.unshifted_codepoints[index],
         };
     }
 
+    pub fn takePressed(self: *State, key: Terminal.Key) ?u32 {
+        const pressed = &self.pressed[@intFromEnum(key)];
+        if (!pressed.*) return null;
+        pressed.* = false;
+        if (self.encoded_character_key == key) self.encoded_character_key = null;
+        return self.unshifted_codepoints[@intFromEnum(key)];
+    }
+
+    pub fn suppressEncodedCharacter(self: *State, key: Terminal.Key, unshifted_codepoint: u32) void {
+        if (unshifted_codepoint != 0) self.encoded_character_key = key;
+    }
+
     pub fn suppressCharacter(self: *State, code_unit: u16) bool {
-        const suppressed = self.suppressed_character == code_unit;
+        const suppressed = self.suppressed_character == code_unit or self.encoded_character_key != null;
         self.suppressed_character = null;
+        self.encoded_character_key = null;
         return suppressed;
     }
 
@@ -207,6 +234,26 @@ fn writingSystemKey(scan_code: u8) ?Terminal.Key {
     };
 }
 
+fn unshiftedCodepoint(virtual_key: usize, lparam: isize) u32 {
+    var keyboard_state: [256]u8 = @splat(0);
+    var utf16: [4]u16 = undefined;
+    const scan_code: win.UINT = @truncate(@as(usize, @bitCast(lparam)) >> 16);
+    const count = win.ToUnicodeEx(
+        @intCast(virtual_key),
+        scan_code,
+        &keyboard_state,
+        &utf16,
+        utf16.len,
+        4,
+        win.GetKeyboardLayout(0),
+    );
+    if ((count == 1 or count == -1) and !std.unicode.utf16IsHighSurrogate(utf16[0]) and !std.unicode.utf16IsLowSurrogate(utf16[0])) return utf16[0];
+    if (count == 2 and std.unicode.utf16IsHighSurrogate(utf16[0]) and std.unicode.utf16IsLowSurrogate(utf16[1])) {
+        return std.unicode.utf16DecodeSurrogatePair(&utf16) catch 0;
+    }
+    return 0;
+}
+
 pub fn currentModifiers() u16 {
     var modifiers: u16 = 0;
     if (win.GetKeyState(win.VK_SHIFT) < 0) modifiers |= Terminal.Modifier.shift;
@@ -252,6 +299,38 @@ test "key events distinguish press repeat and release" {
     try std.testing.expectEqual(Terminal.KeyAction.press, state.keyEvent(win.VK_HOME, 0, false).?.action);
     try std.testing.expectEqual(Terminal.KeyAction.repeat, state.keyEvent(win.VK_HOME, 1 << 30, false).?.action);
     try std.testing.expectEqual(Terminal.KeyAction.release, state.keyEvent(win.VK_HOME, 0, true).?.action);
+}
+
+test "key releases require a delivered press" {
+    var state = State{};
+    const a_message: isize = 0x1e << 16;
+    try std.testing.expectEqual(@as(?KeyEvent, null), state.keyEvent('A', a_message, true));
+    try std.testing.expectEqual(Terminal.KeyAction.press, state.keyEvent('A', a_message, false).?.action);
+    try std.testing.expectEqual(Terminal.KeyAction.release, state.keyEvent('A', a_message, true).?.action);
+    try std.testing.expectEqual(@as(?KeyEvent, null), state.keyEvent('A', a_message, true));
+}
+
+test "pressed keys can be drained when focus is lost" {
+    var state = State{};
+    _ = state.keyEvent('A', 0x1e << 16, false);
+    _ = state.keyEvent('B', 0x30 << 16, false);
+    try std.testing.expect(state.takePressed(.a) != null);
+    try std.testing.expectEqual(@as(?u32, null), state.takePressed(.a));
+    try std.testing.expect(state.takePressed(.b) != null);
+}
+
+test "encoded physical input suppresses only its translated character" {
+    var state = State{};
+    const a_message: isize = 0x1e << 16;
+    const event = state.keyEvent('A', a_message, false).?;
+    state.suppressEncodedCharacter(event.key, event.unshifted_codepoint);
+    try std.testing.expect(state.suppressCharacter('A'));
+    try std.testing.expect(!state.suppressCharacter('A'));
+
+    _ = state.keyEvent('A', a_message, false);
+    state.suppressEncodedCharacter(.a, 'a');
+    _ = state.keyEvent('A', a_message, true);
+    try std.testing.expect(!state.suppressCharacter('B'));
 }
 
 test "translated control character is suppressed once" {

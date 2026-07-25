@@ -26,6 +26,7 @@ pub const View = struct {
     font: win.HFONT,
     text_engine: ?TextEngine,
     input_state: input.State = .{},
+    key_runtimes: [std.enums.values(Terminal.Key).len]?*SessionRuntime = @splat(null),
     cell_width: u32,
     cell_height: u32,
     columns: u16 = 0,
@@ -490,12 +491,39 @@ pub const View = struct {
         };
         if (input.keyFromMessage(wparam, lparam) == null) return false;
         if (!released) self.clearSelection();
-        const session = self.model.activeSession() orelse return true;
-        const event = self.input_state.keyEvent(wparam, lparam, released).?;
-        session.runtime.?.sendKey(event.key, event.action, input.currentModifiers()) catch |err| {
+        const active_runtime = if (self.model.activeSession()) |session| session.runtime else null;
+        if (!released and active_runtime == null) return true;
+        const event = self.input_state.keyEvent(wparam, lparam, released) orelse return true;
+        const index = @intFromEnum(event.key);
+        if (event.action == .press) self.key_runtimes[index] = active_runtime;
+        const key_runtime = self.key_runtimes[index] orelse return true;
+        if (event.action == .release) self.key_runtimes[index] = null;
+        if (!self.runtimeIsLive(key_runtime)) return true;
+        const encoded = key_runtime.sendKey(event.key, event.action, input.currentModifiers(), event.unshifted_codepoint) catch |err| {
             log.debug("unable to send terminal key: {}", .{err});
+            return true;
         };
+        if (!released and encoded) self.input_state.suppressEncodedCharacter(event.key, event.unshifted_codepoint);
         return true;
+    }
+
+    fn releasePressedKeys(self: *View) void {
+        for (std.enums.values(Terminal.Key)) |key| {
+            const unshifted_codepoint = self.input_state.takePressed(key) orelse continue;
+            const index = @intFromEnum(key);
+            const runtime = self.key_runtimes[index];
+            self.key_runtimes[index] = null;
+            if (runtime) |current| {
+                if (self.runtimeIsLive(current)) _ = current.sendKey(key, .release, input.currentModifiers(), unshifted_codepoint) catch |err| {
+                    log.debug("unable to release terminal key: {}", .{err});
+                };
+            }
+        }
+    }
+
+    fn runtimeIsLive(self: *const View, runtime: *SessionRuntime) bool {
+        for (self.model.sessions.items) |session| if (session.runtime == runtime) return true;
+        return false;
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
@@ -1096,6 +1124,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| {
                 current.focused = false;
                 current.consumed_prompt_key = null;
+                current.releasePressedKeys();
                 current.invalidate();
             }
             return 0;

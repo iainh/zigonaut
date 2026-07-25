@@ -128,6 +128,6 @@ build and smoke tests without creating a tag or GitHub Release.
 
 ## MVP path
 
-1. Add full physical-key mapping, key releases, and IME composition support.
+1. Add IME composition support.
 2. Add terminal links and clipboard paste on top of the fixed-grid renderer.
 3. Add WinUI 3 packaging without coupling terminal state to XAML controls.
