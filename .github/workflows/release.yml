@@ -88,6 +88,16 @@ jobs:
           version: 0.15.2
           use-cache: false
 
+      - name: Fetch Zig dependencies
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            zig build --fetch -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { exit $LASTEXITCODE }
+            Start-Sleep -Seconds (10 * $attempt)
+          }
+
       - name: Run tests
         run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
 
