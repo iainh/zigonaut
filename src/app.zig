@@ -31,6 +31,16 @@ pub const Session = struct {
 
 pub const Pane = struct { id: pane_tree.PaneId, session: Session };
 
+/// A pane removed from the model.  The owner must first detach and destroy its
+/// native presentation, then call `destroyRemovedPane`.  Keeping removal and
+/// destruction separate prevents reader callbacks and swap chains from
+/// observing a freed SessionRuntime.
+pub const RemovedPane = struct {
+    pane_id: pane_tree.PaneId,
+    session: Session,
+    removed_tab: bool,
+};
+
 pub const Tab = struct {
     id: u64,
     tree: pane_tree.Tree,
@@ -143,6 +153,89 @@ pub const App = struct {
     }
     pub fn activeSession(self: *App) ?*Session {
         return &(self.activePane() orelse return null).session;
+    }
+
+    pub fn paneById(self: *App, id: pane_tree.PaneId) ?*Pane {
+        for (self.tabs.items) |*tab| if (tab.pane(id)) |value| return value;
+        return null;
+    }
+
+    pub fn runtimeForPane(self: *App, id: pane_tree.PaneId) ?*SessionRuntime {
+        return (self.paneById(id) orelse return null).session.runtime;
+    }
+
+    pub fn focusPane(self: *App, id: pane_tree.PaneId) bool {
+        for (self.tabs.items, 0..) |*tab, index| if (tab.tree.focus(id)) {
+            self.active_tab = index;
+            return true;
+        };
+        return false;
+    }
+
+    pub fn focusDirection(self: *App, direction: pane_tree.Direction) bool {
+        return (self.activeTab() orelse return false).tree.focusDirection(direction);
+    }
+
+    pub fn setSplitRatio(self: *App, split_id: pane_tree.SplitId, ratio: u16) bool {
+        const tab = self.activeTab() orelse return false;
+        tab.tree.setRatio(split_id, ratio) catch return false;
+        return true;
+    }
+
+    pub fn activeLayout(self: *App, allocator: std.mem.Allocator) ![]pane_tree.Item {
+        return (self.activeTab() orelse return allocator.alloc(pane_tree.Item, 0)).tree.flatten(allocator);
+    }
+
+    pub fn splitFocused(self: *App, axis: pane_tree.Axis) !pane_tree.PaneId {
+        const tab = self.activeTab() orelse return error.NoFocusedPane;
+        const source = tab.focusedPane() orelse return error.NoFocusedPane;
+        const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
+        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
+        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, source.session.working_directory.items, session_theme, size.columns, size.rows, self.refresh);
+        return self.splitFocusedRecord(axis, runtime, session_theme.background);
+    }
+
+    fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color) !pane_tree.PaneId {
+        const tab = self.activeTab() orelse return error.NoFocusedPane;
+        const source = tab.focusedPane() orelse return error.NoFocusedPane;
+        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = runtime, .background = background, .hold_on_exit = source.session.hold_on_exit };
+        errdefer self.deinitSession(&session);
+        try session.profile_title.appendSlice(self.allocator, source.session.profile_title.items);
+        try session.command.appendSlice(self.allocator, source.session.command.items);
+        try session.working_directory.appendSlice(self.allocator, source.session.working_directory.items);
+        const source_id = source.id;
+        const pane_id = self.takeObjectId();
+        const split_id = self.takeObjectId();
+        try tab.panes.ensureUnusedCapacity(self.allocator, 1);
+        try tab.tree.split(source_id, pane_id, split_id, axis);
+        tab.panes.appendAssumeCapacity(.{ .id = pane_id, .session = session });
+        _ = tab.tree.focus(pane_id);
+        self.next_session_id +%= 1;
+        if (self.next_session_id == 0) self.next_session_id = 1;
+        return pane_id;
+    }
+
+    pub fn extractFocusedPane(self: *App) ?RemovedPane {
+        const tab_index = self.active_tab orelse return null;
+        var tab = &self.tabs.items[tab_index];
+        const pane_id = tab.tree.focused orelse return null;
+        for (tab.panes.items, 0..) |pane_value, index| if (pane_value.id == pane_id) {
+            const removed = tab.panes.orderedRemove(index);
+            _ = tab.tree.close(pane_id);
+            const final = tab.panes.items.len == 0;
+            if (final) {
+                var empty_tab = self.tabs.orderedRemove(tab_index);
+                empty_tab.panes.deinit(self.allocator);
+                empty_tab.tree.deinit();
+                if (self.tabs.items.len == 0) self.active_tab = null else self.active_tab = @min(tab_index, self.tabs.items.len - 1);
+            }
+            return .{ .pane_id = pane_id, .session = removed.session, .removed_tab = final };
+        };
+        return null;
+    }
+
+    pub fn destroyRemovedPane(self: *App, removed: *RemovedPane) void {
+        self.deinitSession(&removed.session);
     }
 
     pub fn activateTab(self: *App, index: usize) void {
@@ -299,4 +392,49 @@ test "settings traverse panes and closing tabs preserves selection" {
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
     app.closeTab(0);
     try std.testing.expect(app.activeSession() == null);
+}
+
+test "split clones launch metadata, focuses new pane, and snapshots structure" {
+    var app = App.init(std.testing.allocator, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background);
+    app.activeSession().?.hold_on_exit = true;
+    const original = app.activePane().?.id;
+    const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background);
+    try std.testing.expect(created != original);
+    try std.testing.expectEqual(created, app.activePane().?.id);
+    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+    try std.testing.expectEqualStrings("wsl -d Debian", app.activeSession().?.command.items);
+    try std.testing.expectEqualStrings("C:\\work", app.activeSession().?.working_directory.items);
+    try std.testing.expect(app.activeSession().?.hold_on_exit);
+    const layout = try app.activeLayout(std.testing.allocator);
+    defer std.testing.allocator.free(layout);
+    try std.testing.expectEqual(@as(usize, 3), layout.len);
+    try std.testing.expectEqual(pane_tree.Axis.left_right, layout[0].split.axis);
+    try std.testing.expectEqual(original, layout[1].leaf.id);
+    try std.testing.expectEqual(created, layout[2].leaf.id);
+}
+
+test "focus title close extraction and stale identities" {
+    var app = App.init(std.testing.allocator, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background);
+    const first = app.activePane().?.id;
+    const second = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background);
+    try app.activeSession().?.title.appendSlice(std.testing.allocator, "second");
+    try std.testing.expectEqualStrings("second", app.activeTab().?.displayTitle());
+    try std.testing.expect(app.focusDirection(.up));
+    try std.testing.expectEqual(first, app.activePane().?.id);
+    try std.testing.expect(!app.focusPane(999999));
+    try std.testing.expect(!app.setSplitRatio(999999, 123));
+    try std.testing.expect(app.focusPane(second));
+    var removed = app.extractFocusedPane().?;
+    try std.testing.expectEqual(second, removed.pane_id);
+    try std.testing.expect(!removed.removed_tab);
+    app.destroyRemovedPane(&removed);
+    try std.testing.expectEqual(first, app.activePane().?.id);
+    var final = app.extractFocusedPane().?;
+    try std.testing.expect(final.removed_tab);
+    app.destroyRemovedPane(&final);
+    try std.testing.expectEqual(@as(usize, 0), app.tabCount());
 }
