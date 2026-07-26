@@ -164,6 +164,10 @@ struct Bridge {
     uint32_t scrollbar_total = 0;
     uint32_t scrollbar_page = 0;
     uint32_t scrollbar_position = 0;
+    bool appearance_initialized = false;
+    uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
+    bool high_contrast = false;
+    bool dark_theme = false;
     bool closed = false;
     RECT terminal_bounds{ -1, -1, -1, -1 };
     com_ptr<ITaskbarList3> taskbar;
@@ -796,6 +800,12 @@ struct Bridge {
     }
 
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
+        if (appearance_initialized && kind == backdrop_kind &&
+            high_contrast == this->high_contrast && dark_theme == this->dark_theme) return;
+        appearance_initialized = true;
+        backdrop_kind = kind;
+        this->high_contrast = high_contrast;
+        this->dark_theme = dark_theme;
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
