@@ -38,14 +38,16 @@
 #include <vector>
 
 using namespace winrt;
-using namespace Microsoft::UI;
-using namespace Microsoft::UI::Xaml;
-using namespace Microsoft::UI::Xaml::Controls;
-using namespace Microsoft::UI::Xaml::Hosting;
-using namespace Microsoft::Windows::AppNotifications;
-using namespace Microsoft::Windows::AppNotifications::Builder;
+using namespace winrt::Microsoft::UI;
+using namespace winrt::Microsoft::UI::Xaml;
+using namespace winrt::Microsoft::UI::Xaml::Controls;
+using namespace winrt::Microsoft::UI::Xaml::Hosting;
+using namespace winrt::Microsoft::Windows::AppNotifications;
+using namespace winrt::Microsoft::Windows::AppNotifications::Builder;
 
 namespace {
+namespace Microsoft = winrt::Microsoft;
+
 struct NotificationActivationState {
     std::atomic_bool active{true};
     zigonaut_chrome_command callback{};
@@ -717,9 +719,9 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
     }
     try {
         auto const bootstrap_result = MddBootstrapInitialize2(
-            Microsoft::WindowsAppSDK::Release::MajorMinor,
-            Microsoft::WindowsAppSDK::Release::VersionTag,
-            {Microsoft::WindowsAppSDK::Runtime::Version::UInt64},
+            ::Microsoft::WindowsAppSDK::Release::MajorMinor,
+            ::Microsoft::WindowsAppSDK::Release::VersionTag,
+            {::Microsoft::WindowsAppSDK::Runtime::Version::UInt64},
             MddBootstrapInitializeOptions_OnNoMatch_ShowUI);
         if (FAILED(bootstrap_result)) {
             reportFailure(L"MddBootstrapInitialize2", bootstrap_result);
@@ -727,7 +729,7 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
             return nullptr;
         }
         try {
-            auto dispatcher = Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
+            auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
             auto application = make<ZigonautWinUIBridge::implementation::App>();
             return new Bridge(
                 parent,

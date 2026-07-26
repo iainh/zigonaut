@@ -35,6 +35,8 @@
     <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
     <WindowsAppSDKVerifyTransitiveDependencies>false</WindowsAppSDKVerifyTransitiveDependencies>
+    <DisableWindowsAppSDKMLAutoInitialize>true</DisableWindowsAppSDKMLAutoInitialize>
+    <WindowsAppSDKMLVerifyTransitiveDependencies>false</WindowsAppSDKMLVerifyTransitiveDependencies>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>

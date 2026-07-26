@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
     });
     b.getInstallStep().dependOn(&install_themes.step);
 
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, "zigonaut.exe")});
     run_cmd.step.dependOn(b.getInstallStep());
     const run_step = b.step("run", "Run Zigonaut");
     run_step.dependOn(&run_cmd.step);
