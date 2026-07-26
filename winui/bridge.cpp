@@ -646,6 +646,60 @@ struct Bridge {
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
     }
 
+    bool runBenchmarkIfRequested() {
+        wchar_t scenario[32]{};
+        auto const length = GetEnvironmentVariableW(
+            L"ZIGONAUT_WINUI_BENCHMARK", scenario, static_cast<DWORD>(std::size(scenario)));
+        if (!length || length >= std::size(scenario)) return false;
+
+        uint32_t iterations{};
+        auto operation = std::wstring_view{scenario, length};
+        auto const started = std::chrono::steady_clock::now();
+        if (operation == L"layout") {
+            iterations = 100000;
+            for (uint32_t index = 0; index < iterations; ++index) layoutTerminal();
+        } else if (operation == L"tabs") {
+            iterations = 1000;
+            constexpr uint32_t tab_count = 50;
+            std::vector<std::string> storage(tab_count, "terminal");
+            std::vector<char const*> titles(tab_count);
+            std::vector<uint32_t> lengths(tab_count);
+            for (uint32_t index = 0; index < tab_count; ++index) {
+                storage[index] += std::to_string(index);
+                titles[index] = storage[index].data();
+                lengths[index] = static_cast<uint32_t>(storage[index].size());
+            }
+            for (uint32_t index = 0; index < iterations; ++index) {
+                storage[0].back() = index % 2 ? 'A' : 'B';
+                update(titles.data(), lengths.data(), tab_count, 0);
+            }
+        } else if (operation == L"scrollbar") {
+            iterations = 100000;
+            for (uint32_t index = 0; index < iterations; ++index) {
+                updateScrollbar(100000, 40, 50000, false);
+            }
+        } else if (operation == L"appearance") {
+            iterations = 1000;
+            for (uint32_t index = 0; index < iterations; ++index) {
+                updateAppearance(ZIGONAUT_BACKDROP_MICA, false, true);
+            }
+        } else if (operation == L"taskbar") {
+            iterations = 10000;
+            for (uint32_t index = 0; index < iterations; ++index) {
+                check_hresult(updateTaskbarProgress(ZIGONAUT_TASKBAR_PROGRESS_NORMAL, 50));
+            }
+        } else {
+            fwprintf(stderr, L"unknown WinUI benchmark: %.*ls\n", static_cast<int>(length), scenario);
+            return true;
+        }
+        auto const elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        fwprintf(stderr, L"WINUI_BENCHMARK %.*ls %u %.6f ms %.3f ns/op\n",
+                 static_cast<int>(length), scenario, iterations, elapsed,
+                 elapsed * 1000000.0 / iterations);
+        return true;
+    }
+
     void showAboutDialog() {
         if (about_dialog) return;
 
@@ -1014,6 +1068,10 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                                 bridge->app_title_bar.RecomputeDragRegions();
                                 if (!started(context, bridge, bridge->parent)) {
                                     result = E_ABORT;
+                                    bridge->window.Close();
+                                    return;
+                                }
+                                if (bridge->runBenchmarkIfRequested()) {
                                     bridge->window.Close();
                                     return;
                                 }
