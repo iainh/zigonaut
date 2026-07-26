@@ -201,8 +201,10 @@ pub const View = struct {
     }
 
     pub fn syncSessions(self: *View) void {
-        if (self.columns == 0 or self.rows == 0) return;
-        self.model.resizeSessions(self.columns, self.rows, self.cell_width, self.cell_height);
+        if (self.columns != 0 and self.rows != 0) {
+            self.model.resizeSessions(self.columns, self.rows, self.cell_width, self.cell_height);
+        }
+        requestRefresh(self);
     }
 
     /// Must be called before the model changes or destroys its active runtime.
