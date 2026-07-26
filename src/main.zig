@@ -228,15 +228,15 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 },
                 .close => {
                     self.terminal_view.resetInteraction();
-                    self.model.closeSession(argument);
-                    if (self.model.sessions.items.len == 0) {
+                    self.model.closeTab(argument);
+                    if (self.model.tabCount() == 0) {
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
                 },
                 .select => {
                     self.terminal_view.resetInteraction();
-                    self.model.activate(argument);
+                    self.model.activateTab(argument);
                 },
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
@@ -282,12 +282,12 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .select_next, .select_previous => {
-                    const count = self.model.sessions.items.len;
-                    const active = self.model.active orelse return 0;
+                    const count = self.model.tabCount();
+                    const active = self.model.activeTabIndex() orelse return 0;
                     if (count <= 1) return 0;
                     self.terminal_view.resetInteraction();
                     const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
-                    self.model.activate(next);
+                    self.model.activateTab(next);
                 },
                 .shutdown => return 0,
             }
@@ -304,7 +304,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         shell_exited_message => {
             self.terminal_view.resetInteraction();
             if (!self.model.closeCleanlyExitedSessions()) return 0;
-            if (self.model.sessions.items.len == 0) {
+            if (self.model.tabCount() == 0) {
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
             }
@@ -367,7 +367,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
 
 fn syncChromeImpl(self: *Application) void {
     const bridge = if (self.chrome) |*value| value else return;
-    const count = self.model.sessions.items.len;
+    const count = self.model.tabCount();
     self.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
         log.err("unable to allocate chrome title pointers: {}", .{err});
         return;
@@ -378,12 +378,12 @@ fn syncChromeImpl(self: *Application) void {
     };
     self.chrome_titles.items.len = count;
     self.chrome_title_lengths.items.len = count;
-    for (self.model.sessions.items, 0..) |session, index| {
-        const title = session.displayTitle();
+    for (self.model.tabs.items, 0..) |*tab, index| {
+        const title = tab.displayTitle();
         self.chrome_titles.items[index] = title.ptr;
         self.chrome_title_lengths.items[index] = @intCast(title.len);
     }
-    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.model.active)) {
+    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.model.activeTabIndex())) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
         return;
     }
@@ -436,7 +436,8 @@ fn syncTaskbarProgressImpl(self: *Application) void {
 
 fn showPendingNotificationsImpl(self: *Application) void {
     const bridge = if (self.chrome) |*value| value else return;
-    for (self.model.sessions.items) |*session| {
+    for (self.model.tabs.items) |*tab| for (tab.panes.items) |*pane| {
+        const session = &pane.session;
         const runtime = session.runtime orelse continue;
         while (runtime.takeNotification()) |notification| {
             defer runtime.freeNotification(notification);
@@ -444,7 +445,7 @@ fn showPendingNotificationsImpl(self: *Application) void {
             if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body)) continue;
             _ = bridge.showNotification(session.id, title, notification.body);
         }
-    }
+    };
 }
 
 fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {

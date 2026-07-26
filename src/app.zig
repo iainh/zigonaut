@@ -1,12 +1,14 @@
 const std = @import("std");
 const directwrite_renderer = @import("directwrite_renderer.zig");
+const pane_tree = @import("pane_tree.zig");
 const SessionRuntime = @import("session.zig").SessionRuntime;
+const theme = @import("theme.zig");
 
 test {
     _ = directwrite_renderer;
     _ = @import("win32.zig");
+    _ = @import("config.zig");
 }
-const theme = @import("theme.zig");
 
 pub const Shell = enum { powershell, windows, wsl };
 
@@ -16,6 +18,8 @@ pub const Session = struct {
     runtime: ?*SessionRuntime,
     background: theme.Color,
     profile_title: std.ArrayList(u8) = .empty,
+    command: std.ArrayList(u8) = .empty,
+    working_directory: std.ArrayList(u8) = .empty,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
     hold_on_exit: bool = false,
@@ -25,38 +29,68 @@ pub const Session = struct {
     }
 };
 
+pub const Pane = struct { id: pane_tree.PaneId, session: Session };
+
+pub const Tab = struct {
+    id: u64,
+    tree: pane_tree.Tree,
+    panes: std.ArrayList(Pane) = .empty,
+
+    pub fn pane(self: *Tab, id: pane_tree.PaneId) ?*Pane {
+        for (self.panes.items) |*value| if (value.id == id) return value;
+        return null;
+    }
+
+    pub fn focusedPane(self: *Tab) ?*Pane {
+        return self.pane(self.tree.focused orelse return null);
+    }
+
+    pub fn displayTitle(self: *Tab) []const u8 {
+        const focused = self.focusedPane() orelse return "";
+        return focused.session.displayTitle();
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     terminal_theme: theme.Theme,
     randomize_tab_background: bool,
-    sessions: std.ArrayList(Session) = .empty,
-    active: ?usize = null,
-    next_id: u32 = 1,
+    tabs: std.ArrayList(Tab) = .empty,
+    active_tab: ?usize = null,
+    next_object_id: u64 = 1,
+    next_session_id: u32 = 1,
     refresh: SessionRuntime.Refresh = .{},
     terminal_size: ?TerminalSize = null,
 
-    const TerminalSize = struct {
-        columns: u16,
-        rows: u16,
-        cell_width: u32,
-        cell_height: u32,
-    };
+    const TerminalSize = struct { columns: u16, rows: u16, cell_width: u32, cell_height: u32 };
 
     pub fn init(allocator: std.mem.Allocator, terminal_theme: theme.Theme, randomize_tab_background: bool) App {
-        return .{
-            .allocator = allocator,
-            .terminal_theme = terminal_theme,
-            .randomize_tab_background = randomize_tab_background,
-        };
+        return .{ .allocator = allocator, .terminal_theme = terminal_theme, .randomize_tab_background = randomize_tab_background };
     }
 
     pub fn deinit(self: *App) void {
-        for (self.sessions.items) |*session| {
-            if (session.runtime) |runtime| runtime.destroy();
-            session.profile_title.deinit(self.allocator);
-            session.title.deinit(self.allocator);
-        }
-        self.sessions.deinit(self.allocator);
+        for (self.tabs.items) |*tab| self.deinitTab(tab);
+        self.tabs.deinit(self.allocator);
+    }
+
+    fn deinitSession(self: *App, session: *Session) void {
+        if (session.runtime) |runtime| runtime.destroy();
+        session.profile_title.deinit(self.allocator);
+        session.command.deinit(self.allocator);
+        session.working_directory.deinit(self.allocator);
+        session.title.deinit(self.allocator);
+    }
+
+    fn deinitTab(self: *App, tab: *Tab) void {
+        for (tab.panes.items) |*pane| self.deinitSession(&pane.session);
+        tab.panes.deinit(self.allocator);
+        tab.tree.deinit();
+    }
+
+    fn takeObjectId(self: *App) u64 {
+        const id = self.next_object_id;
+        self.next_object_id += 1;
+        return id;
     }
 
     pub fn setRefresh(self: *App, refresh: SessionRuntime.Refresh) void {
@@ -64,92 +98,103 @@ pub const App = struct {
     }
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
-        const terminal_theme = if (self.randomize_tab_background)
-            theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16))
-        else
-            self.terminal_theme;
+        const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
         const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh);
-        const index = self.addSessionRecord(shell, profile_title, runtime, terminal_theme.background) catch |err| {
+        const index = self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background) catch |err| {
             runtime.destroy();
             return err;
         };
-        errdefer self.closeSession(index);
-        self.sessions.items[index].hold_on_exit = hold_on_exit;
+        self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
         return index;
     }
 
-    fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, runtime: ?*SessionRuntime, background: theme.Color) !usize {
-        const index = self.sessions.items.len;
-        var owned_profile_title = std.ArrayList(u8).empty;
-        errdefer owned_profile_title.deinit(self.allocator);
-        try owned_profile_title.appendSlice(self.allocator, profile_title);
-        try self.sessions.append(self.allocator, .{
-            .id = self.next_id,
-            .shell = shell,
-            .runtime = runtime,
-            .background = background,
-            .profile_title = owned_profile_title,
-        });
-        self.next_id +%= 1;
-        self.active = index;
-        return index;
+    fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color) !usize {
+        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = runtime, .background = background };
+        errdefer self.deinitSession(&session);
+        try session.profile_title.appendSlice(self.allocator, profile_title);
+        try session.command.appendSlice(self.allocator, command);
+        try session.working_directory.appendSlice(self.allocator, working_directory);
+        const tab_id = self.takeObjectId();
+        const pane_id = self.takeObjectId();
+        var tree = try pane_tree.Tree.init(self.allocator, pane_id);
+        errdefer tree.deinit();
+        var tab = Tab{ .id = tab_id, .tree = tree };
+        try tab.panes.append(self.allocator, .{ .id = pane_id, .session = session });
+        errdefer tab.panes.deinit(self.allocator);
+        try self.tabs.append(self.allocator, tab);
+        self.next_session_id +%= 1;
+        if (self.next_session_id == 0) self.next_session_id = 1;
+        self.active_tab = self.tabs.items.len - 1;
+        return self.active_tab.?;
     }
 
-    pub fn closeSession(self: *App, index: usize) void {
-        if (index >= self.sessions.items.len) return;
-        const active = self.active;
-        var removed = self.sessions.orderedRemove(index);
-        if (removed.runtime) |runtime| runtime.destroy();
-        removed.profile_title.deinit(self.allocator);
-        removed.title.deinit(self.allocator);
-
-        if (self.sessions.items.len == 0) {
-            self.active = null;
-        } else if (active) |active_index| {
-            self.active = if (active_index > index)
-                active_index - 1
-            else
-                @min(active_index, self.sessions.items.len - 1);
-        }
-        self.resizeActiveSession();
+    pub fn tabCount(self: *const App) usize {
+        return self.tabs.items.len;
+    }
+    pub fn activeTabIndex(self: *const App) ?usize {
+        return self.active_tab;
+    }
+    pub fn activeTab(self: *App) ?*Tab {
+        return &self.tabs.items[self.active_tab orelse return null];
+    }
+    pub fn activePane(self: *App) ?*Pane {
+        return (self.activeTab() orelse return null).focusedPane();
+    }
+    pub fn activeSession(self: *App) ?*Session {
+        return &(self.activePane() orelse return null).session;
     }
 
-    pub fn activate(self: *App, index: usize) void {
-        if (index < self.sessions.items.len) {
-            self.active = index;
+    pub fn activateTab(self: *App, index: usize) void {
+        if (index < self.tabs.items.len) {
+            self.active_tab = index;
             self.resizeActiveSession();
         }
     }
 
-    pub fn activeSession(self: *App) ?*Session {
-        const index = self.active orelse return null;
-        return &self.sessions.items[index];
+    pub fn closeTab(self: *App, index: usize) void {
+        if (index >= self.tabs.items.len) return;
+        const active = self.active_tab;
+        var removed = self.tabs.orderedRemove(index);
+        self.deinitTab(&removed);
+        if (self.tabs.items.len == 0) self.active_tab = null else if (active) |a| self.active_tab = if (a > index) a - 1 else @min(a, self.tabs.items.len - 1);
+        self.resizeActiveSession();
+    }
+
+    fn closePane(self: *App, tab_index: usize, pane_id: pane_tree.PaneId) void {
+        if (tab_index >= self.tabs.items.len) return;
+        var tab = &self.tabs.items[tab_index];
+        for (tab.panes.items, 0..) |pane, index| if (pane.id == pane_id) {
+            var removed = tab.panes.orderedRemove(index);
+            self.deinitSession(&removed.session);
+            _ = tab.tree.close(pane_id);
+            if (tab.panes.items.len == 0) self.closeTab(tab_index) else self.resizeActiveSession();
+            return;
+        };
     }
 
     pub fn activateSessionId(self: *App, id: u32) bool {
-        for (self.sessions.items, 0..) |session, index| {
-            if (session.id != id) continue;
-            self.active = index;
+        for (self.tabs.items, 0..) |*tab, tab_index| for (tab.panes.items) |pane| if (pane.session.id == id) {
+            self.active_tab = tab_index;
+            _ = tab.tree.focus(pane.id);
             self.resizeActiveSession();
             return true;
-        }
+        };
+        return false;
+    }
+
+    pub fn runtimeIsLive(self: *const App, runtime: *SessionRuntime) bool {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime == runtime) return true;
         return false;
     }
 
     pub fn hasPendingNotification(self: *App) bool {
-        for (self.sessions.items) |session| {
-            if (session.runtime) |runtime| {
-                if (runtime.hasPendingNotification()) return true;
-            }
-        }
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.hasPendingNotification()) return true;
         return false;
     }
 
     pub fn resizeSessions(self: *App, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
         self.terminal_size = .{ .columns = columns, .rows = rows, .cell_width = cell_width, .cell_height = cell_height };
-        // Hidden tabs keep their existing grid until activation so a window drag
-        // never reflows every scrollback buffer on the UI thread.
         self.resizeActiveSession();
     }
 
@@ -162,49 +207,48 @@ pub const App = struct {
     pub fn applySettings(self: *App, terminal_theme: theme.Theme, randomize_tab_background: bool) void {
         self.terminal_theme = terminal_theme;
         self.randomize_tab_background = randomize_tab_background;
-        for (self.sessions.items) |*session| {
-            const session_theme = if (randomize_tab_background)
-                theme.randomizedBackground(terminal_theme, std.crypto.random.int(u16))
-            else
-                terminal_theme;
-            session.background = session_theme.background;
-            if (session.runtime) |runtime| runtime.setTheme(session_theme);
-        }
+        for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
+            const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, std.crypto.random.int(u16)) else terminal_theme;
+            pane.session.background = session_theme.background;
+            if (pane.session.runtime) |runtime| runtime.setTheme(session_theme);
+        };
     }
 
     pub fn titlesGeneration(self: *const App) u64 {
         var generation: u64 = 0;
-        for (self.sessions.items) |session| {
-            if (session.runtime) |runtime| generation +%= runtime.titleGeneration();
-        }
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            generation +%= runtime.titleGeneration();
+        };
         return generation;
     }
 
     pub fn hasCleanlyExitedSession(self: *const App) bool {
-        for (self.sessions.items) |session| {
-            if (session.runtime) |runtime| {
-                if (runtime.exitedCleanly()) return true;
-            }
-        }
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.exitedCleanly()) return true;
         return false;
     }
 
     pub fn closeCleanlyExitedSessions(self: *App) bool {
         var changed = false;
-        var index = self.sessions.items.len;
-        while (index > 0) {
-            index -= 1;
-            const runtime = self.sessions.items[index].runtime orelse continue;
-            if (!runtime.exitedCleanly() or self.sessions.items[index].hold_on_exit) continue;
-            self.closeSession(index);
-            changed = true;
+        var ti = self.tabs.items.len;
+        while (ti > 0) {
+            ti -= 1;
+            var pi = self.tabs.items[ti].panes.items.len;
+            while (pi > 0) {
+                pi -= 1;
+                const pane = self.tabs.items[ti].panes.items[pi];
+                const runtime = pane.session.runtime orelse continue;
+                if (!runtime.exitedCleanly() or pane.session.hold_on_exit) continue;
+                self.closePane(ti, pane.id);
+                changed = true;
+            }
         }
         return changed;
     }
 
     pub fn syncTitles(self: *App) bool {
         var changed = false;
-        for (self.sessions.items) |*session| {
+        for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
+            const session = &pane.session;
             const runtime = session.runtime orelse continue;
             const generation = runtime.titleGeneration();
             if (generation == session.title_generation) continue;
@@ -213,65 +257,46 @@ pub const App = struct {
             session.title = .fromOwnedSlice(title);
             session.title_generation = generation;
             changed = true;
-        }
+        };
         return changed;
     }
 };
 
-test "sessions are added and selected" {
+test "tabs are added selected and titled by focused pane" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background));
-    try std.testing.expectEqual(@as(usize, 1), try app.addSessionRecord(.wsl, "Linux", null, theme.rasmus.background));
-    try std.testing.expectEqualStrings("Linux", app.activeSession().?.displayTitle());
-
-    app.activate(0);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "pwsh", "one", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "Linux", "wsl", "two", null, theme.rasmus.background);
+    try std.testing.expectEqual(@as(usize, 2), app.tabCount());
+    try std.testing.expectEqualStrings("Linux", app.activeTab().?.displayTitle());
+    try std.testing.expectEqualStrings("wsl", app.activeSession().?.command.items);
+    app.activateTab(0);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
-    const wsl_id = app.sessions.items[1].id;
-    try std.testing.expect(app.activateSessionId(wsl_id));
-    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+}
+
+test "notification identity selects its tab and pane" {
+    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "Linux", "", "", null, theme.rasmus.background);
+    const id = app.tabs.items[0].panes.items[0].session.id;
+    try std.testing.expect(app.activateSessionId(id));
+    try std.testing.expectEqual(@as(?usize, 0), app.activeTabIndex());
     try std.testing.expect(!app.activateSessionId(999_999));
 }
 
-test "closing the active session selects its nearest neighbor" {
+test "settings traverse panes and closing tabs preserves selection" {
     var app = App.init(std.testing.allocator, theme.rasmus, true);
     defer app.deinit();
-
-    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, "WSL", null, theme.rasmus.background);
-    app.closeSession(1);
-    try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
-
-    app.closeSession(0);
-    try std.testing.expect(app.activeSession() == null);
-}
-
-test "closing a session before the active session preserves the selection" {
-    var app = App.init(std.testing.allocator, theme.rasmus, true);
-    defer app.deinit();
-
-    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, "WSL", null, theme.rasmus.background);
-    app.closeSession(0);
-
-    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
-}
-
-test "applying settings updates existing session backgrounds" {
-    var app = App.init(std.testing.allocator, theme.rasmus, true);
-    defer app.deinit();
-
-    _ = try app.addSessionRecord(.powershell, "PowerShell", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "WSL", "", "", null, theme.rasmus.background);
     var replacement = theme.rasmus;
     replacement.background = .{ .red = 12, .green = 12, .blue = 12 };
     app.applySettings(replacement, false);
-
-    try std.testing.expectEqual(replacement.background, app.sessions.items[0].background);
-    try std.testing.expectEqual(replacement, app.terminal_theme);
-    try std.testing.expect(!app.randomize_tab_background);
-}
-
-test {
-    _ = @import("config.zig");
+    try std.testing.expectEqual(replacement.background, app.tabs.items[0].panes.items[0].session.background);
+    try std.testing.expectEqual(replacement.background, app.tabs.items[1].panes.items[0].session.background);
+    app.closeTab(0);
+    try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
+    app.closeTab(0);
+    try std.testing.expect(app.activeSession() == null);
 }

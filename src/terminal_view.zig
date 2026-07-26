@@ -617,7 +617,7 @@ pub const View = struct {
         const repeated = (lparam & (@as(win.LPARAM, 1) << 30)) != 0;
         if (!repeated) {
             const argument: u32 = if (value == win.ZIGONAUT_CHROME_CLOSE)
-                @intCast(self.model.active orelse 0)
+                @intCast(self.model.activeTabIndex() orelse 0)
             else
                 0;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, @intCast(argument));
@@ -660,8 +660,7 @@ pub const View = struct {
     }
 
     fn runtimeIsLive(self: *const View, runtime: *SessionRuntime) bool {
-        for (self.model.sessions.items) |session| if (session.runtime == runtime) return true;
-        return false;
+        return self.model.runtimeIsLive(runtime);
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
