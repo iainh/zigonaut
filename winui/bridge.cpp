@@ -160,6 +160,10 @@ struct Bridge {
     bool updating = false;
     bool updating_scrollbar = false;
     bool pointer_over_scrollbar = false;
+    bool scrollbar_state_initialized = false;
+    uint32_t scrollbar_total = 0;
+    uint32_t scrollbar_page = 0;
+    uint32_t scrollbar_position = 0;
     bool closed = false;
     RECT terminal_bounds{ -1, -1, -1, -1 };
     com_ptr<ITaskbarList3> taskbar;
@@ -819,6 +823,15 @@ struct Bridge {
     }
 
     void updateScrollbar(uint32_t total, uint32_t page, uint32_t position, bool show) {
+        if (scrollbar_state_initialized && total == scrollbar_total &&
+            page == scrollbar_page && position == scrollbar_position) {
+            if (show) showScrollbar();
+            return;
+        }
+        scrollbar_state_initialized = true;
+        scrollbar_total = total;
+        scrollbar_page = page;
+        scrollbar_position = position;
         updating_scrollbar = true;
         struct ResetUpdating {
             bool& value;
