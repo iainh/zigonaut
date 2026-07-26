@@ -127,36 +127,20 @@ pub const Terminal = struct {
         };
 
         const Recorder = struct {
-            allocator: std.mem.Allocator,
             snapshot: *RenderSnapshot,
-            row_start: usize = 0,
-            failed: ?anyerror = null,
 
             pub fn beginFrame(self: *Recorder, frame: Frame) void {
                 self.snapshot.frame = frame;
             }
 
-            pub fn beginRow(self: *Recorder, _: u16) void {
-                self.row_start = self.snapshot.cells.items.len;
-            }
+            pub fn beginRow(_: *Recorder, _: u16) void {}
 
             pub fn drawCell(self: *Recorder, cell: Cell) void {
-                if (self.failed != null) return;
-                self.snapshot.cells.append(self.allocator, .init(cell)) catch |err| {
-                    self.failed = err;
-                };
+                const index = self.snapshot.rows.items[cell.y].start + cell.x;
+                self.snapshot.cells.items[index] = .init(cell);
             }
 
-            pub fn endRow(self: *Recorder, y: u16) void {
-                if (self.failed != null) return;
-                self.snapshot.rows.append(self.allocator, .{
-                    .y = y,
-                    .start = self.row_start,
-                    .len = self.snapshot.cells.items.len - self.row_start,
-                }) catch |err| {
-                    self.failed = err;
-                };
-            }
+            pub fn endRow(_: *Recorder, _: u16) void {}
 
             pub fn endFrame(_: *Recorder, _: Frame) void {}
         };
@@ -168,14 +152,20 @@ pub const Terminal = struct {
         }
 
         pub fn capture(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
-            self.frame = null;
-            self.cells.clearRetainingCapacity();
-            self.rows.clearRetainingCapacity();
-            try self.cells.ensureTotalCapacity(allocator, @as(usize, terminal.columns) * @as(usize, terminal.rows));
-            try self.rows.ensureTotalCapacity(allocator, terminal.rows);
-            var recorder = Recorder{ .allocator = allocator, .snapshot = self };
-            try terminal.renderViewport(&recorder);
-            if (recorder.failed) |err| return err;
+            const cell_count = @as(usize, terminal.columns) * @as(usize, terminal.rows);
+            const resized = self.cells.items.len != cell_count or self.rows.items.len != terminal.rows;
+            if (resized) {
+                try self.cells.resize(allocator, cell_count);
+                try self.rows.resize(allocator, terminal.rows);
+                for (self.rows.items, 0..) |*row, y| row.* = .{
+                    .y = @intCast(y),
+                    .start = y * terminal.columns,
+                    .len = terminal.columns,
+                };
+                self.frame = null;
+            }
+            var recorder = Recorder{ .snapshot = self };
+            try terminal.renderViewportInternal(&recorder, self.frame != null);
         }
 
         pub fn replay(self: *const RenderSnapshot, renderer: anytype) void {
@@ -765,7 +755,17 @@ pub const Terminal = struct {
     }
 
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
+        try self.renderViewportInternal(renderer, false);
+    }
+
+    /// Updates the render state and emits either all rows or only rows marked
+    /// dirty by libghostty. Dirty flags are consumed after a successful pass.
+    fn renderViewportInternal(self: *Terminal, renderer: anytype, dirty_only: bool) !void {
         try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
+
+        var dirty: vt.GhosttyRenderStateDirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
+        try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty));
+        if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE) return;
 
         var colors = std.mem.zeroes(vt.GhosttyRenderStateColors);
         colors.size = @sizeOf(vt.GhosttyRenderStateColors);
@@ -813,6 +813,13 @@ pub const Terminal = struct {
         ));
         var y: u16 = 0;
         while (vt.ghostty_render_state_row_iterator_next(self.row_iterator)) : (y += 1) {
+            var row_dirty = false;
+            try check(vt.ghostty_render_state_row_get(
+                self.row_iterator,
+                vt.GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+                &row_dirty,
+            ));
+            if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_PARTIAL and !row_dirty) continue;
             try check(vt.ghostty_render_state_row_get(
                 self.row_iterator,
                 vt.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
@@ -891,8 +898,24 @@ pub const Terminal = struct {
                     .selected = selected,
                 });
             }
+            if (dirty_only) {
+                row_dirty = false;
+                try check(vt.ghostty_render_state_row_set(
+                    self.row_iterator,
+                    vt.GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+                    &row_dirty,
+                ));
+            }
         }
         renderer.endFrame(frame);
+        if (dirty_only) {
+            dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+            try check(vt.ghostty_render_state_set(
+                self.render_state,
+                vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY,
+                &dirty,
+            ));
+        }
     }
 
     pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, unshifted_codepoint: u32, output: []u8) ![]const u8 {
@@ -1604,6 +1627,22 @@ test "render snapshots own cell graphemes" {
     var renderer = TestRenderer{};
     snapshot.replay(&renderer);
     try std.testing.expectEqual(theme.rasmus.foreground, renderer.x_foreground.?);
+}
+
+test "render snapshots preserve clean rows during incremental capture" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("A\r\nB");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    terminal.feed("\rC");
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints[0]);
+    try std.testing.expectEqual(@as(u32, 'C'), snapshot.cells.items[4].codepoints[0]);
+    try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
 }
 
 test "libghostty encodes navigation keys" {

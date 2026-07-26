@@ -29,7 +29,13 @@ pub fn main() !void {
     defer snapshot.deinit(std.heap.page_allocator);
     try snapshot.capture(std.heap.page_allocator, &terminal);
     for (0..render_iterations) |_| try snapshot.capture(std.heap.page_allocator, &terminal);
-    const capture_ns = timer.lap();
+    const unchanged_capture_ns = timer.lap();
+    for (0..render_iterations) |iteration| {
+        // Rewrite one cell on one row without moving the cursor between rows.
+        terminal.feed(if (iteration % 2 == 0) "\rX" else "\rY");
+        try snapshot.capture(std.heap.page_allocator, &terminal);
+    }
+    const one_row_capture_ns = timer.lap();
     for (0..render_iterations) |_| snapshot.replay(&renderer);
     const replay_ns = timer.lap();
 
@@ -66,7 +72,7 @@ pub fn main() !void {
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
-            "snapshot capture: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n" ++
+            "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n" ++
             "search: {d} rows, {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n",
         .{
@@ -76,7 +82,8 @@ pub fn main() !void {
             render_iterations,
             milliseconds(render_ns),
             @as(f64, @floatFromInt(render_ns)) / @as(f64, render_iterations) / 1_000.0,
-            @as(f64, @floatFromInt(capture_ns)) / @as(f64, render_iterations) / 1_000.0,
+            @as(f64, @floatFromInt(unchanged_capture_ns)) / @as(f64, render_iterations) / 1_000.0,
+            @as(f64, @floatFromInt(one_row_capture_ns)) / @as(f64, render_iterations) / 1_000.0,
             @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0,
             renderer.checksum,
             total_rows,
