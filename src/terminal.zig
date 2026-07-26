@@ -105,26 +105,64 @@ pub const Terminal = struct {
         };
 
         const OwnedCell = struct {
-            cell: Cell,
             codepoints: [16]u32 = undefined,
+            foreground: theme.Color,
+            background: theme.Color,
+            underline_color: theme.Color,
             codepoint_count: u8,
+            attributes: packed struct(u16) {
+                occupancy: u2,
+                bold: bool,
+                italic: bool,
+                faint: bool,
+                strikethrough: bool,
+                overline: bool,
+                selected: bool,
+                underline: u8,
+            },
 
             fn init(cell: Cell) OwnedCell {
                 var result = OwnedCell{
-                    .cell = cell,
+                    .foreground = cell.foreground,
+                    .background = cell.background,
+                    .underline_color = cell.underline_color,
                     .codepoint_count = @intCast(@min(cell.codepoints.len, 16)),
+                    .attributes = .{
+                        .occupancy = @intCast(@intFromEnum(cell.occupancy)),
+                        .bold = cell.bold,
+                        .italic = cell.italic,
+                        .faint = cell.faint,
+                        .strikethrough = cell.strikethrough,
+                        .overline = cell.overline,
+                        .selected = cell.selected,
+                        .underline = cell.underline,
+                    },
                 };
-                result.cell.codepoints = &.{};
                 @memcpy(result.codepoints[0..result.codepoint_count], cell.codepoints[0..result.codepoint_count]);
                 return result;
             }
 
-            fn value(self: *const OwnedCell) Cell {
-                var result = self.cell;
-                result.codepoints = self.codepoints[0..self.codepoint_count];
-                return result;
+            fn value(self: *const OwnedCell, x: u16, y: u16) Cell {
+                return .{
+                    .x = x,
+                    .y = y,
+                    .occupancy = @enumFromInt(self.attributes.occupancy),
+                    .codepoints = self.codepoints[0..self.codepoint_count],
+                    .foreground = self.foreground,
+                    .background = self.background,
+                    .underline_color = self.underline_color,
+                    .bold = self.attributes.bold,
+                    .italic = self.attributes.italic,
+                    .faint = self.attributes.faint,
+                    .strikethrough = self.attributes.strikethrough,
+                    .overline = self.attributes.overline,
+                    .underline = self.attributes.underline,
+                    .selected = self.attributes.selected,
+                };
             }
         };
+
+        pub const cell_size = @sizeOf(OwnedCell);
 
         const Recorder = struct {
             snapshot: *RenderSnapshot,
@@ -173,7 +211,9 @@ pub const Terminal = struct {
             renderer.beginFrame(frame);
             for (self.rows.items) |row| {
                 renderer.beginRow(row.y);
-                for (self.cells.items[row.start..][0..row.len]) |*cell| renderer.drawCell(cell.value());
+                for (self.cells.items[row.start..][0..row.len], 0..) |*cell, x| {
+                    renderer.drawCell(cell.value(@intCast(x), row.y));
+                }
                 renderer.endRow(row.y);
             }
             renderer.endFrame(frame);

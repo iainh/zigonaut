@@ -72,7 +72,8 @@ pub fn main() !void {
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
-            "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay: {d:.2} us/frame; checksum={d}\n" ++
+            "snapshot cell size: {d} bytes\n" ++
+            "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
             "search: {d} rows, {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n",
         .{
@@ -82,6 +83,7 @@ pub fn main() !void {
             render_iterations,
             milliseconds(render_ns),
             @as(f64, @floatFromInt(render_ns)) / @as(f64, render_iterations) / 1_000.0,
+            Terminal.RenderSnapshot.cell_size,
             @as(f64, @floatFromInt(unchanged_capture_ns)) / @as(f64, render_iterations) / 1_000.0,
             @as(f64, @floatFromInt(one_row_capture_ns)) / @as(f64, render_iterations) / 1_000.0,
             @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0,
