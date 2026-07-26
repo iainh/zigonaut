@@ -7,6 +7,7 @@ const modules = .{
     @import("directwrite_renderer.zig"),
     @import("gdi_renderer.zig"),
     @import("input.zig"),
+    @import("pane_tree.zig"),
     @import("pty.zig"),
     @import("search.zig"),
     @import("session.zig"),
