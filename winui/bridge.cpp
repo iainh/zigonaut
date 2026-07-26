@@ -281,6 +281,10 @@ struct Bridge {
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
         source.SystemBackdrop(backdrop);
         enableTitleBar();
+    }
+
+    bool ensureNotificationsRegistered() noexcept {
+        if (notifications_registered) return true;
         try {
             notification_manager = AppNotificationManager::Default();
             auto const activation = notification_activation;
@@ -302,10 +306,12 @@ struct Bridge {
             });
             notification_manager.Register();
             notifications_registered = true;
+            return true;
         } catch (...) {
             reportCurrentException(L"register app notifications");
             notification_revoker.revoke();
             notification_manager = nullptr;
+            return false;
         }
     }
 
@@ -579,7 +585,7 @@ struct Bridge {
     }
 
     HRESULT showNotification(uint32_t session_id, std::string_view title, std::string_view body) noexcept {
-        if (!notifications_registered) return E_NOTIMPL;
+        if (!ensureNotificationsRegistered()) return E_NOTIMPL;
         try {
             auto builder = AppNotificationBuilder{}
                 .AddArgument(L"session", to_hstring(session_id))
