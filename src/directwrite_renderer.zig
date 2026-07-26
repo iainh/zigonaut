@@ -78,6 +78,10 @@ pub const Engine = struct {
         }
     }
 
+    pub fn swapChain(self: *const Engine) ?*anyopaque {
+        return native.zigonaut_text_engine_get_swap_chain(self.handle);
+    }
+
     pub fn beginFrame(self: *Engine, width: u32, height: u32, background: u32) !void {
         if (native.zigonaut_text_engine_begin_frame(
             self.handle,

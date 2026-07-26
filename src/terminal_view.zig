@@ -16,6 +16,7 @@ const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const refresh_message = win.WM_APP + 1;
+const render_message = win.WM_APP + 2;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
@@ -28,6 +29,8 @@ pub const View = struct {
     hwnd: win.HWND = null,
     refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    render_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
     model: *App,
     font: win.HFONT,
@@ -54,6 +57,8 @@ pub const View = struct {
     scrollbar_changed_message: win.UINT,
     progress_changed_message: win.UINT,
     notification_changed_message: win.UINT,
+    renderer_failed_message: win.UINT,
+    chrome_message: win.UINT,
     wheel_remainder: i32 = 0,
     protocol_wheel_remainder: i32 = 0,
     protocol_hwheel_remainder: i32 = 0,
@@ -64,6 +69,8 @@ pub const View = struct {
     last_click_point: ?Terminal.Point = null,
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
+    consumed_application_key: ?win.WPARAM = null,
+    suppress_application_character: bool = false,
     copy_flash: bool = false,
     padding_horizontal: u16,
     padding_vertical: u16,
@@ -102,6 +109,8 @@ pub const View = struct {
         scrollbar_changed_message: win.UINT,
         progress_changed_message: win.UINT,
         notification_changed_message: win.UINT,
+        renderer_failed_message: win.UINT,
+        chrome_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
@@ -122,6 +131,8 @@ pub const View = struct {
             .scrollbar_changed_message = scrollbar_changed_message,
             .progress_changed_message = progress_changed_message,
             .notification_changed_message = notification_changed_message,
+            .renderer_failed_message = renderer_failed_message,
+            .chrome_message = chrome_message,
         };
     }
 
@@ -131,7 +142,7 @@ pub const View = struct {
             0,
             class_name,
             null,
-            win.WS_CHILD | win.WS_VISIBLE | win.WS_CLIPSIBLINGS | win.WS_TABSTOP,
+            win.WS_CHILD | win.WS_CLIPSIBLINGS,
             0,
             0,
             1,
@@ -162,6 +173,11 @@ pub const View = struct {
         _ = win.MoveWindow(self.hwnd, x, y, @max(width, 1), @max(height, 1), 1);
     }
 
+    pub fn swapChain(self: *const View) ?*anyopaque {
+        const engine = self.text_engine orelse return null;
+        return engine.swapChain();
+    }
+
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
         if (self.text_engine) |*engine| engine.setDpi(dpi) catch |err| {
@@ -183,6 +199,7 @@ pub const View = struct {
         try text_engine.setWindow(self.hwnd);
         if (self.text_engine) |*engine| engine.deinit();
         self.text_engine = text_engine;
+        self.renderer_failed = false;
         self.font = font;
         self.updateCellSize(font);
     }
@@ -220,7 +237,6 @@ pub const View = struct {
         };
         self.protocol_button = null;
         self.protocol_runtime = null;
-        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         self.clearHoveredLink();
         self.wheel_remainder = 0;
         self.protocol_wheel_remainder = 0;
@@ -228,10 +244,15 @@ pub const View = struct {
         self.last_click_tick = 0;
         self.click_count = 0;
         self.last_click_point = null;
+        self.consumed_application_key = null;
+        self.suppress_application_character = false;
     }
 
     pub fn invalidate(self: *View) void {
-        _ = win.InvalidateRect(self.hwnd, null, 0);
+        if (self.hwnd == null or self.render_pending.swap(true, .acq_rel)) return;
+        if (win.PostMessageW(self.hwnd, render_message, 0, 0) == 0) {
+            self.render_pending.store(false, .release);
+        }
     }
 
     fn requestRefresh(context: ?*anyopaque) void {
@@ -386,9 +407,7 @@ pub const View = struct {
         if (width <= 0 or height <= 0) return;
 
         if (self.text_engine != null) {
-            self.paintDirect2D(client, width, height) catch {
-                self.invalidate();
-            };
+            self.paintSwapChain();
             return;
         }
 
@@ -413,6 +432,20 @@ pub const View = struct {
             .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
             .copy_flash = self.copy_flash,
         });
+    }
+
+    fn paintSwapChain(self: *View) void {
+        if (self.text_engine == null or self.renderer_failed) return;
+        var client: win.RECT = undefined;
+        _ = win.GetClientRect(self.hwnd, &client);
+        const width = client.right - client.left;
+        const height = client.bottom - client.top;
+        if (width <= 0 or height <= 0) return;
+        self.paintDirect2D(client, width, height) catch |err| {
+            log.warn("terminal renderer failed: {}", .{err});
+            self.renderer_failed = true;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
+        };
     }
 
     fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !void {
@@ -475,6 +508,7 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (self.handleApplicationShortcut(wparam, lparam, released)) return true;
         if (self.consumed_prompt_key == wparam) {
             if (released) self.consumed_prompt_key = null;
             return true;
@@ -555,6 +589,45 @@ pub const View = struct {
         return true;
     }
 
+    fn handleApplicationShortcut(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
+        if (self.consumed_application_key == wparam) {
+            if (released) {
+                self.consumed_application_key = null;
+                self.suppress_application_character = false;
+            } else self.suppress_application_character = true;
+            return true;
+        }
+        if (released or win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_MENU) < 0) return false;
+
+        const shift = win.GetKeyState(win.VK_SHIFT) < 0;
+        const command: ?u32 = if (shift and wparam == 'T')
+            win.ZIGONAUT_CHROME_NEW_DEFAULT
+        else if (shift and wparam == 'W')
+            win.ZIGONAUT_CHROME_CLOSE
+        else if (wparam == win.VK_TAB)
+            if (shift) win.ZIGONAUT_CHROME_SELECT_PREVIOUS else win.ZIGONAUT_CHROME_SELECT_NEXT
+        else if (wparam == win.VK_ADD or wparam == win.VK_OEM_PLUS)
+            win.ZIGONAUT_CHROME_ZOOM_IN
+        else if (wparam == win.VK_SUBTRACT or wparam == win.VK_OEM_MINUS)
+            win.ZIGONAUT_CHROME_ZOOM_OUT
+        else if (wparam == '0' or wparam == win.VK_NUMPAD0)
+            win.ZIGONAUT_CHROME_ZOOM_RESET
+        else
+            null;
+        const value = command orelse return false;
+        self.consumed_application_key = wparam;
+        self.suppress_application_character = true;
+        const repeated = (lparam & (@as(win.LPARAM, 1) << 30)) != 0;
+        if (!repeated) {
+            const argument: u32 = if (value == win.ZIGONAUT_CHROME_CLOSE)
+                @intCast(self.model.active orelse 0)
+            else
+                0;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, @intCast(argument));
+        }
+        return true;
+    }
+
     fn releasePressedKeys(self: *View) void {
         for (std.enums.values(Terminal.Key)) |key| {
             const unshifted_codepoint = self.input_state.takePressed(key) orelse continue;
@@ -575,6 +648,10 @@ pub const View = struct {
     }
 
     fn handleCharacter(self: *View, code_unit: u16) void {
+        if (self.suppress_application_character) {
+            self.suppress_application_character = false;
+            return;
+        }
         if (self.suppressed_search_character == code_unit) {
             self.suppressed_search_character = null;
             return;
@@ -599,7 +676,6 @@ pub const View = struct {
     fn beginSelection(self: *View, lparam: win.LPARAM) void {
         if (win.GetKeyState(win.VK_CONTROL) < 0 and self.openLinkAt(lparam)) return;
         if (win.GetKeyState(win.VK_SHIFT) >= 0 and self.beginProtocolButton(.left, lparam)) {
-            _ = win.SetCapture(self.hwnd);
             return;
         }
         const point = self.mousePoint(lparam, false) orelse {
@@ -628,7 +704,6 @@ pub const View = struct {
             .unit = unit,
             .focus = point,
         };
-        _ = win.SetCapture(self.hwnd);
         _ = win.SetTimer(self.hwnd, selection_scroll_timer, 33, null);
         self.invalidate();
     }
@@ -671,7 +746,6 @@ pub const View = struct {
             _ = self.sendMouseTo(runtime, .release, button, clientPoint(lparam), false);
             self.protocol_button = null;
             self.protocol_runtime = null;
-            if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
             return;
         }
         if (self.selection == null or !self.selection.?.dragging) return;
@@ -680,7 +754,6 @@ pub const View = struct {
         self.selection.?.dragging = false;
         self.selection.?.runtime.endSelectionAnchor();
         _ = win.KillTimer(self.hwnd, selection_scroll_timer);
-        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         if (!self.selection.?.moved and self.selection.?.unit == .cell) {
             self.clearSelection();
             return;
@@ -699,7 +772,6 @@ pub const View = struct {
         self.protocol_button = null;
         self.protocol_runtime = null;
         _ = win.KillTimer(self.hwnd, selection_scroll_timer);
-        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
     }
 
     fn beginProtocolButton(self: *View, button: Terminal.MouseButton, lparam: win.LPARAM) bool {
@@ -709,7 +781,6 @@ pub const View = struct {
         if (!self.sendMouseTo(runtime, .press, button, clientPoint(lparam), true)) return false;
         self.protocol_button = button;
         self.protocol_runtime = runtime;
-        _ = win.SetCapture(self.hwnd);
         return true;
     }
 
@@ -808,7 +879,6 @@ pub const View = struct {
             selection.runtime.endSelectionAnchor();
         }
         self.selection = null;
-        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         self.invalidate();
     }
 
@@ -818,7 +888,6 @@ pub const View = struct {
         self.selection = null;
         _ = win.KillTimer(self.hwnd, selection_scroll_timer);
         selection.runtime.endSelectionAnchor();
-        if (win.GetCapture() == self.hwnd) _ = win.ReleaseCapture();
         if (self.model.activeSession()) |session| {
             if (session.runtime == selection.runtime) {
                 selection.runtime.setSelection(null) catch |err| {
@@ -1126,17 +1195,19 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             }
             return 0;
         },
-        win.WM_CREATE => {
-            _ = win.SetFocus(hwnd);
+        render_message => {
+            if (view) |current| {
+                current.render_pending.store(false, .release);
+                current.paintSwapChain();
+            }
             return 0;
         },
+        win.WM_CREATE => return 0,
         win.WM_LBUTTONDOWN, win.WM_LBUTTONDBLCLK => {
-            _ = win.SetFocus(hwnd);
             if (view) |current| current.beginSelection(lparam);
             return 0;
         },
         win.WM_MBUTTONDOWN, win.WM_RBUTTONDOWN => {
-            _ = win.SetFocus(hwnd);
             if (win.GetKeyState(win.VK_SHIFT) >= 0) if (view) |current| {
                 if (current.beginProtocolButton(if (message == win.WM_MBUTTONDOWN) .middle else .right, lparam)) return 0;
             };

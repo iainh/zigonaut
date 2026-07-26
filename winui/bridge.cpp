@@ -7,31 +7,31 @@
 #include <winrt/Microsoft.UI.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
-#include <winrt/Microsoft.UI.Content.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Windowing.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Documents.h>
-#include <winrt/Microsoft.UI.Xaml.Hosting.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/base.h>
-#include <Microsoft.UI.Dispatching.Interop.h>
+#include <microsoft.ui.xaml.media.dxinterop.h>
 #include <winrt/Microsoft.UI.Interop.h>
 #include <winrt/Microsoft.Windows.AppNotifications.h>
 #include <winrt/Microsoft.Windows.AppNotifications.Builder.h>
 #include <shobjidl.h>
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -41,7 +41,6 @@ using namespace winrt;
 using namespace winrt::Microsoft::UI;
 using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
-using namespace winrt::Microsoft::UI::Xaml::Hosting;
 using namespace winrt::Microsoft::Windows::AppNotifications;
 using namespace winrt::Microsoft::Windows::AppNotifications::Builder;
 
@@ -60,6 +59,7 @@ HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
     wchar_t message[160]{};
     swprintf_s(message, L"Zigonaut WinUI: %s failed with HRESULT 0x%08X\n", operation, static_cast<unsigned>(result));
     OutputDebugStringW(message);
+    fwprintf(stderr, L"%ls", message);
     return result;
 }
 
@@ -67,7 +67,11 @@ HRESULT reportCurrentException(wchar_t const* operation) noexcept {
     try {
         throw;
     } catch (hresult_error const& error) {
+        fwprintf(stderr, L"Zigonaut WinUI: %ls\n", error.message().c_str());
         return reportFailure(operation, error.code());
+    } catch (std::exception const& error) {
+        fprintf(stderr, "Zigonaut WinUI: %s\n", error.what());
+        return reportFailure(operation, E_FAIL);
     } catch (...) {
         return reportFailure(operation, E_FAIL);
     }
@@ -86,20 +90,25 @@ bool cleanup(wchar_t const* operation, Action&& action, HRESULT& result) noexcep
 }
 
 struct Bridge {
-    // All XAML objects and event revocation must stay on this creating STA thread.
+    // All WinUI objects and event revocation stay on the Application::Start STA.
     DWORD thread_id = GetCurrentThreadId();
     zigonaut_chrome_command callback{};
     void* context{};
-    Microsoft::UI::Dispatching::DispatcherQueueController dispatcher{nullptr};
     Application application{nullptr};
+    Window window{nullptr};
     HWND parent{};
+    HWND terminal{};
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
-    DesktopWindowXamlSource source{nullptr};
-    DesktopWindowXamlSource scrollbar_source{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     Grid root{nullptr};
+    Grid title_bar_root{nullptr};
+    Grid content_root{nullptr};
+    Grid terminal_presenter{nullptr};
+    SwapChainPanel terminal_surface{nullptr};
+    ContentControl terminal_input{nullptr};
     Grid scrollbar_root{nullptr};
+    Border terminal_frame{nullptr};
     TabView tabs{nullptr};
     Button new_tab_button{nullptr};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
@@ -115,7 +124,25 @@ struct Bridge {
     MenuFlyout new_tab_menu{nullptr};
     std::vector<MenuFlyoutItem> profile_items;
     std::vector<MenuFlyoutItem::Click_revoker> profile_revokers;
+    std::vector<Microsoft::UI::Xaml::Input::KeyboardAccelerator> accelerators;
+    std::vector<Microsoft::UI::Xaml::Input::KeyboardAccelerator::Invoked_revoker> accelerator_revokers;
     Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
+    Window::Closed_revoker window_closed_revoker{};
+    Window::Activated_revoker window_activated_revoker{};
+    FrameworkElement::LayoutUpdated_revoker layout_revoker{};
+    FrameworkElement::Loaded_revoker terminal_loaded_revoker{};
+    UIElement::KeyDown_revoker terminal_key_down_revoker{};
+    UIElement::KeyUp_revoker terminal_key_up_revoker{};
+    UIElement::CharacterReceived_revoker terminal_character_revoker{};
+    UIElement::GotFocus_revoker terminal_focus_revoker{};
+    UIElement::LostFocus_revoker terminal_blur_revoker{};
+    UIElement::PointerPressed_revoker terminal_pressed_revoker{};
+    UIElement::PointerReleased_revoker terminal_released_revoker{};
+    UIElement::PointerMoved_revoker terminal_moved_revoker{};
+    UIElement::PointerWheelChanged_revoker terminal_wheel_revoker{};
+    UIElement::PointerExited_revoker terminal_exited_revoker{};
+    UIElement::PointerCanceled_revoker terminal_canceled_revoker{};
+    UIElement::PointerCaptureLost_revoker terminal_capture_lost_revoker{};
     Button::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
@@ -134,7 +161,7 @@ struct Bridge {
     bool updating_scrollbar = false;
     bool pointer_over_scrollbar = false;
     bool closed = false;
-    bool custom_title_bar = false;
+    RECT terminal_bounds{ -1, -1, -1, -1 };
     com_ptr<ITaskbarList3> taskbar;
     AppNotificationManager notification_manager{nullptr};
     AppNotificationManager::NotificationInvoked_revoker notification_revoker{};
@@ -142,13 +169,19 @@ struct Bridge {
     std::shared_ptr<NotificationActivationState> notification_activation;
     hstring app_version;
     hstring git_hash;
+    std::wstring translated_characters;
 
-    Bridge(HWND parent, zigonaut_chrome_command cb, void* ctx,
-           Microsoft::UI::Dispatching::DispatcherQueueController const& controller,
-           Application const& app, std::string_view version, std::string_view hash)
-        : callback(cb), context(ctx), dispatcher(controller), application(app),
+    Bridge(zigonaut_chrome_command cb, void* ctx, Application const& app,
+           std::string_view version, std::string_view hash)
+        : callback(cb), context(ctx), application(app),
           app_version(to_hstring(version)), git_hash(to_hstring(hash)) {
-        this->parent = parent;
+        window = Window{};
+        window.Title(L"Zigonaut");
+        check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&parent));
+        app_window = window.AppWindow();
+        title_bar = app_window.TitleBar();
+        app_window.Resize({1100, 700});
+
         GUID nonce{};
         check_hresult(CoCreateGuid(&nonce));
         wchar_t nonce_text[40]{};
@@ -156,17 +189,52 @@ struct Bridge {
         notification_activation = std::make_shared<NotificationActivationState>();
         notification_activation->callback = callback;
         notification_activation->context = context;
-        notification_activation->queue = dispatcher.DispatcherQueue();
+        notification_activation->queue = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
         notification_activation->nonce = nonce_text;
-        source = DesktopWindowXamlSource{};
-        source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
+
         root = Grid{};
+        root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        auto title_row = RowDefinition{};
+        title_row.Height(GridLength{52, GridUnitType::Pixel});
+        root.RowDefinitions().Append(title_row);
+        auto content_row = RowDefinition{};
+        content_row.Height(GridLength{1, GridUnitType::Star});
+        root.RowDefinitions().Append(content_row);
+
+        title_bar_root = Grid{};
+        title_bar_root.Height(52);
+        Grid::SetRow(title_bar_root, 0);
+        content_root = Grid{};
+        content_root.Margin(Thickness{9, 1, 9, 9});
+        Grid::SetRow(content_root, 1);
+        auto terminal_column = ColumnDefinition{};
+        terminal_column.Width(GridLength{1, GridUnitType::Star});
+        content_root.ColumnDefinitions().Append(terminal_column);
+        auto scrollbar_column = ColumnDefinition{};
+        scrollbar_column.Width(GridLength{14, GridUnitType::Pixel});
+        content_root.ColumnDefinitions().Append(scrollbar_column);
+
+        terminal_frame = Border{};
+        terminal_frame.CornerRadius(CornerRadius{9});
+        terminal_frame.BorderThickness(Thickness{1});
+        Grid::SetColumn(terminal_frame, 0);
+        terminal_presenter = Grid{};
+        terminal_surface = SwapChainPanel{};
+        terminal_input = ContentControl{};
+        terminal_input.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        terminal_input.Opacity(0);
+        terminal_input.IsHitTestVisible(false);
+        terminal_input.IsTabStop(true);
+        terminal_input.UseSystemFocusVisuals(false);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(terminal_input, L"Terminal input surface");
+        terminal_presenter.Children().Append(terminal_surface);
+        terminal_presenter.Children().Append(terminal_input);
+        terminal_frame.Child(terminal_presenter);
         tabs = TabView{};
 
-        scrollbar_source = DesktopWindowXamlSource{};
-        scrollbar_source.Initialize(Microsoft::UI::GetWindowIdFromWindow(parent));
         scrollbar_root = Grid{};
         scrollbar_root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        Grid::SetColumn(scrollbar_root, 1);
         scrollbar = Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{};
         scrollbar.Orientation(Orientation::Vertical);
         scrollbar.HorizontalAlignment(HorizontalAlignment::Right);
@@ -195,9 +263,8 @@ struct Bridge {
             args.Handled(true);
         });
         scrollbar_root.Children().Append(scrollbar);
-        scrollbar_source.Content(scrollbar_root);
 
-        scrollbar_timer = dispatcher.DispatcherQueue().CreateTimer();
+        scrollbar_timer = notification_activation->queue.CreateTimer();
         scrollbar_timer.IsRepeating(false);
         scrollbar_timer.Interval(std::chrono::seconds(2));
         scrollbar_tick_revoker = scrollbar_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
@@ -207,7 +274,6 @@ struct Bridge {
         });
 
         auto const resources = application.Resources();
-        root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
 
         tabs.IsAddTabButtonVisible(false);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
@@ -227,16 +293,21 @@ struct Bridge {
         ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T); right-click for profiles"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
+            focusTerminal();
         });
         tabs.TabStripFooter(new_tab_button);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
                 notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
+                focusTerminal();
             }
         });
         close_tab_revoker = tabs.TabCloseRequested(auto_revoke, [this](TabView const& sender, TabViewTabCloseRequestedEventArgs const& args) {
             uint32_t index = 0;
-            if (sender.TabItems().IndexOf(args.Item(), index)) notify(ZIGONAUT_CHROME_CLOSE, index);
+            if (sender.TabItems().IndexOf(args.Item(), index)) {
+                notify(ZIGONAUT_CHROME_CLOSE, index);
+                focusTerminal();
+            }
         });
 
         menu_button = Button{};
@@ -246,8 +317,20 @@ struct Bridge {
         menu_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         menu_button.BorderThickness(Thickness{});
         menu_button.Padding(Thickness{});
-        auto const menu_icon = SymbolIcon{Symbol::GlobalNavigationButton};
-        menu_button.Content(menu_icon);
+        auto brand = Border{};
+        brand.Width(28);
+        brand.Height(28);
+        brand.CornerRadius(CornerRadius{8});
+        brand.Background(resources.Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        auto brand_text = TextBlock{};
+        brand_text.Text(L"Z");
+        brand_text.FontSize(14);
+        brand_text.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+        brand_text.HorizontalAlignment(HorizontalAlignment::Center);
+        brand_text.VerticalAlignment(VerticalAlignment::Center);
+        brand_text.Foreground(resources.Lookup(box_value(L"TextOnAccentFillColorPrimaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        brand.Child(brand_text);
+        menu_button.Content(brand);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
         ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
 
@@ -256,6 +339,7 @@ struct Bridge {
         bottom_border.VerticalAlignment(VerticalAlignment::Bottom);
         bottom_border.IsHitTestVisible(false);
         bottom_border.Background(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        terminal_frame.BorderBrush(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
 
         app_menu = MenuFlyout{};
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
@@ -282,14 +366,47 @@ struct Bridge {
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         new_tab_button.ContextFlyout(new_tab_menu);
 
-        root.Children().Append(tabs);
-        root.Children().Append(menu_button);
-        root.Children().Append(bottom_border);
-        source.Content(root);
+        title_bar_root.Children().Append(tabs);
+        title_bar_root.Children().Append(menu_button);
+        title_bar_root.Children().Append(bottom_border);
+        content_root.Children().Append(terminal_frame);
+        content_root.Children().Append(scrollbar_root);
+        root.Children().Append(content_root);
+        root.Children().Append(title_bar_root);
+        window.Content(root);
+        window.ExtendsContentIntoTitleBar(true);
+        window.SetTitleBar(title_bar_root);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
-        source.SystemBackdrop(backdrop);
+        window.SystemBackdrop(backdrop);
         enableTitleBar();
+        layout_revoker = root.LayoutUpdated(auto_revoke, [this](auto&&, auto&&) {
+            layoutTerminal();
+            updateTitleBarLayout();
+        });
+        window_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
+            notify(ZIGONAUT_CHROME_SHUTDOWN, 0);
+            close();
+        });
+        window_activated_revoker = window.Activated(auto_revoke, [this](auto&&, WindowActivatedEventArgs const& args) {
+            if (!terminal) return;
+            if (args.WindowActivationState() == WindowActivationState::Deactivated) {
+                SendMessageW(terminal, WM_KILLFOCUS, 0, 0);
+            } else if (terminal_input && terminal_input.FocusState() != FocusState::Unfocused) {
+                SendMessageW(terminal, WM_SETFOCUS, 0, 0);
+            }
+        });
+        addAccelerator(Windows::System::VirtualKey::T, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_DEFAULT);
+        addAccelerator(Windows::System::VirtualKey::W, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_CLOSE);
+        addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_SELECT_NEXT);
+        addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SELECT_PREVIOUS);
+        addAccelerator(Windows::System::VirtualKey::Number0, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_RESET);
+        addAccelerator(Windows::System::VirtualKey::NumberPad0, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_RESET);
+        addAccelerator(Windows::System::VirtualKey::Add, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_IN);
+        addAccelerator(Windows::System::VirtualKey::Subtract, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_PLUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_IN);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_MINUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
+        attachTerminalInput();
     }
 
     bool ensureNotificationsRegistered() noexcept {
@@ -327,13 +444,7 @@ struct Bridge {
     void enableTitleBar() {
         menu_button.Margin(Thickness{8, 0, 0, 0});
         tabs.Margin(Thickness{56, 0, 8, 0});
-        if (!Microsoft::UI::Windowing::AppWindowTitleBar::IsCustomizationSupported()) return;
         try {
-            app_window = Microsoft::UI::Windowing::AppWindow::GetFromWindowId(Microsoft::UI::GetWindowIdFromWindow(parent));
-            title_bar = app_window.TitleBar();
-            title_bar.ExtendsContentIntoTitleBar(true);
-            custom_title_bar = true;
-            title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
             auto const transparent = box_value(Windows::UI::Color{0, 0, 0, 0})
                 .as<Windows::Foundation::IReference<Windows::UI::Color>>();
             title_bar.ButtonBackgroundColor(transparent);
@@ -341,11 +452,213 @@ struct Bridge {
             updateTitleBarLayout();
         } catch (...) {
             reportCurrentException(L"enable custom title bar");
-            HRESULT result = S_OK;
-            if (!restoreTitleBar(result)) return;
-            app_window = nullptr;
-            title_bar = nullptr;
         }
+    }
+
+    void addAccelerator(Windows::System::VirtualKey key, Windows::System::VirtualKeyModifiers modifiers,
+                        zigonaut_chrome_command_id command) {
+        auto accelerator = Microsoft::UI::Xaml::Input::KeyboardAccelerator{};
+        accelerator.Key(key);
+        accelerator.Modifiers(modifiers);
+        accelerator_revokers.emplace_back(accelerator.Invoked(auto_revoke, [this, command](auto&&, Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& args) {
+            if (terminal_input && terminal_input.FocusState() != FocusState::Unfocused) return;
+            auto argument = uint32_t{};
+            if (command == ZIGONAUT_CHROME_CLOSE && tabs.SelectedIndex() >= 0) {
+                argument = static_cast<uint32_t>(tabs.SelectedIndex());
+            }
+            notify(command, argument);
+            args.Handled(true);
+        }));
+        root.KeyboardAccelerators().Append(accelerator);
+        accelerators.emplace_back(std::move(accelerator));
+    }
+
+    void attachTerminal(HWND child, void* swap_chain) {
+        if (!child || GetParent(child) != parent || !swap_chain) throw hresult_invalid_argument();
+        check_hresult(terminal_surface.as<ISwapChainPanelNative>()->SetSwapChain(
+            static_cast<IDXGISwapChain*>(swap_chain)));
+        terminal = child;
+        layoutTerminal();
+    }
+
+    static LPARAM keyLparam(Windows::UI::Core::CorePhysicalKeyStatus const& status) {
+        return static_cast<LPARAM>(status.RepeatCount) |
+            (static_cast<LPARAM>(status.ScanCode) << 16) |
+            (static_cast<LPARAM>(status.IsExtendedKey) << 24) |
+            (static_cast<LPARAM>(status.WasKeyDown) << 30) |
+            (static_cast<LPARAM>(status.IsKeyReleased) << 31);
+    }
+
+    void forwardTranslatedCharacters(Windows::System::VirtualKey key,
+                                     Windows::UI::Core::CorePhysicalKeyStatus const& status) {
+        translated_characters.clear();
+        BYTE keyboard_state[256]{};
+        if (!GetKeyboardState(keyboard_state)) return;
+        auto const virtual_key = static_cast<UINT>(key);
+        if (virtual_key < std::size(keyboard_state)) keyboard_state[virtual_key] |= 0x80;
+        wchar_t characters[8]{};
+        auto const count = ToUnicodeEx(
+            virtual_key,
+            status.ScanCode,
+            keyboard_state,
+            characters,
+            static_cast<int>(std::size(characters)),
+            0,
+            GetKeyboardLayout(0));
+        if (count <= 0) return;
+        auto const message = status.IsMenuKeyDown ? WM_SYSCHAR : WM_CHAR;
+        translated_characters.assign(characters, characters + count);
+        for (int index = 0; index < count; ++index) {
+            SendMessageW(terminal, message, static_cast<WPARAM>(characters[index]), keyLparam(status));
+        }
+    }
+
+    WPARAM pointerWparam(Microsoft::UI::Input::PointerPointProperties const& properties) const {
+        WPARAM value = 0;
+        if (properties.IsLeftButtonPressed()) value |= MK_LBUTTON;
+        if (properties.IsRightButtonPressed()) value |= MK_RBUTTON;
+        if (properties.IsMiddleButtonPressed()) value |= MK_MBUTTON;
+        if (GetKeyState(VK_SHIFT) < 0) value |= MK_SHIFT;
+        if (GetKeyState(VK_CONTROL) < 0) value |= MK_CONTROL;
+        return value;
+    }
+
+    LPARAM pointerLparam(Microsoft::UI::Input::PointerPoint const& point) const {
+        auto const scale = terminal_surface.XamlRoot().RasterizationScale();
+        auto const position = point.Position();
+        auto const x = static_cast<short>(std::lround(position.X * scale));
+        auto const y = static_cast<short>(std::lround(position.Y * scale));
+        return MAKELPARAM(x, y);
+    }
+
+    void attachTerminalInput() {
+        terminal_key_down_revoker = terminal_input.KeyDown(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const status = args.KeyStatus();
+            if (status.IsMenuKeyDown && (args.Key() == Windows::System::VirtualKey::F4 ||
+                                         args.Key() == Windows::System::VirtualKey::Space)) return;
+            SendMessageW(terminal, status.IsMenuKeyDown ? WM_SYSKEYDOWN : WM_KEYDOWN,
+                         static_cast<WPARAM>(args.Key()), keyLparam(status));
+            forwardTranslatedCharacters(args.Key(), status);
+            args.Handled(true);
+        });
+        terminal_key_up_revoker = terminal_input.KeyUp(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const status = args.KeyStatus();
+            SendMessageW(terminal, status.IsMenuKeyDown ? WM_SYSKEYUP : WM_KEYUP,
+                         static_cast<WPARAM>(args.Key()), keyLparam(status));
+            args.Handled(true);
+        });
+        terminal_character_revoker = terminal_input.CharacterReceived(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::CharacterReceivedRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const status = args.KeyStatus();
+            if (!translated_characters.empty() &&
+                static_cast<uint32_t>(translated_characters.front()) == args.Character()) {
+                translated_characters.erase(translated_characters.begin());
+                args.Handled(true);
+                return;
+            }
+            translated_characters.clear();
+            SendMessageW(terminal, status.IsMenuKeyDown ? WM_SYSCHAR : WM_CHAR,
+                         static_cast<WPARAM>(args.Character()), keyLparam(status));
+            args.Handled(true);
+        });
+        terminal_focus_revoker = terminal_input.GotFocus(auto_revoke, [this](auto&&, auto&&) {
+            if (terminal) SendMessageW(terminal, WM_SETFOCUS, 0, 0);
+        });
+        terminal_blur_revoker = terminal_input.LostFocus(auto_revoke, [this](auto&&, auto&&) {
+            if (terminal) SendMessageW(terminal, WM_KILLFOCUS, 0, 0);
+        });
+        terminal_pressed_revoker = terminal_presenter.PointerPressed(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (!terminal) return;
+            terminal_input.Focus(FocusState::Pointer);
+            auto const point = args.GetCurrentPoint(terminal_surface);
+            auto const kind = point.Properties().PointerUpdateKind();
+            UINT message{};
+            switch (kind) {
+            case Microsoft::UI::Input::PointerUpdateKind::LeftButtonPressed: message = WM_LBUTTONDOWN; break;
+            case Microsoft::UI::Input::PointerUpdateKind::RightButtonPressed: message = WM_RBUTTONDOWN; break;
+            case Microsoft::UI::Input::PointerUpdateKind::MiddleButtonPressed: message = WM_MBUTTONDOWN; break;
+            default: return;
+            }
+            SendMessageW(terminal, message, pointerWparam(point.Properties()), pointerLparam(point));
+            terminal_presenter.CapturePointer(args.Pointer());
+            args.Handled(true);
+        });
+        terminal_released_revoker = terminal_presenter.PointerReleased(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const point = args.GetCurrentPoint(terminal_surface);
+            auto const kind = point.Properties().PointerUpdateKind();
+            UINT message{};
+            switch (kind) {
+            case Microsoft::UI::Input::PointerUpdateKind::LeftButtonReleased: message = WM_LBUTTONUP; break;
+            case Microsoft::UI::Input::PointerUpdateKind::RightButtonReleased: message = WM_RBUTTONUP; break;
+            case Microsoft::UI::Input::PointerUpdateKind::MiddleButtonReleased: message = WM_MBUTTONUP; break;
+            default: return;
+            }
+            SendMessageW(terminal, message, pointerWparam(point.Properties()), pointerLparam(point));
+            terminal_presenter.ReleasePointerCapture(args.Pointer());
+            args.Handled(true);
+        });
+        terminal_moved_revoker = terminal_presenter.PointerMoved(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const point = args.GetCurrentPoint(terminal_surface);
+            SendMessageW(terminal, WM_MOUSEMOVE, pointerWparam(point.Properties()), pointerLparam(point));
+            args.Handled(true);
+        });
+        terminal_wheel_revoker = terminal_presenter.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (!terminal) return;
+            auto const point = args.GetCurrentPoint(terminal_surface);
+            auto const local = pointerLparam(point);
+            POINT screen_point{
+                static_cast<short>(LOWORD(local)),
+                static_cast<short>(HIWORD(local)),
+            };
+            ClientToScreen(terminal, &screen_point);
+            auto const properties = point.Properties();
+            auto const wheel = static_cast<short>(properties.MouseWheelDelta());
+            auto const message = properties.IsHorizontalMouseWheel() ? WM_MOUSEHWHEEL : WM_MOUSEWHEEL;
+            SendMessageW(terminal, message, MAKEWPARAM(pointerWparam(properties), wheel),
+                         MAKELPARAM(static_cast<short>(screen_point.x), static_cast<short>(screen_point.y)));
+            args.Handled(true);
+        });
+        terminal_exited_revoker = terminal_presenter.PointerExited(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (terminal) SendMessageW(terminal, WM_MOUSELEAVE, 0, 0);
+            args.Handled(true);
+        });
+        terminal_canceled_revoker = terminal_presenter.PointerCanceled(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (terminal) SendMessageW(terminal, WM_CANCELMODE, 0, 0);
+            args.Handled(true);
+        });
+        terminal_capture_lost_revoker = terminal_presenter.PointerCaptureLost(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+            if (terminal) SendMessageW(terminal, WM_CAPTURECHANGED, 0, 0);
+        });
+    }
+
+    void activate() {
+        window.Activate();
+        layoutTerminal();
+        focusTerminal();
+    }
+
+    void focusTerminal() {
+        if (terminal_input) terminal_input.Focus(FocusState::Programmatic);
+    }
+
+    void layoutTerminal() {
+        if (!terminal || !IsWindow(terminal) || !terminal_surface || !terminal_surface.XamlRoot()) return;
+        auto const origin = terminal_surface.TransformToVisual(root).TransformPoint({0, 0});
+        auto const scale = terminal_surface.XamlRoot().RasterizationScale();
+        RECT next{
+            static_cast<LONG>(std::lround(origin.X * scale)),
+            static_cast<LONG>(std::lround(origin.Y * scale)),
+            static_cast<LONG>(std::lround((origin.X + terminal_surface.ActualWidth()) * scale)),
+            static_cast<LONG>(std::lround((origin.Y + terminal_surface.ActualHeight()) * scale)),
+        };
+        if (next.right <= next.left || next.bottom <= next.top || EqualRect(&next, &terminal_bounds)) return;
+        terminal_bounds = next;
+        SetWindowPos(terminal, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
     }
 
     void showAboutDialog() {
@@ -416,6 +729,9 @@ struct Bridge {
         about_closed_revoker = about_dialog.Closed(auto_revoke, [this](auto&&, auto&&) {
             about_operation = nullptr;
             about_dialog = nullptr;
+            terminal_bounds = {-1, -1, -1, -1};
+            layoutTerminal();
+            if (terminal_input) terminal_input.Focus(FocusState::Programmatic);
         });
         try {
             about_operation = about_dialog.ShowAsync();
@@ -424,74 +740,22 @@ struct Bridge {
             about_closed_revoker.revoke();
             about_operation = nullptr;
             about_dialog = nullptr;
+            terminal_bounds = {-1, -1, -1, -1};
+            layoutTerminal();
         }
-    }
-
-    bool restoreTitleBar(HRESULT& result) noexcept {
-        if (!custom_title_bar) return true;
-        if (IsWindow(parent)) {
-            if (!cleanup(L"restore system title bar", [&] { title_bar.ResetToDefault(); }, result)) return false;
-        }
-        custom_title_bar = false;
-        title_bar = nullptr;
-        app_window = nullptr;
-        return true;
     }
 
     void updateTitleBarLayout() {
-        if (!custom_title_bar) return;
-        RECT client{};
-        if (IsIconic(parent) || !GetClientRect(parent, &client) || client.right <= 0 || client.bottom <= 0) return;
+        if (!title_bar || !title_bar_root) return;
         auto const dpi = GetDpiForWindow(parent);
-        auto const left_inset = title_bar.LeftInset();
-        auto const right_inset = title_bar.RightInset();
-        auto const client_width = static_cast<int32_t>(client.right);
-        auto const client_height = static_cast<int32_t>(client.bottom);
-        auto const drag_height = std::min(title_bar.Height(), client_height);
-        auto const drag_right = std::max(0, client_width - std::max(right_inset, 0));
+        if (!dpi) return;
         auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
-        menu_button.Margin(Thickness{to_dips(left_inset) + 8, 0, 0, 0});
-        tabs.Margin(Thickness{to_dips(left_inset) + 56, 0, to_dips(right_inset) + 8, 0});
-        std::array<Windows::Graphics::RectInt32, 1> drag_areas{};
-        uint32_t drag_area_count = 0;
-        double occupied_width = tabs.Margin().Left;
-        bool items_measured = true;
-        for (auto const& value : tabs.TabItems()) {
-            auto const width = value.as<TabViewItem>().ActualWidth();
-            if (width <= 0) items_measured = false;
-            occupied_width += width;
-        }
-        if (items_measured) {
-            auto const new_tab_width = new_tab_button.ActualWidth();
-            if (new_tab_width <= 0) items_measured = false;
-            occupied_width += new_tab_width;
-        }
-        if (items_measured) {
-            auto const drag_start = static_cast<int32_t>(occupied_width * dpi / 96.0 + 0.5);
-            if (drag_right > drag_start && drag_height > 0) {
-                drag_areas[drag_area_count] = {drag_start, 0, drag_right - drag_start, drag_height};
-                ++drag_area_count;
-            }
-        }
-        title_bar.SetDragRectangles({drag_areas.data(), drag_area_count});
-    }
-
-    void move(int32_t x, int32_t y, int32_t width, int32_t height) {
-        if (IsIconic(parent)) return;
-        source.SiteBridge().MoveAndResize({x, y, width > 0 ? width : 1, height > 0 ? height : 1});
-        RECT client{};
-        if (GetClientRect(parent, &client)) {
-            auto const dpi = GetDpiForWindow(parent);
-            auto const overlay_width = std::max(1, MulDiv(16, dpi, 96));
-            auto const terminal_top = y + height;
-            scrollbar_source.SiteBridge().MoveAndResize({
-                std::max(x, x + width - overlay_width),
-                terminal_top,
-                std::min(std::max(width, 1), overlay_width),
-                std::max(static_cast<int32_t>(client.bottom) - terminal_top, 1),
-            });
-        }
-        updateTitleBarLayout();
+        auto const left = to_dips(std::max(title_bar.LeftInset(), 0));
+        auto const right = to_dips(std::max(title_bar.RightInset(), 0));
+        auto const menu_margin = Thickness{left + 8, 0, 0, 0};
+        auto const tabs_margin = Thickness{left + 56, 0, right + 8, 0};
+        if (menu_button.Margin() != menu_margin) menu_button.Margin(menu_margin);
+        if (tabs.Margin() != tabs_margin) tabs.Margin(tabs_margin);
     }
 
     void showScrollbar() {
@@ -504,29 +768,33 @@ struct Bridge {
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
         scrollbar_root.RequestedTheme(requested_theme);
-        if (high_contrast) {
+        auto const resources = application.Resources();
+        if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
             root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
-            bottom_border.Background(application.Resources().Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
         } else {
-            auto const color = dark_theme
-                ? Windows::UI::Color{255, 0x2e, 0x2e, 0x2e}
-                : Windows::UI::Color{255, 0xe8, 0xe8, 0xe8};
-            root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{color});
-            auto const border_color = dark_theme
-                ? Windows::UI::Color{0x26, 0xff, 0xff, 0xff}
-                : Windows::UI::Color{0x0f, 0x00, 0x00, 0x00};
-            bottom_border.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{border_color});
+            root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         }
-        source.SystemBackdrop(nullptr);
+        auto const border_color = high_contrast
+            ? resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>()
+            : Microsoft::UI::Xaml::Media::SolidColorBrush{dark_theme
+                ? Windows::UI::Color{0x2e, 0xff, 0xff, 0xff}
+                : Windows::UI::Color{0x18, 0x00, 0x00, 0x00}};
+        bottom_border.Background(border_color);
+        terminal_frame.BorderBrush(border_color);
+        terminal_frame.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{dark_theme
+            ? Windows::UI::Color{0x16, 0xff, 0xff, 0xff}
+            : Windows::UI::Color{0x12, 0x00, 0x00, 0x00}});
+
+        window.SystemBackdrop(nullptr);
         backdrop = nullptr;
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) return;
         if (kind == ZIGONAUT_BACKDROP_ACRYLIC) {
-            source.SystemBackdrop(Microsoft::UI::Xaml::Media::DesktopAcrylicBackdrop{});
+            window.SystemBackdrop(Microsoft::UI::Xaml::Media::DesktopAcrylicBackdrop{});
             return;
         }
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
-        source.SystemBackdrop(backdrop);
+        window.SystemBackdrop(backdrop);
     }
 
     void scheduleScrollbarHide() {
@@ -627,6 +895,7 @@ struct Bridge {
             item.Text(to_hstring(std::string_view{names[index], name_lengths[index]}));
             profile_revokers.emplace_back(item.Click(auto_revoke, [this, index](auto&&, auto&&) {
                 notify(ZIGONAUT_CHROME_NEW_PROFILE, index);
+                focusTerminal();
             }));
             new_tab_menu.Items().Append(item);
             profile_items.emplace_back(std::move(item));
@@ -635,6 +904,7 @@ struct Bridge {
 
     HRESULT close() noexcept {
         if (closed) return S_OK;
+        closed = true;
         notification_activation->active.store(false, std::memory_order_release);
         callback = nullptr;
         context = nullptr;
@@ -665,9 +935,25 @@ struct Bridge {
         scrollbar_wheel_revoker.revoke();
         scrollbar_tick_revoker.revoke();
         if (scrollbar_timer) scrollbar_timer.Stop();
+        layout_revoker.revoke();
+        terminal_loaded_revoker.revoke();
+        terminal_key_down_revoker.revoke();
+        terminal_key_up_revoker.revoke();
+        terminal_character_revoker.revoke();
+        terminal_focus_revoker.revoke();
+        terminal_blur_revoker.revoke();
+        terminal_pressed_revoker.revoke();
+        terminal_released_revoker.revoke();
+        terminal_moved_revoker.revoke();
+        terminal_wheel_revoker.revoke();
+        terminal_exited_revoker.revoke();
+        terminal_canceled_revoker.revoke();
+        terminal_capture_lost_revoker.revoke();
+        for (auto& revoker : accelerator_revokers) revoker.revoke();
+        accelerator_revokers.clear();
+        window_closed_revoker.revoke();
+        window_activated_revoker.revoke();
         handlers_detached = true;
-        if (!restoreTitleBar(result)) return result;
-        closed = true;
         cleanup(L"detach new-tab menu", [&] { new_tab_button.ContextFlyout(nullptr); }, result);
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         profile_items.clear();
@@ -682,23 +968,36 @@ struct Bridge {
         cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
         new_tab_button = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
-        cleanup(L"detach scrollbar content", [&] { scrollbar_source.Content(nullptr); }, result);
         cleanup(L"clear scrollbar content", [&] { scrollbar_root.Children().Clear(); }, result);
+        cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
+        accelerators.clear();
         scrollbar = nullptr;
         scrollbar_root = nullptr;
-        cleanup(L"close scrollbar XAML source", [&] { scrollbar_source.Close(); }, result);
-        scrollbar_source = nullptr;
         scrollbar_timer = nullptr;
-        cleanup(L"detach XAML content", [&] { source.Content(nullptr); }, result);
+        cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
+        cleanup(L"clear title bar root", [&] { title_bar_root.Children().Clear(); }, result);
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
+        cleanup(L"detach terminal swap chain", [&] {
+            if (terminal_surface) terminal_surface.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);
+        }, result);
+        cleanup(L"detach custom title bar", [&] { window.SetTitleBar(nullptr); }, result);
+        cleanup(L"clear system backdrop", [&] { window.SystemBackdrop(nullptr); }, result);
+        cleanup(L"detach window content", [&] { window.Content(nullptr); }, result);
+        terminal = nullptr;
+        terminal_input = nullptr;
+        terminal_surface = nullptr;
+        terminal_presenter = nullptr;
+        terminal_frame = nullptr;
+        content_root = nullptr;
+        title_bar_root = nullptr;
         bottom_border = nullptr;
         menu_button = nullptr;
         tabs = nullptr;
         root = nullptr;
-        cleanup(L"clear system backdrop", [&] { source.SystemBackdrop(nullptr); }, result);
         backdrop = nullptr;
-        cleanup(L"close XAML source", [&] { source.Close(); }, result);
-        source = nullptr;
+        title_bar = nullptr;
+        app_window = nullptr;
+        window = nullptr;
         about_operation = nullptr;
         about_dialog = nullptr;
         application = nullptr;
@@ -706,22 +1005,23 @@ struct Bridge {
     }
 };
 
-bool owner(Bridge* bridge) { return bridge && bridge->thread_id == GetCurrentThreadId(); }
-
 HRESULT validate(Bridge* bridge) {
     if (!bridge) return E_POINTER;
-    return bridge->thread_id == GetCurrentThreadId() ? S_OK : RPC_E_WRONG_THREAD;
+    if (bridge->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+    return bridge->closed ? RO_E_CLOSED : S_OK;
 }
 }
 
-extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome_command callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) noexcept {
-    if (!parent || !callback || (version_length && !version) || (git_hash_length && !git_hash)) return nullptr;
+extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) noexcept {
+    if (!started || !callback || !context || (version_length && !version) || (git_hash_length && !git_hash)) return E_INVALIDARG;
     try {
         init_apartment(apartment_type::single_threaded);
     } catch (...) {
-        reportCurrentException(L"init_apartment");
-        return nullptr;
+        return reportCurrentException(L"init_apartment");
     }
+    auto result = S_OK;
+    auto bootstrapped = false;
+    Bridge* bridge{};
     try {
         auto const bootstrap_result = MddBootstrapInitialize2(
             ::Microsoft::WindowsAppSDK::Release::MajorMinor,
@@ -731,31 +1031,71 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
         if (FAILED(bootstrap_result)) {
             reportFailure(L"MddBootstrapInitialize2", bootstrap_result);
             uninit_apartment();
-            return nullptr;
+            return bootstrap_result;
         }
+        bootstrapped = true;
         try {
-            auto dispatcher = winrt::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
-            auto application = make<ZigonautWinUIBridge::implementation::App>();
-            return new Bridge(
-                parent,
-                callback,
-                context,
-                dispatcher,
-                application,
-                std::string_view{version ? version : "", version_length},
-                std::string_view{git_hash ? git_hash : "", git_hash_length});
-        }
-        catch (...) {
-            reportCurrentException(L"WinUI initialization");
-            MddBootstrapShutdown();
-            uninit_apartment();
-            return nullptr;
+            Application::Start([&](auto&&) {
+                make<ZigonautWinUIBridge::implementation::App>([&] {
+                    try {
+                        bridge = new Bridge(
+                            callback,
+                            context,
+                            Application::Current(),
+                            std::string_view{version ? version : "", version_length},
+                            std::string_view{git_hash ? git_hash : "", git_hash_length});
+                        bridge->terminal_loaded_revoker = bridge->terminal_surface.Loaded(auto_revoke, [&, started, context](auto&&, auto&&) {
+                            bridge->terminal_loaded_revoker.revoke();
+                            try {
+                                bridge->root.UpdateLayout();
+                                if (!started(context, bridge, bridge->parent)) {
+                                    result = E_ABORT;
+                                    bridge->window.Close();
+                                    return;
+                                }
+                                bridge->activate();
+                            } catch (...) {
+                                result = reportCurrentException(L"initialize WinUI window");
+                                if (bridge && bridge->window) {
+                                    try { bridge->window.Close(); } catch (...) { reportCurrentException(L"close failed window"); }
+                                }
+                            }
+                        });
+                        bridge->window.Activate();
+                    } catch (...) {
+                        result = reportCurrentException(L"create WinUI window");
+                        if (bridge && bridge->window) {
+                            try { bridge->window.Close(); } catch (...) { reportCurrentException(L"close failed window"); }
+                        }
+                    }
+                });
+            });
+        } catch (...) {
+            result = reportCurrentException(L"WinUI application");
         }
     } catch (...) {
-        reportCurrentException(L"Windows App SDK initialization");
-        uninit_apartment();
-        return nullptr;
+        result = reportCurrentException(L"Windows App SDK initialization");
     }
+    if (bridge) {
+        auto const close_result = bridge->close();
+        if (SUCCEEDED(result) && FAILED(close_result)) result = close_result;
+        delete bridge;
+    }
+    if (bootstrapped) MddBootstrapShutdown();
+    uninit_apartment();
+    return result;
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_attach_terminal(void* value, HWND terminal, void* swap_chain) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    try { bridge->attachTerminal(terminal, swap_chain); return S_OK; } catch (...) { return reportCurrentException(L"attach terminal"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_focus_terminal(void* value) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    try { bridge->focusTerminal(); return S_OK; } catch (...) { return reportCurrentException(L"focus terminal"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active) noexcept {
@@ -792,40 +1132,9 @@ extern "C" HRESULT __cdecl zigonaut_chrome_show_notification(void* value, uint32
     return bridge->showNotification(session_id, std::string_view(title ? title : "", title_length), std::string_view(body ? body : "", body_length));
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t y, int32_t width, int32_t height) noexcept {
-    auto bridge = static_cast<Bridge*>(value);
-    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    try { bridge->move(x, y, width, height); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
-}
-
 extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
     try { bridge->updateAppearance(backdrop, high_contrast != FALSE, dark_theme != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
-}
-
-extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {
-    auto bridge = static_cast<Bridge*>(value); if (!owner(bridge) || !message) return FALSE;
-    try { return ContentPreTranslateMessage(message) ? TRUE : FALSE; } catch (...) { reportCurrentException(L"pretranslate"); return FALSE; }
-}
-
-extern "C" HRESULT __cdecl zigonaut_chrome_close(void* value) noexcept {
-    auto bridge = static_cast<Bridge*>(value);
-    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    return bridge->close();
-}
-
-extern "C" HRESULT __cdecl zigonaut_chrome_destroy(void* value) noexcept {
-    auto bridge = static_cast<Bridge*>(value);
-    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    auto dispatcher = bridge->dispatcher;
-    auto result = bridge->close();
-    if (!bridge->handlers_detached || bridge->custom_title_bar) return FAILED(result) ? result : E_FAIL;
-    delete bridge;
-    try { dispatcher.ShutdownQueue(); } catch (...) { reportCurrentException(L"ShutdownQueue"); }
-    dispatcher = nullptr;
-    MddBootstrapShutdown();
-    uninit_apartment();
-    return S_OK;
 }

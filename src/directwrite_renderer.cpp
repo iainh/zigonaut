@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
 #include <dwrite.h>
 #include <dwrite_2.h>
+#include <dxgi1_3.h>
 #include <list>
 #include <map>
 #include <memory>
@@ -145,8 +147,12 @@ struct ZigonautTextEngine {
     IDWriteFontCollection* fonts = nullptr;
     IDWriteFontFace* normal_face = nullptr;
     IDWriteTextFormat* formats[4] = {};
-    ID2D1Factory* d2d_factory = nullptr;
-    ID2D1HwndRenderTarget* target = nullptr;
+    ID2D1Factory1* d2d_factory = nullptr;
+    ID3D11Device* d3d_device = nullptr;
+    ID2D1Device* d2d_device = nullptr;
+    ID2D1DeviceContext* target = nullptr;
+    IDXGISwapChain1* swap_chain = nullptr;
+    ID2D1Bitmap1* target_bitmap = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, LayoutEntry> layouts;
     std::list<LayoutKey> layout_recency;
@@ -221,9 +227,110 @@ struct ZigonautTextEngine {
 
         hr = D2D1CreateFactory(
             D2D1_FACTORY_TYPE_SINGLE_THREADED,
-            __uuidof(ID2D1Factory),
+            __uuidof(ID2D1Factory1),
             nullptr,
             reinterpret_cast<void**>(&d2d_factory));
+        if (FAILED(hr)) return hr;
+
+        UINT device_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+#if defined(_DEBUG)
+        device_flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+        constexpr D3D_FEATURE_LEVEL feature_levels[] = {
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+        };
+        D3D_FEATURE_LEVEL feature_level{};
+        hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            device_flags,
+            feature_levels,
+            static_cast<UINT>(std::size(feature_levels)),
+            D3D11_SDK_VERSION,
+            &d3d_device,
+            &feature_level,
+            nullptr);
+#if defined(_DEBUG)
+        if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING) {
+            device_flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+            hr = D3D11CreateDevice(
+                nullptr,
+                D3D_DRIVER_TYPE_HARDWARE,
+                nullptr,
+                device_flags,
+                feature_levels,
+                static_cast<UINT>(std::size(feature_levels)),
+                D3D11_SDK_VERSION,
+                &d3d_device,
+                &feature_level,
+                nullptr);
+        }
+#endif
+        if (FAILED(hr)) {
+            hr = D3D11CreateDevice(
+                nullptr,
+                D3D_DRIVER_TYPE_WARP,
+                nullptr,
+                device_flags,
+                feature_levels,
+                static_cast<UINT>(std::size(feature_levels)),
+                D3D11_SDK_VERSION,
+                &d3d_device,
+                &feature_level,
+                nullptr);
+        }
+        if (FAILED(hr)) return hr;
+
+        IDXGIDevice* dxgi_device = nullptr;
+        hr = d3d_device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+        if (FAILED(hr)) return hr;
+        hr = d2d_factory->CreateDevice(dxgi_device, &d2d_device);
+        if (SUCCEEDED(hr)) {
+            hr = d2d_device->CreateDeviceContext(
+                D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                &target);
+        }
+
+        IDXGIAdapter* adapter = nullptr;
+        IDXGIFactory2* dxgi_factory = nullptr;
+        if (SUCCEEDED(hr)) hr = dxgi_device->GetAdapter(&adapter);
+        if (SUCCEEDED(hr)) hr = adapter->GetParent(IID_PPV_ARGS(&dxgi_factory));
+        if (SUCCEEDED(hr)) {
+            DXGI_SWAP_CHAIN_DESC1 description{};
+            description.Width = 1;
+            description.Height = 1;
+            description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            description.Stereo = FALSE;
+            description.SampleDesc.Count = 1;
+            description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            description.BufferCount = 2;
+            description.Scaling = DXGI_SCALING_STRETCH;
+            description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            description.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            hr = dxgi_factory->CreateSwapChainForComposition(
+                d3d_device,
+                &description,
+                nullptr,
+                &swap_chain);
+        }
+        release(dxgi_factory);
+        release(adapter);
+        release(dxgi_device);
+        if (FAILED(hr)) return hr;
+
+        hr = updateSwapChainTransform();
+        if (FAILED(hr)) return hr;
+
+        target->SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+        target->SetDpi(96.0f, 96.0f);
+        target->SetTextRenderingParams(rendering_params);
+        hr = target->CreateSolidColorBrush(
+            D2D1::ColorF(1.0f, 1.0f, 1.0f),
+            &brush);
         if (FAILED(hr)) return hr;
 
         hr = createFormats();
@@ -266,9 +373,21 @@ struct ZigonautTextEngine {
         return S_OK;
     }
 
-    void discardTarget() {
-        release(brush);
-        release(target);
+    HRESULT updateSwapChainTransform() {
+        if (swap_chain == nullptr || dpi == 0) return E_HANDLE;
+        IDXGISwapChain2* swap_chain2 = nullptr;
+        HRESULT hr = swap_chain->QueryInterface(IID_PPV_ARGS(&swap_chain2));
+        if (FAILED(hr)) return hr;
+        const float scale = 96.0f / static_cast<float>(dpi);
+        DXGI_MATRIX_3X2_F transform{scale, 0.0f, 0.0f, scale, 0.0f, 0.0f};
+        hr = swap_chain2->SetMatrixTransform(&transform);
+        release(swap_chain2);
+        return hr;
+    }
+
+    void discardTargetBitmap() {
+        if (target != nullptr) target->SetTarget(nullptr);
+        release(target_bitmap);
     }
 
     void clearLayouts() {
@@ -339,26 +458,37 @@ struct ZigonautTextEngine {
     }
 
     HRESULT ensureTarget(uint32_t width, uint32_t height) {
-        if (hwnd == nullptr) return E_HANDLE;
-        const D2D1_SIZE_U size = D2D1::SizeU(width, height);
-        HRESULT hr = S_OK;
-        if (target == nullptr) {
-            hr = d2d_factory->CreateHwndRenderTarget(
-                D2D1::RenderTargetProperties(),
-                D2D1::HwndRenderTargetProperties(hwnd, size),
-                &target);
-            if (FAILED(hr)) return hr;
-            target->SetDpi(96.0f, 96.0f);
-            target->SetTextRenderingParams(rendering_params);
-            hr = target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f), &brush);
-            if (FAILED(hr)) {
-                discardTarget();
-                return hr;
-            }
-        } else if (target->GetPixelSize().width != width ||
-                   target->GetPixelSize().height != height) {
-            hr = target->Resize(size);
+        if (target == nullptr || swap_chain == nullptr) return E_HANDLE;
+        if (target_bitmap != nullptr &&
+            target_bitmap->GetPixelSize().width == width &&
+            target_bitmap->GetPixelSize().height == height) return S_OK;
+
+        discardTargetBitmap();
+        HRESULT hr = swap_chain->ResizeBuffers(
+            2,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            0);
+        if (FAILED(hr)) return hr;
+
+        IDXGISurface* surface = nullptr;
+        hr = swap_chain->GetBuffer(0, IID_PPV_ARGS(&surface));
+        if (SUCCEEDED(hr)) {
+            auto const properties = D2D1::BitmapProperties1(
+                D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                D2D1::PixelFormat(
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D2D1_ALPHA_MODE_IGNORE),
+                96.0f,
+                96.0f);
+            hr = target->CreateBitmapFromDxgiSurface(
+                surface,
+                &properties,
+                &target_bitmap);
         }
+        release(surface);
+        if (SUCCEEDED(hr)) target->SetTarget(target_bitmap);
         return hr;
     }
 
@@ -776,7 +906,12 @@ private:
 
 ZigonautTextEngine::~ZigonautTextEngine() {
     delete grid_renderer;
-    discardTarget();
+    discardTargetBitmap();
+    release(brush);
+    release(target);
+    release(d2d_device);
+    release(swap_chain);
+    release(d3d_device);
     release(d2d_factory);
     clearLayouts();
     for (auto*& format : formats) release(format);
@@ -957,7 +1092,9 @@ extern "C" HRESULT zigonaut_text_engine_set_dpi(
     uint32_t dpi) {
     if (engine == nullptr || dpi == 0) return E_INVALIDARG;
     engine->dpi = dpi;
-    const HRESULT hr = engine->createFormats();
+    HRESULT hr = engine->updateSwapChainTransform();
+    if (FAILED(hr)) return hr;
+    hr = engine->createFormats();
     if (FAILED(hr)) return hr;
     engine->updateMetrics();
     return engine->refreshRenderingParams();
@@ -979,9 +1116,13 @@ extern "C" HRESULT zigonaut_text_engine_set_window(
     ZigonautTextEngine* engine,
     uintptr_t hwnd) {
     if (engine == nullptr || hwnd == 0) return E_INVALIDARG;
-    engine->discardTarget();
     engine->hwnd = reinterpret_cast<HWND>(hwnd);
     return engine->refreshRenderingParams();
+}
+
+extern "C" void* zigonaut_text_engine_get_swap_chain(
+    ZigonautTextEngine* engine) {
+    return engine == nullptr ? nullptr : engine->swap_chain;
 }
 
 extern "C" HRESULT zigonaut_text_engine_begin_frame(
@@ -1080,8 +1221,9 @@ extern "C" void zigonaut_text_engine_draw_cursor(
 extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     if (engine == nullptr || engine->target == nullptr) return E_INVALIDARG;
     const HRESULT hr = engine->target->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) engine->discardTarget();
-    return hr;
+    if (hr == D2DERR_RECREATE_TARGET) engine->discardTargetBitmap();
+    if (FAILED(hr)) return hr;
+    return engine->swap_chain->Present(1, 0);
 }
 
 extern "C" void zigonaut_fit_cluster_advances(

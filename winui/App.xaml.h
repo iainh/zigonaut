@@ -1,19 +1,18 @@
 #pragma once
 
 #include "App.xaml.g.h"
+#include <functional>
 
 namespace winrt::ZigonautWinUIBridge::implementation
 {
     struct App : AppT<App>
     {
-        App()
-            : xaml_manager(Microsoft::UI::Xaml::Hosting::WindowsXamlManager::InitializeForCurrentThread())
-        {
-        }
+        App() = default;
+        explicit App(std::function<void()> launch);
 
         void OnLaunched(Microsoft::UI::Xaml::LaunchActivatedEventArgs const&);
 
     private:
-        Microsoft::UI::Xaml::Hosting::WindowsXamlManager xaml_manager{ nullptr };
+        std::function<void()> launch_;
     };
 }

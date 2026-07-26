@@ -49,6 +49,8 @@ ZigonautCellMetrics zigonaut_text_engine_get_cell_metrics(
 
 HRESULT zigonaut_text_engine_set_window(ZigonautTextEngine* engine, uintptr_t hwnd);
 
+void* zigonaut_text_engine_get_swap_chain(ZigonautTextEngine* engine);
+
 HRESULT zigonaut_text_engine_begin_frame(
     ZigonautTextEngine* engine,
     uint32_t width,

@@ -10,8 +10,6 @@ const win32 = @import("win32.zig");
 const win = win32.c;
 const log = std.log.scoped(.app);
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautWindow");
-const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut");
 const open_operation = std.unicode.utf8ToUtf16LeStringLiteral("open");
 const personalize_key = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
 const apps_use_light_theme = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
@@ -22,9 +20,10 @@ const shell_exited_message = win.WM_APP + 3;
 const scrollbar_changed_message = win.WM_APP + 4;
 const progress_changed_message = win.WM_APP + 5;
 const notification_changed_message = win.WM_APP + 6;
-const winui_terminal_top: i32 = 48;
+const renderer_failed_message = win.WM_APP + 7;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
+const window_subclass_id: win.UINT_PTR = 1;
 
 const Application = struct {
     loaded: config.Loaded,
@@ -37,7 +36,7 @@ const Application = struct {
     dark_theme: bool = false,
     high_contrast: bool = false,
     zoomed_font_size: u16,
-    consumed_zoom_key: ?win.WPARAM = null,
+    window_subclassed: bool = false,
     taskbar_button_created_message: win.UINT = 0,
     taskbar_ready: bool = false,
     terminal_ready: bool = false,
@@ -59,7 +58,6 @@ const Application = struct {
     }
 
     fn deinit(self: *Application) void {
-        if (self.chrome) |*bridge| _ = bridge.deinit();
         self.model.deinit();
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
@@ -67,9 +65,9 @@ const Application = struct {
         self.loaded.deinit();
     }
 
-    const handleShortcut = handleShortcutImpl;
     const windowMessage = windowMessageImpl;
-    const layoutTerminalView = layoutTerminalViewImpl;
+    const initializeWindow = initializeWindowImpl;
+    const shutdownWindow = shutdownWindowImpl;
     const syncChrome = syncChromeImpl;
     const syncScrollbar = syncScrollbarImpl;
     const syncTaskbarProgress = syncTaskbarProgressImpl;
@@ -80,6 +78,8 @@ const Application = struct {
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
     const setZoomedFontSize = setZoomedFontSizeImpl;
+    const attachTerminalRenderer = attachTerminalRendererImpl;
+    const recoverTerminalRenderer = recoverTerminalRendererImpl;
 };
 
 pub fn main() !void {
@@ -92,7 +92,7 @@ pub fn main() !void {
     application.* = Application.init(loaded, themes);
     defer {
         // If synchronous window destruction fails, retain the owner until
-        // process exit rather than leave GWLP_USERDATA pointing at freed memory.
+        // process exit rather than leave a subclass callback pointing at freed memory.
         if (application.hwnd == null) {
             application.deinit();
             std.heap.page_allocator.destroy(application);
@@ -102,160 +102,108 @@ pub fn main() !void {
     const instance = win.GetModuleHandleW(null);
     const arrow_cursor: win.LPCWSTR = @ptrFromInt(32512);
     const cursor = win.LoadCursorW(null, arrow_cursor);
-    const icon_resource = win32.handleFromInt(win.LPCWSTR, 1);
-    const large_image = win.LoadImageW(
-        instance,
-        icon_resource,
-        win.IMAGE_ICON,
-        win.GetSystemMetrics(win.SM_CXICON),
-        win.GetSystemMetrics(win.SM_CYICON),
-        win.LR_SHARED,
-    );
-    const large_icon: win.HICON = if (large_image) |handle|
-        win32.handleFromInt(win.HICON, @intFromPtr(handle))
-    else
-        null;
-    const small_image = win.LoadImageW(
-        instance,
-        icon_resource,
-        win.IMAGE_ICON,
-        win.GetSystemMetrics(win.SM_CXSMICON),
-        win.GetSystemMetrics(win.SM_CYSMICON),
-        win.LR_SHARED,
-    );
-    const small_icon: win.HICON = if (small_image) |handle|
-        win32.handleFromInt(win.HICON, @intFromPtr(handle))
-    else
-        null;
     try TerminalView.registerClass(instance, cursor);
-    const window_class = win.WNDCLASSEXW{
-        .cbSize = @sizeOf(win.WNDCLASSEXW),
-        .style = win.CS_HREDRAW | win.CS_VREDRAW,
-        .lpfnWndProc = windowProc,
-        .cbClsExtra = 0,
-        .cbWndExtra = 0,
-        .hInstance = instance,
-        .hIcon = large_icon,
-        .hCursor = cursor,
-        .hbrBackground = null,
-        .lpszMenuName = null,
-        .lpszClassName = class_name,
-        .hIconSm = small_icon,
-    };
-    if (win.RegisterClassExW(&window_class) == 0) return error.RegisterWindowClassFailed;
-
-    _ = win.CreateWindowExW(
-        win.WS_EX_CONTROLPARENT,
-        class_name,
-        window_title,
-        win.WS_OVERLAPPEDWINDOW | win.WS_VISIBLE,
-        win.CW_USEDEFAULT,
-        win.CW_USEDEFAULT,
-        1100,
-        700,
-        null,
-        null,
-        instance,
+    application.chrome = chrome.Bridge.load() orelse return error.LoadWinUIFailed;
+    const result = application.chrome.?.run(
+        windowStarted,
+        chromeCommand,
         application,
-    ) orelse return error.CreateWindowFailed;
-
-    application.updateTheme();
-
-    var message: win.MSG = undefined;
-    while (true) {
-        const status = win.GetMessageW(&message, null, 0, 0);
-        if (status <= 0) {
-            if (application.hwnd) |hwnd| {
-                if (win.DestroyWindow(hwnd) == 0) return error.DestroyWindowFailed;
-            }
-            if (status < 0) return error.GetMessageFailed;
-            break;
-        }
-        if (application.handleShortcut(&message)) continue;
-        if (application.chrome) |*bridge| if (bridge.pretranslate(&message)) continue;
-        _ = win.TranslateMessage(&message);
-        _ = win.DispatchMessageW(&message);
+        build_options.version,
+        build_options.git_hash,
+    );
+    if (!chrome.succeeded(result)) {
+        std.debug.print("WinUI window exited with HRESULT 0x{x}\n", .{@as(u32, @bitCast(result))});
+        return error.RunWinUIFailed;
     }
 }
 
-fn handleShortcutImpl(self: *Application, message: *const win.MSG) bool {
-    if (message.message == win.WM_KEYUP or message.message == win.WM_SYSKEYUP) {
-        if (self.consumed_zoom_key == message.wParam) {
-            self.consumed_zoom_key = null;
-            return true;
-        }
-        return false;
+fn windowStarted(context: ?*anyopaque, native_bridge: ?*anyopaque, hwnd: win.HWND) callconv(.c) win.BOOL {
+    const self: *Application = @ptrCast(@alignCast(context orelse return 0));
+    const bridge = if (self.chrome) |*value| value else return 0;
+    if (!bridge.setInstance(native_bridge)) return 0;
+    self.hwnd = hwnd;
+    if (win.SetWindowSubclass(hwnd, windowSubclassProc, window_subclass_id, @intFromPtr(self)) == 0) {
+        self.hwnd = null;
+        return 0;
     }
-    if (message.message != win.WM_KEYDOWN and message.message != win.WM_SYSKEYDOWN) return false;
-    const control = win.GetKeyState(win.VK_CONTROL) < 0;
-    const alt = win.GetKeyState(win.VK_MENU) < 0;
-    const shift = win.GetKeyState(win.VK_SHIFT) < 0;
-    const repeated = (message.lParam & (@as(win.LPARAM, 1) << 30)) != 0;
-    const hwnd = self.hwnd.?;
-    if (!control or alt) return false;
-
-    const key = message.wParam;
-    const zoom_delta: i8 = if (key == win.VK_ADD or key == win.VK_OEM_PLUS)
-        1
-    else if (key == win.VK_SUBTRACT or key == win.VK_OEM_MINUS)
-        -1
-    else
-        0;
-    if (zoom_delta != 0) {
-        self.consumed_zoom_key = key;
-        if (!repeated) self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, zoom_delta));
-        return true;
-    }
-    if (key == '0' or key == win.VK_NUMPAD0) {
-        self.consumed_zoom_key = key;
-        if (!repeated) self.setZoomedFontSize(self.settings.font_size);
-        return true;
-    }
-
-    if (shift and message.wParam == 'T') {
-        if (!repeated) self.addDefaultSession() catch |err| log.err("unable to open default session: {}", .{err});
-        return true;
-    }
-    if (shift and message.wParam == 'W') {
-        if (!repeated) {
-            if (self.model.active) |active| sendChromeCommand(hwnd, .close, @intCast(active));
-        }
-        return true;
-    }
-    if (message.wParam != win.VK_TAB) return false;
-
-    const count = self.model.sessions.items.len;
-    const active = self.model.active orelse return true;
-    if (count > 1) {
-        const next = if (shift) (active + count - 1) % count else (active + 1) % count;
-        sendChromeCommand(hwnd, .select, @intCast(next));
-    }
-    return true;
+    self.window_subclassed = true;
+    win.DragAcceptFiles(hwnd, 1);
+    setWindowIcons(hwnd);
+    self.initializeWindow() catch |err| {
+        log.err("unable to initialize application window: {}", .{err});
+        return 0;
+    };
+    return 1;
 }
 
-fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
-    var application: ?*Application = null;
-    if (message == win.WM_NCCREATE) {
-        const create: *const win.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
-        application = @ptrCast(@alignCast(create.lpCreateParams orelse return 0));
-        application.?.hwnd = hwnd;
-        const userdata: win.LONG_PTR = @bitCast(@intFromPtr(application.?));
-        _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, userdata);
-        if (win.GetWindowLongPtrW(hwnd, win.GWLP_USERDATA) != userdata) {
-            application.?.hwnd = null;
-            return 0;
-        }
-    } else {
-        const value = win.GetWindowLongPtrW(hwnd, win.GWLP_USERDATA);
-        if (value != 0) application = @ptrFromInt(@as(usize, @bitCast(value)));
-    }
-    const self = application orelse return win.DefWindowProcW(hwnd, message, wparam, lparam);
+fn initializeWindowImpl(self: *Application) !void {
+    const hwnd = self.hwnd orelse return error.WindowUnavailable;
+    self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
+    const dpi = win.GetDpiForWindow(hwnd);
+    const font = createFontFor(self.settings, dpi);
+    if (font == null) return error.CreateFontFailed;
+    self.font = font;
+    self.dpi = dpi;
+    self.terminal_view = TerminalView.init(
+        hwnd,
+        &self.model,
+        font,
+        self.settings.font_family,
+        self.settings.font_size,
+        dpi,
+        self.settings.padding_horizontal,
+        self.settings.padding_vertical,
+        self.settings.background_opacity,
+        titles_changed_message,
+        shell_exited_message,
+        scrollbar_changed_message,
+        progress_changed_message,
+        notification_changed_message,
+        renderer_failed_message,
+        chrome_message,
+    );
+    try self.terminal_view.create(hwnd, win.GetModuleHandleW(null));
+    self.terminal_ready = true;
+    if (!self.attachTerminalRenderer()) return error.AttachTerminalFailed;
+    try self.syncProfiles(&self.settings);
+    try self.addDefaultSession();
+    self.updateTheme();
+}
+
+fn setWindowIcons(hwnd: win.HWND) void {
+    const instance = win.GetModuleHandleW(null);
+    const resource = win32.handleFromInt(win.LPCWSTR, 1);
+    const large = win.LoadImageW(instance, resource, win.IMAGE_ICON, win.GetSystemMetrics(win.SM_CXICON), win.GetSystemMetrics(win.SM_CYICON), win.LR_SHARED);
+    const small = win.LoadImageW(instance, resource, win.IMAGE_ICON, win.GetSystemMetrics(win.SM_CXSMICON), win.GetSystemMetrics(win.SM_CYSMICON), win.LR_SHARED);
+    if (large) |icon| _ = win.SendMessageW(hwnd, win.WM_SETICON, win.ICON_BIG, @intCast(@intFromPtr(icon)));
+    if (small) |icon| _ = win.SendMessageW(hwnd, win.WM_SETICON, win.ICON_SMALL, @intCast(@intFromPtr(icon)));
+}
+
+fn windowSubclassProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM, _: win.UINT_PTR, reference: win.DWORD_PTR) callconv(.c) win.LRESULT {
+    const self: *Application = @ptrFromInt(reference);
     const result = self.windowMessage(message, wparam, lparam);
     if (message == win.WM_NCDESTROY) {
-        _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, 0);
+        _ = win.RemoveWindowSubclass(hwnd, windowSubclassProc, window_subclass_id);
+        self.window_subclassed = false;
         self.hwnd = null;
+        if (self.chrome) |*bridge| bridge.detach();
     }
     return result;
+}
+
+fn shutdownWindowImpl(self: *Application) void {
+    const hwnd = self.hwnd orelse return;
+    if (self.terminal_ready) self.terminal_view.resetInteraction();
+    _ = win.KillTimer(hwnd, taskbar_progress_timer);
+    if (self.taskbar_ready) {
+        if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
+    }
+    if (self.window_subclassed) {
+        _ = win.RemoveWindowSubclass(hwnd, windowSubclassProc, window_subclass_id);
+        self.window_subclassed = false;
+    }
+    self.hwnd = null;
+    if (self.chrome) |*bridge| bridge.detach();
 }
 
 fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) win.LRESULT {
@@ -266,51 +214,6 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         return 0;
     }
     switch (message) {
-        win.WM_CREATE => {
-            self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
-            const dpi = win.GetDpiForWindow(hwnd);
-            const font = createFontFor(self.settings, dpi);
-            self.font = font;
-            self.dpi = dpi;
-            self.terminal_view = TerminalView.init(
-                hwnd,
-                &self.model,
-                font,
-                self.settings.font_family,
-                self.settings.font_size,
-                dpi,
-                self.settings.padding_horizontal,
-                self.settings.padding_vertical,
-                self.settings.background_opacity,
-                titles_changed_message,
-                shell_exited_message,
-                scrollbar_changed_message,
-                progress_changed_message,
-                notification_changed_message,
-            );
-            self.terminal_view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
-                log.err("unable to create terminal view: {}", .{err});
-                return -1;
-            };
-            self.terminal_ready = true;
-            self.chrome = chrome.Bridge.load(
-                hwnd,
-                chromeCommand,
-                self,
-                build_options.version,
-                build_options.git_hash,
-            ) orelse return -1;
-            self.syncProfiles(&self.settings) catch |err| {
-                log.err("unable to populate profile menu: {}", .{err});
-                return -1;
-            };
-            self.layoutTerminalView();
-            self.addDefaultSession() catch |err| {
-                log.err("unable to create initial session: {}", .{err});
-                return -1;
-            };
-            return 0;
-        },
         chrome_message => {
             const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
@@ -363,9 +266,30 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.syncChrome();
                     _ = win.ShowWindow(hwnd, win.SW_RESTORE);
                     _ = win.SetForegroundWindow(hwnd);
-                    _ = win.SetFocus(self.terminal_view.hwnd);
+                    if (self.chrome) |*bridge| _ = bridge.focusTerminal();
                     return 0;
                 },
+                .zoom_in => {
+                    self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, 1));
+                    return 0;
+                },
+                .zoom_out => {
+                    self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, -1));
+                    return 0;
+                },
+                .zoom_reset => {
+                    self.setZoomedFontSize(self.settings.font_size);
+                    return 0;
+                },
+                .select_next, .select_previous => {
+                    const count = self.model.sessions.items.len;
+                    const active = self.model.active orelse return 0;
+                    if (count <= 1) return 0;
+                    self.terminal_view.resetInteraction();
+                    const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
+                    self.model.activate(next);
+                },
+                .shutdown => return 0,
             }
             self.terminal_view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
@@ -401,82 +325,44 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             self.showPendingNotifications();
             return 0;
         },
+        renderer_failed_message => {
+            self.recoverTerminalRenderer();
+            return 0;
+        },
         win.WM_TIMER => {
             if (wparam == taskbar_progress_timer) {
                 self.syncTaskbarProgress();
                 return 0;
             }
-            return win.DefWindowProcW(hwnd, message, wparam, lparam);
-        },
-        win.WM_SIZE => {
-            self.layoutTerminalView();
-            return 0;
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_DPICHANGED => {
-            const suggested: *const win.RECT = @ptrFromInt(@as(usize, @bitCast(lparam)));
-            _ = win.SetWindowPos(
-                hwnd,
-                null,
-                suggested.left,
-                suggested.top,
-                suggested.right - suggested.left,
-                suggested.bottom - suggested.top,
-                win.SWP_NOACTIVATE | win.SWP_NOZORDER,
-            );
             const new_dpi: u32 = @intCast(wparam & 0xffff);
             const new_font = createFont(self.settings.font_family, self.zoomed_font_size, new_dpi);
-            self.terminal_view.updateFont(new_font, new_dpi);
-            _ = win.DeleteObject(self.font);
-            self.font = new_font;
-            self.dpi = new_dpi;
-            self.layoutTerminalView();
-            _ = win.InvalidateRect(hwnd, null, 0);
-            return 0;
+            if (new_font != null) {
+                self.terminal_view.updateFont(new_font, new_dpi);
+                _ = win.DeleteObject(self.font);
+                self.font = new_font;
+                self.dpi = new_dpi;
+                _ = win.InvalidateRect(hwnd, null, 0);
+            }
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_SETTINGCHANGE => {
             self.terminal_view.refreshTextRenderingSettings();
             self.updateTheme();
-            return 0;
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
+        },
+        win.WM_DROPFILES => {
+            if (self.terminal_ready) return win.SendMessageW(self.terminal_view.hwnd, message, wparam, lparam);
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
             self.updateTheme();
-            return 0;
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
-        win.WM_CLOSE => {
-            if (self.terminal_ready) self.terminal_view.resetInteraction();
-            _ = win.KillTimer(hwnd, taskbar_progress_timer);
-            if (self.taskbar_ready) {
-                if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
-            }
-            if (self.chrome) |*bridge| bridge.close();
-            return win.DefWindowProcW(hwnd, message, wparam, lparam);
-        },
-        win.WM_ERASEBKGND => return 1,
-        win.WM_DESTROY => {
-            win.PostQuitMessage(0);
-            return 0;
-        },
-        else => return win.DefWindowProcW(hwnd, message, wparam, lparam),
+        else => return win.DefSubclassProc(hwnd, message, wparam, lparam),
     }
-}
-
-fn layoutTerminalViewImpl(self: *Application) void {
-    const hwnd = self.hwnd orelse return;
-    var client: win.RECT = undefined;
-    if (win.GetClientRect(hwnd, &client) == 0) return;
-    const dpi = self.dpi;
-    const terminal_top = scaled(winui_terminal_top, dpi);
-    const bridge = if (self.chrome) |*value| value else return;
-    if (!bridge.move(0, 0, client.right, terminal_top)) {
-        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-        return;
-    }
-    self.terminal_view.move(
-        0,
-        terminal_top,
-        client.right,
-        client.bottom - terminal_top,
-    );
 }
 
 fn syncChromeImpl(self: *Application) void {
@@ -563,8 +449,12 @@ fn showPendingNotificationsImpl(self: *Application) void {
 
 fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c) void {
     const self: *Application = @ptrCast(@alignCast(context orelse return));
-    const hwnd = self.hwnd orelse return;
     const typed = chrome.commandFromInt(command) orelse return;
+    if (typed == .shutdown) {
+        self.shutdownWindow();
+        return;
+    }
+    const hwnd = self.hwnd orelse return;
     sendChromeCommand(hwnd, typed, argument);
 }
 
@@ -651,6 +541,10 @@ fn reloadSettingsImpl(self: *Application) !void {
     try self.syncProfiles(&next);
     if (new_font != null) {
         try self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi);
+        if (!self.attachTerminalRenderer()) {
+            log.err("unable to attach the reloaded terminal renderer", .{});
+            if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+        }
         self.zoomed_font_size = next.font_size;
     }
 
@@ -667,10 +561,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     }
     self.terminal_view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
     self.updateTheme();
-    if (new_font != null) {
-        _ = win.DeleteObject(old_font);
-        self.layoutTerminalView();
-    }
+    if (new_font != null) _ = win.DeleteObject(old_font);
     self.terminal_view.invalidate();
 }
 
@@ -699,10 +590,37 @@ fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
         _ = win.DeleteObject(new_font);
         return;
     };
+    if (!self.attachTerminalRenderer()) {
+        log.err("unable to attach the zoomed terminal renderer", .{});
+        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+    }
     _ = win.DeleteObject(self.font);
     self.font = new_font;
     self.zoomed_font_size = size;
-    self.layoutTerminalView();
+}
+
+fn attachTerminalRendererImpl(self: *Application) bool {
+    const bridge = if (self.chrome) |*value| value else return false;
+    return bridge.attachTerminal(self.terminal_view.hwnd, self.terminal_view.swapChain());
+}
+
+fn recoverTerminalRendererImpl(self: *Application) void {
+    const new_font = createFont(self.settings.font_family, self.zoomed_font_size, self.dpi);
+    if (new_font == null) {
+        log.err("unable to recreate the terminal font after a renderer failure", .{});
+        return;
+    }
+    self.terminal_view.reloadFont(new_font, self.settings.font_family, self.zoomed_font_size, self.dpi) catch |err| {
+        _ = win.DeleteObject(new_font);
+        log.err("unable to recover the terminal renderer: {}", .{err});
+        return;
+    };
+    if (!self.attachTerminalRenderer()) {
+        log.err("unable to reattach the recovered terminal renderer", .{});
+        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+    }
+    _ = win.DeleteObject(self.font);
+    self.font = new_font;
 }
 
 fn appsUseDarkTheme() bool {

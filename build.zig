@@ -59,9 +59,12 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
     exe.linkSystemLibrary("user32");
+    exe.linkSystemLibrary("comctl32");
     exe.linkSystemLibrary("gdi32");
     exe.linkSystemLibrary("d2d1");
+    exe.linkSystemLibrary("d3d11");
     exe.linkSystemLibrary("dwrite");
+    exe.linkSystemLibrary("dxgi");
     exe.linkSystemLibrary("dwmapi");
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("kernel32");
@@ -119,7 +122,9 @@ pub fn build(b: *std.Build) void {
     tests.linkSystemLibrary("user32");
     tests.linkSystemLibrary("gdi32");
     tests.linkSystemLibrary("d2d1");
+    tests.linkSystemLibrary("d3d11");
     tests.linkSystemLibrary("dwrite");
+    tests.linkSystemLibrary("dxgi");
     tests.linkSystemLibrary("kernel32");
     configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
@@ -144,7 +149,9 @@ pub fn build(b: *std.Build) void {
     benchmark.linkSystemLibrary("user32");
     benchmark.linkSystemLibrary("gdi32");
     benchmark.linkSystemLibrary("d2d1");
+    benchmark.linkSystemLibrary("d3d11");
     benchmark.linkSystemLibrary("dwrite");
+    benchmark.linkSystemLibrary("dxgi");
     benchmark.linkSystemLibrary("kernel32");
     configureGhostty(benchmark.root_module, ghostty);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");

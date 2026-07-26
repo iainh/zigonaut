@@ -4,6 +4,7 @@ pub const c = @cImport({
     @cDefine("_WIN32_WINNT", "0x0A00");
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cInclude("windows.h");
+    @cInclude("commctrl.h");
     @cInclude("dwmapi.h");
     @cInclude("shellapi.h");
     @cInclude("bridge.h");

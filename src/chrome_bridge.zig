@@ -14,6 +14,12 @@ pub const Command = enum(u32) {
     scroll_wheel = win.ZIGONAUT_CHROME_SCROLL_WHEEL,
     notification_activate = win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE,
     new_default = win.ZIGONAUT_CHROME_NEW_DEFAULT,
+    zoom_in = win.ZIGONAUT_CHROME_ZOOM_IN,
+    zoom_out = win.ZIGONAUT_CHROME_ZOOM_OUT,
+    zoom_reset = win.ZIGONAUT_CHROME_ZOOM_RESET,
+    select_next = win.ZIGONAUT_CHROME_SELECT_NEXT,
+    select_previous = win.ZIGONAUT_CHROME_SELECT_PREVIOUS,
+    shutdown = win.ZIGONAUT_CHROME_SHUTDOWN,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -21,42 +27,34 @@ pub fn commandFromInt(value: u32) ?Command {
 }
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
-const Initialize = *const fn (win.HWND, Callback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) ?*anyopaque;
+pub const Started = *const fn (?*anyopaque, ?*anyopaque, win.HWND) callconv(.c) win.BOOL;
+const Run = *const fn (Started, Callback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
+const AttachTerminal = *const fn (?*anyopaque, win.HWND, ?*anyopaque) callconv(.c) win.HRESULT;
+const FocusTerminal = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
 const UpdateProfiles = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32) callconv(.c) win.HRESULT;
 const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
-const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
 const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
-const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
-const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
-const Destroy = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 
-/// UI-thread-owned WinUI bridge. Every method must run on the thread that called
-/// `load`. Successful `deinit` destroys the instance but deliberately keeps the
-/// DLL loaded because WinUI may retain delegate code until process teardown.
+/// UI-thread-owned full WinUI window. `run` owns the WinUI application pump and
+/// blocks until its Window closes. The DLL deliberately stays loaded because
+/// WinUI can retain delegate code until process teardown.
 pub const Bridge = struct {
     module: win.HMODULE,
-    instance: ?*anyopaque,
+    instance: ?*anyopaque = null,
+    run_fn: Run,
+    attach_terminal_fn: AttachTerminal,
+    focus_terminal_fn: FocusTerminal,
     update_fn: Update,
     update_profiles_fn: UpdateProfiles,
     update_scrollbar_fn: UpdateScrollbar,
     update_taskbar_progress_fn: UpdateTaskbarProgress,
     show_notification_fn: ShowNotification,
-    move_fn: Move,
     update_appearance_fn: UpdateAppearance,
-    pretranslate_fn: Pretranslate,
-    close_fn: Close,
-    destroy_fn: Destroy,
 
-    pub fn load(
-        parent: win.HWND,
-        callback: Callback,
-        context: ?*anyopaque,
-        version: []const u8,
-        git_hash: []const u8,
-    ) ?Bridge {
+    pub fn load() ?Bridge {
         var path: [win.MAX_PATH]u16 = undefined;
         const path_length = win.GetModuleFileNameW(null, &path, path.len);
         if (path_length == 0 or path_length >= path.len) return null;
@@ -74,28 +72,59 @@ pub const Bridge = struct {
         defer {
             if (!loaded) _ = win.FreeLibrary(module);
         }
-        const initialize: Initialize = symbol(Initialize, module, "zigonaut_chrome_initialize") orelse return null;
+        const run_fn = symbol(Run, module, "zigonaut_window_run") orelse return null;
+        const attach_terminal_fn = symbol(AttachTerminal, module, "zigonaut_chrome_attach_terminal") orelse return null;
+        const focus_terminal_fn = symbol(FocusTerminal, module, "zigonaut_chrome_focus_terminal") orelse return null;
         const update_fn = symbol(Update, module, "zigonaut_chrome_update") orelse return null;
         const update_profiles_fn = symbol(UpdateProfiles, module, "zigonaut_chrome_update_profiles") orelse return null;
         const update_scrollbar_fn = symbol(UpdateScrollbar, module, "zigonaut_chrome_update_scrollbar") orelse return null;
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
-        const move_fn = symbol(Move, module, "zigonaut_chrome_move") orelse return null;
         const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
-        const pretranslate_fn = symbol(Pretranslate, module, "zigonaut_chrome_pretranslate") orelse return null;
-        const close_fn = symbol(Close, module, "zigonaut_chrome_close") orelse return null;
-        const destroy_fn = symbol(Destroy, module, "zigonaut_chrome_destroy") orelse return null;
-        const instance = initialize(
-            parent,
+        loaded = true;
+        return .{
+            .module = module,
+            .run_fn = run_fn,
+            .attach_terminal_fn = attach_terminal_fn,
+            .focus_terminal_fn = focus_terminal_fn,
+            .update_fn = update_fn,
+            .update_profiles_fn = update_profiles_fn,
+            .update_scrollbar_fn = update_scrollbar_fn,
+            .update_taskbar_progress_fn = update_taskbar_progress_fn,
+            .show_notification_fn = show_notification_fn,
+            .update_appearance_fn = update_appearance_fn,
+        };
+    }
+
+    pub fn run(self: *Bridge, started: Started, callback: Callback, context: ?*anyopaque, version: []const u8, git_hash: []const u8) win.HRESULT {
+        if (self.instance != null) return @bitCast(@as(u32, 0x8000ffff));
+        const result = self.run_fn(
+            started,
             callback,
             context,
             version.ptr,
             @intCast(version.len),
             git_hash.ptr,
             @intCast(git_hash.len),
-        ) orelse return null;
-        loaded = true;
-        return .{ .module = module, .instance = instance, .update_fn = update_fn, .update_profiles_fn = update_profiles_fn, .update_scrollbar_fn = update_scrollbar_fn, .update_taskbar_progress_fn = update_taskbar_progress_fn, .show_notification_fn = show_notification_fn, .move_fn = move_fn, .update_appearance_fn = update_appearance_fn, .pretranslate_fn = pretranslate_fn, .close_fn = close_fn, .destroy_fn = destroy_fn };
+        );
+        self.instance = null;
+        return result;
+    }
+
+    pub fn setInstance(self: *Bridge, instance: ?*anyopaque) bool {
+        if (instance == null or self.instance != null) return false;
+        self.instance = instance;
+        return true;
+    }
+
+    pub fn attachTerminal(self: *Bridge, terminal: win.HWND, swap_chain: ?*anyopaque) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.attach_terminal_fn(instance, terminal, swap_chain));
+    }
+
+    pub fn focusTerminal(self: *Bridge) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.focus_terminal_fn(instance));
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
@@ -123,37 +152,17 @@ pub const Bridge = struct {
         return succeeded(self.show_notification_fn(instance, session_id, title.ptr, @intCast(title.len), body.ptr, @intCast(body.len)));
     }
 
-    pub fn move(self: *Bridge, x: i32, y: i32, width: i32, height: i32) bool {
-        const instance = self.instance orelse return false;
-        return succeeded(self.move_fn(instance, x, y, width, height));
-    }
-
     pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool, dark_theme: bool) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast), @intFromBool(dark_theme)));
     }
 
-    pub fn pretranslate(self: *Bridge, message: *win.MSG) bool {
-        const instance = self.instance orelse return false;
-        return self.pretranslate_fn(instance, message) != 0;
-    }
-
-    pub fn close(self: *Bridge) void {
-        const instance = self.instance orelse return;
-        _ = self.close_fn(instance);
-    }
-
-    pub fn deinit(self: *Bridge) bool {
-        const instance = self.instance orelse return true;
-        // Native destruction clears its callback and context before any
-        // fallible WinUI cleanup, so a failed destroy cannot call the owner.
-        if (!succeeded(self.destroy_fn(instance))) return false;
+    pub fn detach(self: *Bridge) void {
         self.instance = null;
-        return true;
     }
 };
 
-fn succeeded(result: win.HRESULT) bool {
+pub fn succeeded(result: win.HRESULT) bool {
     return result >= 0;
 }
 
@@ -171,5 +180,7 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.new_profile, commandFromInt(win.ZIGONAUT_CHROME_NEW_PROFILE).?);
     try std.testing.expectEqual(Command.notification_activate, commandFromInt(win.ZIGONAUT_CHROME_NOTIFICATION_ACTIVATE).?);
     try std.testing.expectEqual(Command.new_default, commandFromInt(win.ZIGONAUT_CHROME_NEW_DEFAULT).?);
+    try std.testing.expectEqual(Command.shutdown, commandFromInt(win.ZIGONAUT_CHROME_SHUTDOWN).?);
+    try std.testing.expectEqual(Command.zoom_in, commandFromInt(win.ZIGONAUT_CHROME_ZOOM_IN).?);
     try std.testing.expect(commandFromInt(2) == null);
 }
