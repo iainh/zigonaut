@@ -129,6 +129,7 @@ struct Bridge {
     Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
     Window::Closed_revoker window_closed_revoker{};
     Window::Activated_revoker window_activated_revoker{};
+    XamlRoot::Changed_revoker xaml_root_changed_revoker{};
     FrameworkElement::LayoutUpdated_revoker layout_revoker{};
     FrameworkElement::Loaded_revoker terminal_loaded_revoker{};
     UIElement::KeyDown_revoker terminal_key_down_revoker{};
@@ -168,6 +169,7 @@ struct Bridge {
     uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
     bool high_contrast = false;
     bool dark_theme = false;
+    double rasterization_scale = 1;
     bool closed = false;
     RECT terminal_bounds{ -1, -1, -1, -1 };
     com_ptr<ITaskbarList3> taskbar;
@@ -520,10 +522,9 @@ struct Bridge {
     }
 
     LPARAM pointerLparam(Microsoft::UI::Input::PointerPoint const& point) const {
-        auto const scale = terminal_surface.XamlRoot().RasterizationScale();
         auto const position = point.Position();
-        auto const x = static_cast<short>(std::lround(position.X * scale));
-        auto const y = static_cast<short>(std::lround(position.Y * scale));
+        auto const x = static_cast<short>(std::lround(position.X * rasterization_scale));
+        auto const y = static_cast<short>(std::lround(position.Y * rasterization_scale));
         return MAKELPARAM(x, y);
     }
 
@@ -644,12 +645,11 @@ struct Bridge {
     void layoutTerminal() {
         if (!terminal || !IsWindow(terminal) || !terminal_surface || !terminal_surface.XamlRoot()) return;
         auto const origin = terminal_surface.TransformToVisual(root).TransformPoint({0, 0});
-        auto const scale = terminal_surface.XamlRoot().RasterizationScale();
         RECT next{
-            static_cast<LONG>(std::lround(origin.X * scale)),
-            static_cast<LONG>(std::lround(origin.Y * scale)),
-            static_cast<LONG>(std::lround((origin.X + terminal_surface.ActualWidth()) * scale)),
-            static_cast<LONG>(std::lround((origin.Y + terminal_surface.ActualHeight()) * scale)),
+            static_cast<LONG>(std::lround(origin.X * rasterization_scale)),
+            static_cast<LONG>(std::lround(origin.Y * rasterization_scale)),
+            static_cast<LONG>(std::lround((origin.X + terminal_surface.ActualWidth()) * rasterization_scale)),
+            static_cast<LONG>(std::lround((origin.Y + terminal_surface.ActualHeight()) * rasterization_scale)),
         };
         if (next.right <= next.left || next.bottom <= next.top || EqualRect(&next, &terminal_bounds)) return;
         terminal_bounds = next;
@@ -1020,6 +1020,7 @@ struct Bridge {
         terminal_exited_revoker.revoke();
         terminal_canceled_revoker.revoke();
         terminal_capture_lost_revoker.revoke();
+        xaml_root_changed_revoker.revoke();
         for (auto& revoker : accelerator_revokers) revoker.revoke();
         accelerator_revokers.clear();
         window_closed_revoker.revoke();
@@ -1127,6 +1128,13 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                                     bridge->window.Close();
                                     return;
                                 }
+                                auto const xaml_root = bridge->terminal_surface.XamlRoot();
+                                bridge->rasterization_scale = xaml_root.RasterizationScale();
+                                bridge->xaml_root_changed_revoker = xaml_root.Changed(auto_revoke, [bridge](XamlRoot const& sender, auto&&) {
+                                    bridge->rasterization_scale = sender.RasterizationScale();
+                                    bridge->terminal_bounds = {-1, -1, -1, -1};
+                                    bridge->layoutTerminal();
+                                });
                                 if (bridge->runBenchmarkIfRequested()) {
                                     bridge->window.Close();
                                     return;
