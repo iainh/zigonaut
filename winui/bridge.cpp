@@ -204,7 +204,6 @@ struct Bridge {
         app_title_bar = TitleBar{};
         Grid::SetRow(app_title_bar, 0);
         content_root = Grid{};
-        content_root.Margin(Thickness{9, 1, 9, 9});
         Grid::SetRow(content_root, 1);
 
         terminal_frame = Border{};
