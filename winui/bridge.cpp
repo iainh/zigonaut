@@ -102,7 +102,7 @@ struct Bridge {
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     Grid root{nullptr};
-    Grid title_bar_root{nullptr};
+    TitleBar app_title_bar{nullptr};
     Grid content_root{nullptr};
     Grid terminal_presenter{nullptr};
     SwapChainPanel terminal_surface{nullptr};
@@ -110,6 +110,7 @@ struct Bridge {
     Border terminal_frame{nullptr};
     TabView tabs{nullptr};
     Button new_tab_button{nullptr};
+    Grid title_bar_drag_region{nullptr};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
@@ -194,22 +195,20 @@ struct Bridge {
         root = Grid{};
         root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         auto title_row = RowDefinition{};
-        title_row.Height(GridLength{52, GridUnitType::Pixel});
+        title_row.Height(GridLength{1, GridUnitType::Auto});
         root.RowDefinitions().Append(title_row);
         auto content_row = RowDefinition{};
         content_row.Height(GridLength{1, GridUnitType::Star});
         root.RowDefinitions().Append(content_row);
 
-        title_bar_root = Grid{};
-        title_bar_root.Height(52);
-        Grid::SetRow(title_bar_root, 0);
+        app_title_bar = TitleBar{};
+        Grid::SetRow(app_title_bar, 0);
         content_root = Grid{};
         content_root.Margin(Thickness{9, 1, 9, 9});
         Grid::SetRow(content_root, 1);
 
         terminal_frame = Border{};
-        terminal_frame.CornerRadius(CornerRadius{9});
-        terminal_frame.BorderThickness(Thickness{1});
+        terminal_frame.Style(application.Resources().Lookup(box_value(L"ZigonautTerminalFrameStyle")).as<Style>());
         terminal_presenter = Grid{};
         terminal_surface = SwapChainPanel{};
         terminal_input = ContentControl{};
@@ -217,7 +216,6 @@ struct Bridge {
         terminal_input.Opacity(0);
         terminal_input.IsHitTestVisible(false);
         terminal_input.IsTabStop(true);
-        terminal_input.UseSystemFocusVisuals(false);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(terminal_input, L"Terminal input surface");
         terminal_presenter.Children().Append(terminal_surface);
         terminal_presenter.Children().Append(terminal_input);
@@ -274,11 +272,8 @@ struct Bridge {
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_button = Button{};
-        new_tab_button.Width(40);
+        new_tab_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         new_tab_button.VerticalAlignment(VerticalAlignment::Center);
-        new_tab_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        new_tab_button.BorderThickness(Thickness{});
-        new_tab_button.Padding(Thickness{});
         auto const new_tab_icon = SymbolIcon{Symbol::Add};
         new_tab_button.Content(new_tab_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
@@ -303,12 +298,9 @@ struct Bridge {
         });
 
         menu_button = Button{};
-        menu_button.Width(40);
+        menu_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
         menu_button.VerticalAlignment(VerticalAlignment::Center);
-        menu_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        menu_button.BorderThickness(Thickness{});
-        menu_button.Padding(Thickness{});
         auto brand = Border{};
         brand.Width(28);
         brand.Height(28);
@@ -327,25 +319,26 @@ struct Bridge {
         ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
 
         bottom_border = Border{};
-        bottom_border.Height(1);
-        bottom_border.VerticalAlignment(VerticalAlignment::Bottom);
-        bottom_border.IsHitTestVisible(false);
-        bottom_border.Background(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
-        terminal_frame.BorderBrush(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        bottom_border.Style(resources.Lookup(box_value(L"ZigonautTitleBarDividerStyle")).as<Style>());
+        Grid::SetRow(bottom_border, 0);
 
         app_menu = MenuFlyout{};
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         open_settings_item = MenuFlyoutItem{};
         open_settings_item.Text(L"Open Settings");
+        open_settings_item.AccessKey(L"S");
         open_settings_revoker = open_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_OPEN_SETTINGS, 0); });
         reload_settings_item = MenuFlyoutItem{};
         reload_settings_item.Text(L"Reload Settings");
+        reload_settings_item.AccessKey(L"R");
         reload_settings_revoker = reload_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
         about_item = MenuFlyoutItem{};
         about_item.Text(L"About Zigonaut");
+        about_item.AccessKey(L"A");
         about_revoker = about_item.Click(auto_revoke, [this](auto&&, auto&&) { showAboutDialog(); });
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Quit");
+        quit_item.AccessKey(L"Q");
         quit_revoker = quit_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
         app_menu.Items().Append(open_settings_item);
         app_menu.Items().Append(reload_settings_item);
@@ -358,22 +351,40 @@ struct Bridge {
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         new_tab_button.ContextFlyout(new_tab_menu);
 
-        title_bar_root.Children().Append(tabs);
-        title_bar_root.Children().Append(menu_button);
-        title_bar_root.Children().Append(bottom_border);
+        auto title_bar_content = Grid{};
+        auto tabs_column = ColumnDefinition{};
+        tabs_column.Width(GridLength{1, GridUnitType::Auto});
+        title_bar_content.ColumnDefinitions().Append(tabs_column);
+        auto drag_column = ColumnDefinition{};
+        drag_column.Width(GridLength{1, GridUnitType::Star});
+        title_bar_content.ColumnDefinitions().Append(drag_column);
+        tabs.HorizontalAlignment(HorizontalAlignment::Left);
+        Grid::SetColumn(tabs, 0);
+        title_bar_content.Children().Append(tabs);
+        title_bar_drag_region = Grid{};
+        title_bar_drag_region.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        Grid::SetColumn(title_bar_drag_region, 1);
+        TitleBar::SetIsDragRegion(
+            title_bar_drag_region,
+            box_value(true).as<Windows::Foundation::IReference<bool>>());
+        title_bar_content.Children().Append(title_bar_drag_region);
+
+        app_title_bar.LeftHeader(menu_button);
+        app_title_bar.Content(title_bar_content);
         content_root.Children().Append(terminal_frame);
         root.Children().Append(content_root);
-        root.Children().Append(title_bar_root);
+        root.Children().Append(app_title_bar);
+        root.Children().Append(bottom_border);
         window.Content(root);
         window.ExtendsContentIntoTitleBar(true);
-        window.SetTitleBar(title_bar_root);
+        window.SetTitleBar(app_title_bar);
+        title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
         window.SystemBackdrop(backdrop);
         enableTitleBar();
         layout_revoker = root.LayoutUpdated(auto_revoke, [this](auto&&, auto&&) {
             layoutTerminal();
-            updateTitleBarLayout();
         });
         window_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_SHUTDOWN, 0);
@@ -433,14 +444,11 @@ struct Bridge {
     }
 
     void enableTitleBar() {
-        menu_button.Margin(Thickness{8, 0, 0, 0});
-        tabs.Margin(Thickness{56, 0, 8, 0});
         try {
             auto const transparent = box_value(Windows::UI::Color{0, 0, 0, 0})
                 .as<Windows::Foundation::IReference<Windows::UI::Color>>();
             title_bar.ButtonBackgroundColor(transparent);
             title_bar.ButtonInactiveBackgroundColor(transparent);
-            updateTitleBarLayout();
         } catch (...) {
             reportCurrentException(L"enable custom title bar");
         }
@@ -736,19 +744,6 @@ struct Bridge {
         }
     }
 
-    void updateTitleBarLayout() {
-        if (!title_bar || !title_bar_root) return;
-        auto const dpi = GetDpiForWindow(parent);
-        if (!dpi) return;
-        auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
-        auto const left = to_dips(std::max(title_bar.LeftInset(), 0));
-        auto const right = to_dips(std::max(title_bar.RightInset(), 0));
-        auto const menu_margin = Thickness{left + 8, 0, 0, 0};
-        auto const tabs_margin = Thickness{left + 56, 0, right + 8, 0};
-        if (menu_button.Margin() != menu_margin) menu_button.Margin(menu_margin);
-        if (tabs.Margin() != tabs_margin) tabs.Margin(tabs_margin);
-    }
-
     void showScrollbar() {
         if (!scrollbar || scrollbar.Visibility() != Visibility::Visible) return;
         scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::MouseIndicator);
@@ -759,22 +754,11 @@ struct Bridge {
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
-        auto const resources = application.Resources();
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
             root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
         } else {
             root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         }
-        auto const border_color = high_contrast
-            ? resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>()
-            : Microsoft::UI::Xaml::Media::SolidColorBrush{dark_theme
-                ? Windows::UI::Color{0x2e, 0xff, 0xff, 0xff}
-                : Windows::UI::Color{0x18, 0x00, 0x00, 0x00}};
-        bottom_border.Background(border_color);
-        terminal_frame.BorderBrush(border_color);
-        terminal_frame.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{dark_theme
-            ? Windows::UI::Color{0x16, 0xff, 0xff, 0xff}
-            : Windows::UI::Color{0x12, 0x00, 0x00, 0x00}});
 
         window.SystemBackdrop(nullptr);
         backdrop = nullptr;
@@ -871,7 +855,7 @@ struct Bridge {
         }
         tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
         tabs.UpdateLayout();
-        updateTitleBarLayout();
+        app_title_bar.RecomputeDragRegions();
     }
 
     void updateProfiles(char const* const* names, uint32_t const* name_lengths, uint32_t count) {
@@ -958,13 +942,17 @@ struct Bridge {
         app_menu = nullptr;
         cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
         new_tab_button = nullptr;
+        title_bar_drag_region = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
+        cleanup(L"detach title bar content", [&] {
+            app_title_bar.LeftHeader(nullptr);
+            app_title_bar.Content(nullptr);
+        }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
         accelerators.clear();
         scrollbar = nullptr;
         scrollbar_timer = nullptr;
         cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
-        cleanup(L"clear title bar root", [&] { title_bar_root.Children().Clear(); }, result);
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
         cleanup(L"detach terminal swap chain", [&] {
             if (terminal_surface) terminal_surface.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);
@@ -978,7 +966,7 @@ struct Bridge {
         terminal_presenter = nullptr;
         terminal_frame = nullptr;
         content_root = nullptr;
-        title_bar_root = nullptr;
+        app_title_bar = nullptr;
         bottom_border = nullptr;
         menu_button = nullptr;
         tabs = nullptr;
@@ -1037,6 +1025,7 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                             bridge->terminal_loaded_revoker.revoke();
                             try {
                                 bridge->root.UpdateLayout();
+                                bridge->app_title_bar.RecomputeDragRegions();
                                 if (!started(context, bridge, bridge->parent)) {
                                     result = E_ABORT;
                                     bridge->window.Close();
