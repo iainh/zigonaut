@@ -129,16 +129,20 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n",
+        "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n" ++
+            "search row lookup: binary {d:.2} ms; monotonic cursor {d:.2} ms ({d:.2}% faster)\n",
         .{
             milliseconds(search_highlight.per_cell_ns),
             milliseconds(search_highlight.per_row_ns),
             improvement(search_highlight.per_cell_ns, search_highlight.per_row_ns),
+            milliseconds(search_highlight.per_row_ns),
+            milliseconds(search_highlight.cursor_ns),
+            improvement(search_highlight.per_row_ns, search_highlight.cursor_ns),
         },
     );
 }
 
-fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64 } {
+fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64, cursor_ns: u64 } {
     const iterations = 1_000;
     var matches: [4096]SearchMatch = undefined;
     for (&matches, 0..) |*match, row| match.* = .{ .row = @intCast(row), .start = 40, .end = 48 };
@@ -152,8 +156,16 @@ fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64 } {
         const row_matches = search.matchesForRow(&matches, 4000 + y);
         for (0..columns) |x| checksum +%= search.highlightRow(row_matches, 4030, @intCast(x));
     };
+    const per_row_ns = timer.lap();
+    for (0..iterations) |_| {
+        var cursor = search.RowCursor.init(&matches, 4000);
+        for (0..rows) |y| {
+            const row_matches = cursor.next(4000 + y);
+            for (0..columns) |x| checksum +%= search.highlightRow(row_matches, 4030, @intCast(x));
+        }
+    }
     std.mem.doNotOptimizeAway(checksum);
-    return .{ .per_cell_ns = per_cell_ns, .per_row_ns = timer.lap() };
+    return .{ .per_cell_ns = per_cell_ns, .per_row_ns = per_row_ns, .cursor_ns = timer.lap() };
 }
 
 fn benchmarkSearchSnapshotCopy() !struct { uncached_ns: u64, cached_ns: u64 } {

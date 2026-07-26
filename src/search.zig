@@ -7,6 +7,22 @@ pub const RowMatches = struct {
     start_index: usize,
 };
 
+pub const RowCursor = struct {
+    matches: []const Match,
+    index: usize = 0,
+
+    pub fn init(matches: []const Match, first_row: u64) RowCursor {
+        return .{ .matches = matches, .index = matchesForRow(matches, first_row).start_index };
+    }
+
+    pub fn next(self: *RowCursor, row: u64) RowMatches {
+        while (self.index < self.matches.len and self.matches[self.index].row < row) self.index += 1;
+        const start = self.index;
+        while (self.index < self.matches.len and self.matches[self.index].row == row) self.index += 1;
+        return .{ .matches = self.matches[start..self.index], .start_index = start };
+    }
+};
+
 pub fn matchesForRow(matches: []const Match, row: u64) RowMatches {
     var low: usize = 0;
     var high = matches.len;
@@ -82,4 +98,19 @@ test "highlight finds a visible match without scanning earlier rows" {
     try std.testing.expectEqual(@as(u2, 0), highlight(&matches, 2, 8000, 3));
     try std.testing.expectEqual(@as(u2, 1), highlight(&matches, 2, 8000, 5));
     try std.testing.expectEqual(@as(u2, 2), highlight(&matches, 2, 8000, 10));
+}
+
+test "row cursor advances through visible matches" {
+    const matches = [_]Match{
+        .{ .row = 2, .start = 1, .end = 3 },
+        .{ .row = 8000, .start = 4, .end = 8 },
+        .{ .row = 8000, .start = 10, .end = 12 },
+        .{ .row = 8002, .start = 0, .end = 2 },
+    };
+    var cursor = RowCursor.init(&matches, 8000);
+    const first = cursor.next(8000);
+    try std.testing.expectEqual(@as(usize, 1), first.start_index);
+    try std.testing.expectEqual(@as(usize, 2), first.matches.len);
+    try std.testing.expectEqual(@as(usize, 0), cursor.next(8001).matches.len);
+    try std.testing.expectEqual(@as(u16, 2), cursor.next(8002).matches[0].end);
 }

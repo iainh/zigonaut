@@ -980,6 +980,7 @@ const DirectWriteCellRenderer = struct {
     frame: ?Terminal.Frame = null,
     search_matches: []const SearchMatch = &.{},
     search_row_matches: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
+    search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
     search_enabled: bool = false,
@@ -997,10 +998,11 @@ const DirectWriteCellRenderer = struct {
 
     pub fn beginFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
+        self.search_cursor = .init(self.search_matches, self.search_offset);
     }
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
-        self.search_row_matches = search.matchesForRow(self.search_matches, self.search_offset + y);
+        self.search_row_matches = self.search_cursor.next(self.search_offset + y);
         self.engine.beginRow(
             y,
             @floatFromInt(self.origin_x),

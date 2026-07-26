@@ -97,6 +97,7 @@ const CellRenderer = struct {
     frame: ?Terminal.Frame = null,
     search_matches: []const SearchMatch = &.{},
     search_row_matches: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
+    search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
     search_enabled: bool = false,
@@ -114,12 +115,13 @@ const CellRenderer = struct {
 
     pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
         self.frame = frame;
+        self.search_cursor = .init(self.search_matches, self.search_offset);
         if (!self.context.high_contrast) fill(self.dc, self.client, translucentColorRef(frame.background, self.context.background_opacity, self.context.dark_theme));
         _ = win.SelectObject(self.dc, self.context.font);
         _ = win.SetBkMode(self.dc, win.OPAQUE);
     }
     pub fn beginRow(self: *CellRenderer, y: u16) void {
-        self.search_row_matches = search.matchesForRow(self.search_matches, self.search_offset + y);
+        self.search_row_matches = self.search_cursor.next(self.search_offset + y);
     }
     pub fn endRow(_: *CellRenderer, _: u16) void {}
 
