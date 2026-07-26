@@ -1668,6 +1668,20 @@ test "selecting either half of a wide cell copies the grapheme once" {
     try std.testing.expectEqualStrings("中", selected);
 }
 
+test "selected text excludes ANSI escape sequences" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b[31mred\x1b[0m plain");
+
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 0, .y = 0 },
+        .focus = .{ .x = 7, .y = 0 },
+    });
+    const selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("red plai", selected);
+}
+
 test "resolves OSC 8 and detected links at viewport cells" {
     var terminal = try Terminal.init(80, 4, theme.rasmus);
     defer terminal.deinit();

@@ -509,16 +509,13 @@ pub const View = struct {
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
         if (self.handleApplicationShortcut(wparam, lparam, released)) return true;
+        if (self.handleClipboardShortcut(wparam, lparam, released)) return true;
         if (self.consumed_prompt_key == wparam) {
             if (released) self.consumed_prompt_key = null;
             return true;
         }
         if (released and (wparam == win.VK_CONTROL or wparam == win.VK_LCONTROL or wparam == win.VK_RCONTROL)) {
             self.clearHoveredLink();
-        }
-        if (isPasteShortcut(wparam)) {
-            if (!released) self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err});
-            return true;
         }
         const runtime = if (self.model.activeSession()) |s| s.runtime else null;
         const control_shift = win.GetKeyState(win.VK_CONTROL) < 0 and win.GetKeyState(win.VK_SHIFT) < 0;
@@ -624,6 +621,26 @@ pub const View = struct {
             else
                 0;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, @intCast(argument));
+        }
+        return true;
+    }
+
+    fn handleClipboardShortcut(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
+        const shortcut = clipboardShortcut(
+            wparam,
+            win.GetKeyState(win.VK_CONTROL) < 0,
+            win.GetKeyState(win.VK_SHIFT) < 0,
+            win.GetKeyState(win.VK_MENU) < 0,
+        ) orelse return false;
+        if (released) return true;
+
+        self.consumed_application_key = wparam;
+        self.suppress_application_character = true;
+        const repeated = (lparam & (@as(win.LPARAM, 1) << 30)) != 0;
+        if (repeated) return true;
+        switch (shortcut) {
+            .copy => self.copySelection() catch |err| log.debug("unable to copy terminal selection: {}", .{err}),
+            .paste => self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err}),
         }
         return true;
     }
@@ -1207,9 +1224,18 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| current.beginSelection(lparam);
             return 0;
         },
-        win.WM_MBUTTONDOWN, win.WM_RBUTTONDOWN => {
+        win.WM_MBUTTONDOWN => {
             if (win.GetKeyState(win.VK_SHIFT) >= 0) if (view) |current| {
-                if (current.beginProtocolButton(if (message == win.WM_MBUTTONDOWN) .middle else .right, lparam)) return 0;
+                if (current.beginProtocolButton(.middle, lparam)) return 0;
+            };
+            if (view) |current| current.pasteClipboard() catch |err| {
+                log.debug("unable to paste clipboard: {}", .{err});
+            };
+            return 0;
+        },
+        win.WM_RBUTTONDOWN => {
+            if (win.GetKeyState(win.VK_SHIFT) >= 0) if (view) |current| {
+                if (current.beginProtocolButton(.right, lparam)) return 0;
             };
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
@@ -1248,6 +1274,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| {
                 current.focused = false;
                 current.consumed_prompt_key = null;
+                current.consumed_application_key = null;
+                current.suppress_application_character = false;
                 current.releasePressedKeys();
                 current.invalidate();
             }
@@ -1380,10 +1408,15 @@ fn wheelAccumulation(remainder: i32, delta: i32) WheelAccumulation {
     return .{ .steps = steps, .remainder = total - steps * win.WHEEL_DELTA };
 }
 
-fn isPasteShortcut(key: win.WPARAM) bool {
-    const control = win.GetKeyState(win.VK_CONTROL) < 0;
-    const shift = win.GetKeyState(win.VK_SHIFT) < 0;
-    return shift and (key == win.VK_INSERT or control and key == 'V');
+const ClipboardShortcut = enum { copy, paste };
+
+fn clipboardShortcut(key: win.WPARAM, control: bool, shift: bool, alt: bool) ?ClipboardShortcut {
+    if (alt) return null;
+    if (shift and key == win.VK_INSERT) return .paste;
+    if (control and key == win.VK_INSERT) return .copy;
+    if (control and shift and key == 'C') return .copy;
+    if (control and shift and key == 'V') return .paste;
+    return null;
 }
 
 fn searchControlCharacter(key: win.WPARAM, control: bool) ?u16 {
@@ -1546,6 +1579,15 @@ fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORRE
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
+}
+
+test "standard terminal clipboard shortcuts are recognized" {
+    try std.testing.expectEqual(ClipboardShortcut.copy, clipboardShortcut('C', true, true, false).?);
+    try std.testing.expectEqual(ClipboardShortcut.copy, clipboardShortcut(win.VK_INSERT, true, false, false).?);
+    try std.testing.expectEqual(ClipboardShortcut.paste, clipboardShortcut('V', true, true, false).?);
+    try std.testing.expectEqual(ClipboardShortcut.paste, clipboardShortcut(win.VK_INSERT, false, true, false).?);
+    try std.testing.expect(clipboardShortcut('C', true, false, false) == null);
+    try std.testing.expect(clipboardShortcut('V', true, true, true) == null);
 }
 
 test "click count saturates" {
