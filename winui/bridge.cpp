@@ -101,7 +101,7 @@ struct Bridge {
     Grid root{nullptr};
     Grid scrollbar_root{nullptr};
     TabView tabs{nullptr};
-    SplitButton new_tab_button{nullptr};
+    Button new_tab_button{nullptr};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
@@ -116,7 +116,7 @@ struct Bridge {
     std::vector<MenuFlyoutItem> profile_items;
     std::vector<MenuFlyoutItem::Click_revoker> profile_revokers;
     Microsoft::UI::Dispatching::DispatcherQueueTimer scrollbar_timer{nullptr};
-    SplitButton::Click_revoker new_tab_revoker{};
+    Button::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
@@ -215,12 +215,16 @@ struct Bridge {
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
-        new_tab_button = SplitButton{};
-        new_tab_button.Height(40);
+        new_tab_button = Button{};
+        new_tab_button.Width(40);
+        new_tab_button.VerticalAlignment(VerticalAlignment::Center);
+        new_tab_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        new_tab_button.BorderThickness(Thickness{});
+        new_tab_button.Padding(Thickness{});
         auto const new_tab_icon = SymbolIcon{Symbol::Add};
         new_tab_button.Content(new_tab_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
-        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T)"));
+        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T); right-click for profiles"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
         });
@@ -237,10 +241,11 @@ struct Bridge {
 
         menu_button = Button{};
         menu_button.Width(40);
-        menu_button.Height(40);
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
-        menu_button.VerticalAlignment(VerticalAlignment::Bottom);
+        menu_button.VerticalAlignment(VerticalAlignment::Center);
         menu_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        menu_button.BorderThickness(Thickness{});
+        menu_button.Padding(Thickness{});
         auto const menu_icon = SymbolIcon{Symbol::GlobalNavigationButton};
         menu_button.Content(menu_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
@@ -275,7 +280,7 @@ struct Bridge {
 
         new_tab_menu = MenuFlyout{};
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-        new_tab_button.Flyout(new_tab_menu);
+        new_tab_button.ContextFlyout(new_tab_menu);
 
         root.Children().Append(tabs);
         root.Children().Append(menu_button);
@@ -663,7 +668,7 @@ struct Bridge {
         handlers_detached = true;
         if (!restoreTitleBar(result)) return result;
         closed = true;
-        cleanup(L"detach new-tab menu", [&] { new_tab_button.Flyout(nullptr); }, result);
+        cleanup(L"detach new-tab menu", [&] { new_tab_button.ContextFlyout(nullptr); }, result);
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         profile_items.clear();
         new_tab_menu = nullptr;
