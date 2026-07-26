@@ -231,6 +231,28 @@ pub const Terminal = struct {
         }
     };
 
+    pub const SearchCache = struct {
+        const Row = struct { text_start: usize, text_end: usize, starts_start: usize, starts_end: usize };
+        text: std.ArrayList(u8) = .empty,
+        starts: std.ArrayList(usize) = .empty,
+        rows: std.ArrayList(Row) = .empty,
+        scratch: SearchScratch = .{},
+
+        pub fn deinit(self: *SearchCache, allocator: std.mem.Allocator) void {
+            self.text.deinit(allocator);
+            self.starts.deinit(allocator);
+            self.rows.deinit(allocator);
+            self.scratch.deinit(allocator);
+            self.* = .{};
+        }
+
+        pub fn clear(self: *SearchCache, _: std.mem.Allocator) void {
+            self.text.clearRetainingCapacity();
+            self.starts.clearRetainingCapacity();
+            self.rows.clearRetainingCapacity();
+        }
+    };
+
     pub const Scrollbar = struct {
         total: u64,
         offset: u64,
@@ -638,6 +660,36 @@ pub const Terminal = struct {
     /// callers can bound terminal lock time and continue processing PTY output.
     pub fn searchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         if (query.len == 0) return;
+        try self.reconstructSearchRow(allocator, scratch, row_index);
+        try searchCachedRow(allocator, scratch, row_index, query, output);
+    }
+
+    /// Searches a row whose UTF-8 text and byte-to-column map are retained for
+    /// subsequent queries. Callers must clear the cache when grid text changes.
+    pub fn searchRowCached(self: *Terminal, allocator: std.mem.Allocator, cache: *SearchCache, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
+        if (query.len == 0) return;
+        // Scans are sequential, so a missing row is always appended once.
+        if (cache.rows.items.len <= row_index) {
+            try self.reconstructSearchRow(allocator, &cache.scratch, row_index);
+            const text_start = cache.text.items.len;
+            const starts_start = cache.starts.items.len;
+            try cache.text.ensureUnusedCapacity(allocator, cache.scratch.text.items.len);
+            try cache.starts.ensureUnusedCapacity(allocator, cache.scratch.starts.items.len);
+            try cache.rows.ensureUnusedCapacity(allocator, 1);
+            cache.text.appendSliceAssumeCapacity(cache.scratch.text.items);
+            cache.starts.appendSliceAssumeCapacity(cache.scratch.starts.items);
+            cache.rows.appendAssumeCapacity(.{
+                .text_start = text_start,
+                .text_end = cache.text.items.len,
+                .starts_start = starts_start,
+                .starts_end = cache.starts.items.len,
+            });
+        }
+        const row = cache.rows.items[row_index];
+        try searchRowText(allocator, cache.text.items[row.text_start..row.text_end], cache.starts.items[row.starts_start..row.starts_end], row_index, query, output);
+    }
+
+    fn reconstructSearchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32) !void {
         scratch.text.clearRetainingCapacity();
         scratch.starts.clearRetainingCapacity();
         try scratch.starts.ensureTotalCapacity(allocator, @as(usize, self.columns) + 1);
@@ -666,10 +718,17 @@ pub const Terminal = struct {
             }
         }
         starts[self.columns] = scratch.text.items.len;
+    }
+
+    fn searchCachedRow(allocator: std.mem.Allocator, scratch: *const SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
+        try searchRowText(allocator, scratch.text.items, scratch.starts.items, row_index, query, output);
+    }
+
+    fn searchRowText(allocator: std.mem.Allocator, text: []const u8, starts: []const usize, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         var from: usize = 0;
-        while (std.mem.indexOfPos(u8, scratch.text.items, from, query)) |at| {
+        while (std.mem.indexOfPos(u8, text, from, query)) |at| {
             const finish = at + query.len;
-            const start_column = searchStartColumn(starts[0..self.columns], at);
+            const start_column = searchStartColumn(starts[0 .. starts.len - 1], at);
             const end_column = searchEndColumn(starts, finish);
             try output.append(allocator, .{ .row = row_index, .start = start_column, .end = @max(end_column, start_column + 1) });
             from = at + @max(query.len, 1);
@@ -1523,6 +1582,32 @@ test "search row resolves UTF-8 matches in scrollback screen coordinates" {
     try std.testing.expectEqual(@as(usize, 2), matches.items.len);
     try std.testing.expectEqual(@as(u32, 0), matches.items[0].row);
     try std.testing.expectEqual(@as(u16, 4), matches.items[0].start);
+}
+
+test "cached search rows preserve text and byte-to-column mappings across queries" {
+    var terminal = try Terminal.init(12, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("a\xc3\xa9 needle");
+    var matches = std.ArrayList(SearchMatch).empty;
+    defer matches.deinit(std.testing.allocator);
+    var cache = Terminal.SearchCache{};
+    defer cache.deinit(std.testing.allocator);
+
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "needle", &matches);
+    try std.testing.expectEqual(@as(u16, 3), matches.items[0].start);
+    const cached_text_pointer = cache.text.items.ptr;
+    matches.clearRetainingCapacity();
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "\xc3\xa9", &matches);
+    try std.testing.expectEqual(cached_text_pointer, cache.text.items.ptr);
+    try std.testing.expectEqual(@as(u16, 1), matches.items[0].start);
+    try std.testing.expectEqual(@as(u16, 2), matches.items[0].end);
+
+    terminal.feed("\rchanged");
+    cache.clear(std.testing.allocator);
+    matches.clearRetainingCapacity();
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "changed", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start);
 }
 
 test "wide cell tails do not add spaces to viewport text" {

@@ -41,11 +41,14 @@ pub fn main() !void {
 
     var matches = std.ArrayList(SearchMatch).empty;
     defer matches.deinit(std.heap.page_allocator);
-    var search_scratch = Terminal.SearchScratch{};
-    defer search_scratch.deinit(std.heap.page_allocator);
+    var search_cache = Terminal.SearchCache{};
+    defer search_cache.deinit(std.heap.page_allocator);
     const total_rows = try terminal.totalRows();
-    for (0..total_rows) |row| try terminal.searchRow(std.heap.page_allocator, &search_scratch, @intCast(row), "terminal_view", &matches);
-    const search_ns = timer.lap();
+    for (0..total_rows) |row| try terminal.searchRowCached(std.heap.page_allocator, &search_cache, @intCast(row), "terminal_view", &matches);
+    const cold_search_ns = timer.lap();
+    matches.clearRetainingCapacity();
+    for (0..total_rows) |row| try terminal.searchRowCached(std.heap.page_allocator, &search_cache, @intCast(row), "compile", &matches);
+    const warm_search_ns = timer.lap();
 
     var resize_terminals: [resize_session_count]Terminal = undefined;
     var initialized: usize = 0;
@@ -74,7 +77,7 @@ pub fn main() !void {
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
             "snapshot cell size: {d} bytes\n" ++
             "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
-            "search: {d} rows, {d} matches in {d:.2} ms\n" ++
+            "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n",
         .{
             line.len * feed_iterations,
@@ -89,8 +92,9 @@ pub fn main() !void {
             @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0,
             renderer.checksum,
             total_rows,
+            milliseconds(cold_search_ns),
             matches.items.len,
-            milliseconds(search_ns),
+            milliseconds(warm_search_ns),
             resize_session_count,
             resize_iterations,
             milliseconds(all_resize_ns),

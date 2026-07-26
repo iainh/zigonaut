@@ -20,6 +20,7 @@ pub const SessionRuntime = struct {
     refresh: Refresh,
     terminal_mutex: std.Thread.Mutex = .{},
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    search_content_generation: u64 = 0,
     title: std.ArrayList(u8) = .empty,
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     search: Search = .{},
@@ -30,7 +31,8 @@ pub const SessionRuntime = struct {
     render_snapshot: Terminal.RenderSnapshot = .{},
     render_query: std.ArrayList(u8) = .empty,
     render_matches: std.ArrayList(SearchMatch) = .empty,
-    search_scratch: Terminal.SearchScratch = .{},
+    search_cache: Terminal.SearchCache = .{},
+    search_cache_generation: u64 = std.math.maxInt(u64),
     columns: u16,
     rows: u16,
     cell_width: u32 = 0,
@@ -123,7 +125,7 @@ pub const SessionRuntime = struct {
         self.render_snapshot.deinit(self.allocator);
         self.render_query.deinit(self.allocator);
         self.render_matches.deinit(self.allocator);
-        self.search_scratch.deinit(self.allocator);
+        self.search_cache.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -337,7 +339,14 @@ pub const SessionRuntime = struct {
         const previous_matches = self.search.matches.items.len;
         const previous_scanning = self.search.scanning;
         const generation = self.contentGeneration();
-        if (!self.search.scanning and generation != self.search.scanned_generation) self.search.reset();
+        if (generation != self.search.scanned_generation) {
+            self.search.reset();
+            self.search.scanned_generation = generation;
+        }
+        if (self.search_cache_generation != self.search_content_generation) {
+            self.search_cache.clear(self.allocator);
+            self.search_cache_generation = self.search_content_generation;
+        }
         const total = self.terminal.totalRows() catch return .{
             .changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning,
             .scanning = self.search.scanning,
@@ -345,7 +354,7 @@ pub const SessionRuntime = struct {
         var timer = std.time.Timer.start() catch null;
         var count: usize = 0;
         while (self.search.scanning and self.search.next_row < total) : (count += 1) {
-            self.terminal.searchRow(self.allocator, &self.search_scratch, self.search.next_row, self.search.query.items, &self.search.matches) catch break;
+            self.terminal.searchRowCached(self.allocator, &self.search_cache, self.search.next_row, self.search.query.items, &self.search.matches) catch break;
             self.search.next_row += 1;
             if (timer) |*clock| {
                 if (clock.read() >= time_budget_ns) break;
@@ -426,6 +435,12 @@ pub const SessionRuntime = struct {
         };
         self.terminal_mutex.unlock();
         if (!resized) return;
+        if (grid_changed) {
+            self.terminal_mutex.lock();
+            self.search_content_generation +%= 1;
+            self.terminal_mutex.unlock();
+            _ = self.content_generation.fetchAdd(1, .monotonic);
+        }
         if (grid_changed) if (self.pty) |*pty| pty.resize(columns, rows) catch |err| {
             log.warn("unable to resize pseudoconsole: {}", .{err});
         };
@@ -532,6 +547,7 @@ pub const SessionRuntime = struct {
             _ = self.progress_generation.fetchAdd(1, .release);
         }
         self.terminal.feed(bytes);
+        self.search_content_generation +%= 1;
         _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
