@@ -884,18 +884,39 @@ struct Bridge {
             ~ResetUpdating() { value = false; }
         } reset{updating};
         auto items = tabs.TabItems();
-        while (items.Size() > count) items.RemoveAtEnd();
-        for (uint32_t i = 0; i < count; ++i) {
-            TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
-            item.Header(box_value(to_hstring(std::string_view{titles[i], title_lengths[i]})));
-            item.MaxWidth(240);
-            item.IsClosable(true);
-            ToolTipService::SetToolTip(item, item.Header());
-            if (i == items.Size()) items.Append(item);
+        auto changed = false;
+        while (items.Size() > count) {
+            items.RemoveAtEnd();
+            changed = true;
         }
-        tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
-        tabs.UpdateLayout();
-        app_title_bar.RecomputeDragRegions();
+        for (uint32_t i = 0; i < count; ++i) {
+            auto const title = to_hstring(std::string_view{titles[i], title_lengths[i]});
+            if (i == items.Size()) {
+                auto item = TabViewItem{};
+                item.Header(box_value(title));
+                item.MaxWidth(240);
+                item.IsClosable(true);
+                ToolTipService::SetToolTip(item, item.Header());
+                items.Append(item);
+                changed = true;
+            } else {
+                auto item = items.GetAt(i).as<TabViewItem>();
+                if (unbox_value<hstring>(item.Header()) != title) {
+                    item.Header(box_value(title));
+                    ToolTipService::SetToolTip(item, item.Header());
+                    changed = true;
+                }
+            }
+        }
+        auto const selected = active >= 0 && active < static_cast<int32_t>(count) ? active : -1;
+        if (tabs.SelectedIndex() != selected) {
+            tabs.SelectedIndex(selected);
+            changed = true;
+        }
+        if (changed) {
+            tabs.UpdateLayout();
+            app_title_bar.RecomputeDragRegions();
+        }
     }
 
     void updateProfiles(char const* const* names, uint32_t const* name_lengths, uint32_t count) {
