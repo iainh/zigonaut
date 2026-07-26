@@ -171,6 +171,9 @@ struct Bridge {
     bool closed = false;
     RECT terminal_bounds{ -1, -1, -1, -1 };
     com_ptr<ITaskbarList3> taskbar;
+    bool taskbar_state_initialized = false;
+    uint32_t taskbar_state = ZIGONAUT_TASKBAR_PROGRESS_NONE;
+    uint32_t taskbar_value = 0;
     AppNotificationManager notification_manager{nullptr};
     AppNotificationManager::NotificationInvoked_revoker notification_revoker{};
     bool notifications_registered = false;
@@ -864,6 +867,8 @@ struct Bridge {
     }
 
     HRESULT updateTaskbarProgress(uint32_t state, uint32_t value) noexcept {
+        value = std::min(value, 100u);
+        if (taskbar_state_initialized && state == taskbar_state && value == taskbar_value) return S_OK;
         if (!taskbar) {
             auto const created = CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
                                                    IID_PPV_ARGS(taskbar.put()));
@@ -876,8 +881,15 @@ struct Bridge {
         }
         auto const flag = static_cast<TBPFLAG>(state);
         auto result = taskbar->SetProgressState(parent, flag);
-        if (FAILED(result) || flag == TBPF_NOPROGRESS || flag == TBPF_INDETERMINATE) return result;
-        return taskbar->SetProgressValue(parent, std::min(value, 100u), 100);
+        if (FAILED(result)) return result;
+        if (flag != TBPF_NOPROGRESS && flag != TBPF_INDETERMINATE) {
+            result = taskbar->SetProgressValue(parent, value, 100);
+            if (FAILED(result)) return result;
+        }
+        taskbar_state_initialized = true;
+        taskbar_state = state;
+        taskbar_value = value;
+        return S_OK;
     }
 
     HRESULT showNotification(uint32_t session_id, std::string_view title, std::string_view body) noexcept {
