@@ -107,7 +107,6 @@ struct Bridge {
     Grid terminal_presenter{nullptr};
     SwapChainPanel terminal_surface{nullptr};
     ContentControl terminal_input{nullptr};
-    Grid scrollbar_root{nullptr};
     Border terminal_frame{nullptr};
     TabView tabs{nullptr};
     Button new_tab_button{nullptr};
@@ -207,17 +206,10 @@ struct Bridge {
         content_root = Grid{};
         content_root.Margin(Thickness{9, 1, 9, 9});
         Grid::SetRow(content_root, 1);
-        auto terminal_column = ColumnDefinition{};
-        terminal_column.Width(GridLength{1, GridUnitType::Star});
-        content_root.ColumnDefinitions().Append(terminal_column);
-        auto scrollbar_column = ColumnDefinition{};
-        scrollbar_column.Width(GridLength{14, GridUnitType::Pixel});
-        content_root.ColumnDefinitions().Append(scrollbar_column);
 
         terminal_frame = Border{};
         terminal_frame.CornerRadius(CornerRadius{9});
         terminal_frame.BorderThickness(Thickness{1});
-        Grid::SetColumn(terminal_frame, 0);
         terminal_presenter = Grid{};
         terminal_surface = SwapChainPanel{};
         terminal_input = ContentControl{};
@@ -229,47 +221,47 @@ struct Bridge {
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(terminal_input, L"Terminal input surface");
         terminal_presenter.Children().Append(terminal_surface);
         terminal_presenter.Children().Append(terminal_input);
-        terminal_frame.Child(terminal_presenter);
         tabs = TabView{};
 
-        scrollbar_root = Grid{};
-        scrollbar_root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        Grid::SetColumn(scrollbar_root, 1);
         scrollbar = Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{};
         scrollbar.Orientation(Orientation::Vertical);
         scrollbar.HorizontalAlignment(HorizontalAlignment::Right);
+        scrollbar.VerticalAlignment(VerticalAlignment::Stretch);
+        scrollbar.Margin(Thickness{0, 4, 2, 4});
         scrollbar.Width(12);
         scrollbar.SmallChange(1);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(scrollbar, L"Terminal scrollback");
-        scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+        scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::MouseIndicator);
+        scrollbar.Opacity(0);
         scrollbar.Visibility(Visibility::Collapsed);
         scrollbar_scroll_revoker = scrollbar.Scroll(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Controls::Primitives::ScrollEventArgs const& args) {
             if (updating_scrollbar) return;
             showScrollbar();
             notify(ZIGONAUT_CHROME_SCROLL, static_cast<uint32_t>(std::clamp(args.NewValue(), 0.0, static_cast<double>(UINT32_MAX))));
         });
-        scrollbar_entered_revoker = scrollbar_root.PointerEntered(auto_revoke, [this](auto&&, auto&&) {
+        scrollbar_entered_revoker = scrollbar.PointerEntered(auto_revoke, [this](auto&&, auto&&) {
             pointer_over_scrollbar = true;
             showScrollbar();
         });
-        scrollbar_exited_revoker = scrollbar_root.PointerExited(auto_revoke, [this](auto&&, auto&&) {
+        scrollbar_exited_revoker = scrollbar.PointerExited(auto_revoke, [this](auto&&, auto&&) {
             pointer_over_scrollbar = false;
             scheduleScrollbarHide();
         });
-        scrollbar_wheel_revoker = scrollbar_root.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
-            auto const delta = args.GetCurrentPoint(scrollbar_root).Properties().MouseWheelDelta();
+        scrollbar_wheel_revoker = scrollbar.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            auto const delta = args.GetCurrentPoint(scrollbar).Properties().MouseWheelDelta();
             showScrollbar();
             notify(ZIGONAUT_CHROME_SCROLL_WHEEL, static_cast<uint32_t>(delta));
             args.Handled(true);
         });
-        scrollbar_root.Children().Append(scrollbar);
+        terminal_presenter.Children().Append(scrollbar);
+        terminal_frame.Child(terminal_presenter);
 
         scrollbar_timer = notification_activation->queue.CreateTimer();
         scrollbar_timer.IsRepeating(false);
         scrollbar_timer.Interval(std::chrono::seconds(2));
         scrollbar_tick_revoker = scrollbar_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
             if (!pointer_over_scrollbar && scrollbar) {
-                scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+                scrollbar.Opacity(0);
             }
         });
 
@@ -370,7 +362,6 @@ struct Bridge {
         title_bar_root.Children().Append(menu_button);
         title_bar_root.Children().Append(bottom_border);
         content_root.Children().Append(terminal_frame);
-        content_root.Children().Append(scrollbar_root);
         root.Children().Append(content_root);
         root.Children().Append(title_bar_root);
         window.Content(root);
@@ -569,7 +560,7 @@ struct Bridge {
         terminal_blur_revoker = terminal_input.LostFocus(auto_revoke, [this](auto&&, auto&&) {
             if (terminal) SendMessageW(terminal, WM_KILLFOCUS, 0, 0);
         });
-        terminal_pressed_revoker = terminal_presenter.PointerPressed(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_pressed_revoker = terminal_surface.PointerPressed(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (!terminal) return;
             terminal_input.Focus(FocusState::Pointer);
             auto const point = args.GetCurrentPoint(terminal_surface);
@@ -582,10 +573,10 @@ struct Bridge {
             default: return;
             }
             SendMessageW(terminal, message, pointerWparam(point.Properties()), pointerLparam(point));
-            terminal_presenter.CapturePointer(args.Pointer());
+            terminal_surface.CapturePointer(args.Pointer());
             args.Handled(true);
         });
-        terminal_released_revoker = terminal_presenter.PointerReleased(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_released_revoker = terminal_surface.PointerReleased(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (!terminal) return;
             auto const point = args.GetCurrentPoint(terminal_surface);
             auto const kind = point.Properties().PointerUpdateKind();
@@ -597,16 +588,16 @@ struct Bridge {
             default: return;
             }
             SendMessageW(terminal, message, pointerWparam(point.Properties()), pointerLparam(point));
-            terminal_presenter.ReleasePointerCapture(args.Pointer());
+            terminal_surface.ReleasePointerCapture(args.Pointer());
             args.Handled(true);
         });
-        terminal_moved_revoker = terminal_presenter.PointerMoved(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_moved_revoker = terminal_surface.PointerMoved(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (!terminal) return;
             auto const point = args.GetCurrentPoint(terminal_surface);
             SendMessageW(terminal, WM_MOUSEMOVE, pointerWparam(point.Properties()), pointerLparam(point));
             args.Handled(true);
         });
-        terminal_wheel_revoker = terminal_presenter.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_wheel_revoker = terminal_surface.PointerWheelChanged(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (!terminal) return;
             auto const point = args.GetCurrentPoint(terminal_surface);
             auto const local = pointerLparam(point);
@@ -622,15 +613,15 @@ struct Bridge {
                          MAKELPARAM(static_cast<short>(screen_point.x), static_cast<short>(screen_point.y)));
             args.Handled(true);
         });
-        terminal_exited_revoker = terminal_presenter.PointerExited(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_exited_revoker = terminal_surface.PointerExited(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (terminal) SendMessageW(terminal, WM_MOUSELEAVE, 0, 0);
             args.Handled(true);
         });
-        terminal_canceled_revoker = terminal_presenter.PointerCanceled(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+        terminal_canceled_revoker = terminal_surface.PointerCanceled(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             if (terminal) SendMessageW(terminal, WM_CANCELMODE, 0, 0);
             args.Handled(true);
         });
-        terminal_capture_lost_revoker = terminal_presenter.PointerCaptureLost(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+        terminal_capture_lost_revoker = terminal_surface.PointerCaptureLost(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
             if (terminal) SendMessageW(terminal, WM_CAPTURECHANGED, 0, 0);
         });
     }
@@ -761,13 +752,13 @@ struct Bridge {
     void showScrollbar() {
         if (!scrollbar || scrollbar.Visibility() != Visibility::Visible) return;
         scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::MouseIndicator);
+        scrollbar.Opacity(1);
         scheduleScrollbarHide();
     }
 
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
-        scrollbar_root.RequestedTheme(requested_theme);
         auto const resources = application.Resources();
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
             root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
@@ -819,7 +810,7 @@ struct Bridge {
         scrollbar.Visibility(maximum > 0 ? Visibility::Visible : Visibility::Collapsed);
         if (maximum == 0) {
             scrollbar_timer.Stop();
-            scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
+            scrollbar.Opacity(0);
         } else if (show) {
             showScrollbar();
         }
@@ -968,11 +959,9 @@ struct Bridge {
         cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
         new_tab_button = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
-        cleanup(L"clear scrollbar content", [&] { scrollbar_root.Children().Clear(); }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
         accelerators.clear();
         scrollbar = nullptr;
-        scrollbar_root = nullptr;
         scrollbar_timer = nullptr;
         cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
         cleanup(L"clear title bar root", [&] { title_bar_root.Children().Clear(); }, result);
