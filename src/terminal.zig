@@ -934,6 +934,13 @@ pub const Terminal = struct {
                 vt.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                 @ptrCast(&self.row_cells),
             ));
+            var selection = std.mem.zeroes(vt.GhosttyRenderStateRowSelection);
+            selection.size = @sizeOf(vt.GhosttyRenderStateRowSelection);
+            const has_selection = vt.ghostty_render_state_row_get(
+                self.row_iterator,
+                vt.GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                &selection,
+            ) == vt.GHOSTTY_SUCCESS;
             renderer.beginRow(y);
             defer renderer.endRow(y);
             var x: u16 = 0;
@@ -984,12 +991,6 @@ pub const Terminal = struct {
                         &codepoints,
                     ));
                 }
-                var selected = false;
-                try check(vt.ghostty_render_state_row_cells_get(
-                    self.row_cells,
-                    vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED,
-                    &selected,
-                ));
                 renderer.drawCell(Cell{
                     .x = x,
                     .y = y,
@@ -1004,7 +1005,7 @@ pub const Terminal = struct {
                     .strikethrough = style.strikethrough,
                     .overline = style.overline,
                     .underline = @intCast(@max(style.underline, 0)),
-                    .selected = selected,
+                    .selected = has_selection and x >= selection.start_x and x <= selection.end_x,
                 });
             }
             if (dirty_only) {
