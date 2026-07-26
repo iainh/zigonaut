@@ -203,7 +203,7 @@ pub const Terminal = struct {
                 self.frame = null;
             }
             var recorder = Recorder{ .snapshot = self };
-            try terminal.renderViewportInternal(&recorder, self.frame != null);
+            try terminal.renderViewportInternal(&recorder, self.frame);
         }
 
         pub fn replay(self: *const RenderSnapshot, renderer: anytype) void {
@@ -854,17 +854,17 @@ pub const Terminal = struct {
     }
 
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
-        try self.renderViewportInternal(renderer, false);
+        try self.renderViewportInternal(renderer, null);
     }
 
     /// Updates the render state and emits either all rows or only rows marked
     /// dirty by libghostty. Dirty flags are consumed after a successful pass.
-    fn renderViewportInternal(self: *Terminal, renderer: anytype, dirty_only: bool) !void {
+    fn renderViewportInternal(self: *Terminal, renderer: anytype, previous_frame: ?Frame) !void {
         try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
 
         var dirty: vt.GhosttyRenderStateDirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
         try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty));
-        if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE) return;
+        const dirty_only = previous_frame != null;
 
         var colors = std.mem.zeroes(vt.GhosttyRenderStateColors);
         colors.size = @sizeOf(vt.GhosttyRenderStateColors);
@@ -904,6 +904,16 @@ pub const Terminal = struct {
             .cursor_columns = if (cursor_wide_tail) 2 else 1,
         };
         renderer.beginFrame(frame);
+        const global_colors_changed = if (previous_frame) |previous|
+            !std.meta.eql(previous.foreground, frame.foreground) or
+                !std.meta.eql(previous.background, frame.background)
+        else
+            true;
+        if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !global_colors_changed) {
+            renderer.endFrame(frame);
+            return;
+        }
+        if (global_colors_changed) dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
 
         try check(vt.ghostty_render_state_get(
             self.render_state,
@@ -1768,6 +1778,43 @@ test "render snapshots preserve clean rows during incremental capture" {
     try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints[0]);
     try std.testing.expectEqual(@as(u32, 'C'), snapshot.cells.items[4].codepoints[0]);
     try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
+}
+
+test "incremental snapshots refresh cursor-only frame changes" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("A");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    terminal.feed("\x1b[2;3H\x1b[?25l");
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(@as(u16, 2), snapshot.frame.?.cursor_x);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.frame.?.cursor_y);
+    try std.testing.expect(!snapshot.frame.?.cursor_visible);
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints[0]);
+}
+
+test "incremental snapshots refresh all cells after global color changes" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("AB");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    const previous = snapshot.frame.?;
+    terminal.feed("\x1b[?5h");
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(previous.foreground, snapshot.frame.?.background);
+    try std.testing.expectEqual(previous.background, snapshot.frame.?.foreground);
+    for (snapshot.cells.items) |*cell| {
+        try std.testing.expectEqual(snapshot.frame.?.foreground, cell.foreground);
+        try std.testing.expectEqual(snapshot.frame.?.background, cell.background);
+    }
 }
 
 test "libghostty encodes navigation keys" {
