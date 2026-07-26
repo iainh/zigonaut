@@ -101,14 +101,14 @@ jobs:
       - name: Run tests
         run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
 
-      - name: Install Windows App Runtime 1.8
+      - name: Install Windows App Runtime 2.3.1
         shell: pwsh
         env:
           RUNTIME_ARCH: ${{ matrix.runtime_arch }}
         run: |
           $installer = Join-Path $env:RUNNER_TEMP "WindowsAppRuntimeInstall-$env:RUNTIME_ARCH.exe"
           Invoke-WebRequest `
-            -Uri "https://aka.ms/windowsappsdk/1.8/1.8.260508005/windowsappruntimeinstall-$env:RUNTIME_ARCH.exe" `
+            -Uri "https://aka.ms/windowsappsdk/2.3/2.3.1/windowsappruntimeinstall-$env:RUNTIME_ARCH.exe" `
             -OutFile $installer
           & $installer --quiet
           if ($LASTEXITCODE -ne 0) {
@@ -134,7 +134,8 @@ jobs:
             'zigonaut.exe',
             'Zigonaut.WinUI.Bridge.dll',
             'Microsoft.WindowsAppRuntime.Bootstrap.dll',
-            'resources.pri'
+            'resources.pri',
+            'zigonaut-about-1024.png'
           )
           foreach ($file in $releaseFiles) {
             $source = Join-Path $env:GITHUB_WORKSPACE "zig-out\bin\$file"

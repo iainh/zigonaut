@@ -38,7 +38,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
-    <Link><AdditionalLibraryDirectories>$(NuGetPackageRoot)microsoft.windowsappsdk.foundation\1.8.260505001\lib\native\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs></Link>
+    <Link><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
@@ -58,7 +58,7 @@
   <ItemGroup><Midl Include="App.idl"><DependentUpon>App.xaml</DependentUpon></Midl></ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240405.15" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260508005" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CompileXamlBeforeCpp" BeforeTargets="ClCompile" DependsOnTargets="MarkupCompilePass1;MarkupCompilePass2" />

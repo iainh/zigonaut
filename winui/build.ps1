@@ -39,11 +39,12 @@ $aboutIcon = if ($DebugIcon -or $Configuration -eq 'Debug') {
 }
 Copy-Item (Join-Path $repository $aboutIcon) (Join-Path $destination 'zigonaut-about-1024.png') -Force
 
-$runtime = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction SilentlyContinue |
-    Where-Object Architecture -eq $runtimeArchitecture |
+$runtime = Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.2' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Architecture -eq $runtimeArchitecture -and $_.Version -ge [version]'2.3.1.0' } |
     Select-Object -First 1
 if (-not $runtime) {
-    throw "Windows App Runtime 1.8 $runtimeArchitecture is required. Install it with: winget install -e --id Microsoft.WindowsAppRuntime.1.8"
+    $installerArchitecture = $runtimeArchitecture.ToLowerInvariant()
+    throw "Windows App Runtime 2.3.1 $runtimeArchitecture is required. Install it from https://aka.ms/windowsappsdk/2.3/2.3.1/windowsappruntimeinstall-$installerArchitecture.exe"
 }
 
 Write-Host "WinUI bridge deployed to $destination"

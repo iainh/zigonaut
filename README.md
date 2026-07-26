@@ -19,10 +19,12 @@ The dependency is pinned to Ghostty commit `ae52f97dcac558735cfa916ea3965f247e5c
 
 ## Build
 
-Install Visual Studio 2022 with **Desktop development with C++**, then install the Windows App Runtime 1.8 architecture matching your target (x64 or ARM64) once:
+Install Visual Studio 2022 with **Desktop development with C++**, then install Windows App Runtime 2.3.1 for your target architecture once. Replace `x64` with `arm64` when building for ARM64.
 
 ```powershell
-winget install -e --id Microsoft.WindowsAppRuntime.1.8
+$installer = "$env:TEMP\WindowsAppRuntimeInstall.exe"
+Invoke-WebRequest https://aka.ms/windowsappsdk/2.3/2.3.1/windowsappruntimeinstall-x64.exe -OutFile $installer
+& $installer
 ```
 
 ```powershell
@@ -108,7 +110,7 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
 - `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
   the active PowerShell, CMD, WSL, or custom profile.
 
-The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 1.8 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed 1.8 runtime on the Zig STA UI thread, and must be called only from that owner thread.
+The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 2.3.1 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed runtime selected by Windows App SDK 2.3.1 on the Zig STA UI thread, and must be called only from that owner thread.
 
 ## Releases
 
@@ -127,7 +129,7 @@ The release workflow tests, builds, packages, and launches the x64 and ARM64 arc
 clean native GitHub-hosted runners. It then creates a draft GitHub Release containing both
 portable ZIPs and their SHA-256 checksum files. Download and smoke-test the draft artifacts
 on representative Windows machines before publishing the release. The portable build
-requires the matching Windows App Runtime 1.8 architecture to be installed.
+requires the matching Windows App Runtime 2.3.1 architecture to be installed.
 
 The release workflow can also be run manually with a version to exercise the clean-runner
 build and smoke tests without creating a tag or GitHub Release.

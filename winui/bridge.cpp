@@ -2,8 +2,10 @@
 #include "App.xaml.h"
 #include "bridge.h"
 #include <MddBootstrap.h>
+#include <WindowsAppSDK-VersionInfo.h>
 #include <winrt/Microsoft.UI.Input.h>
 #include <winrt/Microsoft.UI.h>
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Content.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
@@ -106,7 +108,8 @@ struct Bridge {
     MenuFlyoutItem reload_settings_item{nullptr};
     MenuFlyoutItem about_item{nullptr};
     MenuFlyoutItem quit_item{nullptr};
-    Window about_window{nullptr};
+    ContentDialog about_dialog{nullptr};
+    Windows::Foundation::IAsyncOperation<ContentDialogResult> about_operation{nullptr};
     MenuFlyout new_tab_menu{nullptr};
     std::vector<MenuFlyoutItem> profile_items;
     std::vector<MenuFlyoutItem::Click_revoker> profile_revokers;
@@ -118,8 +121,7 @@ struct Bridge {
     MenuFlyoutItem::Click_revoker reload_settings_revoker{};
     MenuFlyoutItem::Click_revoker about_revoker{};
     MenuFlyoutItem::Click_revoker quit_revoker{};
-    Button::Click_revoker about_ok_revoker{};
-    Window::Closed_revoker about_closed_revoker{};
+    ContentDialog::Closed_revoker about_closed_revoker{};
     Microsoft::UI::Xaml::Controls::Primitives::ScrollBar::Scroll_revoker scrollbar_scroll_revoker{};
     UIElement::PointerEntered_revoker scrollbar_entered_revoker{};
     UIElement::PointerExited_revoker scrollbar_exited_revoker{};
@@ -168,6 +170,7 @@ struct Bridge {
         scrollbar.HorizontalAlignment(HorizontalAlignment::Right);
         scrollbar.Width(12);
         scrollbar.SmallChange(1);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(scrollbar, L"Terminal scrollback");
         scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::None);
         scrollbar.Visibility(Visibility::Collapsed);
         scrollbar_scroll_revoker = scrollbar.Scroll(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Controls::Primitives::ScrollEventArgs const& args) {
@@ -202,19 +205,20 @@ struct Bridge {
         });
 
         auto const resources = application.Resources();
-        root.Background(resources.Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
+        root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
 
         tabs.IsAddTabButtonVisible(false);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_button = SplitButton{};
         new_tab_button.Height(40);
-        auto const new_tab_icon = FontIcon{};
-        new_tab_icon.Glyph(L"\xE710");
-        new_tab_icon.FontSize(12);
+        auto const new_tab_icon = SymbolIcon{Symbol::Add};
         new_tab_button.Content(new_tab_icon);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
+        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T)"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
         });
@@ -235,12 +239,10 @@ struct Bridge {
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
         menu_button.VerticalAlignment(VerticalAlignment::Bottom);
         menu_button.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        menu_button.BorderThickness(Thickness{});
-        menu_button.CornerRadius(CornerRadius{});
-        auto const menu_icon = FontIcon{};
-        menu_icon.Glyph(L"\xE700");
-        menu_icon.FontSize(12);
+        auto const menu_icon = SymbolIcon{Symbol::GlobalNavigationButton};
         menu_button.Content(menu_icon);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
+        ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
 
         bottom_border = Border{};
         bottom_border.Height(1);
@@ -258,7 +260,7 @@ struct Bridge {
         reload_settings_revoker = reload_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0); });
         about_item = MenuFlyoutItem{};
         about_item.Text(L"About Zigonaut");
-        about_revoker = about_item.Click(auto_revoke, [this](auto&&, auto&&) { showAboutWindow(); });
+        about_revoker = about_item.Click(auto_revoke, [this](auto&&, auto&&) { showAboutDialog(); });
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Quit");
         quit_revoker = quit_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
@@ -339,21 +341,14 @@ struct Bridge {
         }
     }
 
-    void showAboutWindow() {
-        if (about_window) {
-            about_window.Activate();
-            return;
-        }
+    void showAboutDialog() {
+        if (about_dialog) return;
 
-        auto window = Window{};
-        window.Title(L"About Zigonaut");
-
-        auto root = Grid{};
         auto content = StackPanel{};
-        content.Width(320);
+        content.MaxWidth(320);
         content.Spacing(10);
-        content.Padding(Thickness{0, 32, 0, 32});
-        content.HorizontalAlignment(HorizontalAlignment::Center);
+        content.Padding(Thickness{0, 8, 0, 0});
+        content.HorizontalAlignment(HorizontalAlignment::Stretch);
 
         wchar_t module_path[MAX_PATH]{};
         auto const module_path_length = GetModuleFileNameW(nullptr, module_path, static_cast<DWORD>(std::size(module_path)));
@@ -377,7 +372,7 @@ struct Bridge {
 
         auto name = TextBlock{};
         name.Text(L"Zigonaut");
-        name.FontSize(24);
+        name.Style(application.Resources().Lookup(box_value(L"TitleTextBlockStyle")).as<Style>());
         name.HorizontalAlignment(HorizontalAlignment::Stretch);
         name.TextAlignment(TextAlignment::Center);
         content.Children().Append(name);
@@ -405,52 +400,24 @@ struct Bridge {
         hash.Inlines().Append(hash_link);
         content.Children().Append(hash);
 
-        auto ok = Button{};
-        ok.Content(box_value(L"OK"));
-        ok.Width(100);
-        ok.Margin(Thickness{0, 12, 0, 0});
-        ok.HorizontalAlignment(HorizontalAlignment::Center);
-        content.Children().Append(ok);
-
-        root.Children().Append(content);
-        window.Content(root);
-        auto const about_app_window = window.AppWindow();
-        auto const about_hwnd = Microsoft::UI::GetWindowFromWindowId(about_app_window.Id());
-        SetWindowLongPtrW(about_hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(parent));
-        if (auto const presenter = about_app_window.Presenter().try_as<Microsoft::UI::Windowing::OverlappedPresenter>()) {
-            presenter.IsResizable(false);
-            presenter.IsMaximizable(false);
-            presenter.IsMinimizable(false);
-        }
-        auto const owner_dpi = GetDpiForWindow(parent);
-        auto const about_width = MulDiv(400, owner_dpi, 96);
-        auto const about_height = MulDiv(430, owner_dpi, 96);
-        RECT owner_rect{};
-        if (GetWindowRect(parent, &owner_rect)) {
-            about_app_window.MoveAndResize({
-                owner_rect.left + ((owner_rect.right - owner_rect.left) - about_width) / 2,
-                owner_rect.top + ((owner_rect.bottom - owner_rect.top) - about_height) / 2,
-                about_width,
-                about_height,
-            });
-        } else {
-            about_app_window.Resize({about_width, about_height});
-        }
-
-        about_window = window;
-        about_ok_revoker = ok.Click(auto_revoke, [this](auto&&, auto&&) {
-            if (about_window) about_window.Close();
+        about_dialog = ContentDialog{};
+        about_dialog.XamlRoot(root.XamlRoot());
+        about_dialog.Title(box_value(L"About Zigonaut"));
+        about_dialog.Content(content);
+        about_dialog.CloseButtonText(L"Close");
+        about_dialog.DefaultButton(ContentDialogButton::Close);
+        about_closed_revoker = about_dialog.Closed(auto_revoke, [this](auto&&, auto&&) {
+            about_operation = nullptr;
+            about_dialog = nullptr;
         });
-        about_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
-            about_ok_revoker.revoke();
-            about_window = nullptr;
-            if (IsWindow(parent)) {
-                EnableWindow(parent, TRUE);
-                SetForegroundWindow(parent);
-            }
-        });
-        EnableWindow(parent, FALSE);
-        window.Activate();
+        try {
+            about_operation = about_dialog.ShowAsync();
+        } catch (...) {
+            reportCurrentException(L"show About dialog");
+            about_closed_revoker.revoke();
+            about_operation = nullptr;
+            about_dialog = nullptr;
+        }
     }
 
     bool restoreTitleBar(HRESULT& result) noexcept {
@@ -615,10 +582,9 @@ struct Bridge {
         for (uint32_t i = 0; i < count; ++i) {
             TabViewItem item = i < items.Size() ? items.GetAt(i).as<TabViewItem>() : TabViewItem{};
             item.Header(box_value(to_hstring(std::string_view{titles[i], title_lengths[i]})));
-            item.MinHeight(40);
             item.MaxWidth(240);
-            item.FontSize(12);
             item.IsClosable(true);
+            ToolTipService::SetToolTip(item, item.Header());
             if (i == items.Size()) items.Append(item);
         }
         tabs.SelectedIndex(active >= 0 && active < static_cast<int32_t>(count) ? active : -1);
@@ -660,10 +626,7 @@ struct Bridge {
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
         about_closed_revoker.revoke();
-        about_ok_revoker.revoke();
-        if (about_window) cleanup(L"close About window", [&] { about_window.Close(); }, result);
-        about_window = nullptr;
-        if (IsWindow(parent)) EnableWindow(parent, TRUE);
+        if (about_dialog) cleanup(L"hide About dialog", [&] { about_dialog.Hide(); }, result);
         for (auto& revoker : profile_revokers) revoker.revoke();
         profile_revokers.clear();
         open_settings_revoker.revoke();
@@ -713,6 +676,8 @@ struct Bridge {
         backdrop = nullptr;
         cleanup(L"close XAML source", [&] { source.Close(); }, result);
         source = nullptr;
+        about_operation = nullptr;
+        about_dialog = nullptr;
         application = nullptr;
         return result;
     }
@@ -735,11 +700,13 @@ extern "C" void* __cdecl zigonaut_chrome_initialize(HWND parent, zigonaut_chrome
         return nullptr;
     }
     try {
-        PACKAGE_VERSION minimum{};
-        minimum.Version = 0;
-        auto const bootstrap_result = MddBootstrapInitialize(0x00010008, nullptr, minimum);
+        auto const bootstrap_result = MddBootstrapInitialize2(
+            Microsoft::WindowsAppSDK::Release::MajorMinor,
+            Microsoft::WindowsAppSDK::Release::VersionTag,
+            {Microsoft::WindowsAppSDK::Runtime::Version::UInt64},
+            MddBootstrapInitializeOptions_OnNoMatch_ShowUI);
         if (FAILED(bootstrap_result)) {
-            reportFailure(L"MddBootstrapInitialize", bootstrap_result);
+            reportFailure(L"MddBootstrapInitialize2", bootstrap_result);
             uninit_apartment();
             return nullptr;
         }
