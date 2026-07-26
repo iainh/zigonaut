@@ -19,7 +19,6 @@ const refresh_message = win.WM_APP + 1;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
-const idle_refresh_interval_ms = 250;
 const search_refresh_interval_ms = 33;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
@@ -29,7 +28,7 @@ pub const View = struct {
     hwnd: win.HWND = null,
     refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    refresh_interval_ms: u32 = idle_refresh_interval_ms,
+    refresh_interval_ms: u32 = 0,
     model: *App,
     font: win.HFONT,
     text_engine: ?TextEngine,
@@ -245,7 +244,11 @@ pub const View = struct {
     fn setRefreshInterval(self: *View, interval_ms: u32) void {
         if (self.refresh_interval_ms == interval_ms or self.hwnd == null) return;
         self.refresh_interval_ms = interval_ms;
-        _ = win.SetTimer(self.hwnd, refresh_timer, interval_ms, null);
+        if (interval_ms == 0) {
+            _ = win.KillTimer(self.hwnd, refresh_timer);
+        } else {
+            _ = win.SetTimer(self.hwnd, refresh_timer, interval_ms, null);
+        }
     }
 
     fn refreshIfNeeded(self: *View) void {
@@ -261,7 +264,7 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.notification_changed_message, 0, 0);
         }
         const session = self.model.activeSession() orelse {
-            self.setRefreshInterval(idle_refresh_interval_ms);
+            self.setRefreshInterval(0);
             if (self.last_progress_runtime != null) {
                 self.last_progress_runtime = null;
                 _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
@@ -270,7 +273,7 @@ pub const View = struct {
             return;
         };
         const runtime = session.runtime orelse {
-            self.setRefreshInterval(idle_refresh_interval_ms);
+            self.setRefreshInterval(0);
             return;
         };
         const progress_generation = runtime.progressGeneration();
@@ -280,7 +283,7 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
         }
         const search_tick = runtime.searchTick(search_time_budget_ns);
-        self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else idle_refresh_interval_ms);
+        self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else 0);
         if (search_tick.changed) self.invalidate();
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
@@ -513,7 +516,7 @@ pub const View = struct {
             const control = win.GetKeyState(win.VK_CONTROL) < 0;
             if (wparam == win.VK_ESCAPE or control and (wparam == 'C' or wparam == 'G')) {
                 r.searchCancel();
-                self.setRefreshInterval(idle_refresh_interval_ms);
+                self.setRefreshInterval(0);
             } else if (wparam == win.VK_BACK) {
                 r.searchBackspace();
                 self.setRefreshInterval(search_refresh_interval_ms);
@@ -1122,7 +1125,6 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_CREATE => {
-            _ = win.SetTimer(hwnd, refresh_timer, idle_refresh_interval_ms, null);
             _ = win.SetFocus(hwnd);
             return 0;
         },
