@@ -3,6 +3,7 @@ const SearchMatch = @import("search.zig").Match;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const directwrite = @import("directwrite_renderer.zig");
+const progress = @import("progress.zig");
 
 const columns = 120;
 const rows = 40;
@@ -76,6 +77,8 @@ pub fn main() !void {
     const layout_repetitions = 5;
     const layout_result = try directwrite.benchmarkLayoutCache(layout_repetitions);
     const layout_cache_ns = timer.lap();
+    const progress_bytewise_ns = benchmarkProgressParser(false);
+    const progress_fast_ns = benchmarkProgressParser(true);
 
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
@@ -84,7 +87,8 @@ pub fn main() !void {
             "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
             "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n" ++
-            "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n",
+            "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n" ++
+            "output metadata scan: bytewise {d:.2} ms; skip plain text {d:.2} ms ({d:.2}% faster)\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -112,9 +116,36 @@ pub fn main() !void {
             layout_result.layout_creations,
             layout_result.hot_reuse_creations,
             layout_result.cache_entries,
+            milliseconds(progress_bytewise_ns),
+            milliseconds(progress_fast_ns),
+            improvement(progress_bytewise_ns, progress_fast_ns),
         },
     );
 }
+
+fn benchmarkProgressParser(fast: bool) u64 {
+    const iterations = 100_000;
+    var parser = progress.Parser{};
+    var handler = ProgressBenchmarkHandler{};
+    var timer = std.time.Timer.start() catch return 0;
+    for (0..iterations) |_| {
+        if (fast) {
+            parser.feedEach(line, &handler);
+        } else {
+            for (line) |byte| if (parser.feedByte(byte)) |update| handler.handle(update);
+        }
+    }
+    std.mem.doNotOptimizeAway(handler.count);
+    return timer.read();
+}
+
+const ProgressBenchmarkHandler = struct {
+    count: usize = 0,
+
+    pub fn handle(self: *ProgressBenchmarkHandler, _: progress.Update) void {
+        self.count += 1;
+    }
+};
 
 const BenchmarkRenderer = struct {
     checksum: u64 = 0,
@@ -142,4 +173,9 @@ const BenchmarkRenderer = struct {
 
 fn milliseconds(nanoseconds: u64) f64 {
     return @as(f64, @floatFromInt(nanoseconds)) / 1_000_000.0;
+}
+
+fn improvement(before: u64, after: u64) f64 {
+    return (@as(f64, @floatFromInt(before)) - @as(f64, @floatFromInt(after))) /
+        @as(f64, @floatFromInt(before)) * 100.0;
 }

@@ -513,29 +513,37 @@ pub const SessionRuntime = struct {
     fn processOutputChunk(self: *SessionRuntime, bytes: []const u8) void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        for (bytes) |byte| {
-            const update = self.progress_parser.feedByte(byte) orelse continue;
+        self.progress_parser.feedEach(bytes, ProgressHandler{ .runtime = self });
+        self.terminal.feed(bytes);
+        self.search_content_generation +%= 1;
+        _ = self.content_generation.fetchAdd(1, .monotonic);
+    }
+
+    const ProgressHandler = struct {
+        runtime: *SessionRuntime,
+
+        pub fn handle(self: ProgressHandler, update: progress.Update) void {
+            const runtime = self.runtime;
             if (update == .notification) {
                 const event = update.notification;
-                const title = self.allocator.dupe(u8, event.title) catch continue;
-                const body = self.allocator.dupe(u8, event.body) catch {
-                    self.allocator.free(title);
-                    continue;
+                const title = runtime.allocator.dupe(u8, event.title) catch return;
+                const body = runtime.allocator.dupe(u8, event.body) catch {
+                    runtime.allocator.free(title);
+                    return;
                 };
-                if (self.notifications.items.len == 32) {
-                    self.notifications.orderedRemove(0).deinit(self.allocator);
+                if (runtime.notifications.items.len == 32) {
+                    runtime.notifications.orderedRemove(0).deinit(runtime.allocator);
                 }
-                self.notifications.append(self.allocator, .{ .title = title, .body = body }) catch {
-                    self.allocator.free(title);
-                    self.allocator.free(body);
-                    continue;
+                runtime.notifications.append(runtime.allocator, .{ .title = title, .body = body }) catch {
+                    runtime.allocator.free(title);
+                    runtime.allocator.free(body);
                 };
-                continue;
+                return;
             }
-            self.taskbar_progress = switch (update) {
+            runtime.taskbar_progress = switch (update) {
                 .remove => null,
                 .report => |report| value: {
-                    const previous = if (self.taskbar_progress) |current| current.value else 0;
+                    const previous = if (runtime.taskbar_progress) |current| current.value else 0;
                     break :value .{
                         .state = report.state,
                         .value = progress.resolvedValue(report, previous),
@@ -544,12 +552,9 @@ pub const SessionRuntime = struct {
                 },
                 .notification => unreachable,
             };
-            _ = self.progress_generation.fetchAdd(1, .release);
+            _ = runtime.progress_generation.fetchAdd(1, .release);
         }
-        self.terminal.feed(bytes);
-        self.search_content_generation +%= 1;
-        _ = self.content_generation.fetchAdd(1, .monotonic);
-    }
+    };
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
     /// already holds `terminal_mutex`. Readers acquire that mutex in `titleAlloc`.

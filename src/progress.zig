@@ -40,6 +40,18 @@ pub const Parser = struct {
         return latest;
     }
 
+    /// Delivers every update while skipping spans that cannot affect the OSC
+    /// state machine. Most terminal output is plain text or CSI payload.
+    pub fn feedEach(self: *Parser, bytes: []const u8, handler: anytype) void {
+        var index: usize = 0;
+        while (index < bytes.len) : (index += 1) {
+            if (self.phase == .text) {
+                index = std.mem.indexOfScalarPos(u8, bytes, index, 0x1b) orelse return;
+            }
+            if (self.feedByte(bytes[index])) |update| handler.handle(update);
+        }
+    }
+
     pub fn feedByte(self: *Parser, byte: u8) ?Update {
         return switch (self.phase) {
             .text => if (byte == 0x1b) {
@@ -155,6 +167,29 @@ test "progress parser survives split sequences and ignores other OSC" {
     try std.testing.expect(parser.feed("text\x1b]9;4;") == null);
     try std.testing.expectEqual(Update{ .report = .{ .state = .paused, .value = 5 } }, parser.feed("4;5\x07tail").?);
     try std.testing.expect(parser.feed("\x1b]0;title\x07") == null);
+}
+
+test "fast parser delivers every update across plain text and split chunks" {
+    const Handler = struct {
+        reports: usize = 0,
+        removes: usize = 0,
+        notifications: usize = 0,
+
+        pub fn handle(self: *@This(), update: Update) void {
+            switch (update) {
+                .report => self.reports += 1,
+                .remove => self.removes += 1,
+                .notification => self.notifications += 1,
+            }
+        }
+    };
+    var parser = Parser{};
+    var handler = Handler{};
+    parser.feedEach("plain \x1b[32mgreen\x1b[0m \x1b]9;4;1;25\x07\x1b]9;", &handler);
+    parser.feedEach("4;0\x07 more text \x1b]9;done\x1b\\", &handler);
+    try std.testing.expectEqual(@as(usize, 1), handler.reports);
+    try std.testing.expectEqual(@as(usize, 1), handler.removes);
+    try std.testing.expectEqual(@as(usize, 1), handler.notifications);
 }
 
 test "UTF-8 continuation bytes do not start C1 OSC" {
