@@ -31,6 +31,8 @@ pub const SessionRuntime = struct {
     render_snapshot: Terminal.RenderSnapshot = .{},
     render_query: std.ArrayList(u8) = .empty,
     render_matches: std.ArrayList(SearchMatch) = .empty,
+    search_render_generation: u64 = 0,
+    rendered_search_generation: u64 = std.math.maxInt(u64),
     search_cache: Terminal.SearchCache = .{},
     search_cache_generation: u64 = std.math.maxInt(u64),
     columns: u16,
@@ -224,18 +226,21 @@ pub const SessionRuntime = struct {
     pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
         self.terminal_mutex.lock();
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
-        self.render_query.ensureTotalCapacity(self.allocator, self.search.query.items.len) catch |err| {
-            self.terminal_mutex.unlock();
-            return err;
-        };
-        self.render_matches.ensureTotalCapacity(self.allocator, self.search.matches.items.len) catch |err| {
-            self.terminal_mutex.unlock();
-            return err;
-        };
-        self.render_query.clearRetainingCapacity();
-        self.render_query.appendSliceAssumeCapacity(self.search.query.items);
-        self.render_matches.clearRetainingCapacity();
-        self.render_matches.appendSliceAssumeCapacity(self.search.matches.items);
+        if (self.rendered_search_generation != self.search_render_generation) {
+            self.render_query.ensureTotalCapacity(self.allocator, self.search.query.items.len) catch |err| {
+                self.terminal_mutex.unlock();
+                return err;
+            };
+            self.render_matches.ensureTotalCapacity(self.allocator, self.search.matches.items.len) catch |err| {
+                self.terminal_mutex.unlock();
+                return err;
+            };
+            self.render_query.clearRetainingCapacity();
+            self.render_query.appendSliceAssumeCapacity(self.search.query.items);
+            self.render_matches.clearRetainingCapacity();
+            self.render_matches.appendSliceAssumeCapacity(self.search.matches.items);
+            self.rendered_search_generation = self.search_render_generation;
+        }
         const search_enabled = self.search.enabled;
         const search_active = self.search.active;
         const search_scanning = self.search.scanning;
@@ -282,6 +287,7 @@ pub const SessionRuntime = struct {
         }
         self.search.enabled = true;
         self.search.reset();
+        self.search_render_generation +%= 1;
     }
 
     pub fn searchCancel(self: *SessionRuntime) void {
@@ -300,6 +306,7 @@ pub const SessionRuntime = struct {
         self.search.saved_offset = null;
         self.search.query.clearRetainingCapacity();
         self.search.reset();
+        self.search_render_generation +%= 1;
     }
 
     pub fn searchAppend(self: *SessionRuntime, bytes: []const u8) !void {
@@ -307,6 +314,7 @@ pub const SessionRuntime = struct {
         defer self.terminal_mutex.unlock();
         try self.search.query.appendSlice(self.allocator, bytes);
         self.search.reset();
+        self.search_render_generation +%= 1;
     }
     pub fn searchBackspace(self: *SessionRuntime) void {
         self.terminal_mutex.lock();
@@ -316,6 +324,7 @@ pub const SessionRuntime = struct {
             while (end > 0 and self.search.query.items[end] & 0xc0 == 0x80) end -= 1;
             self.search.query.shrinkRetainingCapacity(end);
             self.search.reset();
+            self.search_render_generation +%= 1;
         }
     }
 
@@ -324,6 +333,7 @@ pub const SessionRuntime = struct {
         defer self.terminal_mutex.unlock();
         self.search.query.clearRetainingCapacity();
         self.search.reset();
+        self.search_render_generation +%= 1;
     }
 
     pub fn searchEnabled(self: *SessionRuntime) bool {
@@ -342,6 +352,7 @@ pub const SessionRuntime = struct {
         if (generation != self.search.scanned_generation) {
             self.search.reset();
             self.search.scanned_generation = generation;
+            self.search_render_generation +%= 1;
         }
         if (self.search_cache_generation != self.search_content_generation) {
             self.search_cache.clear(self.allocator);
@@ -364,8 +375,10 @@ pub const SessionRuntime = struct {
             self.search.scanning = false;
             self.search.scanned_generation = generation;
         }
+        const changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning;
+        if (changed) self.search_render_generation +%= 1;
         return .{
-            .changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning,
+            .changed = changed,
             .scanning = self.search.scanning,
         };
     }
@@ -374,6 +387,7 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         const match = self.search.navigate(forward) orelse return null;
+        self.search_render_generation +%= 1;
         const state = self.terminal.scrollbar() catch return match;
         const target = @min(@as(u64, match.row), state.total -| state.len);
         const delta: isize = if (target >= state.offset) @intCast(target - state.offset) else -@as(isize, @intCast(state.offset - target));
