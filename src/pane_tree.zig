@@ -15,7 +15,7 @@ pub const Rect = struct {
 
 pub const Item = union(enum) {
     leaf: struct { id: PaneId, rect: Rect },
-    split: struct { id: SplitId, axis: Axis, ratio: u16, rect: Rect },
+    split: struct { id: SplitId, axis: Axis, ratio: u16, subtree_size: u32, rect: Rect },
 };
 
 pub const Error = error{
@@ -179,7 +179,8 @@ fn appendItems(node: *const Node, rect: Rect, items: *std.ArrayList(Item), alloc
     switch (node.*) {
         .leaf => |id| try items.append(allocator, .{ .leaf = .{ .id = id, .rect = rect } }),
         .split => |split| {
-            try items.append(allocator, .{ .split = .{ .id = split.id, .axis = split.axis, .ratio = split.ratio, .rect = rect } });
+            const split_index = items.items.len;
+            try items.append(allocator, .{ .split = .{ .id = split.id, .axis = split.axis, .ratio = split.ratio, .subtree_size = 0, .rect = rect } });
             const first_size: u32 = @intCast((@as(u64, if (split.axis == .left_right) rect.width else rect.height) * split.ratio) / std.math.maxInt(u16));
             var first = rect;
             var second = rect;
@@ -194,6 +195,7 @@ fn appendItems(node: *const Node, rect: Rect, items: *std.ArrayList(Item), alloc
             }
             try appendItems(split.first, first, items, allocator);
             try appendItems(split.second, second, items, allocator);
+            items.items[split_index].split.subtree_size = @intCast(items.items.len - split_index);
         },
     }
 }
@@ -273,6 +275,8 @@ test "mixed splits, ratios, and preorder are structural" {
     try std.testing.expectEqual(@as(SplitId, 100), items[0].split.id);
     try std.testing.expectEqual(@as(u16, 40000), items[0].split.ratio);
     try std.testing.expectEqual(@as(SplitId, 101), items[1].split.id);
+    try std.testing.expectEqual(@as(u32, 7), items[0].split.subtree_size);
+    try std.testing.expectEqual(@as(u32, 3), items[1].split.subtree_size);
     try std.testing.expectEqual(@as(PaneId, 10), items[2].leaf.id);
     try std.testing.expectEqual(@as(PaneId, 30), items[3].leaf.id);
     try std.testing.expectEqual(@as(SplitId, 102), items[4].split.id);

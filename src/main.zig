@@ -22,11 +22,13 @@ const progress_changed_message = win.WM_APP + 5;
 const notification_changed_message = win.WM_APP + 6;
 const renderer_failed_message = win.WM_APP + 7;
 const pane_event_message = win.WM_APP + 8;
+const runtime_refresh_message = win.WM_APP + 9;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
 
 const Application = struct {
+    const ViewEntry = struct { pane_id: u64, view: *TerminalView };
     loaded: config.Loaded,
     themes: theme.Catalog,
     settings: config.Config,
@@ -41,9 +43,11 @@ const Application = struct {
     taskbar_button_created_message: win.UINT = 0,
     taskbar_ready: bool = false,
     terminal_ready: bool = false,
-    terminal_view: TerminalView = undefined,
+    views: std.ArrayList(ViewEntry) = .empty,
+    refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     chrome: ?chrome.Bridge = null,
-    attached_pane: ?u64 = null,
+    attached_panes: std.ArrayList(u64) = .empty,
     pane_events_mutex: std.Thread.Mutex = .{},
     pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
@@ -62,7 +66,10 @@ const Application = struct {
     }
 
     fn deinit(self: *Application) void {
+        self.destroyAllViews();
         self.model.deinit();
+        self.views.deinit(std.heap.page_allocator);
+        self.attached_panes.deinit(std.heap.page_allocator);
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.pane_events.deinit(std.heap.page_allocator);
@@ -87,24 +94,110 @@ const Application = struct {
     const detachTerminalRenderer = detachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
 
-    fn bindActivePane(self: *Application) !void {
-        const next = if (self.model.activePane()) |pane| pane.id else null;
-        self.terminal_view.bindPane(next);
-        if (self.attached_pane == next) return;
-        if (self.attached_pane) |old| if (old != next) {
-            if (self.chrome) |*bridge| _ = bridge.detachPane(old);
-            self.attached_pane = null;
+    fn viewFor(self: *Application, id: u64) ?*TerminalView {
+        for (self.views.items) |entry| if (entry.pane_id == id) return entry.view;
+        return null;
+    }
+
+    fn activeView(self: *Application) ?*TerminalView {
+        return self.viewFor((self.model.activePane() orelse return null).id);
+    }
+
+    fn ensureView(self: *Application, id: u64) !*TerminalView {
+        if (self.viewFor(id)) |view| return view;
+        const hwnd = self.hwnd orelse return error.WindowUnavailable;
+        const view = try std.heap.page_allocator.create(TerminalView);
+        var may_free = true;
+        errdefer if (may_free) std.heap.page_allocator.destroy(view);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, chrome_message);
+        view.pane_id = id;
+        view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
+            if (!view.destroy()) may_free = false;
+            return err;
         };
-        if (next) |id| {
-            const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
-            if (!bridge.attachPane(id, self.terminal_view.hwnd, self.terminal_view.swapChain())) return error.AttachPaneFailed;
-            const layout = [_]chrome.LayoutNode{.{ .kind = 1, .id = id }};
-            if (!bridge.updateLayout(&layout, id)) {
-                _ = bridge.detachPane(id);
-                return error.UpdateLayoutFailed;
+        if (view.swapChain() == null) {
+            if (!view.destroy()) {
+                may_free = false;
+                return error.DestroyTerminalViewFailed;
             }
-            self.attached_pane = id;
+            return error.SwapChainUnavailable;
         }
+        view.syncSessions();
+        self.views.append(std.heap.page_allocator, .{ .pane_id = id, .view = view }) catch |err| {
+            if (!view.destroy()) may_free = false;
+            return err;
+        };
+        return view;
+    }
+
+    fn detachPresentation(self: *Application) !void {
+        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+        for (self.attached_panes.items) |id| if (!bridge.detachPane(id)) return error.DetachPaneFailed;
+        self.attached_panes.clearRetainingCapacity();
+    }
+
+    fn isAttached(self: *const Application, id: u64) bool {
+        return std.mem.indexOfScalar(u64, self.attached_panes.items, id) != null;
+    }
+
+    fn syncPresentation(self: *Application) !void {
+        try self.detachPresentation();
+        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+        const model_layout = try self.model.activeLayout(std.heap.page_allocator);
+        defer std.heap.page_allocator.free(model_layout);
+        var layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, model_layout.len);
+        defer std.heap.page_allocator.free(layout);
+        try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, model_layout.len);
+        errdefer self.detachPresentation() catch {};
+        for (model_layout, 0..) |item, index| switch (item) {
+            .leaf => |leaf| {
+                const view = try self.ensureView(leaf.id);
+                if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain())) return error.AttachPaneFailed;
+                self.attached_panes.appendAssumeCapacity(leaf.id);
+                layout[index] = .{ .kind = 1, .id = leaf.id };
+            },
+            .split => |split| layout[index] = .{ .kind = 2, .id = split.id, .axis = switch (split.axis) {
+                .left_right => 1,
+                .top_bottom => 2,
+            }, .ratio = split.ratio, .subtree_size = split.subtree_size },
+        };
+        const focused = (self.model.activePane() orelse return).id;
+        if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
+        _ = bridge.focusPane(focused);
+    }
+
+    fn destroyView(self: *Application, id: u64) bool {
+        for (self.views.items, 0..) |entry, index| if (entry.pane_id == id) {
+            entry.view.resetInteraction();
+            if (!entry.view.destroy()) return false;
+            std.heap.page_allocator.destroy(entry.view);
+            _ = self.views.swapRemove(index);
+            return true;
+        };
+        return true;
+    }
+
+    fn destroyAllViews(self: *Application) void {
+        while (self.views.items.len != 0) {
+            if (!self.destroyView(self.views.items[self.views.items.len - 1].pane_id)) return;
+        }
+    }
+
+    fn reloadViews(self: *Application, font: win.HFONT, family: []const u8, size: u16, dpi: u32) !void {
+        const prepared = try std.heap.page_allocator.alloc(TerminalView.PreparedReload, self.views.items.len);
+        defer std.heap.page_allocator.free(prepared);
+        var count: usize = 0;
+        errdefer for (prepared[0..count]) |*value| value.deinit();
+        for (self.views.items, 0..) |entry, index| {
+            prepared[index] = try entry.view.prepareReload(font, family, size, dpi);
+            count += 1;
+        }
+        try self.detachPresentation();
+        for (self.views.items, prepared) |entry, value| entry.view.commitReload(value);
+        self.syncPresentation() catch |err| {
+            if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+            log.err("unable to republish reloaded renderers: {}", .{err});
+        };
     }
 };
 
@@ -171,25 +264,8 @@ fn initializeWindowImpl(self: *Application) !void {
     if (font == null) return error.CreateFontFailed;
     self.font = font;
     self.dpi = dpi;
-    self.terminal_view = TerminalView.init(
-        hwnd,
-        &self.model,
-        font,
-        self.settings.font_family,
-        self.settings.font_size,
-        dpi,
-        self.settings.padding_horizontal,
-        self.settings.padding_vertical,
-        self.settings.background_opacity,
-        titles_changed_message,
-        shell_exited_message,
-        scrollbar_changed_message,
-        progress_changed_message,
-        notification_changed_message,
-        renderer_failed_message,
-        chrome_message,
-    );
-    try self.terminal_view.create(hwnd, win.GetModuleHandleW(null));
+    self.refresh_hwnd.store(@intFromPtr(hwnd), .release);
+    self.model.setRefresh(.{ .callback = requestRuntimeRefresh, .context = self });
     self.terminal_ready = true;
     try self.syncProfiles(&self.settings);
     try self.addDefaultSession();
@@ -209,6 +285,8 @@ fn windowSubclassProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lpa
     const self: *Application = @ptrFromInt(reference);
     const result = self.windowMessage(message, wparam, lparam);
     if (message == win.WM_NCDESTROY) {
+        self.refresh_hwnd.store(0, .release);
+        self.model.setRefresh(.{});
         _ = win.RemoveWindowSubclass(hwnd, windowSubclassProc, window_subclass_id);
         self.window_subclassed = false;
         self.hwnd = null;
@@ -219,11 +297,8 @@ fn windowSubclassProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lpa
 
 fn shutdownWindowImpl(self: *Application) void {
     const hwnd = self.hwnd orelse return;
-    if (self.terminal_ready) self.terminal_view.resetInteraction();
-    if (self.attached_pane) |id| {
-        if (self.chrome) |*bridge| _ = bridge.detachPane(id);
-    }
-    self.attached_pane = null;
+    self.refresh_hwnd.store(0, .release);
+    self.model.setRefresh(.{});
     _ = win.KillTimer(hwnd, taskbar_progress_timer);
     if (self.taskbar_ready) {
         if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
@@ -244,6 +319,11 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         return 0;
     }
     switch (message) {
+        runtime_refresh_message => {
+            self.refresh_pending.store(false, .release);
+            for (self.views.items) |entry| entry.view.refresh();
+            return 0;
+        },
         pane_event_message => {
             while (true) {
                 self.pane_events_mutex.lock();
@@ -251,11 +331,31 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 self.pane_events_mutex.unlock();
                 const current = event orelse break;
                 if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
-                if (self.attached_pane != current.target_id) continue;
                 switch (current.kind) {
-                    chrome.pane_scroll => self.terminal_view.scrollTo(current.value),
-                    chrome.pane_scroll_wheel => self.terminal_view.handleMouseWheelDelta(@bitCast(current.value)),
-                    chrome.pane_focus, chrome.pane_committed_ratio => {},
+                    chrome.pane_scroll => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.scrollTo(current.value),
+                    chrome.pane_scroll_wheel => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.handleMouseWheelDelta(@bitCast(current.value)),
+                    chrome.pane_focus => {
+                        if (!self.isAttached(current.target_id)) continue;
+                        const active = self.model.activePane() orelse continue;
+                        const tab = self.model.activeTab() orelse continue;
+                        if (active.id != current.target_id and tab.tree.focus(current.target_id)) {
+                            self.syncChrome();
+                            self.syncScrollbar(false);
+                            self.syncTaskbarProgress();
+                        }
+                    },
+                    chrome.pane_committed_ratio => {
+                        const layout = self.model.activeLayout(std.heap.page_allocator) catch continue;
+                        defer std.heap.page_allocator.free(layout);
+                        var valid = false;
+                        for (layout) |item| switch (item) {
+                            .split => |split| if (split.id == current.target_id) {
+                                valid = true;
+                            },
+                            else => {},
+                        };
+                        if (valid) _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
+                    },
                     else => {},
                 }
             }
@@ -274,19 +374,29 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close => {
-                    self.terminal_view.bindPane(null);
+                    self.detachPresentation() catch |err| {
+                        log.err("unable to detach panes before close: {}", .{err});
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    };
+                    if (argument < self.model.tabs.items.len) {
+                        for (self.model.tabs.items[argument].panes.items) |pane| if (!self.destroyView(pane.id)) {
+                            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                            return 0;
+                        };
+                    }
                     self.model.closeTab(argument);
                     if (self.model.tabCount() == 0) {
-                        self.terminal_view.bindPane(null);
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
-                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
+                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
                 .select => {
-                    self.terminal_view.resetInteraction();
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch return 0;
                     self.model.activateTab(argument);
-                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
+                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
@@ -301,24 +411,27 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .scroll => {
-                    self.terminal_view.scrollTo(argument);
+                    if (self.activeView()) |view| view.scrollTo(argument);
                     return 0;
                 },
                 .scroll_wheel => {
-                    self.terminal_view.handleMouseWheelDelta(@bitCast(argument));
+                    if (self.activeView()) |view| view.handleMouseWheelDelta(@bitCast(argument));
                     return 0;
                 },
                 .notification_activate => {
-                    self.terminal_view.resetInteraction();
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch return 0;
                     if (!self.model.activateSessionId(argument)) return 0;
-                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
-                    self.terminal_view.syncSessions();
-                    self.terminal_view.invalidate();
+                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+                    if (self.activeView()) |view| {
+                        view.syncSessions();
+                        view.invalidate();
+                    }
                     self.syncChrome();
                     _ = win.ShowWindow(hwnd, win.SW_RESTORE);
                     _ = win.SetForegroundWindow(hwnd);
                     if (self.chrome) |*bridge| {
-                        if (self.attached_pane) |id| _ = bridge.focusPane(id);
+                        if (self.model.activePane()) |pane| _ = bridge.focusPane(pane.id);
                     }
                     return 0;
                 },
@@ -338,16 +451,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     const count = self.model.tabCount();
                     const active = self.model.activeTabIndex() orelse return 0;
                     if (count <= 1) return 0;
-                    self.terminal_view.resetInteraction();
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch return 0;
                     const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
                     self.model.activateTab(next);
-                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
+                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
                 .shutdown => return 0,
             }
-            self.terminal_view.syncSessions();
+            for (self.views.items) |entry| entry.view.syncSessions();
             _ = win.InvalidateRect(hwnd, null, 0);
-            self.terminal_view.invalidate();
+            for (self.views.items) |entry| entry.view.invalidate();
             self.syncChrome();
             return 0;
         },
@@ -356,23 +470,42 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         shell_exited_message => {
-            self.terminal_view.bindPane(null);
-            if (!self.model.closeCleanlyExitedSessions()) {
-                self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
+            self.detachPresentation() catch |err| {
+                log.err("unable to detach panes before exited-session cleanup: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            };
+            var changed = false;
+            while (self.model.extractCleanlyExitedPane()) |removed_value| {
+                var removed = removed_value;
+                if (!self.destroyView(removed.pane_id)) {
+                    // The pane is already extracted; retain its runtime forever rather
+                    // than let a native child callback observe freed session state.
+                    _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                    return 0;
+                }
+                self.model.destroyRemovedPane(&removed);
+                changed = true;
+            }
+            if (!changed) {
+                self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 return 0;
             }
             if (self.model.tabCount() == 0) {
-                self.terminal_view.bindPane(null);
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
             }
-            self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
-            self.terminal_view.syncSessions();
-            self.terminal_view.invalidate();
+            self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+            if (self.activeView()) |view| {
+                view.syncSessions();
+                view.invalidate();
+            }
             self.syncChrome();
             return 0;
         },
         scrollbar_changed_message => {
+            const source_id: u64 = @bitCast(lparam);
+            if (!self.isAttached(source_id) or (self.model.activePane() orelse return 0).id != source_id) return 0;
             self.syncScrollbar(wparam != 0);
             return 0;
         },
@@ -399,21 +532,26 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             const new_dpi: u32 = @intCast(wparam & 0xffff);
             const new_font = createFont(self.settings.font_family, self.zoomed_font_size, new_dpi);
             if (new_font != null) {
-                self.terminal_view.updateFont(new_font, new_dpi);
-                _ = win.DeleteObject(self.font);
+                self.reloadViews(new_font, self.settings.font_family, self.zoomed_font_size, new_dpi) catch |err| {
+                    log.err("unable to reload renderers for DPI change: {}", .{err});
+                    _ = win.DeleteObject(new_font);
+                    return win.DefSubclassProc(hwnd, message, wparam, lparam);
+                };
+                const old_font = self.font;
                 self.font = new_font;
                 self.dpi = new_dpi;
+                _ = win.DeleteObject(old_font);
                 _ = win.InvalidateRect(hwnd, null, 0);
             }
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_SETTINGCHANGE => {
-            self.terminal_view.refreshTextRenderingSettings();
+            for (self.views.items) |entry| entry.view.refreshTextRenderingSettings();
             self.updateTheme();
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_DROPFILES => {
-            if (self.terminal_ready) return win.SendMessageW(self.terminal_view.hwnd, message, wparam, lparam);
+            if (self.activeView()) |view| return win.SendMessageW(view.hwnd, message, wparam, lparam);
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
@@ -452,10 +590,11 @@ fn syncChromeImpl(self: *Application) void {
 
 fn syncScrollbarImpl(self: *Application, show: bool) void {
     const bridge = if (self.chrome) |*value| value else return;
-    const state = self.terminal_view.scrollbar();
+    const active = self.model.activePane() orelse return;
+    const state = (self.viewFor(active.id) orelse return).scrollbar();
     const limit = std.math.maxInt(u32);
     if (!bridge.updateScrollbar(
-        self.attached_pane orelse return,
+        active.id,
         @intCast(@min(state.total, limit)),
         @intCast(@min(state.len, limit)),
         @intCast(@min(state.offset, limit)),
@@ -531,22 +670,34 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
     _ = win.PostMessageW(hwnd, pane_event_message, 0, 0);
 }
 
+fn requestRuntimeRefresh(context: ?*anyopaque) void {
+    const self: *Application = @ptrCast(@alignCast(context orelse return));
+    if (self.refresh_pending.swap(true, .acq_rel)) return;
+    const value = self.refresh_hwnd.load(.acquire);
+    if (value == 0 or win.PostMessageW(win32.handleFromInt(win.HWND, value), runtime_refresh_message, 0, 0) == 0)
+        self.refresh_pending.store(false, .release);
+}
+
 fn addDefaultSessionImpl(self: *Application) !void {
     try self.addProfile(self.settings.defaultProfile());
-    self.terminal_view.syncSessions();
-    self.terminal_view.invalidate();
+    if (self.activeView()) |view| {
+        view.syncSessions();
+        view.invalidate();
+    }
     self.syncChrome();
 }
 
 fn addProfileImpl(self: *Application, profile: config.Profile) !void {
-    self.terminal_view.resetInteraction();
+    if (self.activeView()) |view| view.resetInteraction();
     const shell: app_model.Shell = switch (profile.shell) {
         .powershell => .powershell,
         .windows => .windows,
         .wsl => .wsl,
     };
-    _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
-    try self.bindActivePane();
+    const columns: u16 = if (self.activeView()) |view| view.columns else 80;
+    const rows: u16 = if (self.activeView()) |view| view.rows else 24;
+    _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, columns, rows);
+    try self.syncPresentation();
 }
 
 fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {
@@ -614,15 +765,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     };
     try self.syncProfiles(&next);
     if (new_font != null) {
-        self.detachTerminalRenderer();
-        self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi) catch |err| {
-            _ = self.attachTerminalRenderer();
-            return err;
-        };
-        if (!self.attachTerminalRenderer()) {
-            log.err("unable to attach the reloaded terminal renderer", .{});
-            if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-        }
+        try self.reloadViews(new_font, next.font_family, next.font_size, self.dpi);
         self.zoomed_font_size = next.font_size;
     }
 
@@ -637,10 +780,10 @@ fn reloadSettingsImpl(self: *Application) !void {
         self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
         self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
-    self.terminal_view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
+    for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
     self.updateTheme();
     if (new_font != null) _ = win.DeleteObject(old_font);
-    self.terminal_view.invalidate();
+    for (self.views.items) |entry| entry.view.invalidate();
 }
 
 fn scaled(value: anytype, dpi: u32) i32 {
@@ -653,7 +796,7 @@ fn updateThemeImpl(self: *Application) void {
     self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
     self.high_contrast = highContrastEnabled();
     if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
-    if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
+    if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
@@ -664,35 +807,22 @@ fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
     if (size == self.zoomed_font_size) return;
     const new_font = createFont(self.settings.font_family, size, self.dpi);
     if (new_font == null) return;
-    self.detachTerminalRenderer();
-    self.terminal_view.reloadFont(new_font, self.settings.font_family, size, self.dpi) catch {
-        _ = self.attachTerminalRenderer();
+    self.reloadViews(new_font, self.settings.font_family, size, self.dpi) catch {
         _ = win.DeleteObject(new_font);
         return;
     };
-    if (!self.attachTerminalRenderer()) {
-        log.err("unable to attach the zoomed terminal renderer", .{});
-        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-    }
     _ = win.DeleteObject(self.font);
     self.font = new_font;
     self.zoomed_font_size = size;
 }
 
 fn attachTerminalRendererImpl(self: *Application) bool {
-    const bridge = if (self.chrome) |*value| value else return false;
-    const id = self.attached_pane orelse if (self.model.activePane()) |pane| pane.id else return false;
-    if (self.attached_pane != null) _ = bridge.detachPane(id);
-    if (!bridge.attachPane(id, self.terminal_view.hwnd, self.terminal_view.swapChain())) return false;
-    self.attached_pane = id;
-    const layout = [_]chrome.LayoutNode{.{ .kind = 1, .id = id }};
-    return bridge.updateLayout(&layout, id);
+    self.syncPresentation() catch return false;
+    return true;
 }
 
 fn detachTerminalRendererImpl(self: *Application) void {
-    const id = self.attached_pane orelse return;
-    if (self.chrome) |*bridge| _ = bridge.detachPane(id);
-    self.attached_pane = null;
+    self.detachPresentation() catch {};
 }
 
 fn recoverTerminalRendererImpl(self: *Application) void {
@@ -701,17 +831,11 @@ fn recoverTerminalRendererImpl(self: *Application) void {
         log.err("unable to recreate the terminal font after a renderer failure", .{});
         return;
     }
-    self.detachTerminalRenderer();
-    self.terminal_view.reloadFont(new_font, self.settings.font_family, self.zoomed_font_size, self.dpi) catch |err| {
-        _ = self.attachTerminalRenderer();
+    self.reloadViews(new_font, self.settings.font_family, self.zoomed_font_size, self.dpi) catch |err| {
         _ = win.DeleteObject(new_font);
         log.err("unable to recover the terminal renderer: {}", .{err});
         return;
     };
-    if (!self.attachTerminalRenderer()) {
-        log.err("unable to reattach the recovered terminal renderer", .{});
-        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-    }
     _ = win.DeleteObject(self.font);
     self.font = new_font;
 }

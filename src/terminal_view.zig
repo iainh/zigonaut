@@ -17,7 +17,6 @@ const win = win32.c;
 const log = std.log.scoped(.terminal_view);
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
-const refresh_message = win.WM_APP + 1;
 const render_message = win.WM_APP + 2;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
@@ -29,8 +28,6 @@ const wheel_rows = 3;
 
 pub const View = struct {
     hwnd: win.HWND = null,
-    refresh_hwnd: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     render_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
@@ -155,14 +152,19 @@ pub const View = struct {
             instance,
             self,
         ) orelse return error.CreateTerminalViewFailed;
-        self.refresh_hwnd.store(@intFromPtr(self.hwnd), .release);
-        self.model.setRefresh(.{ .callback = requestRefresh, .context = self });
         if (self.text_engine) |*engine| engine.setWindow(self.hwnd) catch |err| {
             log.warn("DirectWrite window initialization failed; using GDI fallback: {}", .{err});
             engine.deinit();
             self.text_engine = null;
         };
         win.DragAcceptFiles(self.hwnd, 1);
+    }
+
+    /// Destroys the child window synchronously, which releases renderer and
+    /// swap-chain resources before the heap-stable View owner is freed.
+    pub fn destroy(self: *View) bool {
+        if (self.hwnd == null) return true;
+        return win.DestroyWindow(self.hwnd) != 0;
     }
 
     fn deinitResources(self: *View) void {
@@ -196,15 +198,28 @@ pub const View = struct {
         self.invalidate();
     }
 
-    pub fn reloadFont(self: *View, font: win.HFONT, font_family: []const u8, font_size: u16, dpi: u32) !void {
-        var text_engine = try TextEngine.init(font_family, font_size, dpi);
-        errdefer text_engine.deinit();
-        try text_engine.setWindow(self.hwnd);
+    pub const PreparedReload = struct {
+        engine: TextEngine,
+        font: win.HFONT,
+
+        pub fn deinit(self: *PreparedReload) void {
+            self.engine.deinit();
+        }
+    };
+
+    pub fn prepareReload(self: *View, font: win.HFONT, font_family: []const u8, font_size: u16, dpi: u32) !PreparedReload {
+        var engine = try TextEngine.init(font_family, font_size, dpi);
+        errdefer engine.deinit();
+        try engine.setWindow(self.hwnd);
+        return .{ .engine = engine, .font = font };
+    }
+
+    pub fn commitReload(self: *View, prepared: PreparedReload) void {
         if (self.text_engine) |*engine| engine.deinit();
-        self.text_engine = text_engine;
+        self.text_engine = prepared.engine;
         self.renderer_failed = false;
-        self.font = font;
-        self.updateCellSize(font);
+        self.font = prepared.font;
+        self.updateCellSize(prepared.font);
     }
 
     fn updateCellSize(self: *View, font: win.HFONT) void {
@@ -224,7 +239,7 @@ pub const View = struct {
         if (self.columns != 0 and self.rows != 0) {
             if (self.boundRuntime()) |runtime| runtime.resize(self.columns, self.rows, self.cell_width, self.cell_height);
         }
-        requestRefresh(self);
+        self.refresh();
     }
 
     pub fn bindPane(self: *View, pane_id: ?pane_tree.PaneId) void {
@@ -279,13 +294,8 @@ pub const View = struct {
         }
     }
 
-    fn requestRefresh(context: ?*anyopaque) void {
-        const self: *View = @ptrCast(@alignCast(context orelse return));
-        if (self.refresh_pending.swap(true, .acq_rel)) return;
-        const value = self.refresh_hwnd.load(.acquire);
-        if (value == 0 or win.PostMessageW(win32.handleFromInt(win.HWND, value), refresh_message, 0, 0) == 0) {
-            self.refresh_pending.store(false, .release);
-        }
+    pub fn refresh(self: *View) void {
+        self.refreshIfNeeded();
     }
 
     fn setRefreshInterval(self: *View, interval_ms: u32) void {
@@ -384,7 +394,13 @@ pub const View = struct {
     }
 
     pub fn notifyScrollbar(self: *View, show: bool) void {
-        _ = win.PostMessageW(win.GetParent(self.hwnd), self.scrollbar_changed_message, @intFromBool(show), 0);
+        const pane_id = self.pane_id orelse return;
+        _ = win.PostMessageW(
+            win.GetParent(self.hwnd),
+            self.scrollbar_changed_message,
+            @intFromBool(show),
+            @bitCast(pane_id),
+        );
     }
 
     fn scrollViewport(self: *View, delta: isize) void {
@@ -1228,13 +1244,6 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
     const view: ?*View = if (userdata == 0) null else @ptrFromInt(@as(usize, @intCast(userdata)));
 
     switch (message) {
-        refresh_message => {
-            if (view) |current| {
-                current.refresh_pending.store(false, .release);
-                current.refreshIfNeeded();
-            }
-            return 0;
-        },
         render_message => {
             if (view) |current| {
                 current.render_pending.store(false, .release);
@@ -1373,8 +1382,6 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             const result = win.DefWindowProcW(hwnd, message, wparam, lparam);
             _ = win.SetWindowLongPtrW(hwnd, win.GWLP_USERDATA, 0);
             if (view) |current| {
-                current.refresh_hwnd.store(0, .release);
-                current.refresh_pending.store(false, .release);
                 current.hwnd = null;
             }
             return result;

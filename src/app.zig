@@ -217,8 +217,13 @@ pub const App = struct {
 
     pub fn extractFocusedPane(self: *App) ?RemovedPane {
         const tab_index = self.active_tab orelse return null;
-        var tab = &self.tabs.items[tab_index];
+        const tab = &self.tabs.items[tab_index];
         const pane_id = tab.tree.focused orelse return null;
+        return self.extractPane(tab_index, pane_id);
+    }
+
+    fn extractPane(self: *App, tab_index: usize, pane_id: pane_tree.PaneId) ?RemovedPane {
+        var tab = &self.tabs.items[tab_index];
         for (tab.panes.items, 0..) |pane_value, index| if (pane_value.id == pane_id) {
             const removed = tab.panes.orderedRemove(index);
             _ = tab.tree.close(pane_id);
@@ -230,6 +235,16 @@ pub const App = struct {
                 if (self.tabs.items.len == 0) self.active_tab = null else self.active_tab = @min(tab_index, self.tabs.items.len - 1);
             }
             return .{ .pane_id = pane_id, .session = removed.session, .removed_tab = final };
+        };
+        return null;
+    }
+
+    /// Removes exactly one eligible pane without destroying its still-live runtime.
+    pub fn extractCleanlyExitedPane(self: *App) ?RemovedPane {
+        for (self.tabs.items, 0..) |*tab, tab_index| for (tab.panes.items) |pane| {
+            const runtime = pane.session.runtime orelse continue;
+            if (runtime.exitedCleanly() and !pane.session.hold_on_exit)
+                return self.extractPane(tab_index, pane.id);
         };
         return null;
     }
