@@ -300,20 +300,7 @@ struct Bridge {
         menu_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
         menu_button.VerticalAlignment(VerticalAlignment::Center);
-        auto brand = Border{};
-        brand.Width(28);
-        brand.Height(28);
-        brand.CornerRadius(CornerRadius{8});
-        brand.Background(resources.Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
-        auto brand_text = TextBlock{};
-        brand_text.Text(L"Z");
-        brand_text.FontSize(14);
-        brand_text.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
-        brand_text.HorizontalAlignment(HorizontalAlignment::Center);
-        brand_text.VerticalAlignment(VerticalAlignment::Center);
-        brand_text.Foreground(resources.Lookup(box_value(L"TextOnAccentFillColorPrimaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
-        brand.Child(brand_text);
-        menu_button.Content(brand);
+        menu_button.Content(SymbolIcon{Symbol::GlobalNavigationButton});
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
         ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
 
