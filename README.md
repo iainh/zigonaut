@@ -42,23 +42,84 @@ VT ingestion and render-state traversal without relying on interactive timing.
 On first launch Zigonaut creates `%APPDATA%\spiralpoint\zigonaut\zigonaut.conf`:
 
 ```ini
+# Terminal font family. Default: Cascadia Mono.
 font_family=Cascadia Mono
+# Terminal font size in points (6-72). Default: 18.
 font_size=18
+# Theme used in dark application mode. Default: rasmus.
 dark_theme=rasmus
+# Theme used in light application mode. Default: campbell-light.
 light_theme=campbell-light
+# Application color scheme: system, light, or dark. Default: system.
 color_scheme=system
+# Horizontal terminal padding in pixels (0-128). Default: 8.
 padding_horizontal=8
+# Vertical terminal padding in pixels (0-128). Default: 8.
 padding_vertical=8
+# Terminal background opacity percentage (0-100). Default: 100.
 background_opacity=100
+# Window backdrop: none, mica, or acrylic. Default: mica.
 backdrop=mica
+
+# Palette overrides use #RRGGBB. Their defaults come from the selected
+# dark_theme or light_theme, so they are commented out unless overridden.
+# Terminal foreground color. Default: selected theme foreground.
+#foreground=#RRGGBB
+# Terminal background color. Default: selected theme background.
+#background=#RRGGBB
+# Terminal cursor color. Default: selected theme cursor.
+#cursor=#RRGGBB
+# ANSI black. Default: selected theme ANSI 0.
+#ansi0=#RRGGBB
+# ANSI red. Default: selected theme ANSI 1.
+#ansi1=#RRGGBB
+# ANSI green. Default: selected theme ANSI 2.
+#ansi2=#RRGGBB
+# ANSI yellow. Default: selected theme ANSI 3.
+#ansi3=#RRGGBB
+# ANSI blue. Default: selected theme ANSI 4.
+#ansi4=#RRGGBB
+# ANSI magenta. Default: selected theme ANSI 5.
+#ansi5=#RRGGBB
+# ANSI cyan. Default: selected theme ANSI 6.
+#ansi6=#RRGGBB
+# ANSI white. Default: selected theme ANSI 7.
+#ansi7=#RRGGBB
+# ANSI bright black. Default: selected theme ANSI 8.
+#ansi8=#RRGGBB
+# ANSI bright red. Default: selected theme ANSI 9.
+#ansi9=#RRGGBB
+# ANSI bright green. Default: selected theme ANSI 10.
+#ansi10=#RRGGBB
+# ANSI bright yellow. Default: selected theme ANSI 11.
+#ansi11=#RRGGBB
+# ANSI bright blue. Default: selected theme ANSI 12.
+#ansi12=#RRGGBB
+# ANSI bright magenta. Default: selected theme ANSI 13.
+#ansi13=#RRGGBB
+# ANSI bright cyan. Default: selected theme ANSI 14.
+#ansi14=#RRGGBB
+# ANSI bright white. Default: selected theme ANSI 15.
+#ansi15=#RRGGBB
+
+# Profile opened initially and by Ctrl+Shift+T. Default: PowerShell.
 default_profile=PowerShell
+# Launch profiles use profile.<name>=<shell type>|<command line>.
+# Shell types are powershell, windows, and wsl. These four profiles are
+# the defaults; declaring any profile.* key replaces the default set.
 profile.PowerShell=powershell|powershell.exe
 profile.PowerShell 7=powershell|pwsh.exe
 profile.Command Prompt=windows|cmd.exe
 profile.WSL=wsl|wsl.exe
+# Working directory for new processes. Default: empty (inherit Zigonaut's).
 working_directory=
+# Keep a new tab open after its process exits cleanly. Default: false.
 hold_on_exit=false
+# Give each new tab a randomized background hue. Default: true.
 randomize_tab_background=true
+
+# Legacy alias: theme sets dark_theme. Default: not set.
+#theme=rasmus
 ```
 
 Themes are loaded at startup from the `themes` directory beside `zigonaut.exe`. Each JSON
