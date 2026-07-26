@@ -68,7 +68,11 @@ fn luminance(color: Color) u32 {
 }
 
 fn scaledChannel(channel: u8, target: u32, source: u32) u8 {
-    return @intCast((@as(u64, channel) * target + source / 2) / source);
+    if (target <= source) {
+        return @intCast((@as(u64, channel) * target + source / 2) / source);
+    }
+    const remaining = 2_550_000 - source;
+    return channel + @as(u8, @intCast((@as(u64, 255 - channel) * (target - source) + remaining / 2) / remaining));
 }
 
 const max_themes = 64;
@@ -213,4 +217,17 @@ test "random backgrounds retain the theme background darkness" {
     try std.testing.expect(@abs(@as(i64, luminance(second.background)) - target) < 10_000);
     try std.testing.expectEqual(rasmus.foreground, first.foreground);
     try std.testing.expectEqual(rasmus.ansi, first.ansi);
+}
+
+test "random backgrounds support light themes" {
+    var light = rasmus;
+    light.background = hex(0xf3f3f3);
+
+    const value = randomizedBackground(light, 0);
+
+    try std.testing.expectEqual(@as(u8, 255), value.background.red);
+    const target: i64 = luminance(light.background);
+    try std.testing.expect(@abs(@as(i64, luminance(value.background)) - target) < 10_000);
+    try std.testing.expectEqual(light.foreground, value.foreground);
+    try std.testing.expectEqual(light.ansi, value.ansi);
 }

@@ -47,11 +47,13 @@ const Application = struct {
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
     fn init(loaded: config.Loaded, themes: theme.Catalog) Application {
+        const dark_theme = appsUseDarkTheme();
         return .{
             .settings = loaded.value,
             .loaded = loaded,
             .themes = themes,
-            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, &themes, true), loaded.value.randomize_tab_background),
+            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, &themes, dark_theme), loaded.value.randomize_tab_background),
+            .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
         };
     }
