@@ -21,6 +21,7 @@ const scrollbar_changed_message = win.WM_APP + 4;
 const progress_changed_message = win.WM_APP + 5;
 const notification_changed_message = win.WM_APP + 6;
 const renderer_failed_message = win.WM_APP + 7;
+const pane_event_message = win.WM_APP + 8;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
@@ -42,6 +43,9 @@ const Application = struct {
     terminal_ready: bool = false,
     terminal_view: TerminalView = undefined,
     chrome: ?chrome.Bridge = null,
+    attached_pane: ?u64 = null,
+    pane_events_mutex: std.Thread.Mutex = .{},
+    pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
@@ -61,6 +65,7 @@ const Application = struct {
         self.model.deinit();
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
+        self.pane_events.deinit(std.heap.page_allocator);
         if (self.font != null) _ = win.DeleteObject(self.font);
         self.loaded.deinit();
     }
@@ -79,10 +84,27 @@ const Application = struct {
     const updateTheme = updateThemeImpl;
     const setZoomedFontSize = setZoomedFontSizeImpl;
     const attachTerminalRenderer = attachTerminalRendererImpl;
+    const detachTerminalRenderer = detachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
 
-    fn bindActivePane(self: *Application) void {
-        self.terminal_view.bindPane(if (self.model.activePane()) |pane| pane.id else null);
+    fn bindActivePane(self: *Application) !void {
+        const next = if (self.model.activePane()) |pane| pane.id else null;
+        self.terminal_view.bindPane(next);
+        if (self.attached_pane == next) return;
+        if (self.attached_pane) |old| if (old != next) {
+            if (self.chrome) |*bridge| _ = bridge.detachPane(old);
+            self.attached_pane = null;
+        };
+        if (next) |id| {
+            const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+            if (!bridge.attachPane(id, self.terminal_view.hwnd, self.terminal_view.swapChain())) return error.AttachPaneFailed;
+            const layout = [_]chrome.LayoutNode{.{ .kind = 1, .id = id }};
+            if (!bridge.updateLayout(&layout, id)) {
+                _ = bridge.detachPane(id);
+                return error.UpdateLayoutFailed;
+            }
+            self.attached_pane = id;
+        }
     }
 };
 
@@ -111,6 +133,7 @@ pub fn main() !void {
     const result = application.chrome.?.run(
         windowStarted,
         chromeCommand,
+        paneEvent,
         application,
         build_options.version,
         build_options.git_hash,
@@ -168,7 +191,6 @@ fn initializeWindowImpl(self: *Application) !void {
     );
     try self.terminal_view.create(hwnd, win.GetModuleHandleW(null));
     self.terminal_ready = true;
-    if (!self.attachTerminalRenderer()) return error.AttachTerminalFailed;
     try self.syncProfiles(&self.settings);
     try self.addDefaultSession();
     self.updateTheme();
@@ -198,6 +220,10 @@ fn windowSubclassProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lpa
 fn shutdownWindowImpl(self: *Application) void {
     const hwnd = self.hwnd orelse return;
     if (self.terminal_ready) self.terminal_view.resetInteraction();
+    if (self.attached_pane) |id| {
+        if (self.chrome) |*bridge| _ = bridge.detachPane(id);
+    }
+    self.attached_pane = null;
     _ = win.KillTimer(hwnd, taskbar_progress_timer);
     if (self.taskbar_ready) {
         if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
@@ -218,6 +244,23 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         return 0;
     }
     switch (message) {
+        pane_event_message => {
+            while (true) {
+                self.pane_events_mutex.lock();
+                const event = if (self.pane_events.items.len != 0) self.pane_events.orderedRemove(0) else null;
+                self.pane_events_mutex.unlock();
+                const current = event orelse break;
+                if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
+                if (self.attached_pane != current.target_id) continue;
+                switch (current.kind) {
+                    chrome.pane_scroll => self.terminal_view.scrollTo(current.value),
+                    chrome.pane_scroll_wheel => self.terminal_view.handleMouseWheelDelta(@bitCast(current.value)),
+                    chrome.pane_focus, chrome.pane_committed_ratio => {},
+                    else => {},
+                }
+            }
+            return 0;
+        },
         chrome_message => {
             const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
             const argument: u32 = @intCast(lparam);
@@ -238,12 +281,12 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
-                    self.bindActivePane();
+                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
                 },
                 .select => {
                     self.terminal_view.resetInteraction();
                     self.model.activateTab(argument);
-                    self.bindActivePane();
+                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
                 },
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
@@ -268,13 +311,15 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 .notification_activate => {
                     self.terminal_view.resetInteraction();
                     if (!self.model.activateSessionId(argument)) return 0;
-                    self.bindActivePane();
+                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
                     self.terminal_view.syncSessions();
                     self.terminal_view.invalidate();
                     self.syncChrome();
                     _ = win.ShowWindow(hwnd, win.SW_RESTORE);
                     _ = win.SetForegroundWindow(hwnd);
-                    if (self.chrome) |*bridge| _ = bridge.focusTerminal();
+                    if (self.chrome) |*bridge| {
+                        if (self.attached_pane) |id| _ = bridge.focusPane(id);
+                    }
                     return 0;
                 },
                 .zoom_in => {
@@ -296,7 +341,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.terminal_view.resetInteraction();
                     const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
                     self.model.activateTab(next);
-                    self.bindActivePane();
+                    self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
                 },
                 .shutdown => return 0,
             }
@@ -313,7 +358,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         shell_exited_message => {
             self.terminal_view.bindPane(null);
             if (!self.model.closeCleanlyExitedSessions()) {
-                self.bindActivePane();
+                self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
                 return 0;
             }
             if (self.model.tabCount() == 0) {
@@ -321,7 +366,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
             }
-            self.bindActivePane();
+            self.bindActivePane() catch |err| log.err("unable to bind active pane: {}", .{err});
             self.terminal_view.syncSessions();
             self.terminal_view.invalidate();
             self.syncChrome();
@@ -410,6 +455,7 @@ fn syncScrollbarImpl(self: *Application, show: bool) void {
     const state = self.terminal_view.scrollbar();
     const limit = std.math.maxInt(u32);
     if (!bridge.updateScrollbar(
+        self.attached_pane orelse return,
         @intCast(@min(state.total, limit)),
         @intCast(@min(state.len, limit)),
         @intCast(@min(state.offset, limit)),
@@ -473,6 +519,18 @@ fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c)
     sendChromeCommand(hwnd, typed, argument);
 }
 
+fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c) void {
+    const self: *Application = @ptrCast(@alignCast(context orelse return));
+    const hwnd = self.hwnd orelse return;
+    self.pane_events_mutex.lock();
+    self.pane_events.append(std.heap.page_allocator, source.*) catch {
+        self.pane_events_mutex.unlock();
+        return;
+    };
+    self.pane_events_mutex.unlock();
+    _ = win.PostMessageW(hwnd, pane_event_message, 0, 0);
+}
+
 fn addDefaultSessionImpl(self: *Application) !void {
     try self.addProfile(self.settings.defaultProfile());
     self.terminal_view.syncSessions();
@@ -488,7 +546,7 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
         .wsl => .wsl,
     };
     _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
-    self.bindActivePane();
+    try self.bindActivePane();
 }
 
 fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {
@@ -556,7 +614,11 @@ fn reloadSettingsImpl(self: *Application) !void {
     };
     try self.syncProfiles(&next);
     if (new_font != null) {
-        try self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi);
+        self.detachTerminalRenderer();
+        self.terminal_view.reloadFont(new_font, next.font_family, next.font_size, self.dpi) catch |err| {
+            _ = self.attachTerminalRenderer();
+            return err;
+        };
         if (!self.attachTerminalRenderer()) {
             log.err("unable to attach the reloaded terminal renderer", .{});
             if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
@@ -602,7 +664,9 @@ fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
     if (size == self.zoomed_font_size) return;
     const new_font = createFont(self.settings.font_family, size, self.dpi);
     if (new_font == null) return;
+    self.detachTerminalRenderer();
     self.terminal_view.reloadFont(new_font, self.settings.font_family, size, self.dpi) catch {
+        _ = self.attachTerminalRenderer();
         _ = win.DeleteObject(new_font);
         return;
     };
@@ -617,7 +681,18 @@ fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
 
 fn attachTerminalRendererImpl(self: *Application) bool {
     const bridge = if (self.chrome) |*value| value else return false;
-    return bridge.attachTerminal(self.terminal_view.hwnd, self.terminal_view.swapChain());
+    const id = self.attached_pane orelse if (self.model.activePane()) |pane| pane.id else return false;
+    if (self.attached_pane != null) _ = bridge.detachPane(id);
+    if (!bridge.attachPane(id, self.terminal_view.hwnd, self.terminal_view.swapChain())) return false;
+    self.attached_pane = id;
+    const layout = [_]chrome.LayoutNode{.{ .kind = 1, .id = id }};
+    return bridge.updateLayout(&layout, id);
+}
+
+fn detachTerminalRendererImpl(self: *Application) void {
+    const id = self.attached_pane orelse return;
+    if (self.chrome) |*bridge| _ = bridge.detachPane(id);
+    self.attached_pane = null;
 }
 
 fn recoverTerminalRendererImpl(self: *Application) void {
@@ -626,7 +701,9 @@ fn recoverTerminalRendererImpl(self: *Application) void {
         log.err("unable to recreate the terminal font after a renderer failure", .{});
         return;
     }
+    self.detachTerminalRenderer();
     self.terminal_view.reloadFont(new_font, self.settings.font_family, self.zoomed_font_size, self.dpi) catch |err| {
+        _ = self.attachTerminalRenderer();
         _ = win.DeleteObject(new_font);
         log.err("unable to recover the terminal renderer: {}", .{err});
         return;

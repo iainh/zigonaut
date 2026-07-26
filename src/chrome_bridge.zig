@@ -27,13 +27,22 @@ pub fn commandFromInt(value: u32) ?Command {
 }
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
+pub const PaneEvent = extern struct { size: u32 = @sizeOf(PaneEvent), kind: u32, target_id: u64, value: u32, reserved: u32 = 0 };
+pub const LayoutNode = extern struct { size: u32 = @sizeOf(LayoutNode), kind: u32, id: u64, axis: u32 = 0, ratio: u32 = 0, subtree_size: u32 = 1, reserved: u32 = 0 };
+pub const pane_focus: u32 = 1;
+pub const pane_committed_ratio: u32 = 2;
+pub const pane_scroll: u32 = 3;
+pub const pane_scroll_wheel: u32 = 4;
+const PaneCallback = *const fn (?*anyopaque, *const PaneEvent) callconv(.c) void;
 pub const Started = *const fn (?*anyopaque, ?*anyopaque, win.HWND) callconv(.c) win.BOOL;
-const Run = *const fn (Started, Callback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
-const AttachTerminal = *const fn (?*anyopaque, win.HWND, ?*anyopaque) callconv(.c) win.HRESULT;
-const FocusTerminal = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
+const Run = *const fn (Started, Callback, PaneCallback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
+const AttachPane = *const fn (?*anyopaque, u64, win.HWND, ?*anyopaque) callconv(.c) win.HRESULT;
+const DetachPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
+const FocusPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
+const UpdateLayout = *const fn (?*anyopaque, [*]const LayoutNode, u32, u64) callconv(.c) win.HRESULT;
 const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
 const UpdateProfiles = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32) callconv(.c) win.HRESULT;
-const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
+const UpdateScrollbar = *const fn (?*anyopaque, u64, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
@@ -45,8 +54,10 @@ pub const Bridge = struct {
     module: win.HMODULE,
     instance: ?*anyopaque = null,
     run_fn: Run,
-    attach_terminal_fn: AttachTerminal,
-    focus_terminal_fn: FocusTerminal,
+    attach_pane_fn: AttachPane,
+    detach_pane_fn: DetachPane,
+    focus_pane_fn: FocusPane,
+    update_layout_fn: UpdateLayout,
     update_fn: Update,
     update_profiles_fn: UpdateProfiles,
     update_scrollbar_fn: UpdateScrollbar,
@@ -73,11 +84,13 @@ pub const Bridge = struct {
             if (!loaded) _ = win.FreeLibrary(module);
         }
         const run_fn = symbol(Run, module, "zigonaut_window_run") orelse return null;
-        const attach_terminal_fn = symbol(AttachTerminal, module, "zigonaut_chrome_attach_terminal") orelse return null;
-        const focus_terminal_fn = symbol(FocusTerminal, module, "zigonaut_chrome_focus_terminal") orelse return null;
+        const attach_pane_fn = symbol(AttachPane, module, "zigonaut_chrome_attach_pane") orelse return null;
+        const detach_pane_fn = symbol(DetachPane, module, "zigonaut_chrome_detach_pane") orelse return null;
+        const focus_pane_fn = symbol(FocusPane, module, "zigonaut_chrome_focus_pane") orelse return null;
+        const update_layout_fn = symbol(UpdateLayout, module, "zigonaut_chrome_update_layout") orelse return null;
         const update_fn = symbol(Update, module, "zigonaut_chrome_update") orelse return null;
         const update_profiles_fn = symbol(UpdateProfiles, module, "zigonaut_chrome_update_profiles") orelse return null;
-        const update_scrollbar_fn = symbol(UpdateScrollbar, module, "zigonaut_chrome_update_scrollbar") orelse return null;
+        const update_scrollbar_fn = symbol(UpdateScrollbar, module, "zigonaut_chrome_update_pane_scrollbar") orelse return null;
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
@@ -85,8 +98,10 @@ pub const Bridge = struct {
         return .{
             .module = module,
             .run_fn = run_fn,
-            .attach_terminal_fn = attach_terminal_fn,
-            .focus_terminal_fn = focus_terminal_fn,
+            .attach_pane_fn = attach_pane_fn,
+            .detach_pane_fn = detach_pane_fn,
+            .focus_pane_fn = focus_pane_fn,
+            .update_layout_fn = update_layout_fn,
             .update_fn = update_fn,
             .update_profiles_fn = update_profiles_fn,
             .update_scrollbar_fn = update_scrollbar_fn,
@@ -96,11 +111,12 @@ pub const Bridge = struct {
         };
     }
 
-    pub fn run(self: *Bridge, started: Started, callback: Callback, context: ?*anyopaque, version: []const u8, git_hash: []const u8) win.HRESULT {
+    pub fn run(self: *Bridge, started: Started, callback: Callback, pane_callback: PaneCallback, context: ?*anyopaque, version: []const u8, git_hash: []const u8) win.HRESULT {
         if (self.instance != null) return @bitCast(@as(u32, 0x8000ffff));
         const result = self.run_fn(
             started,
             callback,
+            pane_callback,
             context,
             version.ptr,
             @intCast(version.len),
@@ -117,14 +133,22 @@ pub const Bridge = struct {
         return true;
     }
 
-    pub fn attachTerminal(self: *Bridge, terminal: win.HWND, swap_chain: ?*anyopaque) bool {
+    pub fn attachPane(self: *Bridge, id: u64, terminal: win.HWND, swap_chain: ?*anyopaque) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.attach_terminal_fn(instance, terminal, swap_chain));
+        return succeeded(self.attach_pane_fn(instance, id, terminal, swap_chain));
     }
 
-    pub fn focusTerminal(self: *Bridge) bool {
+    pub fn detachPane(self: *Bridge, id: u64) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.focus_terminal_fn(instance));
+        return succeeded(self.detach_pane_fn(instance, id));
+    }
+    pub fn focusPane(self: *Bridge, id: u64) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.focus_pane_fn(instance, id));
+    }
+    pub fn updateLayout(self: *Bridge, nodes: []const LayoutNode, focused: u64) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.update_layout_fn(instance, nodes.ptr, @intCast(nodes.len), focused));
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
@@ -137,9 +161,9 @@ pub const Bridge = struct {
         return succeeded(self.update_profiles_fn(instance, names.ptr, name_lengths.ptr, @intCast(names.len)));
     }
 
-    pub fn updateScrollbar(self: *Bridge, total: u32, page: u32, position: u32, show: bool) bool {
+    pub fn updateScrollbar(self: *Bridge, pane_id: u64, total: u32, page: u32, position: u32, show: bool) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_scrollbar_fn(instance, total, page, position, @intFromBool(show)));
+        return succeeded(self.update_scrollbar_fn(instance, pane_id, total, page, position, @intFromBool(show)));
     }
 
     pub fn updateTaskbarProgress(self: *Bridge, state: u32, value: u32) bool {

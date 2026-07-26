@@ -31,6 +31,33 @@ typedef enum zigonaut_chrome_command_id {
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);
 typedef BOOL (__cdecl *zigonaut_window_started)(void* context, void* bridge, HWND window);
 
+typedef enum zigonaut_pane_event_kind {
+    ZIGONAUT_PANE_EVENT_FOCUS = 1,
+    ZIGONAUT_PANE_EVENT_COMMITTED_RATIO = 2,
+    ZIGONAUT_PANE_EVENT_SCROLL = 3,
+    ZIGONAUT_PANE_EVENT_SCROLL_WHEEL = 4,
+} zigonaut_pane_event_kind;
+typedef struct zigonaut_pane_event {
+    uint32_t size;
+    uint32_t kind;
+    uint64_t target_id;
+    uint32_t value;
+    uint32_t reserved;
+} zigonaut_pane_event;
+typedef void (__cdecl *zigonaut_pane_event_callback)(void* context, const zigonaut_pane_event* event);
+
+typedef enum zigonaut_layout_kind { ZIGONAUT_LAYOUT_LEAF = 1, ZIGONAUT_LAYOUT_SPLIT = 2 } zigonaut_layout_kind;
+typedef enum zigonaut_split_axis { ZIGONAUT_AXIS_LEFT_RIGHT = 1, ZIGONAUT_AXIS_TOP_BOTTOM = 2 } zigonaut_split_axis;
+typedef struct zigonaut_layout_node {
+    uint32_t size;
+    uint32_t kind;
+    uint64_t id;
+    uint32_t axis;
+    uint32_t ratio;
+    uint32_t subtree_size;
+    uint32_t reserved;
+} zigonaut_layout_node;
+
 typedef enum zigonaut_taskbar_progress_state {
     ZIGONAUT_TASKBAR_PROGRESS_NONE = 0,
     ZIGONAUT_TASKBAR_PROGRESS_INDETERMINATE = 1,
@@ -45,12 +72,14 @@ typedef enum zigonaut_backdrop_kind {
     ZIGONAUT_BACKDROP_ACRYLIC = 2,
 } zigonaut_backdrop_kind;
 
-__declspec(dllexport) HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_attach_terminal(void* bridge, HWND terminal, void* swap_chain) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_focus_terminal(void* bridge) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, zigonaut_pane_event_callback pane_callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_attach_pane(void* bridge, uint64_t pane_id, HWND terminal, void* swap_chain) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_detach_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_focus_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_layout(void* bridge, const zigonaut_layout_node* nodes, uint32_t count, uint64_t focused_pane) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update(void* bridge, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active_index) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_profiles(void* bridge, const char* const* names, const uint32_t* name_lengths, uint32_t count) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* bridge, uint32_t total, uint32_t page, uint32_t position, BOOL show) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_pane_scrollbar(void* bridge, uint64_t pane_id, uint32_t total, uint32_t page, uint32_t position, BOOL show) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* bridge, uint32_t state, uint32_t value) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_notification(void* bridge, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) ZIGONAUT_NOEXCEPT;
