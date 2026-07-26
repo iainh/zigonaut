@@ -20,6 +20,13 @@ pub const Command = enum(u32) {
     select_next = win.ZIGONAUT_CHROME_SELECT_NEXT,
     select_previous = win.ZIGONAUT_CHROME_SELECT_PREVIOUS,
     shutdown = win.ZIGONAUT_CHROME_SHUTDOWN,
+    split_right = win.ZIGONAUT_CHROME_SPLIT_RIGHT,
+    split_down = win.ZIGONAUT_CHROME_SPLIT_DOWN,
+    focus_left = win.ZIGONAUT_CHROME_FOCUS_LEFT,
+    focus_right = win.ZIGONAUT_CHROME_FOCUS_RIGHT,
+    focus_up = win.ZIGONAUT_CHROME_FOCUS_UP,
+    focus_down = win.ZIGONAUT_CHROME_FOCUS_DOWN,
+    close_pane = win.ZIGONAUT_CHROME_CLOSE_PANE,
 };
 
 pub fn commandFromInt(value: u32) ?Command {

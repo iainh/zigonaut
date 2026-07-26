@@ -26,6 +26,13 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_SELECT_NEXT = 18,
     ZIGONAUT_CHROME_SELECT_PREVIOUS = 19,
     ZIGONAUT_CHROME_SHUTDOWN = 20,
+    ZIGONAUT_CHROME_SPLIT_RIGHT = 21,
+    ZIGONAUT_CHROME_SPLIT_DOWN = 22,
+    ZIGONAUT_CHROME_FOCUS_LEFT = 23,
+    ZIGONAUT_CHROME_FOCUS_RIGHT = 24,
+    ZIGONAUT_CHROME_FOCUS_UP = 25,
+    ZIGONAUT_CHROME_FOCUS_DOWN = 26,
+    ZIGONAUT_CHROME_CLOSE_PANE = 27,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

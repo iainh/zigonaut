@@ -392,6 +392,59 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     }
                     self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
+                .split_right, .split_down => {
+                    if (self.activeView()) |view| view.resetInteraction();
+                    _ = self.model.splitFocused(if (command == .split_right) .left_right else .top_bottom) catch |err| {
+                        log.err("unable to split focused pane: {}", .{err});
+                        return 0;
+                    };
+                    self.syncPresentation() catch |err| {
+                        log.err("unable to present split panes: {}", .{err});
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    };
+                },
+                .focus_left, .focus_right, .focus_up, .focus_down => {
+                    const changed = self.model.focusDirection(switch (command) {
+                        .focus_left => .left,
+                        .focus_right => .right,
+                        .focus_up => .up,
+                        .focus_down => .down,
+                        else => unreachable,
+                    });
+                    if (!changed) return 0;
+                    const pane = self.model.activePane() orelse return 0;
+                    if (self.chrome) |*bridge| _ = bridge.focusPane(pane.id);
+                    self.syncChrome();
+                    self.syncScrollbar(false);
+                    self.syncTaskbarProgress();
+                    return 0;
+                },
+                .close_pane => {
+                    const pane_id = (self.model.activePane() orelse return 0).id;
+                    const bridge = if (self.chrome) |*value| value else return 0;
+                    if (!bridge.detachPane(pane_id)) {
+                        log.err("unable to detach focused pane before close", .{});
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    }
+                    if (std.mem.indexOfScalar(u64, self.attached_panes.items, pane_id)) |index| _ = self.attached_panes.swapRemove(index);
+                    var removed = self.model.extractFocusedPane() orelse return 0;
+                    if (!self.destroyView(removed.pane_id)) {
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    }
+                    self.model.destroyRemovedPane(&removed);
+                    if (self.model.tabCount() == 0) {
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    }
+                    self.syncPresentation() catch |err| {
+                        log.err("unable to present panes after close: {}", .{err});
+                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                        return 0;
+                    };
+                },
                 .select => {
                     if (self.activeView()) |view| view.resetInteraction();
                     self.detachPresentation() catch return 0;

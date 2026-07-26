@@ -5,11 +5,11 @@ Zigonaut is an early-stage Windows terminal application built with Zig 0.15.2. T
 - WinUI 3 for the native application shell
 - Windows ConPTY for PowerShell and WSL processes
 - libghostty-vt for VT parsing and terminal/render state
-- one isolated terminal surface per tab
+- independent isolated terminal panes within each tab
 
 ## Current milestone
 
-The repository contains a runnable WinUI 3 application shell and a tested tab/session model. Each PowerShell and WSL tab owns an isolated Windows ConPTY process and `libghostty-vt` terminal. A background reader feeds ConPTY output into Ghostty, and the UI paints synchronized, themed cell render-state snapshots rather than displaying unparsed process output. The built-in Rasmus theme supplies the default, cursor, and ANSI colors while preserving application-defined RGB colors. Windows Unicode text input is sent to ConPTY as UTF-8, while navigation keys use Ghostty's mode-aware key encoder. Window resizing measures the active monospace font with DirectWrite and keeps every Ghostty grid and ConPTY session synchronized to the available viewport.
+The repository contains a runnable WinUI 3 application shell and a tested tab/session model. Each tab may contain multiple independent panes, each with its own Windows ConPTY process and `libghostty-vt` terminal. A background reader feeds ConPTY output into Ghostty, and the UI paints synchronized, themed cell render-state snapshots rather than displaying unparsed process output. The built-in Rasmus theme supplies the default, cursor, and ANSI colors while preserving application-defined RGB colors. Windows Unicode text input is sent to ConPTY as UTF-8, while navigation keys use Ghostty's mode-aware key encoder. Window resizing measures the active monospace font with DirectWrite and keeps every Ghostty grid and ConPTY session synchronized to the available viewport.
 
 The UI is a full, code-first `Microsoft.UI.Xaml.Window` owned by WinUI's application lifetime and dispatcher. Its C++/WinRT shell uses native Fluent controls for the custom title bar, tabs, menus, dialogs, and scrollback. The terminal is composed into the same visual tree with a `SwapChainPanel`; the bridge translates WinUI focus, keyboard, and pointer events into Zig's terminal input boundary while owning no session behavior.
 
@@ -156,6 +156,10 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
 
 ## Terminal workflows
 
+- `Ctrl+Shift+O` splits the focused pane to the right; `Ctrl+Shift+E` splits it
+  downward. Drag the native divider with the mouse to resize adjacent panes.
+- `Ctrl+Alt+Left/Right/Up/Down` moves focus directionally between panes.
+  `Ctrl+Shift+W` closes the focused pane, then its tab or window when it is the last one.
 - `Ctrl+Shift+F` searches live scrollback; Enter/`Ctrl+N` and Shift+Enter/`Ctrl+P`
   move through matches.
 - `Ctrl+Shift+Up` and `Ctrl+Shift+Down` move between OSC 133 shell prompts.

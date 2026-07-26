@@ -7,6 +7,8 @@ All notable changes to Zigonaut will be documented in this file.
 ### Added
 
 - Native WinUI 3 terminal shell for Windows on x64 and ARM64.
+- Native split terminal panes with directional keyboard focus, pane close, and
+  mouse-resizable dividers.
 - Configuration-defined ConPTY profiles with user-selected names, commands, ordering,
   shell quoting behavior, and default profile.
 - Tabbed terminal sessions with shell-provided titles, keyboard shortcuts, a

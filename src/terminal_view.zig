@@ -634,13 +634,28 @@ pub const View = struct {
             } else self.suppress_application_character = true;
             return true;
         }
-        if (released or win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (released or win.GetKeyState(win.VK_CONTROL) >= 0) return false;
 
         const shift = win.GetKeyState(win.VK_SHIFT) < 0;
-        const command: ?u32 = if (shift and wparam == 'T')
+        const alt = win.GetKeyState(win.VK_MENU) < 0;
+        const command: ?u32 = if (alt and !shift and wparam == win.VK_LEFT)
+            win.ZIGONAUT_CHROME_FOCUS_LEFT
+        else if (alt and !shift and wparam == win.VK_RIGHT)
+            win.ZIGONAUT_CHROME_FOCUS_RIGHT
+        else if (alt and !shift and wparam == win.VK_UP)
+            win.ZIGONAUT_CHROME_FOCUS_UP
+        else if (alt and !shift and wparam == win.VK_DOWN)
+            win.ZIGONAUT_CHROME_FOCUS_DOWN
+        else if (alt)
+            null
+        else if (shift and wparam == 'T')
             win.ZIGONAUT_CHROME_NEW_DEFAULT
         else if (shift and wparam == 'W')
-            win.ZIGONAUT_CHROME_CLOSE
+            win.ZIGONAUT_CHROME_CLOSE_PANE
+        else if (shift and wparam == 'O')
+            win.ZIGONAUT_CHROME_SPLIT_RIGHT
+        else if (shift and wparam == 'E')
+            win.ZIGONAUT_CHROME_SPLIT_DOWN
         else if (wparam == win.VK_TAB)
             if (shift) win.ZIGONAUT_CHROME_SELECT_PREVIOUS else win.ZIGONAUT_CHROME_SELECT_NEXT
         else if (wparam == win.VK_ADD or wparam == win.VK_OEM_PLUS)
@@ -656,11 +671,7 @@ pub const View = struct {
         self.suppress_application_character = true;
         const repeated = (lparam & (@as(win.LPARAM, 1) << 30)) != 0;
         if (!repeated) {
-            const argument: u32 = if (value == win.ZIGONAUT_CHROME_CLOSE)
-                @intCast(self.model.activeTabIndex() orelse 0)
-            else
-                0;
-            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, @intCast(argument));
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, 0);
         }
         return true;
     }

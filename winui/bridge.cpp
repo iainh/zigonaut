@@ -345,7 +345,13 @@ struct Bridge {
             }
         });
         addAccelerator(Windows::System::VirtualKey::T, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_DEFAULT);
-        addAccelerator(Windows::System::VirtualKey::W, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_CLOSE);
+        addAccelerator(Windows::System::VirtualKey::W, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_CLOSE_PANE);
+        addAccelerator(Windows::System::VirtualKey::O, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_RIGHT);
+        addAccelerator(Windows::System::VirtualKey::E, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_DOWN);
+        addAccelerator(Windows::System::VirtualKey::Left, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_LEFT);
+        addAccelerator(Windows::System::VirtualKey::Right, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_RIGHT);
+        addAccelerator(Windows::System::VirtualKey::Up, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_UP);
+        addAccelerator(Windows::System::VirtualKey::Down, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_DOWN);
         addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_SELECT_NEXT);
         addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SELECT_PREVIOUS);
         addAccelerator(Windows::System::VirtualKey::Number0, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_RESET);
