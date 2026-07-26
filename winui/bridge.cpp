@@ -493,7 +493,23 @@ struct Bridge {
         scheduleScrollbarHide();
     }
 
-    void updateAppearance(uint32_t kind, bool high_contrast) {
+    void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
+        auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
+        root.RequestedTheme(requested_theme);
+        scrollbar_root.RequestedTheme(requested_theme);
+        if (high_contrast) {
+            root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
+            bottom_border.Background(application.Resources().Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        } else {
+            auto const color = dark_theme
+                ? Windows::UI::Color{255, 0x2e, 0x2e, 0x2e}
+                : Windows::UI::Color{255, 0xe8, 0xe8, 0xe8};
+            root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{color});
+            auto const border_color = dark_theme
+                ? Windows::UI::Color{0x26, 0xff, 0xff, 0xff}
+                : Windows::UI::Color{0x0f, 0x00, 0x00, 0x00};
+            bottom_border.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{border_color});
+        }
         source.SystemBackdrop(nullptr);
         backdrop = nullptr;
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) return;
@@ -775,11 +791,11 @@ extern "C" HRESULT __cdecl zigonaut_chrome_move(void* value, int32_t x, int32_t 
     try { bridge->move(x, y, width, height); return S_OK; } catch (...) { return reportCurrentException(L"move"); }
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32_t backdrop, BOOL high_contrast) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
-    try { bridge->updateAppearance(backdrop, high_contrast != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
+    try { bridge->updateAppearance(backdrop, high_contrast != FALSE, dark_theme != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
 }
 
 extern "C" BOOL __cdecl zigonaut_chrome_pretranslate(void* value, MSG* message) noexcept {

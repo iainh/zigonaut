@@ -46,6 +46,7 @@ font_family=Cascadia Mono
 font_size=18
 dark_theme=rasmus
 light_theme=campbell-light
+color_scheme=system
 padding_horizontal=8
 padding_vertical=8
 background_opacity=100
@@ -67,7 +68,9 @@ or no JSON themes can be loaded. A theme JSON file contains `foreground`, `backg
 `cursor` `#RRGGBB` strings plus an `ansi` array of exactly 16 colors.
 `dark_theme` and `light_theme` follow the Windows application theme; high contrast always
 uses Windows system colors and disables the configured `none`, `mica`, or `acrylic`
-backdrop. `background_opacity` is a percentage, and horizontal and vertical terminal
+backdrop. Set `color_scheme` to `light` or `dark` to override the Windows application
+theme for both the window and terminal, or leave it as `system` to follow Windows.
+`background_opacity` is a percentage, and horizontal and vertical terminal
 padding are configured independently. Override palette entries with `foreground`,
 `background`, `cursor`, and `ansi0` through `ansi15`, using `#RRGGBB` values.
 The legacy `theme` key remains an alias for `dark_theme`. Profiles are ordered `profile.<name>`

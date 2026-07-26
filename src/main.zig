@@ -47,7 +47,7 @@ const Application = struct {
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
     fn init(loaded: config.Loaded, themes: theme.Catalog) Application {
-        const dark_theme = appsUseDarkTheme();
+        const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
         return .{
             .settings = loaded.value,
             .loaded = loaded,
@@ -662,6 +662,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     previous.deinit();
 
     if (changed.theme) {
+        self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
         self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
     self.terminal_view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
@@ -680,11 +681,11 @@ fn scaled(value: anytype, dpi: u32) i32 {
 fn updateThemeImpl(self: *Application) void {
     const hwnd = self.hwnd orelse return;
     const previous_dark_theme = self.dark_theme;
-    self.dark_theme = appsUseDarkTheme();
+    self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
     self.high_contrast = highContrastEnabled();
     if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     if (self.terminal_ready) self.terminal_view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
-    if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast);
+    if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);

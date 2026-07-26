@@ -8,6 +8,7 @@ pub const default_contents =
     \\font_size=18
     \\dark_theme=rasmus
     \\light_theme=campbell-light
+    \\color_scheme=system
     \\padding_horizontal=8
     \\padding_vertical=8
     \\background_opacity=100
@@ -45,12 +46,14 @@ const default_profiles = [4]Profile{
 } ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "" }} ** (max_profiles - 4);
 
 pub const Backdrop = enum { none, mica, acrylic };
+pub const ColorScheme = enum { system, light, dark };
 
 pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
     font_size: u16 = 18,
     dark_theme: []const u8 = "rasmus",
     light_theme: []const u8 = "campbell-light",
+    color_scheme: ColorScheme = .system,
     padding_horizontal: u16 = 8,
     padding_vertical: u16 = 8,
     background_opacity: u8 = 100,
@@ -86,6 +89,7 @@ pub fn changes(previous: Config, next: Config) Changes {
             !std.mem.eql(u8, previous.font_family, next.font_family),
         .theme = !std.mem.eql(u8, previous.dark_theme, next.dark_theme) or
             !std.mem.eql(u8, previous.light_theme, next.light_theme) or
+            previous.color_scheme != next.color_scheme or
             !std.meta.eql(previous.palette, next.palette) or
             previous.randomize_tab_background != next.randomize_tab_background,
     };
@@ -93,6 +97,14 @@ pub fn changes(previous: Config, next: Config) Changes {
 
 pub fn terminalTheme(settings: Config, themes: *const theme.Catalog, dark: bool) theme.Theme {
     return settings.palette.apply(themes.find(if (dark) settings.dark_theme else settings.light_theme));
+}
+
+pub fn useDarkTheme(settings: Config, os_dark: bool) bool {
+    return switch (settings.color_scheme) {
+        .system => os_dark,
+        .light => false,
+        .dark => true,
+    };
 }
 
 pub fn clampZoom(current: u16, delta: i8) u16 {
@@ -164,6 +176,8 @@ pub fn parse(contents: []const u8) Config {
             if (value.len > 0 and value.len < 64) result.dark_theme = value;
         } else if (std.ascii.eqlIgnoreCase(key, "light_theme")) {
             if (value.len > 0 and value.len < 64) result.light_theme = value;
+        } else if (std.ascii.eqlIgnoreCase(key, "color_scheme")) {
+            if (std.ascii.eqlIgnoreCase(value, "system")) result.color_scheme = .system else if (std.ascii.eqlIgnoreCase(value, "light")) result.color_scheme = .light else if (std.ascii.eqlIgnoreCase(value, "dark")) result.color_scheme = .dark;
         } else if (std.ascii.eqlIgnoreCase(key, "padding_horizontal")) {
             const padding = std.fmt.parseInt(u16, value, 10) catch continue;
             if (padding <= 128) result.padding_horizontal = padding;
@@ -229,6 +243,7 @@ test "configuration parses supported values and ignores invalid ones" {
         \\font_size=14
         \\dark_theme=campbell
         \\light_theme=campbell-light
+        \\color_scheme=light
         \\padding_horizontal=12
         \\padding_vertical=4
         \\background_opacity=82
@@ -241,6 +256,7 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
     try std.testing.expectEqualStrings("campbell", parsed.dark_theme);
     try std.testing.expectEqualStrings("campbell-light", parsed.light_theme);
+    try std.testing.expectEqual(ColorScheme.light, parsed.color_scheme);
     try std.testing.expectEqual(@as(u16, 12), parsed.padding_horizontal);
     try std.testing.expectEqual(@as(u16, 4), parsed.padding_vertical);
     try std.testing.expectEqual(@as(u8, 82), parsed.background_opacity);
@@ -279,6 +295,10 @@ test "configuration changes are classified by subsystem" {
     modified = original;
     modified.dark_theme = "campbell";
     try std.testing.expect(changes(original, modified).theme);
+
+    modified = original;
+    modified.color_scheme = .dark;
+    try std.testing.expect(changes(original, modified).theme);
 }
 
 test "terminal theme selection follows app mode and applies overrides" {
@@ -288,6 +308,17 @@ test "terminal theme selection follows app mode and applies overrides" {
     try std.testing.expectEqual(theme.rasmus.background, terminalTheme(value, &themes, true).background);
     try std.testing.expectEqual(theme.rasmus.background, terminalTheme(value, &themes, false).background);
     try std.testing.expectEqual(theme.Color{ .red = 0x12, .green = 0x34, .blue = 0x56 }, terminalTheme(value, &themes, false).cursor);
+}
+
+test "color scheme can follow or override the OS" {
+    var value = Config{};
+    try std.testing.expect(useDarkTheme(value, true));
+    try std.testing.expect(!useDarkTheme(value, false));
+
+    value.color_scheme = .light;
+    try std.testing.expect(!useDarkTheme(value, true));
+    value.color_scheme = .dark;
+    try std.testing.expect(useDarkTheme(value, false));
 }
 
 test "zoom clamps to supported font bounds" {

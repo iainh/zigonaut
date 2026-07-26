@@ -45,7 +45,7 @@ __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_scrollbar(void* bri
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* bridge, uint32_t state, uint32_t value) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_notification(void* bridge, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_move(void* bridge, int32_t x, int32_t y, int32_t width, int32_t height) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) BOOL __cdecl zigonaut_chrome_pretranslate(void* bridge, MSG* message) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_close(void* bridge) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_destroy(void* bridge) ZIGONAUT_NOEXCEPT;

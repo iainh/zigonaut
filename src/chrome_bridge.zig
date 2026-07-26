@@ -28,7 +28,7 @@ const UpdateScrollbar = *const fn (?*anyopaque, u32, u32, u32, win.BOOL) callcon
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const Move = *const fn (?*anyopaque, i32, i32, i32, i32) callconv(.c) win.HRESULT;
-const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL) callconv(.c) win.HRESULT;
+const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
 const Pretranslate = *const fn (?*anyopaque, *win.MSG) callconv(.c) win.BOOL;
 const Close = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
 const Destroy = *const fn (?*anyopaque) callconv(.c) win.HRESULT;
@@ -128,9 +128,9 @@ pub const Bridge = struct {
         return succeeded(self.move_fn(instance, x, y, width, height));
     }
 
-    pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool) bool {
+    pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool, dark_theme: bool) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast)));
+        return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast), @intFromBool(dark_theme)));
     }
 
     pub fn pretranslate(self: *Bridge, message: *win.MSG) bool {
