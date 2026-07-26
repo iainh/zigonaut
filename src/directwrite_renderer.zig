@@ -1,5 +1,23 @@
 const native = @import("win32.zig").c;
 
+pub const CacheBenchmark = struct {
+    layout_creations: u64,
+    hot_reuse_creations: u64,
+    cache_entries: u32,
+};
+
+pub fn benchmarkLayoutCache(repetitions: u32) !CacheBenchmark {
+    var result: native.ZigonautLayoutCacheBenchmark = undefined;
+    if (native.zigonaut_benchmark_layout_cache(repetitions, &result) < 0) {
+        return error.DirectWriteBenchmarkFailed;
+    }
+    return .{
+        .layout_creations = result.layout_creations,
+        .hot_reuse_creations = result.hot_reuse_creations,
+        .cache_entries = result.cache_entries,
+    };
+}
+
 pub const Engine = struct {
     handle: *native.ZigonautTextEngine,
 
@@ -166,6 +184,14 @@ test "cluster advances fit exact terminal spans" {
     var combining = [_]f32{ 9.0, 0.0 };
     native.zigonaut_fit_cluster_advances(&combining, combining.len, 10.0);
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), sum(&combining), 0.001);
+}
+
+test "layout cache retains hot entries when crossing capacity" {
+    const std = @import("std");
+    const result = try benchmarkLayoutCache(1);
+    try std.testing.expectEqual(@as(u64, 2348), result.layout_creations);
+    try std.testing.expectEqual(@as(u64, 0), result.hot_reuse_creations);
+    try std.testing.expectEqual(@as(u32, 2048), result.cache_entries);
 }
 
 fn sum(values: []const f32) f32 {

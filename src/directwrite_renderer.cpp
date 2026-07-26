@@ -6,6 +6,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <dwrite_2.h>
+#include <list>
 #include <map>
 #include <memory>
 #include <new>
@@ -37,6 +38,11 @@ struct LayoutKey {
         if (height != other.height) return height < other.height;
         return text < other.text;
     }
+};
+
+struct LayoutEntry {
+    IDWriteTextLayout* layout;
+    std::list<LayoutKey>::iterator recency;
 };
 
 struct RowCell {
@@ -121,6 +127,13 @@ uint32_t blend(uint32_t foreground, uint32_t background) {
     return red | (green << 8) | (blue << 16);
 }
 
+std::u16string numberedLayoutText(const char16_t* prefix, uint32_t value) {
+    std::u16string result(prefix);
+    const std::string digits = std::to_string(value);
+    result.append(digits.begin(), digits.end());
+    return result;
+}
+
 } // namespace
 
 class GridTextRenderer;
@@ -135,7 +148,9 @@ struct ZigonautTextEngine {
     ID2D1Factory* d2d_factory = nullptr;
     ID2D1HwndRenderTarget* target = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
-    std::map<LayoutKey, IDWriteTextLayout*> layouts;
+    std::map<LayoutKey, LayoutEntry> layouts;
+    std::list<LayoutKey> layout_recency;
+    uint64_t layout_creation_count = 0;
     std::vector<RowCell> row_cells;
     RowSegment row_segment;
     GridTextRenderer* grid_renderer = nullptr;
@@ -257,8 +272,9 @@ struct ZigonautTextEngine {
     }
 
     void clearLayouts() {
-        for (auto& entry : layouts) release(entry.second);
+        for (auto& entry : layouts) release(entry.second.layout);
         layouts.clear();
+        layout_recency.clear();
     }
 
     HRESULT layoutFor(
@@ -279,10 +295,17 @@ struct ZigonautTextEngine {
         };
         auto existing = layouts.find(key);
         if (existing != layouts.end()) {
-            *result = existing->second;
+            layout_recency.splice(layout_recency.end(), layout_recency,
+                existing->second.recency);
+            *result = existing->second.layout;
             return S_OK;
         }
-        if (layouts.size() >= max_layout_cache_entries) clearLayouts();
+        if (layouts.size() >= max_layout_cache_entries) {
+            auto oldest = layouts.find(layout_recency.front());
+            release(oldest->second.layout);
+            layouts.erase(oldest);
+            layout_recency.pop_front();
+        }
         IDWriteTextLayout* layout = nullptr;
         const HRESULT hr = factory->CreateTextLayout(
             reinterpret_cast<const wchar_t*>(text),
@@ -292,7 +315,10 @@ struct ZigonautTextEngine {
             static_cast<float>(height),
             &layout);
         if (FAILED(hr)) return hr;
-        layouts.emplace(std::move(key), layout);
+        ++layout_creation_count;
+        layout_recency.push_back(std::move(key));
+        auto recency = std::prev(layout_recency.end());
+        layouts.emplace(*recency, LayoutEntry{layout, recency});
         *result = layout;
         return S_OK;
     }
@@ -876,6 +902,54 @@ extern "C" HRESULT zigonaut_text_engine_create(
 
 extern "C" void zigonaut_text_engine_destroy(ZigonautTextEngine* engine) {
     delete engine;
+}
+
+extern "C" HRESULT zigonaut_benchmark_layout_cache(
+    uint32_t repetitions,
+    ZigonautLayoutCacheBenchmark* result) {
+    if (repetitions == 0 || result == nullptr) return E_INVALIDARG;
+    *result = {};
+    ZigonautTextEngine* engine = nullptr;
+    HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18, 96, &engine);
+    if (FAILED(hr)) return hr;
+
+    // Fill to capacity, make the final 248 entries hot, cross capacity, then
+    // reuse them. Clear-all creates 2,596 layouts per repetition; bounded LRU
+    // creates only the 2,348 distinct layouts.
+    constexpr uint32_t cold_count = 1800;
+    constexpr uint32_t hot_count = 248;
+    constexpr uint32_t overflow_count = 300;
+    for (uint32_t repetition = 0; repetition < repetitions; ++repetition) {
+        engine->clearLayouts();
+        for (uint32_t index = 0; index < cold_count + hot_count; ++index) {
+            const std::u16string text = numberedLayoutText(u"layout-", index);
+            IDWriteTextLayout* layout = nullptr;
+            hr = engine->layoutFor(text.data(), text.size(), 720, 20, 0, &layout);
+            if (FAILED(hr)) break;
+        }
+        for (uint32_t index = cold_count; SUCCEEDED(hr) && index < cold_count + hot_count; ++index) {
+            const std::u16string text = numberedLayoutText(u"layout-", index);
+            IDWriteTextLayout* layout = nullptr;
+            hr = engine->layoutFor(text.data(), text.size(), 720, 20, 0, &layout);
+        }
+        for (uint32_t index = 0; SUCCEEDED(hr) && index < overflow_count; ++index) {
+            const std::u16string text = numberedLayoutText(u"overflow-", index);
+            IDWriteTextLayout* layout = nullptr;
+            hr = engine->layoutFor(text.data(), text.size(), 720, 20, 0, &layout);
+        }
+        const uint64_t before_hot_reuse = engine->layout_creation_count;
+        for (uint32_t index = cold_count; SUCCEEDED(hr) && index < cold_count + hot_count; ++index) {
+            const std::u16string text = numberedLayoutText(u"layout-", index);
+            IDWriteTextLayout* layout = nullptr;
+            hr = engine->layoutFor(text.data(), text.size(), 720, 20, 0, &layout);
+        }
+        result->hot_reuse_creations += engine->layout_creation_count - before_hot_reuse;
+        if (FAILED(hr)) break;
+    }
+    result->layout_creations = engine->layout_creation_count;
+    result->cache_entries = static_cast<uint32_t>(engine->layouts.size());
+    zigonaut_text_engine_destroy(engine);
+    return hr;
 }
 
 extern "C" HRESULT zigonaut_text_engine_set_dpi(

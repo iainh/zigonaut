@@ -15,6 +15,16 @@ typedef struct ZigonautCellMetrics {
     uint32_t baseline;
 } ZigonautCellMetrics;
 
+typedef struct ZigonautLayoutCacheBenchmark {
+    uint64_t layout_creations;
+    uint64_t hot_reuse_creations;
+    uint32_t cache_entries;
+} ZigonautLayoutCacheBenchmark;
+
+HRESULT zigonaut_benchmark_layout_cache(
+    uint32_t repetitions,
+    ZigonautLayoutCacheBenchmark* result);
+
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,
     ZIGONAUT_CELL_WIDE = 1,

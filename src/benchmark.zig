@@ -2,6 +2,7 @@ const std = @import("std");
 const SearchMatch = @import("search.zig").Match;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
+const directwrite = @import("directwrite_renderer.zig");
 
 const columns = 120;
 const rows = 40;
@@ -72,13 +73,18 @@ pub fn main() !void {
     }
     const active_resize_ns = timer.lap();
 
+    const layout_repetitions = 5;
+    const layout_result = try directwrite.benchmarkLayoutCache(layout_repetitions);
+    const layout_cache_ns = timer.lap();
+
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
             "render: {d} frames in {d:.2} ms ({d:.2} us/frame)\n" ++
             "snapshot cell size: {d} bytes\n" ++
             "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
             "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
-            "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n",
+            "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n" ++
+            "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -101,6 +107,11 @@ pub fn main() !void {
             @as(f64, @floatFromInt(all_resize_ns)) / resize_iterations / 1_000.0,
             milliseconds(active_resize_ns),
             @as(f64, @floatFromInt(active_resize_ns)) / resize_iterations / 1_000.0,
+            layout_repetitions,
+            milliseconds(layout_cache_ns),
+            layout_result.layout_creations,
+            layout_result.hot_reuse_creations,
+            layout_result.cache_entries,
         },
     );
 }

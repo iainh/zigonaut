@@ -134,6 +134,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     benchmark.linkLibC();
+    benchmark.linkLibCpp();
+    benchmark.addIncludePath(b.path("src"));
+    benchmark.root_module.addIncludePath(b.path("winui"));
+    benchmark.addCSourceFile(.{
+        .file = b.path("src/directwrite_renderer.cpp"),
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+    });
+    benchmark.linkSystemLibrary("user32");
+    benchmark.linkSystemLibrary("gdi32");
+    benchmark.linkSystemLibrary("d2d1");
+    benchmark.linkSystemLibrary("dwrite");
+    benchmark.linkSystemLibrary("kernel32");
     configureGhostty(benchmark.root_module, ghostty);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);
