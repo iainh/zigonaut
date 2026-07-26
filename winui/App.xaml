@@ -25,6 +25,7 @@
             </ResourceDictionary.ThemeDictionaries>
 
             <HorizontalAlignment x:Key="TitleBarContentHorizontalAlignment">Stretch</HorizontalAlignment>
+            <VerticalAlignment x:Key="TitleBarContentVerticalAlignment">Bottom</VerticalAlignment>
 
             <Style x:Key="ZigonautTitleBarButtonStyle"
                    TargetType="Button"
