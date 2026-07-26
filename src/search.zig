@@ -2,18 +2,32 @@ const std = @import("std");
 
 pub const Match = struct { row: u32, start: u16, end: u16 };
 
-pub fn highlight(matches: []const Match, active: ?usize, row: u64, column: u16) u2 {
+pub const RowMatches = struct {
+    matches: []const Match,
+    start_index: usize,
+};
+
+pub fn matchesForRow(matches: []const Match, row: u64) RowMatches {
     var low: usize = 0;
     var high = matches.len;
     while (low < high) {
         const middle = low + (high - low) / 2;
         if (matches[middle].row < row) low = middle + 1 else high = middle;
     }
-    for (matches[low..], low..) |match, index| {
-        if (match.row != row) break;
+    var end = low;
+    while (end < matches.len and matches[end].row == row) end += 1;
+    return .{ .matches = matches[low..end], .start_index = low };
+}
+
+pub fn highlightRow(row_matches: RowMatches, active: ?usize, column: u16) u2 {
+    for (row_matches.matches, row_matches.start_index..) |match, index| {
         if (column >= match.start and column < match.end) return if (active == index) 2 else 1;
     }
     return 0;
+}
+
+pub fn highlight(matches: []const Match, active: ?usize, row: u64, column: u16) u2 {
+    return highlightRow(matchesForRow(matches, row), active, column);
 }
 
 pub const State = struct {

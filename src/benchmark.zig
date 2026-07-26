@@ -1,5 +1,6 @@
 const std = @import("std");
-const SearchMatch = @import("search.zig").Match;
+const search = @import("search.zig");
+const SearchMatch = search.Match;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const directwrite = @import("directwrite_renderer.zig");
@@ -80,6 +81,7 @@ pub fn main() !void {
     const progress_bytewise_ns = benchmarkProgressParser(false);
     const progress_fast_ns = benchmarkProgressParser(true);
     const search_copy = try benchmarkSearchSnapshotCopy();
+    const search_highlight = try benchmarkSearchHighlight();
 
     std.debug.print(
         "feed: {d} bytes in {d:.2} ms ({d:.2} MiB/s)\n" ++
@@ -126,6 +128,32 @@ pub fn main() !void {
             improvement(search_copy.uncached_ns, search_copy.cached_ns),
         },
     );
+    std.debug.print(
+        "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n",
+        .{
+            milliseconds(search_highlight.per_cell_ns),
+            milliseconds(search_highlight.per_row_ns),
+            improvement(search_highlight.per_cell_ns, search_highlight.per_row_ns),
+        },
+    );
+}
+
+fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64 } {
+    const iterations = 1_000;
+    var matches: [4096]SearchMatch = undefined;
+    for (&matches, 0..) |*match, row| match.* = .{ .row = @intCast(row), .start = 40, .end = 48 };
+    var checksum: u64 = 0;
+    var timer = try std.time.Timer.start();
+    for (0..iterations) |_| for (0..rows) |y| for (0..columns) |x| {
+        checksum +%= search.highlight(&matches, 4030, 4000 + y, @intCast(x));
+    };
+    const per_cell_ns = timer.lap();
+    for (0..iterations) |_| for (0..rows) |y| {
+        const row_matches = search.matchesForRow(&matches, 4000 + y);
+        for (0..columns) |x| checksum +%= search.highlightRow(row_matches, 4030, @intCast(x));
+    };
+    std.mem.doNotOptimizeAway(checksum);
+    return .{ .per_cell_ns = per_cell_ns, .per_row_ns = timer.lap() };
 }
 
 fn benchmarkSearchSnapshotCopy() !struct { uncached_ns: u64, cached_ns: u64 } {

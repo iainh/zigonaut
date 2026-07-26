@@ -979,6 +979,7 @@ const DirectWriteCellRenderer = struct {
     origin_y: i32,
     frame: ?Terminal.Frame = null,
     search_matches: []const SearchMatch = &.{},
+    search_row_matches: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
     search_active: ?usize = null,
     search_offset: u64 = 0,
     search_enabled: bool = false,
@@ -999,6 +1000,7 @@ const DirectWriteCellRenderer = struct {
     }
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
+        self.search_row_matches = search.matchesForRow(self.search_matches, self.search_offset + y);
         self.engine.beginRow(
             y,
             @floatFromInt(self.origin_x),
@@ -1019,7 +1021,7 @@ const DirectWriteCellRenderer = struct {
             cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, self.frame.?.background);
-        const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
+        const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
         const foreground = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -1101,10 +1103,6 @@ const DirectWriteCellRenderer = struct {
         );
     }
 };
-
-fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
-    return search.highlight(matches, active, offset + y, x);
-}
 
 fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) callconv(.c) win.LRESULT {
     if (message == win.WM_NCCREATE) {

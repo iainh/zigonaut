@@ -96,6 +96,7 @@ const CellRenderer = struct {
     client: win.RECT,
     frame: ?Terminal.Frame = null,
     search_matches: []const SearchMatch = &.{},
+    search_row_matches: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
     search_active: ?usize = null,
     search_offset: u64 = 0,
     search_enabled: bool = false,
@@ -117,7 +118,9 @@ const CellRenderer = struct {
         _ = win.SelectObject(self.dc, self.context.font);
         _ = win.SetBkMode(self.dc, win.OPAQUE);
     }
-    pub fn beginRow(_: *CellRenderer, _: u16) void {}
+    pub fn beginRow(self: *CellRenderer, y: u16) void {
+        self.search_row_matches = search.matchesForRow(self.search_matches, self.search_offset + y);
+    }
     pub fn endRow(_: *CellRenderer, _: u16) void {}
 
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
@@ -134,7 +137,7 @@ const CellRenderer = struct {
             translucentColorRef(cell.background, self.context.background_opacity, self.context.dark_theme)
         else
             colorRef(cell.background);
-        const search_kind = searchHighlight(self.search_matches, self.search_active, self.search_offset, cell.x, cell.y);
+        const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
         const foreground = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -210,10 +213,6 @@ const CellRenderer = struct {
         }
     }
 };
-
-fn searchHighlight(matches: []const SearchMatch, active: ?usize, offset: u64, x: u16, y: u16) u2 {
-    return search.highlight(matches, active, offset + y, x);
-}
 
 fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
     var length: usize = 0;
