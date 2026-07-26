@@ -80,6 +80,10 @@ const Application = struct {
     const setZoomedFontSize = setZoomedFontSizeImpl;
     const attachTerminalRenderer = attachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
+
+    fn bindActivePane(self: *Application) void {
+        self.terminal_view.bindPane(if (self.model.activePane()) |pane| pane.id else null);
+    }
 };
 
 pub fn main() !void {
@@ -227,16 +231,19 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close => {
-                    self.terminal_view.resetInteraction();
+                    self.terminal_view.bindPane(null);
                     self.model.closeTab(argument);
                     if (self.model.tabCount() == 0) {
+                        self.terminal_view.bindPane(null);
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                         return 0;
                     }
+                    self.bindActivePane();
                 },
                 .select => {
                     self.terminal_view.resetInteraction();
                     self.model.activateTab(argument);
+                    self.bindActivePane();
                 },
                 .open_settings => {
                     openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
@@ -261,6 +268,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 .notification_activate => {
                     self.terminal_view.resetInteraction();
                     if (!self.model.activateSessionId(argument)) return 0;
+                    self.bindActivePane();
                     self.terminal_view.syncSessions();
                     self.terminal_view.invalidate();
                     self.syncChrome();
@@ -288,6 +296,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.terminal_view.resetInteraction();
                     const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
                     self.model.activateTab(next);
+                    self.bindActivePane();
                 },
                 .shutdown => return 0,
             }
@@ -302,12 +311,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         shell_exited_message => {
-            self.terminal_view.resetInteraction();
-            if (!self.model.closeCleanlyExitedSessions()) return 0;
+            self.terminal_view.bindPane(null);
+            if (!self.model.closeCleanlyExitedSessions()) {
+                self.bindActivePane();
+                return 0;
+            }
             if (self.model.tabCount() == 0) {
+                self.terminal_view.bindPane(null);
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
             }
+            self.bindActivePane();
             self.terminal_view.syncSessions();
             self.terminal_view.invalidate();
             self.syncChrome();
@@ -474,6 +488,7 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
         .wsl => .wsl,
     };
     _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, self.terminal_view.columns, self.terminal_view.rows);
+    self.bindActivePane();
 }
 
 fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {

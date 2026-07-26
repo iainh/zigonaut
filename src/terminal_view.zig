@@ -1,5 +1,7 @@
 const std = @import("std");
-const App = @import("app.zig").App;
+const app_model = @import("app.zig");
+const App = app_model.App;
+const pane_tree = @import("pane_tree.zig");
 const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
@@ -33,6 +35,7 @@ pub const View = struct {
     renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
     model: *App,
+    pane_id: ?pane_tree.PaneId = null,
     font: win.HFONT,
     text_engine: ?TextEngine,
     input_state: input.State = .{},
@@ -219,9 +222,30 @@ pub const View = struct {
 
     pub fn syncSessions(self: *View) void {
         if (self.columns != 0 and self.rows != 0) {
-            self.model.resizeSessions(self.columns, self.rows, self.cell_width, self.cell_height);
+            if (self.boundRuntime()) |runtime| runtime.resize(self.columns, self.rows, self.cell_width, self.cell_height);
         }
         requestRefresh(self);
+    }
+
+    pub fn bindPane(self: *View, pane_id: ?pane_tree.PaneId) void {
+        if (self.pane_id == pane_id) return;
+        self.releasePressedKeys();
+        self.resetInteraction();
+        self.pane_id = pane_id;
+        self.last_runtime = null;
+        self.last_progress_runtime = null;
+        self.last_content_generation = 0;
+        self.last_progress_generation = 0;
+        self.syncSessions();
+        self.invalidate();
+    }
+
+    fn boundSession(self: *const View) ?*app_model.Session {
+        return &(self.model.paneById(self.pane_id orelse return null) orelse return null).session;
+    }
+
+    fn boundRuntime(self: *const View) ?*SessionRuntime {
+        return (self.boundSession() orelse return null).runtime;
     }
 
     /// Must be called before the model changes or destroys its active runtime.
@@ -286,7 +310,7 @@ pub const View = struct {
         if (self.model.hasPendingNotification()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.notification_changed_message, 0, 0);
         }
-        const session = self.model.activeSession() orelse {
+        const session = self.boundSession() orelse {
             self.setRefreshInterval(0);
             if (self.last_progress_runtime != null) {
                 self.last_progress_runtime = null;
@@ -354,7 +378,7 @@ pub const View = struct {
     }
 
     pub fn scrollbar(self: *View) Terminal.Scrollbar {
-        const session = self.model.activeSession() orelse return .{ .total = 0, .offset = 0, .len = 0 };
+        const session = self.boundSession() orelse return .{ .total = 0, .offset = 0, .len = 0 };
         const runtime = session.runtime orelse return .{ .total = 0, .offset = 0, .len = 0 };
         return runtime.scrollbar() catch .{ .total = 0, .offset = 0, .len = 0 };
     }
@@ -365,7 +389,7 @@ pub const View = struct {
 
     fn scrollViewport(self: *View, delta: isize) void {
         if (delta == 0) return;
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         session.runtime.?.scrollViewport(delta);
         self.notifyScrollbar(true);
         self.invalidate();
@@ -413,7 +437,7 @@ pub const View = struct {
 
         const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
         const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
-        const session = self.model.activeSession();
+        const session = self.boundSession();
         self.gdi_renderer.present(dc, client, .{
             .font = self.font,
             .foreground = self.model.terminal_theme.foreground,
@@ -463,7 +487,7 @@ pub const View = struct {
 
         const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
         const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
-        if (self.model.activeSession()) |session| {
+        if (self.boundSession()) |session| {
             var renderer = DirectWriteCellRenderer{
                 .engine = engine,
                 .view = self,
@@ -502,7 +526,7 @@ pub const View = struct {
     }
 
     fn activeBackground(self: *View) theme.Color {
-        const session = self.model.activeSession() orelse return self.model.terminal_theme.background;
+        const session = self.boundSession() orelse return self.model.terminal_theme.background;
         return session.background;
     }
 
@@ -517,7 +541,7 @@ pub const View = struct {
         if (released and (wparam == win.VK_CONTROL or wparam == win.VK_LCONTROL or wparam == win.VK_RCONTROL)) {
             self.clearHoveredLink();
         }
-        const runtime = if (self.model.activeSession()) |s| s.runtime else null;
+        const runtime = if (self.boundSession()) |s| s.runtime else null;
         const control_shift = win.GetKeyState(win.VK_CONTROL) < 0 and win.GetKeyState(win.VK_SHIFT) < 0;
         if (!released and control_shift and (wparam == win.VK_UP or wparam == win.VK_DOWN)) {
             self.consumed_prompt_key = wparam;
@@ -570,7 +594,7 @@ pub const View = struct {
         };
         if (input.keyFromMessage(wparam, lparam) == null) return false;
         if (!released) self.clearSelection();
-        const active_runtime = if (self.model.activeSession()) |session| session.runtime else null;
+        const active_runtime = if (self.boundSession()) |session| session.runtime else null;
         if (!released and active_runtime == null) return true;
         const event = self.input_state.keyEvent(wparam, lparam, released) orelse return true;
         const index = @intFromEnum(event.key);
@@ -675,7 +699,7 @@ pub const View = struct {
         self.suppressed_search_character = null;
         if (self.input_state.suppressCharacter(code_unit)) return;
         self.clearSelection();
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         var utf8: [4]u8 = undefined;
         const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
         if (session.runtime.?.searchEnabled()) {
@@ -698,7 +722,7 @@ pub const View = struct {
             self.clearSelection();
             return;
         };
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         self.clearSelection();
         const now = win.GetTickCount64();
@@ -729,14 +753,14 @@ pub const View = struct {
             _ = self.sendMouseTo(runtime, .motion, self.protocol_button orelse .none, clientPoint(lparam), self.protocol_button != null);
             return;
         }
-        if (win.GetKeyState(win.VK_SHIFT) >= 0) if (self.model.activeSession()) |session| if (session.runtime) |runtime| {
+        if (win.GetKeyState(win.VK_SHIFT) >= 0) if (self.boundSession()) |session| if (session.runtime) |runtime| {
             _ = self.sendMouseTo(runtime, .motion, .none, clientPoint(lparam), false);
         };
         if (self.selection == null or !self.selection.?.dragging) self.updateHoveredLink(lparam);
         const point = self.mousePoint(lparam, true) orelse return;
         const current = self.selection orelse return;
         if (!current.dragging or std.meta.eql(current.focus, point)) return;
-        const session = self.model.activeSession() orelse {
+        const session = self.boundSession() orelse {
             self.abandonSelection();
             return;
         };
@@ -792,7 +816,7 @@ pub const View = struct {
 
     fn beginProtocolButton(self: *View, button: Terminal.MouseButton, lparam: win.LPARAM) bool {
         if (self.protocol_button != null) return true;
-        const session = self.model.activeSession() orelse return false;
+        const session = self.boundSession() orelse return false;
         const runtime = session.runtime orelse return false;
         if (!self.sendMouseTo(runtime, .press, button, clientPoint(lparam), true)) return false;
         self.protocol_button = button;
@@ -834,7 +858,7 @@ pub const View = struct {
     }
 
     fn sendWheel(self: *View, delta: i32, horizontal: bool, point: Terminal.PixelPoint) bool {
-        const session = self.model.activeSession() orelse return false;
+        const session = self.boundSession() orelse return false;
         const runtime = session.runtime orelse return false;
         const remainder = if (horizontal) &self.protocol_hwheel_remainder else &self.protocol_wheel_remainder;
         const accumulated = wheelAccumulation(remainder.*, delta);
@@ -870,7 +894,7 @@ pub const View = struct {
 
     fn selectionAutoscroll(self: *View) void {
         if (self.selection == null or !self.selection.?.dragging) return;
-        const active = self.model.activeSession() orelse return self.abandonSelection();
+        const active = self.boundSession() orelse return self.abandonSelection();
         if (active.runtime != self.selection.?.runtime) return self.abandonSelection();
         var cursor: win.POINT = undefined;
         if (win.GetCursorPos(&cursor) == 0 or win.ScreenToClient(self.hwnd, &cursor) == 0) return;
@@ -904,7 +928,7 @@ pub const View = struct {
         self.selection = null;
         _ = win.KillTimer(self.hwnd, selection_scroll_timer);
         selection.runtime.endSelectionAnchor();
-        if (self.model.activeSession()) |session| {
+        if (self.boundSession()) |session| {
             if (session.runtime == selection.runtime) {
                 selection.runtime.setSelection(null) catch |err| {
                     log.debug("unable to clear terminal selection: {}", .{err});
@@ -932,7 +956,7 @@ pub const View = struct {
 
     fn copySelection(self: *View) !void {
         const selection = self.selection orelse return;
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         if (runtime != selection.runtime) return;
         const text = try runtime.selectedTextAlloc(std.heap.page_allocator);
@@ -944,7 +968,7 @@ pub const View = struct {
     }
 
     fn copyLastCommandOutput(self: *View) !void {
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         const text = try runtime.lastCommandOutputAlloc(std.heap.page_allocator) orelse return;
         defer std.heap.page_allocator.free(text);
@@ -952,7 +976,7 @@ pub const View = struct {
     }
 
     fn pasteClipboard(self: *View) !void {
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         const text = try clipboardTextAlloc(self.hwnd, std.heap.page_allocator);
         defer std.heap.page_allocator.free(text);
@@ -961,7 +985,7 @@ pub const View = struct {
     }
 
     fn pasteDroppedFiles(self: *View, drop: win.HDROP) !void {
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         const shell: shell_quote.Shell = switch (session.shell) {
             .powershell => .powershell,
@@ -998,7 +1022,7 @@ pub const View = struct {
             self.clearHoveredLink();
             return;
         };
-        const session = self.model.activeSession() orelse return;
+        const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         const generation = runtime.contentGeneration();
         if (self.hovered_link) |hovered| {
@@ -1028,7 +1052,7 @@ pub const View = struct {
 
     fn openLinkAt(self: *View, lparam: win.LPARAM) bool {
         const point = self.mousePoint(lparam, false) orelse return false;
-        const session = self.model.activeSession() orelse return false;
+        const session = self.boundSession() orelse return false;
         const runtime = session.runtime orelse return false;
         const found = runtime.linkAtAlloc(std.heap.page_allocator, point) catch |err| {
             log.debug("unable to inspect terminal link: {}", .{err});
