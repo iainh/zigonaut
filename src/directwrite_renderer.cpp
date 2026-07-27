@@ -13,6 +13,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -33,18 +34,46 @@ struct LayoutKey {
     uint32_t width;
     uint32_t height;
     uint8_t style;
+};
 
-    bool operator<(const LayoutKey& other) const {
-        if (style != other.style) return style < other.style;
-        if (width != other.width) return width < other.width;
-        if (height != other.height) return height < other.height;
-        return text < other.text;
+struct LayoutKeyView {
+    std::u16string_view text;
+    uint32_t width;
+    uint32_t height;
+    uint8_t style;
+};
+
+LayoutKeyView view(const LayoutKey& key) {
+    return {key.text, key.width, key.height, key.style};
+}
+
+struct LayoutKeyLess {
+    using is_transparent = void;
+
+    bool operator()(const LayoutKey& left, const LayoutKey& right) const {
+        return less(view(left), view(right));
+    }
+
+    bool operator()(const LayoutKey& left, LayoutKeyView right) const {
+        return less(view(left), right);
+    }
+
+    bool operator()(LayoutKeyView left, const LayoutKey& right) const {
+        return less(left, view(right));
+    }
+
+private:
+    static bool less(LayoutKeyView left, LayoutKeyView right) {
+        if (left.style != right.style) return left.style < right.style;
+        if (left.width != right.width) return left.width < right.width;
+        if (left.height != right.height) return left.height < right.height;
+        return left.text < right.text;
     }
 };
 
 struct LayoutEntry {
     IDWriteTextLayout* layout;
-    std::list<LayoutKey>::iterator recency;
+    std::list<const LayoutKey*>::iterator recency;
 };
 
 struct RowCell {
@@ -154,8 +183,8 @@ struct ZigonautTextEngine {
     IDXGISwapChain1* swap_chain = nullptr;
     ID2D1Bitmap1* target_bitmap = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
-    std::map<LayoutKey, LayoutEntry> layouts;
-    std::list<LayoutKey> layout_recency;
+    std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
+    std::list<const LayoutKey*> layout_recency;
     uint64_t layout_creation_count = 0;
     std::vector<RowCell> row_cells;
     RowSegment row_segment;
@@ -406,8 +435,8 @@ struct ZigonautTextEngine {
         if (result == nullptr || text_length > UINT32_MAX || format_index >= std::size(formats)) {
             return E_INVALIDARG;
         }
-        LayoutKey key{
-            std::u16string(text, text + text_length),
+        const LayoutKeyView key{
+            std::u16string_view(text, text_length),
             width,
             height,
             static_cast<uint8_t>(format_index),
@@ -420,10 +449,10 @@ struct ZigonautTextEngine {
             return S_OK;
         }
         if (layouts.size() >= max_layout_cache_entries) {
-            auto oldest = layouts.find(layout_recency.front());
+            auto oldest = layouts.find(*layout_recency.front());
             release(oldest->second.layout);
-            layouts.erase(oldest);
             layout_recency.pop_front();
+            layouts.erase(oldest);
         }
         IDWriteTextLayout* layout = nullptr;
         const HRESULT hr = factory->CreateTextLayout(
@@ -435,9 +464,17 @@ struct ZigonautTextEngine {
             &layout);
         if (FAILED(hr)) return hr;
         ++layout_creation_count;
-        layout_recency.push_back(std::move(key));
+        auto inserted = layouts.emplace(
+            LayoutKey{
+                std::u16string(text, text + text_length),
+                width,
+                height,
+                static_cast<uint8_t>(format_index),
+            },
+            LayoutEntry{layout, {}}).first;
+        layout_recency.push_back(&inserted->first);
         auto recency = std::prev(layout_recency.end());
-        layouts.emplace(*recency, LayoutEntry{layout, recency});
+        inserted->second.recency = recency;
         *result = layout;
         return S_OK;
     }
