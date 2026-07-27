@@ -18,11 +18,14 @@ pub const Terminal = struct {
     mouse_encoder: vt.GhosttyMouseEncoder,
     mouse_event: vt.GhosttyMouseEvent,
     selection_anchor: vt.GhosttyTrackedGridRef = null,
+    write_pty: ?WritePty = null,
+    write_pty_context: ?*anyopaque = null,
     title_changed: ?TitleChanged = null,
     title_context: ?*anyopaque = null,
     columns: u16,
     rows: u16,
 
+    pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
 
     pub const Cell = struct {
@@ -840,6 +843,13 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(vt.GhosttyTerminalTitleChangedFn, titleChanged)));
     }
 
+    pub fn setWritePty(self: *Terminal, callback: WritePty, context: ?*anyopaque) !void {
+        self.write_pty = callback;
+        self.write_pty_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(vt.GhosttyTerminalWritePtyFn, writePty)));
+    }
+
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
         try self.renderViewportInternal(renderer, null);
     }
@@ -1428,6 +1438,12 @@ fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
     };
 }
 
+fn writePty(_: vt.GhosttyTerminal, userdata: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.write_pty orelse return;
+    callback(self.write_pty_context, data[0..len]);
+}
+
 fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.title_changed orelse return;
@@ -1495,6 +1511,31 @@ test "libghostty reports shell title changes" {
 
     terminal.feed("\x1b]2;project shell\x07");
     try std.testing.expectEqualStrings("project shell", listener.value);
+}
+
+test "libghostty returns terminal queries and in-band size reports" {
+    const Listener = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(context: ?*anyopaque, bytes: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.bytes.appendSlice(std.testing.allocator, bytes) catch @panic("OOM");
+        }
+    };
+
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    var listener = Listener{};
+    defer listener.bytes.deinit(std.testing.allocator);
+    try terminal.setWritePty(Listener.write, &listener);
+
+    terminal.feed("\x1b[?7$p");
+    try std.testing.expectEqualStrings("\x1b[?7;1$y", listener.bytes.items);
+
+    listener.bytes.clearRetainingCapacity();
+    terminal.feed("\x1b[?2048h");
+    try terminal.resize(100, 40, 9, 18);
+    try std.testing.expectEqualStrings("\x1b[48;40;100;720;900t", listener.bytes.items);
 }
 
 test "libghostty parses control sequences into viewport state" {

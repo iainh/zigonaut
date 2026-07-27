@@ -19,6 +19,8 @@ pub const SessionRuntime = struct {
     reader_thread: ?std.Thread = null,
     refresh: Refresh,
     terminal_mutex: std.Thread.Mutex = .{},
+    pty_mutex: std.Thread.Mutex = .{},
+    closing: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     search_content_generation: u64 = 0,
     title: std.ArrayList(u8) = .empty,
@@ -91,6 +93,7 @@ pub const SessionRuntime = struct {
         };
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
+        try self.terminal.setWritePty(writePty, self);
 
         self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
             var message: [256]u8 = undefined;
@@ -115,7 +118,10 @@ pub const SessionRuntime = struct {
 
     pub fn destroy(self: *SessionRuntime) void {
         if (self.pty) |*pty| {
+            self.pty_mutex.lock();
+            self.closing = true;
             pty.stopIo(self.reader_thread);
+            self.pty_mutex.unlock();
             if (self.reader_thread) |thread| thread.join();
             pty.closeConsole();
             pty.finishClose();
@@ -475,6 +481,9 @@ pub const SessionRuntime = struct {
     }
 
     pub fn write(self: *SessionRuntime, bytes: []const u8) !void {
+        self.pty_mutex.lock();
+        defer self.pty_mutex.unlock();
+        if (self.closing) return error.ShellNotRunning;
         if (self.pty) |*pty| return pty.write(bytes);
         return error.ShellNotRunning;
     }
@@ -578,5 +587,12 @@ pub const SessionRuntime = struct {
         self.title.clearRetainingCapacity();
         self.title.appendSliceAssumeCapacity(title);
         _ = self.title_generation.fetchAdd(1, .release);
+    }
+
+    /// Ghostty invokes this synchronously while `terminal_mutex` is held. PTY
+    /// writes use a separate mutex so replies cannot interleave with user input.
+    fn writePty(context: ?*anyopaque, bytes: []const u8) void {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
+        self.write(bytes) catch |err| log.debug("unable to write terminal response: {}", .{err});
     }
 };
