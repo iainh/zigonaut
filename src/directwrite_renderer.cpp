@@ -121,18 +121,28 @@ struct OwnedColorLayer {
 
 struct RowSegment {
     std::u16string text;
-    std::vector<uint32_t> start_columns;
-    std::vector<uint32_t> end_columns;
+    std::vector<uint32_t> columns;
     uint32_t foreground = 0;
     bool bold = false;
     bool italic = false;
 
     void clear() {
         text.clear();
-        start_columns.clear();
-        end_columns.clear();
+        columns.clear();
     }
 };
+
+uint32_t packedColumns(uint32_t start, uint32_t span) {
+    return start | ((span - 1) << 16);
+}
+
+uint32_t startColumn(uint32_t packed) {
+    return packed & 0xffff;
+}
+
+uint32_t endColumn(uint32_t packed) {
+    return startColumn(packed) + 1 + ((packed >> 16) & 1);
+}
 
 struct ClusterSpan {
     uint32_t start_column = UINT32_MAX;
@@ -780,7 +790,7 @@ public:
             uint32_t run_end_column = 0;
             for (UINT32 index = 0; index < description->stringLength; ++index) {
                 const uint32_t text_index = description->textPosition + index;
-                if (text_index >= segment.start_columns.size()) break;
+                if (text_index >= segment.columns.size()) break;
                 const UINT16 glyph_start = description->clusterMap[index];
                 if (glyph_start >= glyph_run->glyphCount) continue;
                 auto& span = spans[glyph_start];
@@ -790,10 +800,10 @@ public:
                 }
                 span.start_column = std::min(
                     span.start_column,
-                    segment.start_columns[text_index]);
+                    startColumn(segment.columns[text_index]));
                 span.end_column = std::max(
                     span.end_column,
-                    segment.end_columns[text_index]);
+                    endColumn(segment.columns[text_index]));
                 span.first_text_index = std::min(span.first_text_index, text_index);
                 span.text_end = std::max(span.text_end, text_index + 1);
                 run_start_column = std::min(run_start_column, span.start_column);
@@ -808,12 +818,12 @@ public:
                     : glyph_run->glyphCount;
                 if (glyph_start >= glyph_end) continue;
                 const auto& span = spans[glyph_start];
-                const uint32_t cluster_left = segment.start_columns[
-                    span.first_text_index];
+                const uint32_t cluster_left = startColumn(
+                    segment.columns[span.first_text_index]);
                 const uint32_t cluster_right =
-                    span.text_end < segment.start_columns.size()
-                    ? segment.start_columns[span.text_end]
-                    : segment.end_columns[span.text_end - 1];
+                    span.text_end < segment.columns.size()
+                    ? startColumn(segment.columns[span.text_end])
+                    : endColumn(segment.columns[span.text_end - 1]);
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
                 zigonaut_fit_cluster_advances(
@@ -967,9 +977,9 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     if (segment.text.empty()) return S_OK;
     uint32_t start_column = UINT32_MAX;
     uint32_t end_column = 0;
-    for (size_t index = 0; index < segment.start_columns.size(); ++index) {
-        start_column = std::min(start_column, segment.start_columns[index]);
-        end_column = std::max(end_column, segment.end_columns[index]);
+    for (uint32_t packed : segment.columns) {
+        start_column = std::min(start_column, startColumn(packed));
+        end_column = std::max(end_column, endColumn(packed));
     }
     if (start_column == UINT32_MAX || end_column <= start_column) return S_OK;
 
@@ -1030,13 +1040,11 @@ void ZigonautTextEngine::endRow() {
         const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
         if (cell_text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
             segment.text.push_back(u' ');
-            segment.start_columns.push_back(cell.column);
-            segment.end_columns.push_back(cell.column + span);
+            segment.columns.push_back(packedColumns(cell.column, span));
         } else {
             segment.text.append(cell_text);
             for (size_t index = 0; index < cell_text.size(); ++index) {
-                segment.start_columns.push_back(cell.column);
-                segment.end_columns.push_back(cell.column + span);
+                segment.columns.push_back(packedColumns(cell.column, span));
             }
         }
     }
