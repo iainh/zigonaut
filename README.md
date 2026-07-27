@@ -64,6 +64,9 @@ backdrop=mica
 osc52_clipboard_write=false
 # Maximum decoded terminal clipboard payload in bytes (1-16777216). Default: 1048576.
 osc52_clipboard_max_bytes=1048576
+# Windows command that receives the latest OSC 133 command output on stdin.
+# Leave empty to copy the output to the clipboard. Default: empty.
+pipe_command_output=
 
 # Palette overrides use #RRGGBB. Their defaults come from the selected
 # dark_theme or light_theme, so they are commented out unless overridden.
@@ -172,7 +175,8 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
 - `Ctrl+Shift+F` searches live scrollback; Enter/`Ctrl+N` and Shift+Enter/`Ctrl+P`
   move through matches.
 - `Ctrl+Shift+Up` and `Ctrl+Shift+Down` move between OSC 133 shell prompts.
-- `Ctrl+Shift+G` copies the most recent OSC 133 command output.
+- `Ctrl+Shift+G` sends the most recent OSC 133 command output to the standard input
+  of `pipe_command_output` through `cmd.exe`. When unset, it copies the output instead.
 - OSC 9;4 progress from the active tab appears in the Windows taskbar, including
   paused, error, and indeterminate states; stale reports clear after 15 seconds.
 - OSC 9 and OSC 777 desktop notifications use the emitting tab's title and return

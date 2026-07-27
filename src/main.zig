@@ -27,6 +27,7 @@ const ime_bounds_changed_message = win.WM_APP + 10;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
+var process_spawn_mutex: std.Thread.Mutex = .{};
 
 const Application = struct {
     const ViewEntry = struct { pane_id: u64, view: *TerminalView };
@@ -93,6 +94,7 @@ const Application = struct {
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
     const spawnNewWindow = spawnNewWindowImpl;
+    const pipeCommandOutput = pipeCommandOutputImpl;
     const syncProfiles = syncProfilesImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
@@ -419,6 +421,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 },
                 .new_window => {
                     self.spawnNewWindow() catch |err| log.err("unable to open new window: {}", .{err});
+                    return 0;
+                },
+                .pipe_command_output => {
+                    self.pipeCommandOutput() catch |err| log.err("unable to process last command output: {}", .{err});
                     return 0;
                 },
                 .close => {
@@ -847,9 +853,168 @@ fn spawnNewWindowImpl(self: *Application) !void {
     else
         &.{executable};
     var child = std.process.Child.init(argv, allocator);
+    process_spawn_mutex.lock();
+    defer process_spawn_mutex.unlock();
     try child.spawn();
     std.os.windows.CloseHandle(child.thread_handle);
     std.os.windows.CloseHandle(child.id);
+}
+
+fn pipeCommandOutputImpl(self: *Application) !void {
+    if (self.settings.pipe_command_output.len == 0) {
+        const view = self.activeView() orelse return;
+        return view.copyLastCommandOutput();
+    }
+    const runtime = (self.model.activeSession() orelse return).runtime orelse return;
+    const output = try runtime.lastCommandOutputAlloc(std.heap.page_allocator) orelse return;
+    errdefer std.heap.page_allocator.free(output);
+    const directory = try runtime.currentDirectoryAlloc(std.heap.page_allocator);
+    errdefer if (directory) |value| std.heap.page_allocator.free(value);
+    try PipeCommandTask.spawn(self.settings.pipe_command_output, output, directory);
+}
+
+const PipeCommandTask = struct {
+    command: []u8,
+    output: []u8,
+    directory: ?[]u8,
+
+    fn spawn(command: []const u8, output: []u8, directory: ?[]u8) !void {
+        const allocator = std.heap.page_allocator;
+        const task = try allocator.create(PipeCommandTask);
+        errdefer allocator.destroy(task);
+        task.* = .{
+            .command = try allocator.dupe(u8, command),
+            .output = output,
+            .directory = directory,
+        };
+        errdefer allocator.free(task.command);
+        const thread = try std.Thread.spawn(.{}, run, .{task});
+        thread.detach();
+    }
+
+    fn run(self: *PipeCommandTask) void {
+        const allocator = std.heap.page_allocator;
+        defer {
+            allocator.free(self.command);
+            allocator.free(self.output);
+            if (self.directory) |directory| allocator.free(directory);
+            allocator.destroy(self);
+        }
+
+        runPipeCommand(allocator, self.command, self.output, self.directory) catch |err| {
+            log.err("unable to start pipe_command_output: {}", .{err});
+        };
+    }
+};
+
+fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []const u8, directory: ?[]const u8) !void {
+    process_spawn_mutex.lock();
+    var spawn_locked = true;
+    defer if (spawn_locked) process_spawn_mutex.unlock();
+
+    var stdin_read: win.HANDLE = null;
+    var stdin_write: win.HANDLE = null;
+    var security = win.SECURITY_ATTRIBUTES{
+        .nLength = @sizeOf(win.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = null,
+        .bInheritHandle = win.TRUE,
+    };
+    if (win.CreatePipe(&stdin_read, &stdin_write, &security, 0) == 0) return error.CreatePipeFailed;
+    defer {
+        if (stdin_read != null) _ = win.CloseHandle(stdin_read);
+        if (stdin_write != null) _ = win.CloseHandle(stdin_write);
+    }
+    if (win.SetHandleInformation(stdin_write, win.HANDLE_FLAG_INHERIT, 0) == 0) return error.SetHandleInformationFailed;
+
+    const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
+    var nul = win.CreateFileW(
+        nul_name,
+        win.GENERIC_READ | win.GENERIC_WRITE,
+        win.FILE_SHARE_READ | win.FILE_SHARE_WRITE,
+        &security,
+        win.OPEN_EXISTING,
+        win.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (nul == win.INVALID_HANDLE_VALUE) return error.OpenNullDeviceFailed;
+    defer {
+        if (nul != null) _ = win.CloseHandle(nul);
+    }
+
+    var attribute_bytes: usize = 0;
+    _ = win.InitializeProcThreadAttributeList(null, 1, 0, &attribute_bytes);
+    const attribute_memory = win.HeapAlloc(win.GetProcessHeap(), 0, attribute_bytes) orelse return error.OutOfMemory;
+    defer _ = win.HeapFree(win.GetProcessHeap(), 0, attribute_memory);
+    const attributes: win.LPPROC_THREAD_ATTRIBUTE_LIST = @ptrCast(attribute_memory);
+    if (win.InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes) == 0) return error.InitializeAttributeListFailed;
+    defer win.DeleteProcThreadAttributeList(attributes);
+    var inherited_handles = [_]win.HANDLE{ stdin_read, nul };
+    if (win.UpdateProcThreadAttribute(
+        attributes,
+        0,
+        win.PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        @ptrCast(&inherited_handles),
+        @sizeOf(@TypeOf(inherited_handles)),
+        null,
+        null,
+    ) == 0) return error.UpdateAttributeListFailed;
+
+    var system_directory: [win.MAX_PATH]u16 = undefined;
+    const system_length = win.GetSystemDirectoryW(&system_directory, system_directory.len);
+    if (system_length == 0 or system_length >= system_directory.len - "\\cmd.exe".len) return error.SystemDirectoryUnavailable;
+    const suffix = std.unicode.utf8ToUtf16LeStringLiteral("\\cmd.exe");
+    @memcpy(system_directory[system_length..][0..suffix.len], suffix);
+    system_directory[system_length + suffix.len] = 0;
+    const application_name: [*:0]const u16 = @ptrCast(&system_directory);
+
+    var command_line = std.ArrayList(u16).empty;
+    defer command_line.deinit(allocator);
+    try command_line.appendSlice(allocator, std.unicode.utf8ToUtf16LeStringLiteral("cmd.exe /d /s /c \""));
+    const wide_command = try std.unicode.utf8ToUtf16LeAlloc(allocator, command);
+    defer allocator.free(wide_command);
+    try command_line.appendSlice(allocator, wide_command);
+    try command_line.appendSlice(allocator, &.{ '"', 0 });
+
+    const current_directory = if (directory) |value| try std.unicode.utf8ToUtf16LeAllocZ(allocator, value) else null;
+    defer if (current_directory) |value| allocator.free(value);
+    var startup: win.STARTUPINFOEXW = std.mem.zeroes(win.STARTUPINFOEXW);
+    startup.StartupInfo.cb = @sizeOf(win.STARTUPINFOEXW);
+    startup.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin_read;
+    startup.StartupInfo.hStdOutput = nul;
+    startup.StartupInfo.hStdError = nul;
+    startup.lpAttributeList = attributes;
+    var process: win.PROCESS_INFORMATION = std.mem.zeroes(win.PROCESS_INFORMATION);
+    if (win.CreateProcessW(
+        application_name,
+        @ptrCast(command_line.items.ptr),
+        null,
+        null,
+        win.TRUE,
+        win.EXTENDED_STARTUPINFO_PRESENT | win.CREATE_NO_WINDOW,
+        null,
+        if (current_directory) |value| value.ptr else null,
+        &startup.StartupInfo,
+        &process,
+    ) == 0) return error.CreateProcessFailed;
+    _ = win.CloseHandle(process.hThread);
+    stdin_read = null;
+    _ = win.CloseHandle(inherited_handles[0]);
+    nul = null;
+    _ = win.CloseHandle(inherited_handles[1]);
+    process_spawn_mutex.unlock();
+    spawn_locked = false;
+
+    var offset: usize = 0;
+    while (offset < output.len) {
+        var written: win.DWORD = 0;
+        if (win.WriteFile(stdin_write, output[offset..].ptr, @intCast(output.len - offset), &written, null) == 0 or written == 0) break;
+        offset += written;
+    }
+    _ = win.CloseHandle(stdin_write);
+    stdin_write = null;
+    _ = win.WaitForSingleObject(process.hProcess, win.INFINITE);
+    _ = win.CloseHandle(process.hProcess);
 }
 
 fn launchDirectoryFromArgsAlloc(allocator: std.mem.Allocator) !?[]u8 {

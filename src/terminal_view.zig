@@ -741,13 +741,6 @@ pub const View = struct {
             self.invalidate();
             return true;
         }
-        if (control_shift and wparam == 'G') {
-            if (!released) {
-                self.copyLastCommandOutput() catch |err| log.debug("unable to copy last command output: {}", .{err});
-                self.suppressed_search_character = 0x07;
-            }
-            return true;
-        }
         if (!released and control_shift and wparam == 'F') {
             if (runtime) |r| {
                 r.searchBegin();
@@ -834,6 +827,8 @@ pub const View = struct {
             win.ZIGONAUT_CHROME_SPLIT_RIGHT
         else if (shift and wparam == 'E')
             win.ZIGONAUT_CHROME_SPLIT_DOWN
+        else if (shift and wparam == 'G')
+            win.ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT
         else if (wparam == win.VK_TAB)
             if (shift) win.ZIGONAUT_CHROME_SELECT_PREVIOUS else win.ZIGONAUT_CHROME_SELECT_NEXT
         else if (wparam == win.VK_ADD or wparam == win.VK_OEM_PLUS)
@@ -1174,7 +1169,7 @@ pub const View = struct {
         self.invalidate();
     }
 
-    fn copyLastCommandOutput(self: *View) !void {
+    pub fn copyLastCommandOutput(self: *View) !void {
         const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
         const text = try runtime.lastCommandOutputAlloc(std.heap.page_allocator) orelse return;

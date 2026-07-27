@@ -84,6 +84,9 @@ pub const default_contents =
     \\osc52_clipboard_write=false
     \\# Maximum decoded terminal clipboard payload in bytes (1-16777216). Default: 1048576.
     \\osc52_clipboard_max_bytes=1048576
+    \\# Windows command that receives the latest OSC 133 command output on stdin.
+    \\# Leave empty to copy the output to the clipboard. Default: empty.
+    \\pipe_command_output=
     \\#
     \\# Legacy alias: theme sets dark_theme. Default: not set.
     \\#theme=rasmus
@@ -133,6 +136,7 @@ pub const Config = struct {
     randomize_tab_background: bool = true,
     osc52_clipboard_write: bool = false,
     osc52_clipboard_max_bytes: u32 = 1024 * 1024,
+    pipe_command_output: []const u8 = "",
 
     pub fn profileSlice(self: *const Config) []const Profile {
         return self.profiles[0..self.profile_count];
@@ -305,6 +309,8 @@ pub fn parse(contents: []const u8) Config {
         } else if (std.ascii.eqlIgnoreCase(key, "osc52_clipboard_max_bytes")) {
             const limit = std.fmt.parseInt(u32, value, 10) catch continue;
             if (limit >= 1 and limit <= 16 * 1024 * 1024) result.osc52_clipboard_max_bytes = limit;
+        } else if (std.ascii.eqlIgnoreCase(key, "pipe_command_output")) {
+            if (value.len < 4096 and std.mem.indexOfScalar(u8, value, 0) == null and std.unicode.utf8ValidateSlice(value)) result.pipe_command_output = value;
         }
     }
     return result;
@@ -326,6 +332,7 @@ test "configuration parses supported values and ignores invalid ones" {
         \\randomize_tab_background=false
         \\osc52_clipboard_write=true
         \\osc52_clipboard_max_bytes=65536
+        \\pipe_command_output=jq . > latest.json
     );
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
@@ -341,6 +348,7 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expect(!parsed.randomize_tab_background);
     try std.testing.expect(parsed.osc52_clipboard_write);
     try std.testing.expectEqual(@as(u32, 65536), parsed.osc52_clipboard_max_bytes);
+    try std.testing.expectEqualStrings("jq . > latest.json", parsed.pipe_command_output);
 
     const invalid = parse("font_size=500\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\nosc52_clipboard_write=perhaps\nosc52_clipboard_max_bytes=999999999\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
