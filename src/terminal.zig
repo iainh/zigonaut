@@ -99,13 +99,11 @@ pub const Terminal = struct {
         rows: std.ArrayList(Row) = .empty,
 
         const Row = struct {
-            y: u16,
-            start: usize,
-            len: usize,
+            graphemes: std.ArrayList(u32) = .empty,
         };
 
         const OwnedCell = struct {
-            codepoints: [16]u32 = undefined,
+            codepoint_offset: u32,
             foreground: theme.Color,
             background: theme.Color,
             underline_color: theme.Color,
@@ -121,8 +119,9 @@ pub const Terminal = struct {
                 underline: u8,
             },
 
-            fn init(cell: Cell) OwnedCell {
-                var result = OwnedCell{
+            fn init(cell: Cell, codepoint_offset: u32) OwnedCell {
+                return .{
+                    .codepoint_offset = codepoint_offset,
                     .foreground = cell.foreground,
                     .background = cell.background,
                     .underline_color = cell.underline_color,
@@ -138,16 +137,18 @@ pub const Terminal = struct {
                         .underline = cell.underline,
                     },
                 };
-                @memcpy(result.codepoints[0..result.codepoint_count], cell.codepoints[0..result.codepoint_count]);
-                return result;
             }
 
-            fn value(self: *const OwnedCell, x: u16, y: u16) Cell {
+            fn codepoints(self: *const OwnedCell, row: *const Row) []const u32 {
+                return row.graphemes.items[self.codepoint_offset..][0..self.codepoint_count];
+            }
+
+            fn value(self: *const OwnedCell, row: *const Row, x: u16, y: u16) Cell {
                 return .{
                     .x = x,
                     .y = y,
                     .occupancy = @enumFromInt(self.attributes.occupancy),
-                    .codepoints = self.codepoints[0..self.codepoint_count],
+                    .codepoints = self.codepoints(row),
                     .foreground = self.foreground,
                     .background = self.background,
                     .underline_color = self.underline_color,
@@ -166,16 +167,23 @@ pub const Terminal = struct {
 
         const Recorder = struct {
             snapshot: *RenderSnapshot,
+            allocator: std.mem.Allocator,
 
             pub fn beginFrame(self: *Recorder, frame: Frame) void {
                 self.snapshot.frame = frame;
             }
 
-            pub fn beginRow(_: *Recorder, _: u16) void {}
+            pub fn beginRow(self: *Recorder, y: u16) void {
+                self.snapshot.rows.items[y].graphemes.clearRetainingCapacity();
+            }
 
-            pub fn drawCell(self: *Recorder, cell: Cell) void {
-                const index = self.snapshot.rows.items[cell.y].start + cell.x;
-                self.snapshot.cells.items[index] = .init(cell);
+            pub fn drawCell(self: *Recorder, cell: Cell) !void {
+                const row = &self.snapshot.rows.items[cell.y];
+                const count = @min(cell.codepoints.len, 16);
+                const offset: u32 = @intCast(row.graphemes.items.len);
+                try row.graphemes.appendSlice(self.allocator, cell.codepoints[0..count]);
+                const index = @as(usize, cell.y) * self.snapshot.columns() + cell.x;
+                self.snapshot.cells.items[index] = .init(cell, offset);
             }
 
             pub fn endRow(_: *Recorder, _: u16) void {}
@@ -184,6 +192,7 @@ pub const Terminal = struct {
         };
 
         pub fn deinit(self: *RenderSnapshot, allocator: std.mem.Allocator) void {
+            for (self.rows.items) |*row| row.graphemes.deinit(allocator);
             self.cells.deinit(allocator);
             self.rows.deinit(allocator);
             self.* = .{};
@@ -193,28 +202,38 @@ pub const Terminal = struct {
             const cell_count = @as(usize, terminal.columns) * @as(usize, terminal.rows);
             const resized = self.cells.items.len != cell_count or self.rows.items.len != terminal.rows;
             if (resized) {
-                try self.cells.resize(allocator, cell_count);
-                try self.rows.resize(allocator, terminal.rows);
-                for (self.rows.items, 0..) |*row, y| row.* = .{
-                    .y = @intCast(y),
-                    .start = y * terminal.columns,
-                    .len = terminal.columns,
-                };
-                self.frame = null;
+                var replacement = RenderSnapshot{};
+                errdefer replacement.deinit(allocator);
+                try replacement.cells.resize(allocator, cell_count);
+                try replacement.rows.resize(allocator, terminal.rows);
+                for (replacement.rows.items) |*row| {
+                    row.* = .{};
+                    try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
+                }
+                var recorder = Recorder{ .snapshot = &replacement, .allocator = allocator };
+                try terminal.renderViewportInternal(&recorder, null);
+                self.deinit(allocator);
+                self.* = replacement;
+                return;
             }
-            var recorder = Recorder{ .snapshot = self };
+            var recorder = Recorder{ .snapshot = self, .allocator = allocator };
             try terminal.renderViewportInternal(&recorder, self.frame);
+        }
+
+        fn columns(self: *const RenderSnapshot) usize {
+            return if (self.rows.items.len == 0) 0 else self.cells.items.len / self.rows.items.len;
         }
 
         pub fn replay(self: *const RenderSnapshot, renderer: anytype) void {
             const frame = self.frame orelse return;
             renderer.beginFrame(frame);
-            for (self.rows.items) |row| {
-                renderer.beginRow(row.y);
-                for (self.cells.items[row.start..][0..row.len], 0..) |*cell, x| {
-                    renderer.drawCell(cell.value(@intCast(x), row.y));
+            const column_count = self.columns();
+            for (self.rows.items, 0..) |*row, y| {
+                renderer.beginRow(@intCast(y));
+                for (self.cells.items[y * column_count ..][0..column_count], 0..) |*cell, x| {
+                    renderer.drawCell(cell.value(row, @intCast(x), @intCast(y)));
                 }
-                renderer.endRow(row.y);
+                renderer.endRow(@intCast(y));
             }
             renderer.endFrame(frame);
         }
@@ -976,7 +995,7 @@ pub const Terminal = struct {
                         &codepoints,
                     ));
                 }
-                renderer.drawCell(Cell{
+                const draw_result = renderer.drawCell(Cell{
                     .x = x,
                     .y = y,
                     .occupancy = occupancy,
@@ -992,6 +1011,7 @@ pub const Terminal = struct {
                     .underline = @intCast(@max(style.underline, 0)),
                     .selected = has_selection and x >= selection.start_x and x <= selection.end_x,
                 });
+                if (comptime @TypeOf(draw_result) != void) try draw_result;
             }
             if (dirty_only) {
                 row_dirty = false;
@@ -1775,8 +1795,8 @@ test "render snapshots preserve clean rows during incremental capture" {
     terminal.feed("\rC");
     try snapshot.capture(std.testing.allocator, &terminal);
 
-    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints[0]);
-    try std.testing.expectEqual(@as(u32, 'C'), snapshot.cells.items[4].codepoints[0]);
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints(&snapshot.rows.items[0])[0]);
+    try std.testing.expectEqual(@as(u32, 'C'), snapshot.cells.items[4].codepoints(&snapshot.rows.items[1])[0]);
     try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
 }
 
@@ -1830,7 +1850,7 @@ test "incremental snapshots refresh cursor-only frame changes" {
     try std.testing.expectEqual(@as(u16, 2), snapshot.frame.?.cursor_x);
     try std.testing.expectEqual(@as(u16, 1), snapshot.frame.?.cursor_y);
     try std.testing.expect(!snapshot.frame.?.cursor_visible);
-    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints[0]);
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints(&snapshot.rows.items[0])[0]);
 }
 
 test "incremental snapshots refresh all cells after global color changes" {
@@ -1926,18 +1946,17 @@ fn expectSnapshotsEqual(expected: *const Terminal.RenderSnapshot, actual: *const
     try std.testing.expectEqualDeep(expected.frame, actual.frame);
     try std.testing.expectEqual(expected.rows.items.len, actual.rows.items.len);
     try std.testing.expectEqual(expected.cells.items.len, actual.cells.items.len);
-    for (expected.rows.items, actual.rows.items) |expected_row, actual_row| {
-        try std.testing.expectEqual(expected_row.y, actual_row.y);
-        try std.testing.expectEqual(expected_row.len, actual_row.len);
+    const columns = expected.columns();
+    for (expected.rows.items, actual.rows.items, 0..) |*expected_row, *actual_row, y| {
         for (
-            expected.cells.items[expected_row.start..][0..expected_row.len],
-            actual.cells.items[actual_row.start..][0..actual_row.len],
+            expected.cells.items[y * columns ..][0..columns],
+            actual.cells.items[y * columns ..][0..columns],
         ) |expected_cell, actual_cell| {
             try std.testing.expectEqual(expected_cell.codepoint_count, actual_cell.codepoint_count);
             try std.testing.expectEqualSlices(
                 u32,
-                expected_cell.codepoints[0..expected_cell.codepoint_count],
-                actual_cell.codepoints[0..actual_cell.codepoint_count],
+                expected_cell.codepoints(expected_row),
+                actual_cell.codepoints(actual_row),
             );
             try std.testing.expectEqual(expected_cell.foreground, actual_cell.foreground);
             try std.testing.expectEqual(expected_cell.background, actual_cell.background);
