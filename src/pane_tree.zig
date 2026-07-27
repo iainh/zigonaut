@@ -23,6 +23,7 @@ pub const Error = error{
     DuplicateId,
     PaneNotFound,
     SplitNotFound,
+    InvalidRatio,
 };
 
 const Node = union(enum) {
@@ -82,6 +83,7 @@ pub const Tree = struct {
     }
 
     pub fn setRatio(self: *Tree, split_id: SplitId, ratio: u16) Error!void {
+        if (ratio == 0 or ratio == std.math.maxInt(u16)) return error.InvalidRatio;
         const node = findSplit(self.root, split_id) orelse return error.SplitNotFound;
         node.split.ratio = ratio;
     }
@@ -327,6 +329,8 @@ test "invalid duplicate and stale ids do not mutate the tree" {
     try std.testing.expectError(error.DuplicateId, tree.split(7, 9, 70, .top_bottom));
     try std.testing.expectError(error.PaneNotFound, tree.split(99, 9, 71, .top_bottom));
     try std.testing.expectError(error.SplitNotFound, tree.setRatio(99, 1));
+    try std.testing.expectError(error.InvalidRatio, tree.setRatio(70, 0));
+    try std.testing.expectError(error.InvalidRatio, tree.setRatio(70, std.math.maxInt(u16)));
     try std.testing.expect(!tree.focus(99));
     try std.testing.expectEqual(@as(?PaneId, 7), tree.focused);
 }

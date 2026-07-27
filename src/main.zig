@@ -152,7 +152,7 @@ const Application = struct {
             .leaf => |leaf| {
                 const view = try self.ensureView(leaf.id);
                 if (!self.isAttached(leaf.id)) {
-                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight())) return error.AttachPaneFailed;
+                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
                     self.attached_panes.appendAssumeCapacity(leaf.id);
                 }
                 layout[index] = .{
@@ -840,6 +840,8 @@ fn reloadSettingsImpl(self: *Application) !void {
 
     const next = replacement.value;
     const changed = config.changes(self.settings, next);
+    const padding_changed = self.settings.padding_horizontal != next.padding_horizontal or
+        self.settings.padding_vertical != next.padding_vertical;
     const new_font = if (changed.font) createFontFor(next, self.dpi) else null;
     if (changed.font and new_font == null) return error.CreateFontFailed;
     errdefer {
@@ -866,6 +868,10 @@ fn reloadSettingsImpl(self: *Application) !void {
         self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
+    if (padding_changed) {
+        try self.detachPresentation();
+        try self.syncPresentation();
+    }
     self.updateTheme();
     if (new_font != null) _ = win.DeleteObject(old_font);
     for (self.views.items) |entry| entry.view.invalidate();

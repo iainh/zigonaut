@@ -80,7 +80,7 @@ typedef enum zigonaut_backdrop_kind {
 } zigonaut_backdrop_kind;
 
 __declspec(dllexport) HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, zigonaut_pane_event_callback pane_callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_attach_pane(void* bridge, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_attach_pane(void* bridge, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_detach_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_focus_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_layout(void* bridge, const zigonaut_layout_node* nodes, uint32_t count, uint64_t focused_pane) ZIGONAUT_NOEXCEPT;

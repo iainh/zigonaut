@@ -25,6 +25,8 @@ const search_refresh_interval_ms = 33;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
 const wheel_rows = 3;
+const minimum_columns = 10;
+const minimum_rows = 4;
 
 pub const View = struct {
     hwnd: win.HWND = null,
@@ -189,6 +191,16 @@ pub const View = struct {
 
     pub fn cellHeight(self: *const View) u32 {
         return self.cell_height;
+    }
+
+    pub fn minimumWidth(self: *const View) u32 {
+        const padding: u32 = @intCast(@max(scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd)), 0));
+        return minimum_columns * self.cell_width + 2 * padding;
+    }
+
+    pub fn minimumHeight(self: *const View) u32 {
+        const padding: u32 = @intCast(@max(scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd)), 0));
+        return minimum_rows * self.cell_height + 2 * padding;
     }
 
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {

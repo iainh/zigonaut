@@ -47,7 +47,7 @@ pub const axis_top_bottom: u32 = @intCast(win.ZIGONAUT_AXIS_TOP_BOTTOM);
 const PaneCallback = *const fn (?*anyopaque, *const PaneEvent) callconv(.c) void;
 pub const Started = *const fn (?*anyopaque, ?*anyopaque, win.HWND) callconv(.c) win.BOOL;
 const Run = *const fn (Started, Callback, PaneCallback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
-const AttachPane = *const fn (?*anyopaque, u64, win.HWND, ?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
+const AttachPane = *const fn (?*anyopaque, u64, win.HWND, ?*anyopaque, u32, u32, u32, u32) callconv(.c) win.HRESULT;
 const DetachPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const FocusPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const UpdateLayout = *const fn (?*anyopaque, [*]const LayoutNode, u32, u64) callconv(.c) win.HRESULT;
@@ -146,9 +146,9 @@ pub const Bridge = struct {
         return true;
     }
 
-    pub fn attachPane(self: *Bridge, id: u64, terminal: win.HWND, swap_chain: ?*anyopaque, cell_width: u32, cell_height: u32) bool {
+    pub fn attachPane(self: *Bridge, id: u64, terminal: win.HWND, swap_chain: ?*anyopaque, cell_width: u32, cell_height: u32, minimum_width: u32, minimum_height: u32) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.attach_pane_fn(instance, id, terminal, swap_chain, cell_width, cell_height));
+        return succeeded(self.attach_pane_fn(instance, id, terminal, swap_chain, cell_width, cell_height, minimum_width, minimum_height));
     }
 
     pub fn detachPane(self: *Bridge, id: u64) bool {

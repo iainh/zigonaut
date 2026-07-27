@@ -114,12 +114,12 @@ struct Bridge {
     Application application{nullptr};
     Window window{nullptr};
     HWND parent{};
-    struct Attachment { HWND window{}; com_ptr<IDXGISwapChain> swap_chain; uint32_t cell_width{}, cell_height{}; };
+    struct Attachment { HWND window{}; com_ptr<IDXGISwapChain> swap_chain; uint32_t cell_width{}, cell_height{}, minimum_width{}, minimum_height{}; };
     std::unordered_map<uint64_t, Attachment> attachments;
     uint64_t active_pane{};
     struct PaneHost {
         uint64_t pane_id{}; HWND window{}; com_ptr<IDXGISwapChain> swap_chain;
-        uint32_t cell_width{}, cell_height{};
+        uint32_t cell_width{}, cell_height{}, minimum_width{}, minimum_height{};
         Border frame{nullptr}; Grid grid{nullptr}; SwapChainPanel panel{nullptr}; ContentControl input{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
         Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
@@ -138,13 +138,16 @@ struct Bridge {
     struct SplitHost {
         uint64_t id{}; uint32_t axis{}; uint16_t committed{}; Grid grid{nullptr};
         uint32_t cell_width{}, cell_height{};
+        double minimum_width{}, minimum_height{}, minimum_first{}, minimum_second{};
         RowDefinition row_a{nullptr}, row_b{nullptr}; ColumnDefinition column_a{nullptr}, column_b{nullptr};
         Border divider{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb thumb{nullptr};
         Microsoft::UI::Input::InputCursor cursor{nullptr};
         FrameworkElement::Loaded_revoker loaded{};
+        Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragStarted_revoker started{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragDelta_revoker delta{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragCompleted_revoker completed{};
+        double drag_origin{}, drag_change{};
     };
     std::unordered_map<uint64_t, std::unique_ptr<PaneHost>> pane_hosts;
     std::unordered_map<uint64_t, std::unique_ptr<SplitHost>> split_hosts;
@@ -456,9 +459,9 @@ struct Bridge {
         accelerators.emplace_back(std::move(accelerator));
     }
 
-    void attachPane(uint64_t id, HWND child, void* value, uint32_t cell_width, uint32_t cell_height) {
-        if (!id || !child || GetParent(child) != parent || !value || !cell_width || !cell_height) throw hresult_invalid_argument();
-        Attachment attachment{child, {}, cell_width, cell_height};
+    void attachPane(uint64_t id, HWND child, void* value, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height) {
+        if (!id || !child || GetParent(child) != parent || !value || !cell_width || !cell_height || !minimum_width || !minimum_height) throw hresult_invalid_argument();
+        Attachment attachment{child, {}, cell_width, cell_height, minimum_width, minimum_height};
         static_cast<IDXGISwapChain*>(value)->QueryInterface(IID_PPV_ARGS(attachment.swap_chain.put()));
         if (!attachment.swap_chain) throw hresult_invalid_argument();
         attachments.insert_or_assign(id, std::move(attachment));
@@ -494,7 +497,7 @@ struct Bridge {
     }
 
     std::unique_ptr<PaneHost> makePane(uint64_t id, Attachment const& attachment) {
-        auto owned = std::make_unique<PaneHost>(); auto* p = owned.get(); p->pane_id=id; p->window=attachment.window; p->swap_chain=attachment.swap_chain; p->cell_width=attachment.cell_width; p->cell_height=attachment.cell_height;
+        auto owned = std::make_unique<PaneHost>(); auto* p = owned.get(); p->pane_id=id; p->window=attachment.window; p->swap_chain=attachment.swap_chain; p->cell_width=attachment.cell_width; p->cell_height=attachment.cell_height; p->minimum_width=attachment.minimum_width; p->minimum_height=attachment.minimum_height;
         p->frame=Border{}; p->frame.Style(application.Resources().Lookup(box_value(L"ZigonautTerminalFrameStyle")).as<Style>()); p->grid=Grid{};
         p->panel=SwapChainPanel{}; p->input=ContentControl{}; p->input.Opacity(0); p->input.IsTabStop(true); p->input.IsHitTestVisible(false);
         p->scrollbar=Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{}; p->scrollbar.Orientation(Orientation::Vertical); p->scrollbar.HorizontalAlignment(HorizontalAlignment::Right); p->scrollbar.Width(12); p->scrollbar.Opacity(0); p->scrollbar.Visibility(Visibility::Collapsed);
@@ -586,6 +589,7 @@ struct Bridge {
 
     void updateLayout(zigonaut_layout_node const* nodes, uint32_t count, uint64_t focused) {
         if (!nodes || !count || !focused) throw hresult_invalid_argument();
+        if (auto const xaml_root = content_root.XamlRoot()) rasterization_scale = xaml_root.RasterizationScale();
         std::unordered_set<uint64_t> ids;
         for (uint32_t i = 0; i < count; ++i) {
             auto const& n = nodes[i];
@@ -667,11 +671,17 @@ struct Bridge {
                     .Lookup(box_value(L"DividerStrokeColorDefaultBrush"))
                     .as<Microsoft::UI::Xaml::Media::Brush>());
                 if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};auto gap=ColumnDefinition{};gap.Width({5,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);h->thumb.Width(16);h->thumb.HorizontalAlignment(HorizontalAlignment::Center);}else{h->row_a=RowDefinition{};auto gap=RowDefinition{};gap.Height({5,GridUnitType::Pixel});h->row_b=RowDefinition{};h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);h->thumb.Height(16);h->thumb.VerticalAlignment(VerticalAlignment::Center);}
+                h->started = h->thumb.DragStarted(auto_revoke, [h](auto&&, auto&&) {
+                    h->drag_origin = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->column_a.ActualWidth()
+                        : h->row_a.ActualHeight();
+                    h->drag_change = 0;
+                });
                 h->delta = h->thumb.DragDelta(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragDeltaEventArgs const& args) {
                     auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                         ? h->grid.ActualWidth() - 5
                         : h->grid.ActualHeight() - 5;
-                    if (!std::isfinite(total) || total <= 160) return;
+                    if (!std::isfinite(total) || total <= 0) return;
                     auto const current = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                         ? h->column_a.ActualWidth()
                         : h->row_a.ActualHeight();
@@ -679,10 +689,25 @@ struct Bridge {
                         ? args.HorizontalChange()
                         : args.VerticalChange();
                     if (!std::isfinite(current) || !std::isfinite(change)) return;
+                    h->drag_change += change;
                     auto const physical_increment = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT ? h->cell_width : h->cell_height;
                     auto const increment = physical_increment / rasterization_scale;
                     if (!std::isfinite(increment) || increment <= 0) return;
-                    auto const next = std::clamp(std::round((current + change) / increment) * increment, 80.0, total - 80);
+                    auto minimum_first = h->minimum_first;
+                    auto minimum_second = h->minimum_second;
+                    auto const required = minimum_first + minimum_second;
+                    if (required > total) {
+                        auto const scale = total / required;
+                        minimum_first *= scale;
+                        minimum_second *= scale;
+                    }
+                    auto lower = minimum_first;
+                    auto upper = total - minimum_second;
+                    if (lower > upper) lower = upper = std::clamp(lower, 0.0, total);
+                    auto const next = std::clamp(
+                        std::round((h->drag_origin + h->drag_change) / increment) * increment,
+                        lower,
+                        upper);
                     if (std::abs(next - current) < 0.5) return;
                     if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
                         h->column_a.Width({next, GridUnitType::Star});
@@ -693,6 +718,7 @@ struct Bridge {
                     }
                 });
                 h->completed = h->thumb.DragCompleted(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
+                    h->drag_change = 0;
                     auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                         ? h->grid.ActualWidth() - 5
                         : h->grid.ActualHeight() - 5;
@@ -747,6 +773,31 @@ struct Bridge {
             };
             h->cell_width = std::min(subtree_cell_size(i + 1, true), subtree_cell_size(right, true));
             h->cell_height = std::min(subtree_cell_size(i + 1, false), subtree_cell_size(right, false));
+            auto subtree_minimum = [&](uint32_t index, bool width) {
+                if (nodes[index].kind == ZIGONAUT_LAYOUT_LEAF) {
+                    auto const pane = pane_hosts.find(nodes[index].id);
+                    if (pane == pane_hosts.end()) return 0.0;
+                    return (width ? pane->second->minimum_width : pane->second->minimum_height) / rasterization_scale;
+                }
+                auto const split = split_hosts.find(nodes[index].id);
+                if (split == split_hosts.end()) return 0.0;
+                return width ? split->second->minimum_width : split->second->minimum_height;
+            };
+            auto const first_minimum_width = subtree_minimum(i + 1, true);
+            auto const first_minimum_height = subtree_minimum(i + 1, false);
+            auto const second_minimum_width = subtree_minimum(right, true);
+            auto const second_minimum_height = subtree_minimum(right, false);
+            if (n.axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
+                h->minimum_first = first_minimum_width;
+                h->minimum_second = second_minimum_width;
+                h->minimum_width = first_minimum_width + 5 + second_minimum_width;
+                h->minimum_height = std::max(first_minimum_height, second_minimum_height);
+            } else {
+                h->minimum_first = first_minimum_height;
+                h->minimum_second = second_minimum_height;
+                h->minimum_width = std::max(first_minimum_width, second_minimum_width);
+                h->minimum_height = first_minimum_height + 5 + second_minimum_height;
+            }
             if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a.Width({a,GridUnitType::Star});h->column_b.Width({b,GridUnitType::Star});Grid::SetColumn(first,0);Grid::SetColumn(h->divider,1);Grid::SetColumn(h->thumb,1);Grid::SetColumn(second,2);}else{h->row_a.Height({a,GridUnitType::Star});h->row_b.Height({b,GridUnitType::Star});Grid::SetRow(first,0);Grid::SetRow(h->divider,1);Grid::SetRow(h->thumb,1);Grid::SetRow(second,2);}
             h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(h->divider);h->grid.Children().Append(h->thumb);
             return h->grid;
@@ -1300,11 +1351,6 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                             bridge->terminal_loaded_revoker.revoke();
                             try {
                                 bridge->root.UpdateLayout();
-                                if (!started(context, bridge, bridge->parent)) {
-                                    result = E_ABORT;
-                                    bridge->window.Close();
-                                    return;
-                                }
                                 auto const xaml_root = bridge->content_root.XamlRoot();
                                 bridge->rasterization_scale = xaml_root.RasterizationScale();
                                 bridge->xaml_root_changed_revoker = xaml_root.Changed(auto_revoke, [bridge](XamlRoot const& sender, auto&&) {
@@ -1312,6 +1358,11 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                                     for(auto& [_,p]:bridge->pane_hosts) p->bounds={-1,-1,-1,-1};
                                     bridge->layoutTerminal();
                                 });
+                                if (!started(context, bridge, bridge->parent)) {
+                                    result = E_ABORT;
+                                    bridge->window.Close();
+                                    return;
+                                }
                                 if (bridge->runBenchmarkIfRequested()) {
                                     bridge->window.Close();
                                     return;
@@ -1349,10 +1400,10 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
     return result;
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_attach_pane(void* value, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_attach_pane(void* value, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    try { bridge->attachPane(pane_id, terminal, swap_chain, cell_width, cell_height); return S_OK; } catch (...) { return reportCurrentException(L"attach pane"); }
+    try { bridge->attachPane(pane_id, terminal, swap_chain, cell_width, cell_height, minimum_width, minimum_height); return S_OK; } catch (...) { return reportCurrentException(L"attach pane"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_detach_pane(void* value, uint64_t pane_id) noexcept {
