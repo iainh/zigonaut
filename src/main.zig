@@ -725,9 +725,9 @@ fn showPendingNotificationsImpl(self: *Application) void {
         const runtime = session.runtime orelse continue;
         while (runtime.takeNotification()) |notification| {
             defer runtime.freeNotification(notification);
-            const title = if (notification.title.len > 0) notification.title else session.displayTitle();
-            if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body)) continue;
-            _ = bridge.showNotification(session.id, title, notification.body);
+            const title = if (notification.title().len > 0) notification.title() else session.displayTitle();
+            if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body())) continue;
+            _ = bridge.showNotification(session.id, title, notification.body());
         }
     };
 }

@@ -27,7 +27,7 @@ pub const SessionRuntime = struct {
     progress_parser: progress.Parser = .{},
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    notifications: std.ArrayList(Notification) = .empty,
+    notifications: NotificationQueue = .{},
     render_snapshot: Terminal.RenderSnapshot = .{},
     // Search state is UI-thread-owned. The reader thread only changes terminal
     // content and generations, so synchronous rendering can borrow these lists.
@@ -59,12 +59,54 @@ pub const SessionRuntime = struct {
     };
 
     pub const Notification = struct {
-        title: []u8,
-        body: []u8,
+        payload: []u8,
+        title_len: u16,
+
+        pub fn title(self: Notification) []const u8 {
+            return self.payload[0..self.title_len];
+        }
+
+        pub fn body(self: Notification) []const u8 {
+            return self.payload[self.title_len..];
+        }
 
         pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
-            allocator.free(self.title);
-            allocator.free(self.body);
+            allocator.free(self.payload);
+        }
+    };
+
+    const NotificationQueue = struct {
+        const capacity = 32;
+        slots: std.ArrayList(Notification) = .empty,
+        head: usize = 0,
+        count: usize = 0,
+
+        fn deinit(self: *NotificationQueue, allocator: std.mem.Allocator) void {
+            while (self.pop()) |notification| notification.deinit(allocator);
+            self.slots.deinit(allocator);
+            self.* = .{};
+        }
+
+        fn push(self: *NotificationQueue, allocator: std.mem.Allocator, notification: Notification) !void {
+            if (self.slots.items.len == 0) try self.slots.resize(allocator, capacity);
+            if (self.count == capacity) {
+                self.slots.items[self.head].deinit(allocator);
+                self.slots.items[self.head] = notification;
+                self.head = (self.head + 1) % capacity;
+                return;
+            }
+            const index = (self.head + self.count) % capacity;
+            self.slots.items[index] = notification;
+            self.count += 1;
+        }
+
+        fn pop(self: *NotificationQueue) ?Notification {
+            if (self.count == 0) return null;
+            const notification = self.slots.items[self.head];
+            self.head = (self.head + 1) % capacity;
+            self.count -= 1;
+            if (self.count == 0) self.head = 0;
+            return notification;
         }
     };
 
@@ -119,7 +161,6 @@ pub const SessionRuntime = struct {
             pty.finishClose();
         }
         self.title.deinit(self.allocator);
-        for (self.notifications.items) |notification| notification.deinit(self.allocator);
         self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
         self.render_snapshot.deinit(self.allocator);
@@ -389,14 +430,13 @@ pub const SessionRuntime = struct {
     pub fn takeNotification(self: *SessionRuntime) ?Notification {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        if (self.notifications.items.len == 0) return null;
-        return self.notifications.orderedRemove(0);
+        return self.notifications.pop();
     }
 
     pub fn hasPendingNotification(self: *SessionRuntime) bool {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        return self.notifications.items.len > 0;
+        return self.notifications.count > 0;
     }
 
     pub fn freeNotification(self: *SessionRuntime, notification: Notification) void {
@@ -513,18 +553,11 @@ pub const SessionRuntime = struct {
             const runtime = self.runtime;
             if (update == .notification) {
                 const event = update.notification;
-                const title = runtime.allocator.dupe(u8, event.title) catch return;
-                const body = runtime.allocator.dupe(u8, event.body) catch {
-                    runtime.allocator.free(title);
-                    return;
-                };
-                if (runtime.notifications.items.len == 32) {
-                    runtime.notifications.orderedRemove(0).deinit(runtime.allocator);
-                }
-                runtime.notifications.append(runtime.allocator, .{ .title = title, .body = body }) catch {
-                    runtime.allocator.free(title);
-                    runtime.allocator.free(body);
-                };
+                const payload = runtime.allocator.alloc(u8, event.title.len + event.body.len) catch return;
+                @memcpy(payload[0..event.title.len], event.title);
+                @memcpy(payload[event.title.len..], event.body);
+                const notification = Notification{ .payload = payload, .title_len = @intCast(event.title.len) };
+                runtime.notifications.push(runtime.allocator, notification) catch notification.deinit(runtime.allocator);
                 return;
             }
             runtime.taskbar_progress = switch (update) {
@@ -553,3 +586,23 @@ pub const SessionRuntime = struct {
         _ = self.title_generation.fetchAdd(1, .release);
     }
 };
+
+test "notification queue preserves FIFO order and evicts its oldest entry" {
+    var queue = SessionRuntime.NotificationQueue{};
+    defer queue.deinit(std.testing.allocator);
+
+    for (0..33) |index| {
+        const payload = try std.testing.allocator.alloc(u8, 1);
+        payload[0] = @intCast(index);
+        const notification = SessionRuntime.Notification{ .payload = payload, .title_len = 0 };
+        queue.push(std.testing.allocator, notification) catch |err| {
+            notification.deinit(std.testing.allocator);
+            return err;
+        };
+    }
+
+    try std.testing.expectEqual(@as(usize, 32), queue.count);
+    const first = queue.pop().?;
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 1), first.body()[0]);
+}
