@@ -69,6 +69,8 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("advapi32");
     exe.linkSystemLibrary("kernel32");
     exe.linkSystemLibrary("shell32");
+    exe.linkSystemLibrary("windowscodecs");
+    exe.linkSystemLibrary("ole32");
     const check_step = b.step("check", "Compile Zigonaut without installing it");
     check_step.dependOn(&exe.step);
     const install_exe = b.addInstallArtifact(exe, .{});
@@ -126,6 +128,8 @@ pub fn build(b: *std.Build) void {
     tests.linkSystemLibrary("dwrite");
     tests.linkSystemLibrary("dxgi");
     tests.linkSystemLibrary("kernel32");
+    tests.linkSystemLibrary("windowscodecs");
+    tests.linkSystemLibrary("ole32");
     configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -153,6 +157,8 @@ pub fn build(b: *std.Build) void {
     benchmark.linkSystemLibrary("dwrite");
     benchmark.linkSystemLibrary("dxgi");
     benchmark.linkSystemLibrary("kernel32");
+    benchmark.linkSystemLibrary("windowscodecs");
+    benchmark.linkSystemLibrary("ole32");
     configureGhostty(benchmark.root_module, ghostty);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);

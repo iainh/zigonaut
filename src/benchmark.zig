@@ -241,6 +241,10 @@ const BenchmarkRenderer = struct {
 
     pub fn endRow(_: *BenchmarkRenderer, _: u16) void {}
 
+    pub fn drawImage(self: *BenchmarkRenderer, image: Terminal.Image) void {
+        self.checksum +%= image.pixels.len;
+    }
+
     pub fn endFrame(self: *BenchmarkRenderer, frame: Terminal.Frame) void {
         self.checksum +%= frame.cursor_y;
     }

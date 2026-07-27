@@ -122,6 +122,9 @@ const CellRenderer = struct {
     }
     pub fn endRow(_: *CellRenderer, _: u16) void {}
 
+    // Kitty images are currently supported by the hardware renderer only.
+    pub fn drawImage(_: *CellRenderer, _: Terminal.Image) void {}
+
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
         if (cell.occupancy == .wide_tail) return;
         const left = self.context.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.context.cell_width));

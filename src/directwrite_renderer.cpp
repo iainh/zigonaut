@@ -8,6 +8,8 @@
 #include <dwrite.h>
 #include <dwrite_2.h>
 #include <dxgi1_3.h>
+#include <objbase.h>
+#include <wincodec.h>
 #include <list>
 #include <map>
 #include <memory>
@@ -137,6 +139,48 @@ std::u16string numberedLayoutText(const char16_t* prefix, uint32_t value) {
 }
 
 } // namespace
+
+extern "C" HRESULT zigonaut_decode_png(const uint8_t* data, size_t length,
+    ZigonautDecodedImage* result) {
+    if (!data || !length || !result || length > UINT32_MAX) return E_INVALIDARG;
+    *result = {};
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com) && com != RPC_E_CHANGED_MODE) return com;
+    const bool uninitialize = SUCCEEDED(com);
+    IWICImagingFactory* factory = nullptr; IWICStream* stream = nullptr;
+    IWICBitmapDecoder* decoder = nullptr; IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromMemory(
+        const_cast<BYTE*>(data), static_cast<DWORD>(length));
+    if (SUCCEEDED(hr)) hr = factory->CreateDecoderFromStream(stream, nullptr,
+        WICDecodeMetadataCacheOnLoad, &decoder);
+    GUID container_format{};
+    if (SUCCEEDED(hr)) hr = decoder->GetContainerFormat(&container_format);
+    if (SUCCEEDED(hr) && !IsEqualGUID(container_format, GUID_ContainerFormatPng)) hr = WINCODEC_ERR_BADIMAGE;
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter);
+    if (SUCCEEDED(hr)) hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+    UINT width = 0, height = 0;
+    if (SUCCEEDED(hr)) hr = converter->GetSize(&width, &height);
+    size_t bytes = 0;
+    if (!width || !height || width > SIZE_MAX / height ||
+        static_cast<size_t>(width) * height > (32u * 1024u * 1024u) / 4u) hr = E_INVALIDARG;
+    if (SUCCEEDED(hr)) bytes = static_cast<size_t>(width) * height * 4;
+    uint8_t* pixels = SUCCEEDED(hr) ? new (std::nothrow) uint8_t[bytes] : nullptr;
+    if (SUCCEEDED(hr) && !pixels) hr = E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) hr = converter->CopyPixels(nullptr, width * 4,
+        static_cast<UINT>(bytes), pixels);
+    if (FAILED(hr)) delete[] pixels; else *result = {width, height, pixels, bytes};
+    release(converter); release(frame); release(decoder); release(stream); release(factory);
+    if (uninitialize) CoUninitialize();
+    return hr;
+}
+
+extern "C" void zigonaut_free_decoded_image(uint8_t* pixels) { delete[] pixels; }
 
 class GridTextRenderer;
 
@@ -1187,6 +1231,47 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
         overline != FALSE,
         underline,
         occupancy);
+}
+
+extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
+    const uint8_t* rgba, size_t rgba_length, uint32_t image_width, uint32_t image_height,
+    float dl, float dt, float dw, float dh, float sl, float st, float sw, float sh,
+    float cl, float ct, float cr, float cb) {
+    if (!engine || !engine->target || !rgba || !image_width || !image_height ||
+        image_width > UINT32_MAX / 4 ||
+        !std::isfinite(dl) || !std::isfinite(dt) || !std::isfinite(dw) || !std::isfinite(dh) ||
+        !std::isfinite(sl) || !std::isfinite(st) || !std::isfinite(sw) || !std::isfinite(sh) ||
+        !std::isfinite(cl) || !std::isfinite(ct) || !std::isfinite(cr) || !std::isfinite(cb) ||
+        dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 || sl < 0 || st < 0 ||
+        sl > image_width || st > image_height || sw > image_width - sl || sh > image_height - st ||
+        cl >= cr || ct >= cb || !std::isfinite(dl + dw) || !std::isfinite(dt + dh) ||
+        !std::isfinite(sl + sw) || !std::isfinite(st + sh)) return E_INVALIDARG;
+    constexpr size_t max_image_bytes = 32u * 1024u * 1024u;
+    if (static_cast<size_t>(image_width) > max_image_bytes / 4u / image_height) return E_INVALIDARG;
+    const size_t byte_length = static_cast<size_t>(image_width) * image_height * 4;
+    if (rgba_length != byte_length) return E_INVALIDARG;
+    std::unique_ptr<uint8_t[]> premultiplied(new (std::nothrow) uint8_t[byte_length]);
+    if (!premultiplied) return E_OUTOFMEMORY;
+    std::copy_n(rgba, byte_length, premultiplied.get());
+    for (size_t index = 0; index < byte_length; index += 4) {
+        const uint32_t alpha = premultiplied[index + 3];
+        premultiplied[index] = static_cast<uint8_t>((premultiplied[index] * alpha + 127) / 255);
+        premultiplied[index + 1] = static_cast<uint8_t>((premultiplied[index + 1] * alpha + 127) / 255);
+        premultiplied[index + 2] = static_cast<uint8_t>((premultiplied[index + 2] * alpha + 127) / 255);
+    }
+    D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    ID2D1Bitmap1* bitmap = nullptr;
+    HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(image_width, image_height),
+        premultiplied.get(), image_width * 4, properties, &bitmap);
+    if (FAILED(hr)) return hr;
+    engine->target->PushAxisAlignedClip(D2D1::RectF(cl, ct, cr, cb), D2D1_ANTIALIAS_MODE_ALIASED);
+    engine->target->DrawBitmap(bitmap, D2D1::RectF(dl, dt, dl + dw, dt + dh), 1.0f,
+        D2D1_INTERPOLATION_MODE_LINEAR, D2D1::RectF(sl, st, sl + sw, st + sh));
+    engine->target->PopAxisAlignedClip();
+    release(bitmap);
+    return S_OK;
 }
 
 extern "C" void zigonaut_text_engine_end_row(ZigonautTextEngine* engine) {

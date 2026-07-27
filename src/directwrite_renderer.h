@@ -21,6 +21,16 @@ typedef struct ZigonautLayoutCacheBenchmark {
     uint32_t cache_entries;
 } ZigonautLayoutCacheBenchmark;
 
+typedef struct ZigonautDecodedImage {
+    uint32_t width;
+    uint32_t height;
+    uint8_t* pixels;
+    size_t length;
+} ZigonautDecodedImage;
+
+HRESULT zigonaut_decode_png(const uint8_t* data, size_t length, ZigonautDecodedImage* result);
+void zigonaut_free_decoded_image(uint8_t* pixels);
+
 HRESULT zigonaut_benchmark_layout_cache(
     uint32_t repetitions,
     ZigonautLayoutCacheBenchmark* result);
@@ -83,6 +93,13 @@ HRESULT zigonaut_text_engine_draw_cell(
     BOOL overline,
     uint8_t underline,
     ZigonautCellOccupancy occupancy);
+
+HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
+    const uint8_t* rgba, size_t rgba_length, uint32_t image_width, uint32_t image_height,
+    float destination_left, float destination_top, float destination_width,
+    float destination_height, float source_left, float source_top,
+    float source_width, float source_height, float clip_left, float clip_top,
+    float clip_right, float clip_bottom);
 
 void zigonaut_text_engine_end_row(ZigonautTextEngine* engine);
 

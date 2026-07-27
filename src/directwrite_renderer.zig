@@ -152,6 +152,10 @@ pub const Engine = struct {
         native.zigonaut_text_engine_end_row(self.handle);
     }
 
+    pub fn drawImage(self: *Engine, image: @import("terminal.zig").Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) void {
+        _ = native.zigonaut_text_engine_draw_image(self.handle, image.pixels.ptr, image.pixels.len, image.width, image.height, left, top, width, height, @floatFromInt(image.source_x), @floatFromInt(image.source_y), @floatFromInt(image.source_width), @floatFromInt(image.source_height), clip[0], clip[1], clip[2], clip[3]);
+    }
+
     pub fn drawCursor(
         self: *Engine,
         left: f32,

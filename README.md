@@ -15,6 +15,8 @@ The UI is a full, code-first `Microsoft.UI.Xaml.Window` owned by WinUI's applica
 
 The terminal surface uses a hardware-accelerated D3D11/DXGI composition swap chain with Direct2D and DirectWrite. Rendering is invalidation-driven and coalesced on the UI thread rather than continuously polling. Ghostty's physical narrow, wide, and spacer cells remain authoritative: compatible row spans are contextually shaped with system font fallback, then each DirectWrite glyph cluster is fitted back to its exact terminal-column span. The renderer supports bold, italic, faint, underline variants, strikethrough, overline, and layered COLR/CPAL color glyphs while preserving per-cell backgrounds and cursor geometry.
 
+The hardware renderer also supports direct, in-memory PNG transmissions from the Kitty graphics protocol. Image storage and Kitty APC payloads are capped at 32 MiB; file, temporary-file, and shared-memory transmissions are disabled. Kitty images are not currently drawn by the GDI fallback, and negative z-index (below-text/background) placements are not yet rendered.
+
 The dependency is pinned to Ghostty commit `d4ac93a0395d321b043ee0116dc8a1a384f0fb83`, matching Zig 0.15.2 and including the protocol-neutral terminal clipboard-write effect. Full `libghostty` surfaces currently have no Win32 platform renderer, so Zigonaut uses the supported cross-platform VT library and owns its Windows rendering.
 
 ## Build

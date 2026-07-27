@@ -1393,6 +1393,19 @@ const DirectWriteCellRenderer = struct {
         self.engine.endRow();
     }
 
+    pub fn drawImage(self: *DirectWriteCellRenderer, image: Terminal.Image) void {
+        const cell_width: f32 = @floatFromInt(self.view.cell_width);
+        const cell_height: f32 = @floatFromInt(self.view.cell_height);
+        const origin_x: f32 = @floatFromInt(self.origin_x);
+        const origin_y: f32 = @floatFromInt(self.origin_y);
+        const left = origin_x + @as(f32, @floatFromInt(image.viewport_col)) * cell_width + @as(f32, @floatFromInt(image.x_offset));
+        const top = origin_y + @as(f32, @floatFromInt(image.viewport_row)) * cell_height + @as(f32, @floatFromInt(image.y_offset));
+        self.engine.drawImage(image, left, top, @floatFromInt(image.pixel_width), @floatFromInt(image.pixel_height), .{
+            origin_x,                                                           origin_y,
+            origin_x + @as(f32, @floatFromInt(self.view.columns)) * cell_width, origin_y + @as(f32, @floatFromInt(self.view.rows)) * cell_height,
+        });
+    }
+
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
         self.view.ime_anchor_x = frame.cursor_x;
         self.view.ime_anchor_y = frame.cursor_y;
