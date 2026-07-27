@@ -77,7 +77,8 @@ struct LayoutEntry {
 };
 
 struct RowCell {
-    std::u16string text;
+    uint32_t text_offset;
+    uint32_t text_length;
     uint32_t column;
     uint32_t foreground;
     uint32_t background;
@@ -187,6 +188,7 @@ struct ZigonautTextEngine {
     std::list<const LayoutKey*> layout_recency;
     uint64_t layout_creation_count = 0;
     std::vector<RowCell> row_cells;
+    std::u16string row_text;
     RowSegment row_segment;
     GridTextRenderer* grid_renderer = nullptr;
     std::wstring family;
@@ -634,14 +636,15 @@ struct ZigonautTextEngine {
                 D2D1::Point2F(left + width, top + 1.0f), brush, 1.0f);
         }
         if (row_active) {
-            std::u16string cell_text;
+            const uint32_t text_offset = static_cast<uint32_t>(row_text.size());
             if (text_length != 0) {
-                cell_text.assign(
+                row_text.append(
                     reinterpret_cast<const char16_t*>(text),
                     reinterpret_cast<const char16_t*>(text) + text_length);
             }
             row_cells.push_back({
-                std::move(cell_text),
+                text_offset,
+                text_length,
                 static_cast<uint32_t>(std::lround((left - row_origin_x) / row_cell_width)),
                 foreground,
                 background,
@@ -681,6 +684,7 @@ struct ZigonautTextEngine {
         float cell_width,
         float cell_height) {
         row_cells.clear();
+        row_text.clear();
         row_origin_x = origin_x;
         row_top = top;
         row_cell_width = cell_width;
@@ -1007,6 +1011,9 @@ void ZigonautTextEngine::endRow() {
 
     for (const auto& cell : row_cells) {
         if (cell.occupancy == ZIGONAUT_CELL_WIDE_TAIL) continue;
+        const std::u16string_view cell_text = cell.text_length == 0
+            ? std::u16string_view{}
+            : std::u16string_view(row_text.data() + cell.text_offset, cell.text_length);
         if (has_segment &&
             (segment.foreground != cell.foreground ||
              segment.bold != cell.bold ||
@@ -1021,13 +1028,13 @@ void ZigonautTextEngine::endRow() {
         }
 
         const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
-        if (cell.text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
+        if (cell_text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
             segment.text.push_back(u' ');
             segment.start_columns.push_back(cell.column);
             segment.end_columns.push_back(cell.column + span);
         } else {
-            segment.text.append(cell.text);
-            for (size_t index = 0; index < cell.text.size(); ++index) {
+            segment.text.append(cell_text);
+            for (size_t index = 0; index < cell_text.size(); ++index) {
                 segment.start_columns.push_back(cell.column);
                 segment.end_columns.push_back(cell.column + span);
             }
