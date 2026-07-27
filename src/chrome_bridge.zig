@@ -40,6 +40,9 @@ pub const pane_focus: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FOCUS);
 pub const pane_committed_ratio: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_COMMITTED_RATIO);
 pub const pane_scroll: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_SCROLL);
 pub const pane_scroll_wheel: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_SCROLL_WHEEL);
+pub const pane_ime_preedit: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_PREEDIT);
+pub const pane_ime_commit: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_COMMIT);
+pub const pane_ime_clear: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_CLEAR);
 pub const layout_leaf: u32 = @intCast(win.ZIGONAUT_LAYOUT_LEAF);
 pub const layout_split: u32 = @intCast(win.ZIGONAUT_LAYOUT_SPLIT);
 pub const axis_left_right: u32 = @intCast(win.ZIGONAUT_AXIS_LEFT_RIGHT);
@@ -57,6 +60,7 @@ const UpdateScrollbar = *const fn (?*anyopaque, u64, u32, u32, u32, win.BOOL) ca
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
+const UpdateImeBounds = *const fn (?*anyopaque, u64, *const win.zigonaut_ime_bounds) callconv(.c) win.HRESULT;
 
 /// UI-thread-owned full WinUI window. `run` owns the WinUI application pump and
 /// blocks until its Window closes. The DLL deliberately stays loaded because
@@ -75,6 +79,7 @@ pub const Bridge = struct {
     update_taskbar_progress_fn: UpdateTaskbarProgress,
     show_notification_fn: ShowNotification,
     update_appearance_fn: UpdateAppearance,
+    update_ime_bounds_fn: UpdateImeBounds,
 
     pub fn load() ?Bridge {
         var path: [win.MAX_PATH]u16 = undefined;
@@ -105,6 +110,7 @@ pub const Bridge = struct {
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
+        const update_ime_bounds_fn = symbol(UpdateImeBounds, module, "zigonaut_chrome_update_ime_bounds") orelse return null;
         loaded = true;
         return .{
             .module = module,
@@ -119,6 +125,7 @@ pub const Bridge = struct {
             .update_taskbar_progress_fn = update_taskbar_progress_fn,
             .show_notification_fn = show_notification_fn,
             .update_appearance_fn = update_appearance_fn,
+            .update_ime_bounds_fn = update_ime_bounds_fn,
         };
     }
 
@@ -202,6 +209,11 @@ pub const Bridge = struct {
     pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool, dark_theme: bool) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast), @intFromBool(dark_theme)));
+    }
+
+    pub fn updateImeBounds(self: *Bridge, pane_id: u64, bounds: win.zigonaut_ime_bounds) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.update_ime_bounds_fn(instance, pane_id, &bounds));
     }
 
     pub fn detach(self: *Bridge) void {

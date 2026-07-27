@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "App.xaml.h"
 #include "bridge.h"
+#include "tsf.h"
 #include <MddBootstrap.h>
 #include <WindowsAppSDK-VersionInfo.h>
 #include <winrt/Microsoft.UI.Input.h>
@@ -124,7 +125,8 @@ struct Bridge {
         Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
         Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
         RECT bounds{-1,-1,-1,-1}; std::wstring translated_characters;
-        bool updating_scrollbar{}, pointer_over_scrollbar{}, initialized{}; uint32_t total{}, page{}, position{};
+        TsfService::Provider tsf_provider{};
+        bool tsf_focused{}, updating_scrollbar{}, pointer_over_scrollbar{}, initialized{}; uint32_t total{}, page{}, position{};
         UIElement::KeyDown_revoker key_down{}; UIElement::KeyUp_revoker key_up{}; UIElement::CharacterReceived_revoker character{};
         UIElement::GotFocus_revoker focus{}; UIElement::LostFocus_revoker blur{};
         UIElement::PointerPressed_revoker pressed{}; UIElement::PointerReleased_revoker released{}; UIElement::PointerMoved_revoker moved{};
@@ -150,6 +152,7 @@ struct Bridge {
         double drag_origin{}, drag_change{};
     };
     std::unordered_map<uint64_t, std::unique_ptr<PaneHost>> pane_hosts;
+    winrt::com_ptr<TsfService> tsf;
     std::unordered_map<uint64_t, std::unique_ptr<SplitHost>> split_hosts;
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
@@ -394,6 +397,10 @@ struct Bridge {
         addAccelerator(Windows::System::VirtualKey::Subtract, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
         addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_PLUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_IN);
         addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_MINUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
+        // Initialize last so constructor failure cannot leave TSF's advised
+        // sink references holding a partially constructed Bridge alive.
+        tsf.attach(new TsfService{});
+        if (FAILED(tsf->Initialize())) tsf = nullptr;
     }
 
     bool ensureNotificationsRegistered() noexcept {
@@ -471,6 +478,7 @@ struct Bridge {
         if (!id) throw hresult_invalid_argument();
         if (pane_hosts.count(id)) {
             for (auto& [_, host] : pane_hosts) {
+                if (tsf) tsf->Unfocus(&host->tsf_provider);
                 if (host->timer) host->timer.Stop();
                 check_hresult(host->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr));
             }
@@ -488,7 +496,10 @@ struct Bridge {
     }
 
     void paneEvent(uint32_t kind, uint64_t id, uint32_t value) {
-        if (!closed && pane_callback) { zigonaut_pane_event e{sizeof(e), kind, id, value, 0}; pane_callback(context, &e); }
+        if (!closed && pane_callback) { zigonaut_pane_event e{}; e.size=sizeof(e); e.kind=kind; e.target_id=id; e.value=value; pane_callback(context, &e); }
+    }
+    void imeEvent(uint32_t kind, uint64_t id, std::wstring_view text = {}, uint32_t start = 0, uint32_t length = 0) {
+        if (!closed && pane_callback) { zigonaut_pane_event e{}; e.size=sizeof(e); e.kind=kind; e.target_id=id; e.text=reinterpret_cast<uint16_t const*>(text.data()); e.text_length=static_cast<uint32_t>(text.size()); e.selection_start=start; e.selection_length=length; pane_callback(context, &e); }
     }
     void setFocusedPane(uint64_t id) {
         if (active_pane == id) return;
@@ -503,30 +514,41 @@ struct Bridge {
         p->scrollbar=Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{}; p->scrollbar.Orientation(Orientation::Vertical); p->scrollbar.HorizontalAlignment(HorizontalAlignment::Right); p->scrollbar.Width(12); p->scrollbar.Opacity(0); p->scrollbar.Visibility(Visibility::Collapsed);
         p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->frame.Child(p->grid);
         check_hresult(p->panel.as<ISwapChainPanelNative>()->SetSwapChain(p->swap_chain.get()));
+        p->tsf_provider.hwnd = p->window;
+        p->tsf_provider.commit = [this, id](std::wstring_view value) { imeEvent(ZIGONAUT_PANE_EVENT_IME_COMMIT, id, value); };
+        p->tsf_provider.preedit = [this, id](std::wstring_view value, uint32_t start, uint32_t length) { imeEvent(ZIGONAUT_PANE_EVENT_IME_PREEDIT, id, value, start, length); };
+        p->tsf_provider.clear = [this, id] { imeEvent(ZIGONAUT_PANE_EVENT_IME_CLEAR, id); };
         p->focus = p->input.GotFocus(auto_revoke, [this, p](auto&&, auto&&) {
             setFocusedPane(p->pane_id);
+            p->tsf_provider.focus_hwnd = GetFocus();
+            p->tsf_focused = tsf && tsf->Focus(&p->tsf_provider);
             SendMessageW(p->window, WM_SETFOCUS, 0, 0);
         });
-        p->blur = p->input.LostFocus(auto_revoke, [p](auto&&, auto&&) {
+        p->blur = p->input.LostFocus(auto_revoke, [this, p](auto&&, auto&&) {
+            if (tsf) tsf->Unfocus(&p->tsf_provider);
+            p->tsf_focused = false;
             SendMessageW(p->window, WM_KILLFOCUS, 0, 0);
         });
-        p->key_down = p->input.KeyDown(auto_revoke, [p](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+        p->key_down = p->input.KeyDown(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
             auto const status = args.KeyStatus();
             if (status.IsMenuKeyDown && (args.Key() == Windows::System::VirtualKey::F4 ||
                                          args.Key() == Windows::System::VirtualKey::Space)) return;
+            if (tsf && tsf->Active()) { args.Handled(true); return; }
             SendMessageW(p->window, status.IsMenuKeyDown ? WM_SYSKEYDOWN : WM_KEYDOWN,
                          static_cast<WPARAM>(args.Key()), keyLparam(status));
             forwardTranslatedCharacters(*p, args.Key(), status);
             args.Handled(true);
         });
-        p->key_up = p->input.KeyUp(auto_revoke, [p](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+        p->key_up = p->input.KeyUp(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
             auto const status = args.KeyStatus();
+            if (tsf && tsf->Active()) { args.Handled(true); return; }
             SendMessageW(p->window, status.IsMenuKeyDown ? WM_SYSKEYUP : WM_KEYUP,
                          static_cast<WPARAM>(args.Key()), keyLparam(status));
             args.Handled(true);
         });
-        p->character = p->input.CharacterReceived(auto_revoke, [p](auto&&, Microsoft::UI::Xaml::Input::CharacterReceivedRoutedEventArgs const& args) {
+        p->character = p->input.CharacterReceived(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::CharacterReceivedRoutedEventArgs const& args) {
             auto const status = args.KeyStatus();
+            if (tsf && tsf->Active()) { args.Handled(true); return; }
             if (!p->translated_characters.empty() &&
                 static_cast<uint32_t>(p->translated_characters.front()) == args.Character()) {
                 p->translated_characters.erase(p->translated_characters.begin());
@@ -624,6 +646,7 @@ struct Bridge {
             if (ids.count(it->first)) {
                 ++it;
             } else {
+                if (tsf) tsf->Unfocus(&it->second->tsf_provider);
                 if (it->second->timer) it->second->timer.Stop();
                 check_hresult(it->second->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr));
                 it = pane_hosts.erase(it);
@@ -1282,6 +1305,7 @@ struct Bridge {
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
         accelerators.clear();
+        cleanup(L"stop TSF", [&] { if (tsf) { auto service=std::move(tsf); service->Shutdown(); service=nullptr; } }, result);
         cleanup(L"detach pane swap chains", [&] { for(auto& [_,p]:pane_hosts){if(p->timer)p->timer.Stop();p->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);} }, result);
         cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
         pane_hosts.clear(); split_hosts.clear(); attachments.clear();
@@ -1470,4 +1494,18 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
     try { bridge->updateAppearance(backdrop, high_contrast != FALSE, dark_theme != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_update_ime_bounds(void* value, uint64_t pane_id, const zigonaut_ime_bounds* bounds) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (!bounds || bounds->size < sizeof(*bounds) || !pane_id || bounds->right <= bounds->left || bounds->bottom <= bounds->top ||
+        bounds->pane_right <= bounds->pane_left || bounds->pane_bottom <= bounds->pane_top) return E_INVALIDARG;
+    // The TSF context owner consumes this rectangle. Retain physical screen
+    // coordinates on the pane so GetTextExt can return them without crossing ABI ownership.
+    auto pane = bridge->pane_hosts.find(pane_id);
+    if (pane == bridge->pane_hosts.end()) return E_INVALIDARG;
+    pane->second->tsf_provider.caret = { bounds->left, bounds->top, bounds->right, bounds->bottom };
+    pane->second->tsf_provider.viewport = { bounds->pane_left, bounds->pane_top, bounds->pane_right, bounds->pane_bottom };
+    return S_OK;
 }

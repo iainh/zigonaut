@@ -43,6 +43,9 @@ typedef enum zigonaut_pane_event_kind {
     ZIGONAUT_PANE_EVENT_COMMITTED_RATIO = 2,
     ZIGONAUT_PANE_EVENT_SCROLL = 3,
     ZIGONAUT_PANE_EVENT_SCROLL_WHEEL = 4,
+    ZIGONAUT_PANE_EVENT_IME_PREEDIT = 5,
+    ZIGONAUT_PANE_EVENT_IME_COMMIT = 6,
+    ZIGONAUT_PANE_EVENT_IME_CLEAR = 7,
 } zigonaut_pane_event_kind;
 typedef struct zigonaut_pane_event {
     uint32_t size;
@@ -50,6 +53,12 @@ typedef struct zigonaut_pane_event {
     uint64_t target_id;
     uint32_t value;
     uint32_t reserved;
+    /* Present when size includes these fields. Borrowed for the callback only. */
+    const uint16_t* text;
+    uint32_t text_length;
+    uint32_t selection_start;
+    uint32_t selection_length;
+    uint32_t attributes;
 } zigonaut_pane_event;
 typedef void (__cdecl *zigonaut_pane_event_callback)(void* context, const zigonaut_pane_event* event);
 
@@ -90,6 +99,8 @@ __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_pane_scrollbar(void
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* bridge, uint32_t state, uint32_t value) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_notification(void* bridge, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) ZIGONAUT_NOEXCEPT;
+typedef struct zigonaut_ime_bounds { uint32_t size; int32_t left, top, right, bottom; int32_t pane_left, pane_top, pane_right, pane_bottom; } zigonaut_ime_bounds;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_ime_bounds(void* bridge, uint64_t pane_id, const zigonaut_ime_bounds* bounds) ZIGONAUT_NOEXCEPT;
 
 #ifdef __cplusplus
 }

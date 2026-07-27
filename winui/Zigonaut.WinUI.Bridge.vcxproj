@@ -45,12 +45,14 @@
   <ItemGroup>
     <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
     <ClInclude Include="bridge.h" />
+    <ClInclude Include="tsf.h" />
     <ClInclude Include="pch.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
     <ClCompile Include="App.xaml.cpp"><DependentUpon>App.xaml</DependentUpon></ClCompile>
     <ClCompile Include="bridge.cpp" />
+    <ClCompile Include="tsf.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="$(IntDir)XamlLibMetadataProvider.g.cpp" />
     <ClCompile Include="$(IntDir)XamlTypeInfo.g.cpp" />

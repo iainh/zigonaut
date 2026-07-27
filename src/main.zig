@@ -23,6 +23,7 @@ const notification_changed_message = win.WM_APP + 6;
 const renderer_failed_message = win.WM_APP + 7;
 const pane_event_message = win.WM_APP + 8;
 const runtime_refresh_message = win.WM_APP + 9;
+const ime_bounds_changed_message = win.WM_APP + 10;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
@@ -109,7 +110,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -356,6 +357,13 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         runtime_refresh_message => {
             self.refresh_pending.store(false, .release);
             for (self.views.items) |entry| entry.view.refresh();
+            return 0;
+        },
+        ime_bounds_changed_message => {
+            const pane_id: u64 = @intCast(wparam);
+            const view = self.viewFor(pane_id) orelse return 0;
+            const bounds = view.imeBounds() orelse return 0;
+            if (self.chrome) |*bridge| _ = bridge.updateImeBounds(pane_id, bounds);
             return 0;
         },
         pane_event_message => {
@@ -746,6 +754,22 @@ fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c)
 fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c) void {
     const self: *Application = @ptrCast(@alignCast(context orelse return));
     const hwnd = self.hwnd orelse return;
+    if (source.size >= @sizeOf(chrome.PaneEvent) and
+        (source.kind == chrome.pane_ime_preedit or source.kind == chrome.pane_ime_commit or source.kind == chrome.pane_ime_clear))
+    {
+        const view = self.viewFor(source.target_id) orelse return;
+        const text: []const u16 = if (source.text_length == 0) &.{} else if (source.text) |ptr| ptr[0..source.text_length] else return;
+        switch (source.kind) {
+            chrome.pane_ime_preedit => view.setImePreedit(text, source.selection_start, source.selection_length),
+            chrome.pane_ime_commit => view.commitIme(text),
+            chrome.pane_ime_clear => view.clearImePreedit(),
+            else => unreachable,
+        }
+        if (view.imeBounds()) |bounds| {
+            if (self.chrome) |*bridge| _ = bridge.updateImeBounds(source.target_id, bounds);
+        }
+        return;
+    }
     self.pane_events_mutex.lock();
     self.pane_events.append(std.heap.page_allocator, source.*) catch {
         self.pane_events_mutex.unlock();

@@ -95,6 +95,10 @@ void zigonaut_text_engine_draw_cursor(
     uint32_t color,
     uint8_t style);
 
+HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine, const uint16_t* text,
+    uint32_t text_length, uint32_t caret, float left, float top, float max_width,
+    float height, uint32_t foreground, uint32_t background, float* caret_x);
+
 HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
 
 void zigonaut_fit_cluster_advances(

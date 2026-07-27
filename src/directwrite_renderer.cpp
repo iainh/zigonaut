@@ -1218,6 +1218,36 @@ extern "C" void zigonaut_text_engine_draw_cursor(
     }
 }
 
+extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
+    const uint16_t* text, uint32_t text_length, uint32_t caret, float left,
+    float top, float max_width, float height, uint32_t foreground, uint32_t background, float* caret_x) {
+    if (!engine || !text || !text_length || !caret_x || !engine->target ||
+        !std::isfinite(left) || !std::isfinite(top) || !std::isfinite(max_width) ||
+        !std::isfinite(height) || max_width <= 0 || height <= 0) return E_INVALIDARG;
+    IDWriteTextLayout* layout = nullptr;
+    auto hr = engine->factory->CreateTextLayout(reinterpret_cast<const wchar_t*>(text), text_length,
+        engine->formats[0], std::max(max_width, 1.0f), std::max(height, 1.0f), &layout);
+    if (FAILED(hr)) return hr;
+    DWRITE_TEXT_RANGE all{0, text_length};
+    hr = layout->SetUnderline(TRUE, all);
+    if (FAILED(hr)) { release(layout); return hr; }
+    DWRITE_TEXT_METRICS text_metrics{};
+    hr = layout->GetMetrics(&text_metrics);
+    if (FAILED(hr)) { release(layout); return hr; }
+    engine->brush->SetColor(color(background));
+    engine->target->FillRectangle(D2D1::RectF(left, top,
+        left + std::max(text_metrics.widthIncludingTrailingWhitespace, 1.0f),
+        top + std::max(text_metrics.height, height)), engine->brush);
+    engine->brush->SetColor(color(foreground));
+    engine->target->DrawTextLayout(D2D1::Point2F(left, top), layout, engine->brush,
+        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS metrics{};
+    hr = layout->HitTestTextPosition(std::min(caret, text_length), FALSE, &x, &y, &metrics);
+    *caret_x = left + x;
+    release(layout);
+    return hr;
+}
+
 extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     if (engine == nullptr || engine->target == nullptr) return E_INVALIDARG;
     const HRESULT hr = engine->target->EndDraw();

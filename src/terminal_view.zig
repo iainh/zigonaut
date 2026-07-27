@@ -60,6 +60,7 @@ pub const View = struct {
     progress_changed_message: win.UINT,
     notification_changed_message: win.UINT,
     renderer_failed_message: win.UINT,
+    ime_bounds_changed_message: win.UINT,
     chrome_message: win.UINT,
     wheel_remainder: i32 = 0,
     protocol_wheel_remainder: i32 = 0,
@@ -77,6 +78,14 @@ pub const View = struct {
     padding_horizontal: u16,
     padding_vertical: u16,
     background_opacity: u8,
+    ime_preedit: std.ArrayList(u16) = .empty,
+    ime_selection_start: u32 = 0,
+    ime_selection_length: u32 = 0,
+    ime_anchor_x: u16 = 0,
+    ime_anchor_y: u16 = 0,
+    ime_caret_x: i32 = 0,
+    ime_caret_y: i32 = 0,
+    ime_target_search: ?bool = null,
 
     pub fn registerClass(instance: win.HINSTANCE, cursor: win.HCURSOR) !void {
         const window_class = win.WNDCLASSEXW{
@@ -112,6 +121,7 @@ pub const View = struct {
         progress_changed_message: win.UINT,
         notification_changed_message: win.UINT,
         renderer_failed_message: win.UINT,
+        ime_bounds_changed_message: win.UINT,
         chrome_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
@@ -134,6 +144,7 @@ pub const View = struct {
             .progress_changed_message = progress_changed_message,
             .notification_changed_message = notification_changed_message,
             .renderer_failed_message = renderer_failed_message,
+            .ime_bounds_changed_message = ime_bounds_changed_message,
             .chrome_message = chrome_message,
         };
     }
@@ -170,6 +181,7 @@ pub const View = struct {
     }
 
     fn deinitResources(self: *View) void {
+        self.ime_preedit.deinit(std.heap.page_allocator);
         self.clearHoveredLink();
         self.gdi_renderer.release();
         if (self.text_engine) |*engine| engine.deinit();
@@ -266,6 +278,7 @@ pub const View = struct {
         if (self.pane_id == pane_id) return;
         self.releasePressedKeys();
         self.resetInteraction();
+        self.clearImePreedit();
         self.pane_id = pane_id;
         self.last_runtime = null;
         self.last_progress_runtime = null;
@@ -273,6 +286,81 @@ pub const View = struct {
         self.last_progress_generation = 0;
         self.syncSessions();
         self.invalidate();
+    }
+
+    pub fn setImePreedit(self: *View, text: []const u16, selection_start: u32, selection_length: u32) void {
+        if (self.ime_target_search == null) self.ime_target_search = if (self.boundRuntime()) |runtime| runtime.searchEnabled() else false;
+        self.ime_caret_x = 0;
+        self.ime_caret_y = 0;
+        self.ime_preedit.clearRetainingCapacity();
+        self.ime_preedit.appendSlice(std.heap.page_allocator, text) catch {
+            self.ime_preedit.clearRetainingCapacity();
+        };
+        self.ime_selection_start = @min(selection_start, @as(u32, @intCast(self.ime_preedit.items.len)));
+        self.ime_selection_length = @min(selection_length, @as(u32, @intCast(self.ime_preedit.items.len)) - self.ime_selection_start);
+        self.invalidate();
+    }
+
+    pub fn clearImePreedit(self: *View) void {
+        self.ime_preedit.clearRetainingCapacity();
+        self.ime_selection_start = 0;
+        self.ime_selection_length = 0;
+        self.ime_caret_x = 0;
+        self.ime_caret_y = 0;
+        self.ime_target_search = null;
+        self.invalidate();
+    }
+
+    pub fn commitIme(self: *View, text: []const u16) void {
+        if (text.len == 0) return;
+        const runtime = self.boundRuntime() orelse return;
+        const target_search = imeCommitDestination(self.ime_target_search, runtime.searchEnabled()) orelse return;
+        const utf8 = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, text) catch |err| {
+            log.warn("dropping malformed TSF UTF-16 commit: {}", .{err});
+            return;
+        };
+        defer std.heap.page_allocator.free(utf8);
+        if (target_search) {
+            runtime.searchAppend(utf8) catch {};
+            self.setRefreshInterval(search_refresh_interval_ms);
+        } else {
+            runtime.write(utf8) catch |err| log.debug("unable to write TSF commit: {}", .{err});
+            self.scrollToBottom();
+        }
+        self.invalidate();
+    }
+
+    pub fn imeBounds(self: *const View) ?win.zigonaut_ime_bounds {
+        if (self.hwnd == null or self.ime_target_search == null) return null;
+        var client: win.RECT = undefined;
+        if (win.GetClientRect(self.hwnd, &client) == 0 or client.right <= client.left or client.bottom <= client.top) return null;
+        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
+        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
+        const targets_search = self.ime_target_search.?;
+        const caret_x = if (self.ime_caret_x != 0) self.ime_caret_x else padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
+        const caret_y = if (self.ime_caret_y != 0)
+            self.ime_caret_y
+        else if (targets_search)
+            @max(client.top, client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)))
+        else
+            padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
+        var caret_origin = win.POINT{ .x = std.math.clamp(caret_x, client.left, client.right - 1), .y = std.math.clamp(caret_y, client.top, client.bottom - 1) };
+        var pane_origin = win.POINT{ .x = client.left, .y = client.top };
+        var pane_end = win.POINT{ .x = client.right, .y = client.bottom };
+        if (win.ClientToScreen(self.hwnd, &caret_origin) == 0 or
+            win.ClientToScreen(self.hwnd, &pane_origin) == 0 or
+            win.ClientToScreen(self.hwnd, &pane_end) == 0) return null;
+        return .{
+            .size = @sizeOf(win.zigonaut_ime_bounds),
+            .left = caret_origin.x,
+            .top = caret_origin.y,
+            .right = @min(caret_origin.x + @as(i32, @intCast(@max(self.cell_width, 1))), pane_end.x),
+            .bottom = @min(caret_origin.y + @as(i32, @intCast(@max(self.cell_height, 1))), pane_end.y),
+            .pane_left = pane_origin.x,
+            .pane_top = pane_origin.y,
+            .pane_right = pane_end.x,
+            .pane_bottom = pane_end.y,
+        };
     }
 
     fn boundSession(self: *const View) ?*app_model.Session {
@@ -499,6 +587,22 @@ pub const View = struct {
             .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
             .copy_flash = self.copy_flash,
         });
+        if (self.ime_preedit.items.len != 0) {
+            const left = padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
+            const top = if (self.ime_target_search orelse false)
+                client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height))
+            else
+                padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
+            const rect = win.RECT{ .left = left, .top = top, .right = client.right, .bottom = top + @as(i32, @intCast(self.cell_height)) };
+            _ = win.SelectObject(dc, self.font);
+            _ = win.SetTextColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.model.terminal_theme.foreground));
+            _ = win.SetBkColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.backgroundColorRef(self.activeBackground()));
+            _ = win.SetBkMode(dc, win.OPAQUE);
+            _ = win.ExtTextOutW(dc, left, top, win.ETO_CLIPPED | win.ETO_OPAQUE, &rect, self.ime_preedit.items.ptr, @intCast(self.ime_preedit.items.len), null);
+            self.ime_caret_x = left + @as(i32, @intCast(self.ime_selection_start + self.ime_selection_length)) * @as(i32, @intCast(self.cell_width));
+            self.ime_caret_y = top;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.ime_bounds_changed_message, @intCast(self.pane_id orelse 0), 0);
+        }
     }
 
     fn paintSwapChain(self: *View) void {
@@ -547,6 +651,12 @@ pub const View = struct {
                     background,
                 );
             };
+            if (self.ime_preedit.items.len != 0) {
+                const left: f32 = @floatFromInt(padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
+                const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)) else padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));
+                self.ime_caret_x = @intFromFloat(engine.drawPreedit(self.ime_preedit.items, self.ime_selection_start + self.ime_selection_length, left, top, @floatFromInt(@max(client.right - @as(i32, @intFromFloat(left)), 1)), @floatFromInt(self.cell_height), foreground, background) orelse left);
+                self.ime_caret_y = @intFromFloat(top);
+            }
         } else {
             drawDirectWriteMessage(
                 engine,
@@ -557,6 +667,9 @@ pub const View = struct {
             );
         }
         try engine.endFrame();
+        if (self.ime_target_search != null) {
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.ime_bounds_changed_message, @intCast(self.pane_id orelse 0), 0);
+        }
     }
 
     fn backgroundColorRef(self: *const View, color: theme.Color) win.COLORREF {
@@ -1251,6 +1364,8 @@ const DirectWriteCellRenderer = struct {
     }
 
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
+        self.view.ime_anchor_x = frame.cursor_x;
+        self.view.ime_anchor_y = frame.cursor_y;
         if (self.search_enabled) {
             var status: [512]u8 = undefined;
             const text = std.fmt.bufPrint(&status, " Find: {s}  {d} match{s}{s} ", .{ self.search_query, self.search_matches.len, if (self.search_matches.len == 1) "" else "es", if (self.search_scanning) " (scanning)" else "" }) catch " Find ";
@@ -1354,6 +1469,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 current.consumed_application_key = null;
                 current.suppress_application_character = false;
                 current.releasePressedKeys();
+                current.clearImePreedit();
                 current.invalidate();
             }
             return 0;
@@ -1654,6 +1770,11 @@ fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORRE
     );
 }
 
+fn imeCommitDestination(snapshot: ?bool, search_enabled: bool) ?bool {
+    const destination = snapshot orelse search_enabled;
+    return if (destination == search_enabled) destination else null;
+}
+
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
@@ -1666,6 +1787,15 @@ test "standard terminal clipboard shortcuts are recognized" {
     try std.testing.expectEqual(ClipboardShortcut.paste, clipboardShortcut(win.VK_INSERT, false, true, false).?);
     try std.testing.expect(clipboardShortcut('C', true, false, false) == null);
     try std.testing.expect(clipboardShortcut('V', true, true, true) == null);
+}
+
+test "IME commits never move between terminal and search" {
+    try std.testing.expectEqual(false, imeCommitDestination(null, false).?);
+    try std.testing.expectEqual(true, imeCommitDestination(null, true).?);
+    try std.testing.expectEqual(false, imeCommitDestination(false, false).?);
+    try std.testing.expectEqual(true, imeCommitDestination(true, true).?);
+    try std.testing.expectEqual(@as(?bool, null), imeCommitDestination(false, true));
+    try std.testing.expectEqual(@as(?bool, null), imeCommitDestination(true, false));
 }
 
 test "click count saturates" {

@@ -172,6 +172,13 @@ pub const Engine = struct {
         );
     }
 
+    pub fn drawPreedit(self: *Engine, text: []const u16, caret: u32, left: f32, top: f32, max_width: f32, height: f32, foreground: u32, background: u32) ?f32 {
+        if (text.len == 0) return null;
+        var caret_x: f32 = left;
+        if (native.zigonaut_text_engine_draw_preedit(self.handle, text.ptr, @intCast(text.len), caret, left, top, max_width, height, foreground, background, &caret_x) < 0) return null;
+        return caret_x;
+    }
+
     pub fn endFrame(self: *Engine) !void {
         if (native.zigonaut_text_engine_end_frame(self.handle) < 0) {
             return error.Direct2DEndFrameFailed;

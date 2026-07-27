@@ -177,6 +177,9 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
   Ctrl+click links retains priority.
 - `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
   the active PowerShell, CMD, WSL, or custom profile.
+- Windows text services provide native IME composition. Pre-edit text is rendered
+  at the terminal cursor (or beside the find overlay), and only finalized text is
+  sent to the shell or active scrollback search.
 
 The default build discovers MSBuild through Visual Studio Installer, builds the WinUI shell, and deploys its DLL, bootstrap DLL, and compiled XAML resource index beside the executable. It supports x64 and ARM64 Windows targets and verifies that the matching Windows App Runtime 2.3.1 architecture is installed. The DLL disables automatic Windows App SDK bootstrap/deployment initialization, bootstraps the installed runtime selected by Windows App SDK 2.3.1 on the Zig STA UI thread, and must be called only from that owner thread.
 
@@ -201,9 +204,3 @@ requires the matching Windows App Runtime 2.3.1 architecture to be installed.
 
 The release workflow can also be run manually with a version to exercise the clean-runner
 build and smoke tests without creating a tag or GitHub Release.
-
-## MVP path
-
-1. Add IME composition support.
-2. Add terminal links and clipboard paste on top of the fixed-grid renderer.
-3. Add WinUI 3 packaging without coupling terminal state to XAML controls.
