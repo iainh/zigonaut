@@ -65,6 +65,8 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     terminal_theme: theme.Theme,
     randomize_tab_background: bool,
+    clipboard_write_enabled: bool = false,
+    clipboard_write_max_bytes: u32 = 1024 * 1024,
     tabs: std.ArrayList(Tab) = .empty,
     active_tab: ?usize = null,
     next_object_id: u64 = 1,
@@ -109,7 +111,7 @@ pub const App = struct {
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh);
+        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
         const index = self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background) catch |err| {
             runtime.destroy();
             return err;
@@ -191,7 +193,7 @@ pub const App = struct {
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, source.session.working_directory.items, session_theme, size.columns, size.rows, self.refresh);
+        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, source.session.working_directory.items, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
         return self.splitFocusedRecord(axis, runtime, session_theme.background);
     }
 
@@ -319,6 +321,14 @@ pub const App = struct {
             const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, std.crypto.random.int(u16)) else terminal_theme;
             pane.session.background = session_theme.background;
             if (pane.session.runtime) |runtime| runtime.setTheme(session_theme);
+        };
+    }
+
+    pub fn applyClipboardWriteSettings(self: *App, enabled: bool, max_bytes: u32) void {
+        self.clipboard_write_enabled = enabled;
+        self.clipboard_write_max_bytes = max_bytes;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            runtime.setClipboardWriteSettings(enabled, max_bytes);
         };
     }
 

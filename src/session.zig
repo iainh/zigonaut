@@ -32,6 +32,9 @@ pub const SessionRuntime = struct {
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: std.ArrayList(Notification) = .empty,
+    clipboard_write_enabled: bool = false,
+    clipboard_write_max_bytes: u32 = 1024 * 1024,
+    pending_clipboard_write: ?PendingClipboardWrite = null,
     render_snapshot: Terminal.RenderSnapshot = .{},
     render_query: std.ArrayList(u8) = .empty,
     render_matches: std.ArrayList(SearchMatch) = .empty,
@@ -105,6 +108,11 @@ pub const SessionRuntime = struct {
         }
     };
 
+    pub const PendingClipboardWrite = union(enum) {
+        clear,
+        text: []u8,
+    };
+
     pub fn create(
         allocator: std.mem.Allocator,
         command: []const u8,
@@ -113,6 +121,8 @@ pub const SessionRuntime = struct {
         columns: u16,
         rows: u16,
         refresh: Refresh,
+        clipboard_write_enabled: bool,
+        clipboard_write_max_bytes: u32,
     ) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
         errdefer allocator.destroy(self);
@@ -121,12 +131,15 @@ pub const SessionRuntime = struct {
             .allocator = allocator,
             .terminal = try Terminal.init(columns, rows, terminal_theme),
             .refresh = refresh,
+            .clipboard_write_enabled = clipboard_write_enabled,
+            .clipboard_write_max_bytes = clipboard_write_max_bytes,
             .columns = columns,
             .rows = rows,
         };
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
         try self.terminal.setWritePty(writePty, self);
+        try self.terminal.setClipboardWrite(clipboardWrite, self);
 
         self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
             var message: [256]u8 = undefined;
@@ -160,6 +173,7 @@ pub const SessionRuntime = struct {
             pty.finishClose();
         }
         self.title.deinit(self.allocator);
+        if (self.pending_clipboard_write) |pending| self.freePendingClipboardWrite(pending);
         for (self.notifications.items) |notification| notification.deinit(self.allocator);
         self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
@@ -508,6 +522,39 @@ pub const SessionRuntime = struct {
         notification.deinit(self.allocator);
     }
 
+    pub fn setClipboardWriteSettings(self: *SessionRuntime, enabled: bool, max_bytes: u32) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.clipboard_write_enabled = enabled;
+        self.clipboard_write_max_bytes = max_bytes;
+        if (self.pending_clipboard_write) |pending| if (!enabled or switch (pending) {
+            .clear => false,
+            .text => |text| text.len > max_bytes,
+        }) {
+            self.freePendingClipboardWrite(pending);
+            self.pending_clipboard_write = null;
+        };
+    }
+
+    pub fn takeClipboardWrite(self: *SessionRuntime) ?PendingClipboardWrite {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        const text = self.pending_clipboard_write;
+        self.pending_clipboard_write = null;
+        return text;
+    }
+
+    pub fn freeClipboardWrite(self: *SessionRuntime, pending: PendingClipboardWrite) void {
+        self.freePendingClipboardWrite(pending);
+    }
+
+    fn freePendingClipboardWrite(self: *SessionRuntime, pending: PendingClipboardWrite) void {
+        switch (pending) {
+            .clear => {},
+            .text => |text| self.allocator.free(text),
+        }
+    }
+
     pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
@@ -674,6 +721,24 @@ pub const SessionRuntime = struct {
         const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
         self.write(bytes) catch |err| log.debug("unable to write terminal response: {}", .{err});
     }
+
+    /// Ghostty invokes this synchronously while `terminal_mutex` is held. Keep
+    /// only the latest accepted write until the UI thread updates Win32.
+    fn clipboardWrite(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperation) Terminal.ClipboardWriteResult {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return .io_error));
+        if (!self.clipboard_write_enabled) return .denied;
+        const pending: PendingClipboardWrite = switch (operation) {
+            .clear => .clear,
+            .text => |text| text: {
+                if (text.len > self.clipboard_write_max_bytes or std.mem.indexOfScalar(u8, text, 0) != null or !std.unicode.utf8ValidateSlice(text)) return .invalid_data;
+                break :text .{ .text = self.allocator.dupe(u8, text) catch return .io_error };
+            },
+        };
+        if (self.pending_clipboard_write) |previous| self.freePendingClipboardWrite(previous);
+        self.pending_clipboard_write = pending;
+        self.refresh.request();
+        return .success;
+    }
 };
 
 test "synchronized output arms once and releases when disabled" {
@@ -737,7 +802,47 @@ test "session watchdog and resize release synchronized output" {
     try std.testing.expect(try runtime.prepareRender());
 }
 
+test "session applies clipboard write policy and decoded size limit" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .clipboard_write_enabled = true,
+        .clipboard_write_max_bytes = 5,
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+    try runtime.terminal.setClipboardWrite(SessionRuntime.clipboardWrite, &runtime);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;aGVsbG8=\x07", 100);
+    const accepted = runtime.takeClipboardWrite().?;
+    defer runtime.freeClipboardWrite(accepted);
+    try std.testing.expectEqualStrings("hello", accepted.text);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;d29ybGQh\x07", 200);
+    try std.testing.expect(runtime.takeClipboardWrite() == null);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;YQBi\x07", 250);
+    try std.testing.expect(runtime.takeClipboardWrite() == null);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;aGVsbG8=\x07", 275);
+    runtime.setClipboardWriteSettings(true, 4);
+    try std.testing.expect(runtime.takeClipboardWrite() == null);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;\x07", 280);
+    try std.testing.expect(runtime.takeClipboardWrite().? == .clear);
+
+    runtime.setClipboardWriteSettings(false, 5);
+    _ = runtime.processOutputChunk("\x1b]52;c;aGVsbG8=\x07", 300);
+    try std.testing.expect(runtime.takeClipboardWrite() == null);
+
+    _ = runtime.processOutputChunk("\x1b]52;c;?\x07", 400);
+    try std.testing.expect(runtime.takeClipboardWrite() == null);
+}
+
 fn deinitTestRuntime(runtime: *SessionRuntime) void {
+    if (runtime.pending_clipboard_write) |pending| runtime.freePendingClipboardWrite(pending);
     runtime.render_snapshot.deinit(runtime.allocator);
     runtime.render_query.deinit(runtime.allocator);
     runtime.render_matches.deinit(runtime.allocator);

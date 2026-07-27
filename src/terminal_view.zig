@@ -471,6 +471,14 @@ pub const View = struct {
             self.setRefreshInterval(0);
             return;
         };
+        if (runtime.takeClipboardWrite()) |pending| {
+            defer runtime.freeClipboardWrite(pending);
+            const result = switch (pending) {
+                .clear => clearClipboard(self.hwnd),
+                .text => |text| setClipboardText(self.hwnd, text),
+            };
+            result catch |err| log.warn("unable to apply terminal clipboard write: {}", .{err});
+        }
         const progress_generation = runtime.progressGeneration();
         if (runtime != self.last_progress_runtime or progress_generation != self.last_progress_generation) {
             self.last_progress_runtime = runtime;
@@ -1682,18 +1690,8 @@ fn openUri(uri: []const u8) !void {
 
 fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {
     const allocator = std.heap.page_allocator;
-    const extra = std.mem.count(u8, text, "\n");
-    const windows_text = try allocator.alloc(u8, text.len + extra);
+    const windows_text = try windowsClipboardTextAlloc(allocator, text);
     defer allocator.free(windows_text);
-    var index: usize = 0;
-    for (text) |byte| {
-        if (byte == '\n') {
-            windows_text[index] = '\r';
-            index += 1;
-        }
-        windows_text[index] = byte;
-        index += 1;
-    }
 
     const wide = try allocator.alloc(u16, windows_text.len + 1);
     defer allocator.free(wide);
@@ -1715,6 +1713,30 @@ fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {
     if (win.EmptyClipboard() == 0) return error.EmptyClipboardFailed;
     if (win.SetClipboardData(win.CF_UNICODETEXT, memory) == null) return error.SetClipboardDataFailed;
     transferred = true;
+}
+
+fn clearClipboard(hwnd: win.HWND) !void {
+    if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
+    defer _ = win.CloseClipboard();
+    if (win.EmptyClipboard() == 0) return error.EmptyClipboardFailed;
+}
+
+fn windowsClipboardTextAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var extra: usize = 0;
+    for (text, 0..) |byte, index| if (byte == '\n' and (index == 0 or text[index - 1] != '\r')) {
+        extra += 1;
+    };
+    const windows_text = try allocator.alloc(u8, text.len + extra);
+    var output: usize = 0;
+    for (text, 0..) |byte, index| {
+        if (byte == '\n' and (index == 0 or text[index - 1] != '\r')) {
+            windows_text[output] = '\r';
+            output += 1;
+        }
+        windows_text[output] = byte;
+        output += 1;
+    }
+    return windows_text;
 }
 
 fn drawDirectWriteMessage(
@@ -1806,6 +1828,12 @@ fn imeCommitDestination(snapshot: ?bool, search_enabled: bool) ?bool {
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
+}
+
+test "Windows clipboard conversion preserves CRLF and expands lone LF" {
+    const converted = try windowsClipboardTextAlloc(std.testing.allocator, "a\nb\r\nc\rd");
+    defer std.testing.allocator.free(converted);
+    try std.testing.expectEqualStrings("a\r\nb\r\nc\rd", converted);
 }
 
 test "standard terminal clipboard shortcuts are recognized" {

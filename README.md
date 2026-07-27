@@ -15,7 +15,7 @@ The UI is a full, code-first `Microsoft.UI.Xaml.Window` owned by WinUI's applica
 
 The terminal surface uses a hardware-accelerated D3D11/DXGI composition swap chain with Direct2D and DirectWrite. Rendering is invalidation-driven and coalesced on the UI thread rather than continuously polling. Ghostty's physical narrow, wide, and spacer cells remain authoritative: compatible row spans are contextually shaped with system font fallback, then each DirectWrite glyph cluster is fitted back to its exact terminal-column span. The renderer supports bold, italic, faint, underline variants, strikethrough, overline, and layered COLR/CPAL color glyphs while preserving per-cell backgrounds and cursor geometry.
 
-The dependency is pinned to Ghostty commit `ae52f97dcac558735cfa916ea3965f247e5c6e9e`, matching the upstream Ghostling reference application and Zig 0.15.2. Full `libghostty` surfaces currently have no Win32 platform renderer, so Zigonaut uses the supported cross-platform VT library and owns its Windows rendering.
+The dependency is pinned to Ghostty commit `d4ac93a0395d321b043ee0116dc8a1a384f0fb83`, matching Zig 0.15.2 and including the protocol-neutral terminal clipboard-write effect. Full `libghostty` surfaces currently have no Win32 platform renderer, so Zigonaut uses the supported cross-platform VT library and owns its Windows rendering.
 
 ## Build
 
@@ -60,6 +60,10 @@ padding_vertical=8
 background_opacity=100
 # Window backdrop: none, mica, or acrylic. Default: mica.
 backdrop=mica
+# Allow OSC 52 and OSC 1337 Copy writes to the Windows clipboard. Default: false.
+osc52_clipboard_write=false
+# Maximum decoded terminal clipboard payload in bytes (1-16777216). Default: 1048576.
+osc52_clipboard_max_bytes=1048576
 
 # Palette overrides use #RRGGBB. Their defaults come from the selected
 # dark_theme or light_theme, so they are commented out unless overridden.
@@ -177,6 +181,10 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
   Ctrl+click links retains priority.
 - `Ctrl+Shift+V` and Shift+Insert paste the clipboard. Dropped files are quoted for
   the active PowerShell, CMD, WSL, or custom profile.
+- Applications may write, but never read, the Windows clipboard through OSC 52 when
+  `osc52_clipboard_write=true`. Ghostty's protocol-neutral callback also gates iTerm2
+  OSC 1337 Copy with this setting. Decoded writes above `osc52_clipboard_max_bytes`,
+  malformed Base64, binary/non-UTF-8 text, and clipboard read requests are rejected.
 - Windows text services provide native IME composition. Pre-edit text is rendered
   at the terminal cursor (or beside the find overlay), and only finalized text is
   sent to the shell or active scrollback search.

@@ -22,11 +22,16 @@ pub const Terminal = struct {
     write_pty_context: ?*anyopaque = null,
     title_changed: ?TitleChanged = null,
     title_context: ?*anyopaque = null,
+    clipboard_write: ?ClipboardWrite = null,
+    clipboard_context: ?*anyopaque = null,
     columns: u16,
     rows: u16,
 
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
+    pub const ClipboardWrite = *const fn (?*anyopaque, ClipboardWriteOperation) ClipboardWriteResult;
+    pub const ClipboardWriteOperation = union(enum) { clear, text: []const u8 };
+    pub const ClipboardWriteResult = enum { success, denied, unsupported, busy, invalid_data, io_error };
 
     pub const Cell = struct {
         pub const Occupancy = enum(u8) {
@@ -860,6 +865,13 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(vt.GhosttyTerminalWritePtyFn, writePty)));
     }
 
+    pub fn setClipboardWrite(self: *Terminal, callback: ClipboardWrite, context: ?*anyopaque) !void {
+        self.clipboard_write = callback;
+        self.clipboard_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(vt.GhosttyTerminalClipboardWriteFn, clipboardWrite)));
+    }
+
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
         try self.renderViewportInternal(renderer, null);
     }
@@ -1462,6 +1474,35 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
     callback(self.title_context, title.ptr[0..title.len]);
 }
 
+fn clipboardWrite(_: vt.GhosttyTerminal, userdata: ?*anyopaque, write: [*c]const vt.GhosttyClipboardWrite) callconv(.c) vt.GhosttyClipboardWriteResult {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR));
+    const callback = self.clipboard_write orelse return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    const minimum_size = @offsetOf(vt.GhosttyClipboardWrite, "contents_len") + @sizeOf(usize);
+    if (write == null or write[0].size < minimum_size) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+    if (write[0].contents_len == 0) return clipboardWriteResult(callback(self.clipboard_context, .clear));
+    if (write[0].contents == null or write[0].contents_len > std.math.maxInt(usize) / @sizeOf(vt.GhosttyClipboardContent)) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+
+    for (write[0].contents[0..write[0].contents_len]) |content| {
+        if ((content.mime.len != 0 and content.mime.ptr == null) or (content.data.len != 0 and content.data.ptr == null)) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+        const mime = if (content.mime.len == 0) "" else content.mime.ptr[0..content.mime.len];
+        if (!std.mem.eql(u8, mime, "text/plain") and !std.mem.eql(u8, mime, "text/plain;charset=utf-8")) continue;
+        const data = if (content.data.len == 0) "" else content.data.ptr[0..content.data.len];
+        return clipboardWriteResult(callback(self.clipboard_context, .{ .text = data }));
+    }
+    return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+}
+
+fn clipboardWriteResult(result: Terminal.ClipboardWriteResult) vt.GhosttyClipboardWriteResult {
+    return switch (result) {
+        .success => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS,
+        .denied => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED,
+        .unsupported => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED,
+        .busy => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_BUSY,
+        .invalid_data => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA,
+        .io_error => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR,
+    };
+}
+
 fn currentCellOccupancy(cells: vt.GhosttyRenderStateRowCells) !Terminal.Cell.Occupancy {
     var raw: vt.GhosttyCell = 0;
     try check(vt.ghostty_render_state_row_cells_get(
@@ -1566,6 +1607,49 @@ test "libghostty exposes synchronized output mode" {
     try terminal.setSynchronizedOutput(true);
     try terminal.setSynchronizedOutput(false);
     try std.testing.expect(!terminal.synchronizedOutput());
+}
+
+test "libghostty emits decoded clipboard writes but ignores reads" {
+    const Listener = struct {
+        bytes: [64]u8 = undefined,
+        length: usize = 0,
+        calls: usize = 0,
+        cleared: bool = false,
+
+        fn write(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperation) Terminal.ClipboardWriteResult {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            const data = switch (operation) {
+                .clear => clear: {
+                    self.cleared = true;
+                    break :clear "";
+                },
+                .text => |text| text,
+            };
+            if (data.len > self.bytes.len) return .invalid_data;
+            @memcpy(self.bytes[0..data.len], data);
+            self.length = data.len;
+            return .success;
+        }
+    };
+
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    var listener = Listener{};
+    try terminal.setClipboardWrite(Listener.write, &listener);
+
+    terminal.feed("\x1b]52;c;aGVsbG8=\x07");
+    try std.testing.expectEqual(@as(usize, 1), listener.calls);
+    try std.testing.expectEqualStrings("hello", listener.bytes[0..listener.length]);
+
+    terminal.feed("\x1b]52;c;?\x07");
+    terminal.feed("\x1b]52;c;not base64!\x07");
+    try std.testing.expectEqual(@as(usize, 1), listener.calls);
+
+    terminal.feed("\x1b]52;c;\x07");
+    try std.testing.expectEqual(@as(usize, 2), listener.calls);
+    try std.testing.expectEqual(@as(usize, 0), listener.length);
+    try std.testing.expect(listener.cleared);
 }
 
 test "libghostty parses control sequences into viewport state" {

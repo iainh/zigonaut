@@ -80,6 +80,10 @@ pub const default_contents =
     \\hold_on_exit=false
     \\# Give each new tab a randomized background hue. Default: true.
     \\randomize_tab_background=true
+    \\# Allow OSC 52 and OSC 1337 Copy writes to the Windows clipboard. Default: false.
+    \\osc52_clipboard_write=false
+    \\# Maximum decoded terminal clipboard payload in bytes (1-16777216). Default: 1048576.
+    \\osc52_clipboard_max_bytes=1048576
     \\#
     \\# Legacy alias: theme sets dark_theme. Default: not set.
     \\#theme=rasmus
@@ -127,6 +131,8 @@ pub const Config = struct {
     working_directory: []const u8 = "",
     hold_on_exit: bool = false,
     randomize_tab_background: bool = true,
+    osc52_clipboard_write: bool = false,
+    osc52_clipboard_max_bytes: u32 = 1024 * 1024,
 
     pub fn profileSlice(self: *const Config) []const Profile {
         return self.profiles[0..self.profile_count];
@@ -294,6 +300,11 @@ pub fn parse(contents: []const u8) Config {
             } else if (std.ascii.eqlIgnoreCase(value, "false")) {
                 result.randomize_tab_background = false;
             }
+        } else if (std.ascii.eqlIgnoreCase(key, "osc52_clipboard_write")) {
+            if (std.ascii.eqlIgnoreCase(value, "true")) result.osc52_clipboard_write = true else if (std.ascii.eqlIgnoreCase(value, "false")) result.osc52_clipboard_write = false;
+        } else if (std.ascii.eqlIgnoreCase(key, "osc52_clipboard_max_bytes")) {
+            const limit = std.fmt.parseInt(u32, value, 10) catch continue;
+            if (limit >= 1 and limit <= 16 * 1024 * 1024) result.osc52_clipboard_max_bytes = limit;
         }
     }
     return result;
@@ -313,6 +324,8 @@ test "configuration parses supported values and ignores invalid ones" {
         \\ansi15=#abcdef
         \\default_profile=WSL
         \\randomize_tab_background=false
+        \\osc52_clipboard_write=true
+        \\osc52_clipboard_max_bytes=65536
     );
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
@@ -326,12 +339,16 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, parsed.palette.ansi[15].?);
     try std.testing.expectEqualStrings("WSL", parsed.defaultProfile().name);
     try std.testing.expect(!parsed.randomize_tab_background);
+    try std.testing.expect(parsed.osc52_clipboard_write);
+    try std.testing.expectEqual(@as(u32, 65536), parsed.osc52_clipboard_max_bytes);
 
-    const invalid = parse("font_size=500\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\n");
+    const invalid = parse("font_size=500\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\nosc52_clipboard_write=perhaps\nosc52_clipboard_max_bytes=999999999\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
     try std.testing.expectEqualStrings("unknown", invalid.dark_theme);
     try std.testing.expectEqualStrings("PowerShell", invalid.defaultProfile().name);
     try std.testing.expect(invalid.randomize_tab_background);
+    try std.testing.expect(!invalid.osc52_clipboard_write);
+    try std.testing.expectEqual(@as(u32, 1024 * 1024), invalid.osc52_clipboard_max_bytes);
 }
 
 test "configuration parses launch profiles" {

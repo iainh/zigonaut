@@ -56,7 +56,7 @@ const Application = struct {
 
     fn init(loaded: config.Loaded, themes: theme.Catalog) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
-        return .{
+        var result = Application{
             .settings = loaded.value,
             .loaded = loaded,
             .themes = themes,
@@ -64,6 +64,8 @@ const Application = struct {
             .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
         };
+        result.model.applyClipboardWriteSettings(loaded.value.osc52_clipboard_write, loaded.value.osc52_clipboard_max_bytes);
+        return result;
     }
 
     fn deinit(self: *Application) void {
@@ -891,6 +893,7 @@ fn reloadSettingsImpl(self: *Application) !void {
         self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
         self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
+    self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
     if (padding_changed) {
         try self.detachPresentation();
