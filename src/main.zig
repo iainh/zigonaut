@@ -24,6 +24,7 @@ const notification_changed_message = win.WM_APP + 6;
 const renderer_failed_message = win.WM_APP + 7;
 const pane_event_message = win.WM_APP + 8;
 const runtime_refresh_message = win.WM_APP + 9;
+const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
@@ -51,6 +52,7 @@ const Application = struct {
     attached_panes: std.ArrayList(u64) = .empty,
     pane_events_mutex: std.Thread.Mutex = .{},
     pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
+    pane_events_head: usize = 0,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
@@ -94,6 +96,24 @@ const Application = struct {
     const attachTerminalRenderer = attachTerminalRendererImpl;
     const detachTerminalRenderer = detachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
+
+    fn takePaneEvent(self: *Application) ?chrome.PaneEvent {
+        self.pane_events_mutex.lock();
+        defer self.pane_events_mutex.unlock();
+        if (self.pane_events_head == self.pane_events.items.len) return null;
+        const event = self.pane_events.items[self.pane_events_head];
+        self.pane_events_head += 1;
+        if (self.pane_events_head == self.pane_events.items.len) {
+            self.pane_events_head = 0;
+            if (self.pane_events.capacity > pane_event_release_threshold) {
+                self.pane_events.deinit(std.heap.page_allocator);
+                self.pane_events = .empty;
+            } else {
+                self.pane_events.clearRetainingCapacity();
+            }
+        }
+        return event;
+    }
 
     fn viewFor(self: *Application, id: u64) ?*TerminalView {
         for (self.views.items) |entry| if (entry.pane_id == id) return entry.view;
@@ -378,11 +398,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         pane_event_message => {
-            while (true) {
-                self.pane_events_mutex.lock();
-                const event = if (self.pane_events.items.len != 0) self.pane_events.orderedRemove(0) else null;
-                self.pane_events_mutex.unlock();
-                const current = event orelse break;
+            while (self.takePaneEvent()) |current| {
                 if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
                 switch (current.kind) {
                     chrome.pane_scroll => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.scrollTo(current.value),
