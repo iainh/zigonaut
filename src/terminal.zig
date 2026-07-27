@@ -222,7 +222,7 @@ pub const Terminal = struct {
 
     pub const SearchScratch = struct {
         text: std.ArrayList(u8) = .empty,
-        starts: std.ArrayList(usize) = .empty,
+        starts: std.ArrayList(u32) = .empty,
 
         pub fn deinit(self: *SearchScratch, allocator: std.mem.Allocator) void {
             self.text.deinit(allocator);
@@ -232,9 +232,9 @@ pub const Terminal = struct {
     };
 
     pub const SearchCache = struct {
-        const Row = struct { text_start: usize, text_end: usize, starts_start: usize, starts_end: usize };
+        const Row = struct { text_start: usize };
         text: std.ArrayList(u8) = .empty,
-        starts: std.ArrayList(usize) = .empty,
+        starts: std.ArrayList(u32) = .empty,
         rows: std.ArrayList(Row) = .empty,
         scratch: SearchScratch = .{},
 
@@ -659,21 +659,19 @@ pub const Terminal = struct {
         if (cache.rows.items.len <= row_index) {
             try self.reconstructSearchRow(allocator, &cache.scratch, row_index);
             const text_start = cache.text.items.len;
-            const starts_start = cache.starts.items.len;
             try cache.text.ensureUnusedCapacity(allocator, cache.scratch.text.items.len);
             try cache.starts.ensureUnusedCapacity(allocator, cache.scratch.starts.items.len);
             try cache.rows.ensureUnusedCapacity(allocator, 1);
             cache.text.appendSliceAssumeCapacity(cache.scratch.text.items);
             cache.starts.appendSliceAssumeCapacity(cache.scratch.starts.items);
-            cache.rows.appendAssumeCapacity(.{
-                .text_start = text_start,
-                .text_end = cache.text.items.len,
-                .starts_start = starts_start,
-                .starts_end = cache.starts.items.len,
-            });
+            cache.rows.appendAssumeCapacity(.{ .text_start = text_start });
         }
         const row = cache.rows.items[row_index];
-        try searchRowText(allocator, cache.text.items[row.text_start..row.text_end], cache.starts.items[row.starts_start..row.starts_end], row_index, query, output);
+        const next_row: usize = @as(usize, row_index) + 1;
+        const text_end = if (next_row < cache.rows.items.len) cache.rows.items[next_row].text_start else cache.text.items.len;
+        const starts_per_row = @as(usize, self.columns) + 1;
+        const starts_start = @as(usize, row_index) * starts_per_row;
+        try searchRowText(allocator, cache.text.items[row.text_start..text_end], cache.starts.items[starts_start..][0..starts_per_row], row_index, query, output);
     }
 
     fn reconstructSearchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32) !void {
@@ -684,7 +682,7 @@ pub const Terminal = struct {
         const starts = scratch.starts.items;
         var x: u16 = 0;
         while (x < self.columns) : (x += 1) {
-            starts[x] = scratch.text.items.len;
+            starts[x] = @intCast(scratch.text.items.len);
             var reference = std.mem.zeroes(vt.GhosttyGridRef);
             reference.size = @sizeOf(vt.GhosttyGridRef);
             try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = x, .y = row_index } } }, &reference));
@@ -704,25 +702,25 @@ pub const Terminal = struct {
                 }
             }
         }
-        starts[self.columns] = scratch.text.items.len;
+        starts[self.columns] = @intCast(scratch.text.items.len);
     }
 
     fn searchCachedRow(allocator: std.mem.Allocator, scratch: *const SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         try searchRowText(allocator, scratch.text.items, scratch.starts.items, row_index, query, output);
     }
 
-    fn searchRowText(allocator: std.mem.Allocator, text: []const u8, starts: []const usize, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
+    fn searchRowText(allocator: std.mem.Allocator, text: []const u8, starts: []const u32, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         var from: usize = 0;
         while (std.mem.indexOfPos(u8, text, from, query)) |at| {
             const finish = at + query.len;
-            const start_column = searchStartColumn(starts[0 .. starts.len - 1], at);
-            const end_column = searchEndColumn(starts, finish);
+            const start_column = searchStartColumn(starts[0 .. starts.len - 1], @intCast(at));
+            const end_column = searchEndColumn(starts, @intCast(finish));
             try output.append(allocator, .{ .row = row_index, .start = start_column, .end = @max(end_column, start_column + 1) });
             from = at + @max(query.len, 1);
         }
     }
 
-    fn searchStartColumn(starts: []const usize, offset: usize) u16 {
+    fn searchStartColumn(starts: []const u32, offset: u32) u16 {
         var low: usize = 0;
         var high = starts.len;
         while (low < high) {
@@ -732,7 +730,7 @@ pub const Terminal = struct {
         return @intCast(low -| 1);
     }
 
-    fn searchEndColumn(starts: []const usize, offset: usize) u16 {
+    fn searchEndColumn(starts: []const u32, offset: u32) u16 {
         var low: usize = 0;
         var high = starts.len;
         while (low < high) {
