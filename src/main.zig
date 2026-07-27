@@ -152,7 +152,7 @@ const Application = struct {
             .leaf => |leaf| {
                 const view = try self.ensureView(leaf.id);
                 if (!self.isAttached(leaf.id)) {
-                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain())) return error.AttachPaneFailed;
+                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight())) return error.AttachPaneFailed;
                     self.attached_panes.appendAssumeCapacity(leaf.id);
                 }
                 layout[index] = .{

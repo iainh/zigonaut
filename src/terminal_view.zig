@@ -183,6 +183,14 @@ pub const View = struct {
         return engine.swapChain();
     }
 
+    pub fn cellWidth(self: *const View) u32 {
+        return self.cell_width;
+    }
+
+    pub fn cellHeight(self: *const View) u32 {
+        return self.cell_height;
+    }
+
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
         if (self.text_engine) |*engine| engine.setDpi(dpi) catch |err| {
