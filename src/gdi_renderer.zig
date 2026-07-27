@@ -80,10 +80,7 @@ fn paintFrame(dc: win.HDC, client: win.RECT, context: Context) void {
     _ = win.SetTextColor(dc, foreground);
     if (context.runtime) |runtime| {
         var renderer = CellRenderer{ .dc = dc, .context = context, .client = client };
-        runtime.renderViewport(&renderer) catch {
-            var rect = paddedRect(client, context.origin_x, context.origin_y);
-            drawText(dc, "libghostty render state unavailable", &rect);
-        };
+        runtime.replayPreparedViewport(&renderer);
     } else {
         var rect = paddedRect(client, context.origin_x, context.origin_y);
         drawText(dc, "Open a PowerShell or WSL session.", &rect);

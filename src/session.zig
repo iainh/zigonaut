@@ -9,6 +9,7 @@ const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
+const synchronized_output_timeout_ms = 1000;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `destroy` only after no caller can submit input or rendering work.
@@ -22,6 +23,7 @@ pub const SessionRuntime = struct {
     pty_mutex: std.Thread.Mutex = .{},
     closing: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    synchronized_output: SynchronizedOutput = .{},
     search_content_generation: u64 = 0,
     title: std.ArrayList(u8) = .empty,
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -35,6 +37,10 @@ pub const SessionRuntime = struct {
     render_matches: std.ArrayList(SearchMatch) = .empty,
     search_render_generation: u64 = 0,
     rendered_search_generation: u64 = std.math.maxInt(u64),
+    render_search_enabled: bool = false,
+    render_search_active: ?usize = null,
+    render_search_scanning: bool = false,
+    render_scroll_offset: usize = 0,
     search_cache: Terminal.SearchCache = .{},
     search_cache_generation: u64 = std.math.maxInt(u64),
     columns: u16,
@@ -60,6 +66,33 @@ pub const SessionRuntime = struct {
     pub const SearchTickResult = struct {
         changed: bool,
         scanning: bool,
+    };
+
+    const SynchronizedOutput = struct {
+        deadline_tick: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+        fn update(self: *SynchronizedOutput, enabled: bool, now: u64) bool {
+            const deadline = self.deadline_tick.load(.acquire);
+            if (enabled) {
+                if (deadline != 0) return false;
+                self.deadline_tick.store(now +| synchronized_output_timeout_ms, .release);
+                return true;
+            }
+            if (deadline == 0) return false;
+            self.deadline_tick.store(0, .release);
+            return true;
+        }
+
+        fn remaining(self: *const SynchronizedOutput, now: u64) ?u32 {
+            const deadline = self.deadline_tick.load(.acquire);
+            if (deadline == 0) return null;
+            if (deadline <= now) return 0;
+            return @intCast(@min(deadline - now, std.math.maxInt(u32)));
+        }
+
+        fn clear(self: *SynchronizedOutput) void {
+            self.deadline_tick.store(0, .release);
+        }
     };
 
     pub const Notification = struct {
@@ -229,8 +262,14 @@ pub const SessionRuntime = struct {
         return self.terminal.linkAtAlloc(allocator, point);
     }
 
-    pub fn renderViewport(self: *SessionRuntime, renderer: anytype) !void {
+    /// Atomically admits a render and captures its terminal state. A mode 2026
+    /// transition after this returns cannot affect the prepared frame.
+    pub fn prepareRender(self: *SessionRuntime) !bool {
         self.terminal_mutex.lock();
+        if (self.synchronized_output.remaining(win.GetTickCount64()) != null) {
+            self.terminal_mutex.unlock();
+            return false;
+        }
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
         if (self.rendered_search_generation != self.search_render_generation) {
             self.render_query.ensureTotalCapacity(self.allocator, self.search.query.items.len) catch |err| {
@@ -247,17 +286,50 @@ pub const SessionRuntime = struct {
             self.render_matches.appendSliceAssumeCapacity(self.search.matches.items);
             self.rendered_search_generation = self.search_render_generation;
         }
-        const search_enabled = self.search.enabled;
-        const search_active = self.search.active;
-        const search_scanning = self.search.scanning;
+        self.render_search_enabled = self.search.enabled;
+        self.render_search_active = self.search.active;
+        self.render_search_scanning = self.search.scanning;
+        self.render_scroll_offset = scroll_state.offset;
         self.render_snapshot.capture(self.allocator, &self.terminal) catch |err| {
             self.terminal_mutex.unlock();
             return err;
         };
         self.terminal_mutex.unlock();
+        return true;
+    }
 
-        renderer.searchState(search_enabled, self.render_query.items, self.render_matches.items, search_active, scroll_state.offset, search_scanning);
+    pub fn replayPreparedViewport(self: *SessionRuntime, renderer: anytype) void {
+        renderer.searchState(self.render_search_enabled, self.render_query.items, self.render_matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
         self.render_snapshot.replay(renderer);
+    }
+
+    /// Returns the delay before a synchronized-output frame may render. Once
+    /// the watchdog expires, clear mode 2026 so subsequent output is visible.
+    pub fn synchronizedOutputDelay(self: *SessionRuntime, now: u64) ?u32 {
+        const remaining = self.synchronized_output.remaining(now) orelse return null;
+        if (remaining != 0) return remaining;
+
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        const locked_remaining = self.synchronized_output.remaining(now) orelse return null;
+        if (locked_remaining != 0) return locked_remaining;
+        if (self.terminal.synchronizedOutput()) {
+            log.debug("synchronized output timed out; forcing redraw", .{});
+            self.terminal.setSynchronizedOutput(false) catch |err| {
+                log.warn("unable to clear synchronized output mode: {}", .{err});
+            };
+        }
+        self.synchronized_output.clear();
+        return null;
+    }
+
+    pub fn forceEndSynchronizedOutput(self: *SessionRuntime) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.setSynchronizedOutput(false) catch |err| {
+            log.warn("unable to clear synchronized output mode: {}", .{err});
+        };
+        self.synchronized_output.clear();
     }
 
     pub fn scrollbar(self: *SessionRuntime) !Terminal.Scrollbar {
@@ -453,6 +525,7 @@ pub const SessionRuntime = struct {
             };
             break :resized true;
         };
+        if (!self.terminal.synchronizedOutput()) self.synchronized_output.clear();
         self.terminal_mutex.unlock();
         if (!resized) return;
         if (grid_changed) {
@@ -525,21 +598,27 @@ pub const SessionRuntime = struct {
             var offset: usize = 0;
             while (offset < count) {
                 const end = @min(offset + feed_chunk_bytes, count);
-                self.processOutputChunk(buffer[offset..end]);
-                self.refresh.request();
+                if (self.processOutputChunk(buffer[offset..end], win.GetTickCount64())) self.refresh.request();
                 offset = end;
             }
         }
+        self.terminal_mutex.lock();
+        self.terminal.setSynchronizedOutput(false) catch {};
+        self.synchronized_output.clear();
+        self.terminal_mutex.unlock();
         self.refresh.request();
     }
 
-    fn processOutputChunk(self: *SessionRuntime, bytes: []const u8) void {
+    fn processOutputChunk(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         self.progress_parser.feedEach(bytes, ProgressHandler{ .runtime = self });
         self.terminal.feed(bytes);
+        const synchronized = self.terminal.synchronizedOutput();
+        const mode_changed = self.synchronized_output.update(synchronized, now);
         self.search_content_generation +%= 1;
         _ = self.content_generation.fetchAdd(1, .monotonic);
+        return !synchronized or mode_changed;
     }
 
     const ProgressHandler = struct {
@@ -596,3 +675,72 @@ pub const SessionRuntime = struct {
         self.write(bytes) catch |err| log.debug("unable to write terminal response: {}", .{err});
     }
 };
+
+test "synchronized output arms once and releases when disabled" {
+    var state = SessionRuntime.SynchronizedOutput{};
+
+    try std.testing.expect(state.update(true, 100));
+    try std.testing.expectEqual(@as(?u32, 1000), state.remaining(100));
+    try std.testing.expect(!state.update(true, 500));
+    try std.testing.expectEqual(@as(?u32, 600), state.remaining(500));
+    try std.testing.expect(state.update(false, 600));
+    try std.testing.expectEqual(@as(?u32, null), state.remaining(600));
+    try std.testing.expect(!state.update(false, 700));
+}
+
+test "synchronized output watchdog expires and clear releases rendering" {
+    var state = SessionRuntime.SynchronizedOutput{};
+
+    try std.testing.expect(state.update(true, 50));
+    try std.testing.expectEqual(@as(?u32, 1), state.remaining(1049));
+    try std.testing.expectEqual(@as(?u32, 0), state.remaining(1050));
+    state.clear();
+    try std.testing.expectEqual(@as(?u32, null), state.remaining(1050));
+}
+
+test "session defers synchronized chunks and prepares once mode ends" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    try std.testing.expect(runtime.processOutputChunk("before\x1b[?2026hpartial", 100));
+    try std.testing.expect(!(try runtime.prepareRender()));
+    try std.testing.expect(!runtime.processOutputChunk("more", 200));
+    try std.testing.expect(runtime.processOutputChunk("final\x1b[?2026l", 300));
+    try std.testing.expect(try runtime.prepareRender());
+}
+
+test "session watchdog and resize release synchronized output" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    try std.testing.expect(runtime.processOutputChunk("\x1b[?2026hpartial", 100));
+    try std.testing.expectEqual(@as(?u32, 1), runtime.synchronizedOutputDelay(1099));
+    try std.testing.expectEqual(@as(?u32, null), runtime.synchronizedOutputDelay(1100));
+    try std.testing.expect(!runtime.terminal.synchronizedOutput());
+    try std.testing.expect(try runtime.prepareRender());
+
+    try std.testing.expect(runtime.processOutputChunk("\x1b[?2026hpartial", 2000));
+    runtime.resize(100, 40, 9, 18);
+    try std.testing.expectEqual(@as(?u32, null), runtime.synchronizedOutputDelay(2001));
+    try std.testing.expect(try runtime.prepareRender());
+}
+
+fn deinitTestRuntime(runtime: *SessionRuntime) void {
+    runtime.render_snapshot.deinit(runtime.allocator);
+    runtime.render_query.deinit(runtime.allocator);
+    runtime.render_matches.deinit(runtime.allocator);
+    runtime.search_cache.deinit(runtime.allocator);
+    runtime.terminal.deinit();
+}

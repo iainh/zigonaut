@@ -523,6 +523,16 @@ pub const Terminal = struct {
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
     }
 
+    pub fn synchronizedOutput(self: *Terminal) bool {
+        var enabled = false;
+        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2026, false), &enabled)) catch return false;
+        return enabled;
+    }
+
+    pub fn setSynchronizedOutput(self: *Terminal, enabled: bool) !void {
+        try check(vt.ghostty_terminal_mode_set(self.terminal, vt.ghostty_mode_new(2026, false), enabled));
+    }
+
     pub fn scrollbar(self: *Terminal) !Scrollbar {
         var state = std.mem.zeroes(vt.GhosttyTerminalScrollbar);
         try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_SCROLLBAR, &state));
@@ -1536,6 +1546,26 @@ test "libghostty returns terminal queries and in-band size reports" {
     terminal.feed("\x1b[?2048h");
     try terminal.resize(100, 40, 9, 18);
     try std.testing.expectEqualStrings("\x1b[48;40;100;720;900t", listener.bytes.items);
+}
+
+test "libghostty exposes synchronized output mode" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+
+    try std.testing.expect(!terminal.synchronizedOutput());
+    terminal.feed("\x1b[?2026h");
+    try std.testing.expect(terminal.synchronizedOutput());
+    terminal.feed("\x1b[?2026l");
+    try std.testing.expect(!terminal.synchronizedOutput());
+
+    try terminal.setSynchronizedOutput(true);
+    try std.testing.expect(terminal.synchronizedOutput());
+    try terminal.resize(100, 40, 9, 18);
+    try std.testing.expect(!terminal.synchronizedOutput());
+
+    try terminal.setSynchronizedOutput(true);
+    try terminal.setSynchronizedOutput(false);
+    try std.testing.expect(!terminal.synchronizedOutput());
 }
 
 test "libghostty parses control sequences into viewport state" {

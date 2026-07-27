@@ -21,6 +21,7 @@ const render_message = win.WM_APP + 2;
 const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
+const synchronized_output_timer = 4;
 const search_refresh_interval_ms = 33;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
@@ -416,6 +417,35 @@ pub const View = struct {
         }
     }
 
+    fn deferSynchronizedOutput(self: *View) bool {
+        const runtime = self.boundRuntime() orelse {
+            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+            return false;
+        };
+        const delay = runtime.synchronizedOutputDelay(win.GetTickCount64()) orelse {
+            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+            return false;
+        };
+        if (win.SetTimer(self.hwnd, synchronized_output_timer, @max(delay, 1), null) == 0) {
+            log.warn("unable to arm synchronized-output watchdog; releasing suppression", .{});
+            runtime.forceEndSynchronizedOutput();
+            return false;
+        }
+        return true;
+    }
+
+    fn prepareBoundRender(self: *View) bool {
+        const runtime = self.boundRuntime() orelse return true;
+        while (true) {
+            const ready = runtime.prepareRender() catch |err| {
+                log.warn("unable to prepare terminal render: {}", .{err});
+                return false;
+            };
+            if (ready) return true;
+            if (self.deferSynchronizedOutput()) return false;
+        }
+    }
+
     fn refreshIfNeeded(self: *View) void {
         if (self.model.hasCleanlyExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
@@ -450,6 +480,7 @@ pub const View = struct {
         const search_tick = runtime.searchTick(search_time_budget_ns);
         self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else 0);
         if (search_tick.changed) self.invalidate();
+        if (self.deferSynchronizedOutput()) return;
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
         self.clearHoveredLink();
@@ -565,6 +596,7 @@ pub const View = struct {
             self.paintSwapChain();
             return;
         }
+        if (!self.prepareBoundRender()) return;
 
         const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
         const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
@@ -612,6 +644,7 @@ pub const View = struct {
         const width = client.right - client.left;
         const height = client.bottom - client.top;
         if (width <= 0 or height <= 0) return;
+        if (!self.prepareBoundRender()) return;
         self.paintDirect2D(client, width, height) catch |err| {
             log.warn("terminal renderer failed: {}", .{err});
             self.renderer_failed = true;
@@ -642,15 +675,7 @@ pub const View = struct {
                 .origin_x = padding_x,
                 .origin_y = padding_y,
             };
-            session.runtime.?.renderViewport(&renderer) catch {
-                drawDirectWriteMessage(
-                    engine,
-                    "libghostty render state unavailable",
-                    paddedRect(client, padding_x, padding_y),
-                    foreground,
-                    background,
-                );
-            };
+            session.runtime.?.replayPreparedViewport(&renderer);
             if (self.ime_preedit.items.len != 0) {
                 const left: f32 = @floatFromInt(padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
                 const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)) else padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));
@@ -1527,6 +1552,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 }
             } else if (wparam == selection_scroll_timer) {
                 if (view) |current| current.selectionAutoscroll();
+            } else if (wparam == synchronized_output_timer) {
+                if (view) |current| current.refreshIfNeeded();
             }
             return 0;
         },
@@ -1539,6 +1566,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.KillTimer(hwnd, refresh_timer);
             _ = win.KillTimer(hwnd, copy_flash_timer);
             _ = win.KillTimer(hwnd, selection_scroll_timer);
+            _ = win.KillTimer(hwnd, synchronized_output_timer);
             if (view) |current| current.deinitResources();
             return 0;
         },
