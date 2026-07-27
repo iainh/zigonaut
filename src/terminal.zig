@@ -505,19 +505,6 @@ pub const Terminal = struct {
     }
 
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
-        // The pinned Ghostty revision underflows while shrinking rows and
-        // columns together if the cursor is below the new bottom row. Reflow
-        // columns against the old row count first, matching upstream #12907.
-        if (columns < self.columns and rows < self.rows) {
-            try check(vt.ghostty_terminal_resize(
-                self.terminal,
-                columns,
-                self.rows,
-                cell_width,
-                cell_height,
-            ));
-            self.columns = columns;
-        }
         try check(vt.ghostty_terminal_resize(
             self.terminal,
             columns,
@@ -1795,6 +1782,42 @@ test "render snapshots preserve clean rows during incremental capture" {
     try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
 }
 
+test "repeated prompt reflow keeps incremental and full snapshots identical" {
+    var terminal = try Terminal.init(52, 8, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed(
+        "\x1b]133;A\x07" ++
+            "\x1b[01;32miain@DESKTOP-2P0L7VP\x1b[00m:" ++
+            "\x1b[01;34m/mnt/c/Users/Iain/zigonaut\x1b[00m$ " ++
+            "\x1b]133;B\x07",
+    );
+
+    var incremental = Terminal.RenderSnapshot{};
+    defer incremental.deinit(std.testing.allocator);
+    try incremental.capture(std.testing.allocator, &terminal);
+
+    var cycle: usize = 0;
+    while (cycle < 4) : (cycle += 1) {
+        for ([_]struct { columns: u16, rows: u16 }{
+            .{ .columns = 13, .rows = 4 },
+            .{ .columns = 52, .rows = 8 },
+        }) |size| {
+            try terminal.resize(size.columns, size.rows, 9, 18);
+            try incremental.capture(std.testing.allocator, &terminal);
+
+            var full = Terminal.RenderSnapshot{};
+            try full.capture(std.testing.allocator, &terminal);
+            defer full.deinit(std.testing.allocator);
+            try expectSnapshotsEqual(&full, &incremental);
+        }
+    }
+
+    var text: [512]u8 = undefined;
+    const viewport = try terminal.writeViewportText(&text);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, viewport, "iain@DESKTOP-2P0L7VP"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, viewport, "/mnt/c/Users/Iain/zigonaut"));
+}
+
 test "incremental snapshots refresh cursor-only frame changes" {
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
@@ -1900,3 +1923,28 @@ const TestRenderer = struct {
 
     pub fn endFrame(_: *TestRenderer, _: Terminal.Frame) void {}
 };
+
+fn expectSnapshotsEqual(expected: *const Terminal.RenderSnapshot, actual: *const Terminal.RenderSnapshot) !void {
+    try std.testing.expectEqualDeep(expected.frame, actual.frame);
+    try std.testing.expectEqual(expected.rows.items.len, actual.rows.items.len);
+    try std.testing.expectEqual(expected.cells.items.len, actual.cells.items.len);
+    for (expected.rows.items, actual.rows.items) |expected_row, actual_row| {
+        try std.testing.expectEqual(expected_row.y, actual_row.y);
+        try std.testing.expectEqual(expected_row.len, actual_row.len);
+        for (
+            expected.cells.items[expected_row.start..][0..expected_row.len],
+            actual.cells.items[actual_row.start..][0..actual_row.len],
+        ) |expected_cell, actual_cell| {
+            try std.testing.expectEqual(expected_cell.codepoint_count, actual_cell.codepoint_count);
+            try std.testing.expectEqualSlices(
+                u32,
+                expected_cell.codepoints[0..expected_cell.codepoint_count],
+                actual_cell.codepoints[0..actual_cell.codepoint_count],
+            );
+            try std.testing.expectEqual(expected_cell.foreground, actual_cell.foreground);
+            try std.testing.expectEqual(expected_cell.background, actual_cell.background);
+            try std.testing.expectEqual(expected_cell.underline_color, actual_cell.underline_color);
+            try std.testing.expectEqual(expected_cell.attributes, actual_cell.attributes);
+        }
+    }
+}
