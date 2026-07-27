@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -78,6 +79,11 @@ HRESULT reportCurrentException(wchar_t const* operation) noexcept {
     } catch (...) {
         return reportFailure(operation, E_FAIL);
     }
+}
+
+bool validString(char const* value, uint32_t length) noexcept {
+    return length <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) &&
+        (value || !length);
 }
 
 template <typename Action>
@@ -1000,7 +1006,7 @@ struct Bridge {
             changed = true;
         }
         for (uint32_t i = 0; i < count; ++i) {
-            auto const title = to_hstring(std::string_view{titles[i], title_lengths[i]});
+            auto const title = to_hstring(std::string_view{titles[i] ? titles[i] : "", title_lengths[i]});
             if (i == items.Size()) {
                 auto item = TabViewItem{};
                 item.Header(box_value(title));
@@ -1038,7 +1044,7 @@ struct Bridge {
         profile_revokers.reserve(count);
         for (uint32_t index = 0; index < count; ++index) {
             auto item = MenuFlyoutItem{};
-            item.Text(to_hstring(std::string_view{names[index], name_lengths[index]}));
+            item.Text(to_hstring(std::string_view{names[index] ? names[index] : "", name_lengths[index]}));
             profile_revokers.emplace_back(item.Click(auto_revoke, [this, index](auto&&, auto&&) {
                 notify(ZIGONAUT_CHROME_NEW_PROFILE, index);
                 focusTerminal();
@@ -1137,7 +1143,8 @@ HRESULT validate(Bridge* bridge) {
 }
 
 extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, zigonaut_pane_event_callback pane_callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) noexcept {
-    if (!started || !callback || !pane_callback || !context || (version_length && !version) || (git_hash_length && !git_hash)) return E_INVALIDARG;
+    if (!started || !callback || !pane_callback || !context ||
+        !validString(version, version_length) || !validString(git_hash, git_hash_length)) return E_INVALIDARG;
     try {
         init_apartment(apartment_type::single_threaded);
     } catch (...) {
@@ -1251,6 +1258,9 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (count && (!titles || !title_lengths)) return E_INVALIDARG;
+    for (uint32_t index = 0; index < count; ++index) {
+        if (!validString(titles[index], title_lengths[index])) return E_INVALIDARG;
+    }
     try { bridge->update(titles, title_lengths, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
@@ -1258,6 +1268,9 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_profiles(void* value, const ch
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (!count || !names || !name_lengths) return E_INVALIDARG;
+    for (uint32_t index = 0; index < count; ++index) {
+        if (!validString(names[index], name_lengths[index])) return E_INVALIDARG;
+    }
     try { bridge->updateProfiles(names, name_lengths, count); return S_OK; } catch (...) { return reportCurrentException(L"update profiles"); }
 }
 
@@ -1278,7 +1291,7 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* value, 
 extern "C" HRESULT __cdecl zigonaut_chrome_show_notification(void* value, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if ((title_length && !title) || (body_length && !body)) return E_INVALIDARG;
+    if (!validString(title, title_length) || !validString(body, body_length)) return E_INVALIDARG;
     return bridge->showNotification(session_id, std::string_view(title ? title : "", title_length), std::string_view(body ? body : "", body_length));
 }
 

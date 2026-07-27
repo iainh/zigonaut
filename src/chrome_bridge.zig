@@ -34,12 +34,16 @@ pub fn commandFromInt(value: u32) ?Command {
 }
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
-pub const PaneEvent = extern struct { size: u32 = @sizeOf(PaneEvent), kind: u32, target_id: u64, value: u32, reserved: u32 = 0 };
-pub const LayoutNode = extern struct { size: u32 = @sizeOf(LayoutNode), kind: u32, id: u64, axis: u32 = 0, ratio: u32 = 0, subtree_size: u32 = 1, reserved: u32 = 0 };
-pub const pane_focus: u32 = 1;
-pub const pane_committed_ratio: u32 = 2;
-pub const pane_scroll: u32 = 3;
-pub const pane_scroll_wheel: u32 = 4;
+pub const PaneEvent = win.zigonaut_pane_event;
+pub const LayoutNode = win.zigonaut_layout_node;
+pub const pane_focus: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FOCUS);
+pub const pane_committed_ratio: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_COMMITTED_RATIO);
+pub const pane_scroll: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_SCROLL);
+pub const pane_scroll_wheel: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_SCROLL_WHEEL);
+pub const layout_leaf: u32 = @intCast(win.ZIGONAUT_LAYOUT_LEAF);
+pub const layout_split: u32 = @intCast(win.ZIGONAUT_LAYOUT_SPLIT);
+pub const axis_left_right: u32 = @intCast(win.ZIGONAUT_AXIS_LEFT_RIGHT);
+pub const axis_top_bottom: u32 = @intCast(win.ZIGONAUT_AXIS_TOP_BOTTOM);
 const PaneCallback = *const fn (?*anyopaque, *const PaneEvent) callconv(.c) void;
 pub const Started = *const fn (?*anyopaque, ?*anyopaque, win.HWND) callconv(.c) win.BOOL;
 const Run = *const fn (Started, Callback, PaneCallback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
@@ -119,16 +123,18 @@ pub const Bridge = struct {
     }
 
     pub fn run(self: *Bridge, started: Started, callback: Callback, pane_callback: PaneCallback, context: ?*anyopaque, version: []const u8, git_hash: []const u8) win.HRESULT {
-        if (self.instance != null) return @bitCast(@as(u32, 0x8000ffff));
+        if (self.instance != null) return win.E_UNEXPECTED;
+        const version_length = stringLength(version.len) orelse return win.E_INVALIDARG;
+        const git_hash_length = stringLength(git_hash.len) orelse return win.E_INVALIDARG;
         const result = self.run_fn(
             started,
             callback,
             pane_callback,
             context,
             version.ptr,
-            @intCast(version.len),
+            version_length,
             git_hash.ptr,
-            @intCast(git_hash.len),
+            git_hash_length,
         );
         self.instance = null;
         return result;
@@ -155,17 +161,25 @@ pub const Bridge = struct {
     }
     pub fn updateLayout(self: *Bridge, nodes: []const LayoutNode, focused: u64) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_layout_fn(instance, nodes.ptr, @intCast(nodes.len), focused));
+        const count = std.math.cast(u32, nodes.len) orelse return false;
+        return succeeded(self.update_layout_fn(instance, nodes.ptr, count, focused));
     }
 
     pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, @intCast(titles.len), if (active) |index| @intCast(index) else -1));
+        if (titles.len != title_lengths.len) return false;
+        const count = std.math.cast(u32, titles.len) orelse return false;
+        const active_index = if (active) |index| std.math.cast(i32, index) orelse return false else -1;
+        for (title_lengths) |length| if (length > std.math.maxInt(i32)) return false;
+        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, count, active_index));
     }
 
     pub fn updateProfiles(self: *Bridge, names: []const [*]const u8, name_lengths: []const u32) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.update_profiles_fn(instance, names.ptr, name_lengths.ptr, @intCast(names.len)));
+        if (names.len == 0 or names.len != name_lengths.len) return false;
+        const count = std.math.cast(u32, names.len) orelse return false;
+        for (name_lengths) |length| if (length > std.math.maxInt(i32)) return false;
+        return succeeded(self.update_profiles_fn(instance, names.ptr, name_lengths.ptr, count));
     }
 
     pub fn updateScrollbar(self: *Bridge, pane_id: u64, total: u32, page: u32, position: u32, show: bool) bool {
@@ -180,7 +194,9 @@ pub const Bridge = struct {
 
     pub fn showNotification(self: *Bridge, session_id: u32, title: []const u8, body: []const u8) bool {
         const instance = self.instance orelse return false;
-        return succeeded(self.show_notification_fn(instance, session_id, title.ptr, @intCast(title.len), body.ptr, @intCast(body.len)));
+        const title_length = stringLength(title.len) orelse return false;
+        const body_length = stringLength(body.len) orelse return false;
+        return succeeded(self.show_notification_fn(instance, session_id, title.ptr, title_length, body.ptr, body_length));
     }
 
     pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool, dark_theme: bool) bool {
@@ -195,6 +211,11 @@ pub const Bridge = struct {
 
 pub fn succeeded(result: win.HRESULT) bool {
     return result >= 0;
+}
+
+fn stringLength(length: usize) ?u32 {
+    if (length > std.math.maxInt(i32)) return null;
+    return @intCast(length);
 }
 
 fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
@@ -214,4 +235,10 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.shutdown, commandFromInt(win.ZIGONAUT_CHROME_SHUTDOWN).?);
     try std.testing.expectEqual(Command.zoom_in, commandFromInt(win.ZIGONAUT_CHROME_ZOOM_IN).?);
     try std.testing.expect(commandFromInt(2) == null);
+}
+
+test "chrome string lengths fit the Win32 UTF-8 conversion API" {
+    const maximum: usize = std.math.maxInt(i32);
+    try std.testing.expectEqual(@as(?u32, @intCast(maximum)), stringLength(maximum));
+    try std.testing.expectEqual(@as(?u32, null), stringLength(maximum + 1));
 }

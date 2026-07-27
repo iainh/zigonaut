@@ -154,12 +154,28 @@ const Application = struct {
                 const view = try self.ensureView(leaf.id);
                 if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain())) return error.AttachPaneFailed;
                 self.attached_panes.appendAssumeCapacity(leaf.id);
-                layout[index] = .{ .kind = 1, .id = leaf.id };
+                layout[index] = .{
+                    .size = @sizeOf(chrome.LayoutNode),
+                    .kind = chrome.layout_leaf,
+                    .id = leaf.id,
+                    .axis = 0,
+                    .ratio = 0,
+                    .subtree_size = 1,
+                    .reserved = 0,
+                };
             },
-            .split => |split| layout[index] = .{ .kind = 2, .id = split.id, .axis = switch (split.axis) {
-                .left_right => 1,
-                .top_bottom => 2,
-            }, .ratio = split.ratio, .subtree_size = split.subtree_size },
+            .split => |split| layout[index] = .{
+                .size = @sizeOf(chrome.LayoutNode),
+                .kind = chrome.layout_split,
+                .id = split.id,
+                .axis = switch (split.axis) {
+                    .left_right => chrome.axis_left_right,
+                    .top_bottom => chrome.axis_top_bottom,
+                },
+                .ratio = split.ratio,
+                .subtree_size = split.subtree_size,
+                .reserved = 0,
+            },
         };
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
@@ -345,6 +361,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                         }
                     },
                     chrome.pane_committed_ratio => {
+                        if (current.value == 0 or current.value >= 65535) continue;
                         const layout = self.model.activeLayout(std.heap.page_allocator) catch continue;
                         defer std.heap.page_allocator.free(layout);
                         var valid = false;
@@ -362,8 +379,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         chrome_message => {
-            const command = chrome.commandFromInt(@intCast(wparam)) orelse return 0;
-            const argument: u32 = @intCast(lparam);
+            const command_value = std.math.cast(u32, wparam) orelse return 0;
+            const command = chrome.commandFromInt(command_value) orelse return 0;
+            const argument = std.math.cast(u32, lparam) orelse return 0;
             switch (command) {
                 .new_profile => {
                     if (argument >= @as(u32, @intCast(self.settings.profile_count))) return 0;
@@ -630,6 +648,11 @@ fn syncChromeImpl(self: *Application) void {
     self.chrome_title_lengths.items.len = count;
     for (self.model.tabs.items, 0..) |*tab, index| {
         const title = tab.displayTitle();
+        if (title.len > std.math.maxInt(i32)) {
+            log.err("terminal title exceeds the WinUI bridge limit", .{});
+            _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
+            return;
+        }
         self.chrome_titles.items[index] = title.ptr;
         self.chrome_title_lengths.items[index] = @intCast(title.len);
     }
