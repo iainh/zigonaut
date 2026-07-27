@@ -206,10 +206,9 @@ pub const Terminal = struct {
                 errdefer replacement.deinit(allocator);
                 try replacement.cells.resize(allocator, cell_count);
                 try replacement.rows.resize(allocator, terminal.rows);
-                for (replacement.rows.items) |*row| {
-                    row.* = .{};
+                for (replacement.rows.items) |*row| row.* = .{};
+                for (replacement.rows.items) |*row|
                     try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
-                }
                 var recorder = Recorder{ .snapshot = &replacement, .allocator = allocator };
                 try terminal.renderViewportInternal(&recorder, null);
                 self.deinit(allocator);
@@ -217,7 +216,12 @@ pub const Terminal = struct {
                 return;
             }
             var recorder = Recorder{ .snapshot = self, .allocator = allocator };
-            try terminal.renderViewportInternal(&recorder, self.frame);
+            terminal.renderViewportInternal(&recorder, self.frame) catch |err| {
+                // A row arena may have been partially rebuilt. Force the next
+                // successful capture to replace every row before replaying it.
+                self.frame = null;
+                return err;
+            };
         }
 
         fn columns(self: *const RenderSnapshot) usize {
