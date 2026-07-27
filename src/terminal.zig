@@ -872,6 +872,13 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(vt.GhosttyTerminalClipboardWriteFn, clipboardWrite)));
     }
 
+    pub fn pwdAlloc(self: *Terminal, allocator: std.mem.Allocator) !?[]u8 {
+        var pwd = std.mem.zeroes(vt.GhosttyString);
+        try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_PWD, &pwd));
+        if (pwd.len == 0) return null;
+        return @as(?[]u8, try allocator.dupe(u8, pwd.ptr[0..pwd.len]));
+    }
+
     pub fn renderViewport(self: *Terminal, renderer: anytype) !void {
         try self.renderViewportInternal(renderer, null);
     }
@@ -1650,6 +1657,19 @@ test "libghostty emits decoded clipboard writes but ignores reads" {
     try std.testing.expectEqual(@as(usize, 2), listener.calls);
     try std.testing.expectEqual(@as(usize, 0), listener.length);
     try std.testing.expect(listener.cleared);
+}
+
+test "libghostty tracks OSC 7 working directory" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("\x1b]7;file://localhost/C:/My%20Files\x07");
+    const pwd = (try terminal.pwdAlloc(std.testing.allocator)).?;
+    defer std.testing.allocator.free(pwd);
+    try std.testing.expectEqualStrings("file://localhost/C:/My%20Files", pwd);
+
+    terminal.feed("\x1b]7;\x07");
+    try std.testing.expect((try terminal.pwdAlloc(std.testing.allocator)) == null);
 }
 
 test "libghostty parses control sequences into viewport state" {

@@ -33,6 +33,7 @@ const Application = struct {
     loaded: config.Loaded,
     themes: theme.Catalog,
     settings: config.Config,
+    initial_working_directory: ?[]u8 = null,
     hwnd: ?win.HWND = null,
     model: app_model.App,
     font: win.HFONT = null,
@@ -54,12 +55,13 @@ const Application = struct {
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
-    fn init(loaded: config.Loaded, themes: theme.Catalog) Application {
+    fn init(loaded: config.Loaded, themes: theme.Catalog, initial_working_directory: ?[]u8) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
         var result = Application{
             .settings = loaded.value,
             .loaded = loaded,
             .themes = themes,
+            .initial_working_directory = initial_working_directory,
             .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, &themes, dark_theme), loaded.value.randomize_tab_background),
             .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
@@ -76,6 +78,7 @@ const Application = struct {
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.pane_events.deinit(std.heap.page_allocator);
+        if (self.initial_working_directory) |directory| std.heap.page_allocator.free(directory);
         if (self.font != null) _ = win.DeleteObject(self.font);
         self.loaded.deinit();
     }
@@ -89,6 +92,7 @@ const Application = struct {
     const showPendingNotifications = showPendingNotificationsImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
+    const spawnNewWindow = spawnNewWindowImpl;
     const syncProfiles = syncProfilesImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
@@ -239,13 +243,16 @@ const Application = struct {
 };
 
 pub fn main() !void {
+    var initial_working_directory = try launchDirectoryFromArgsAlloc(std.heap.page_allocator);
+    errdefer if (initial_working_directory) |directory| std.heap.page_allocator.free(directory);
     var loaded = try config.loadOrCreate(std.heap.page_allocator);
     const themes = theme.Catalog.load(std.heap.page_allocator);
     const application = std.heap.page_allocator.create(Application) catch |err| {
         loaded.deinit();
         return err;
     };
-    application.* = Application.init(loaded, themes);
+    application.* = Application.init(loaded, themes, initial_working_directory);
+    initial_working_directory = null;
     defer {
         // If synchronous window destruction fails, retain the owner until
         // process exit rather than leave a subclass callback pointing at freed memory.
@@ -408,6 +415,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 },
                 .new_default => {
                     self.addDefaultSession() catch |err| log.err("unable to open default shell session: {}", .{err});
+                    return 0;
+                },
+                .new_window => {
+                    self.spawnNewWindow() catch |err| log.err("unable to open new window: {}", .{err});
                     return 0;
                 },
                 .close => {
@@ -807,8 +818,91 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
     };
     const columns: u16 = if (self.activeView()) |view| view.columns else 80;
     const rows: u16 = if (self.activeView()) |view| view.rows else 24;
-    _ = try self.model.addSession(shell, profile.name, profile.command, self.settings.working_directory, self.settings.hold_on_exit, columns, rows);
+    const reported_directory = if (self.model.activeSession()) |session|
+        if (session.runtime) |runtime| runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null else null
+    else
+        null;
+    defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
+    const working_directory = reported_directory orelse self.initial_working_directory orelse self.settings.working_directory;
+    _ = try self.model.addSession(shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
+    if (self.initial_working_directory) |directory| {
+        std.heap.page_allocator.free(directory);
+        self.initial_working_directory = null;
+    }
     try self.syncPresentation();
+}
+
+fn spawnNewWindowImpl(self: *Application) !void {
+    const allocator = std.heap.page_allocator;
+    const executable = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(executable);
+    const directory = if (self.model.activeSession()) |session|
+        if (session.runtime) |runtime| try runtime.currentDirectoryAlloc(allocator) else null
+    else
+        null;
+    defer if (directory) |value| allocator.free(value);
+
+    const argv: []const []const u8 = if (directory) |value|
+        &.{ executable, "--working-directory", value }
+    else
+        &.{executable};
+    var child = std.process.Child.init(argv, allocator);
+    try child.spawn();
+    std.os.windows.CloseHandle(child.thread_handle);
+    std.os.windows.CloseHandle(child.id);
+}
+
+fn launchDirectoryFromArgsAlloc(allocator: std.mem.Allocator) !?[]u8 {
+    const arguments = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, arguments);
+    return launchDirectoryFromArgumentsAlloc(allocator, arguments);
+}
+
+fn launchDirectoryFromArgumentsAlloc(allocator: std.mem.Allocator, arguments: []const []const u8) !?[]u8 {
+    var index: usize = 1;
+    while (index < arguments.len) : (index += 1) {
+        if (!std.mem.eql(u8, arguments[index], "--working-directory")) continue;
+        if (index + 1 >= arguments.len) return error.MissingWorkingDirectory;
+        const directory = arguments[index + 1];
+        if (!isLocalWindowsDrivePath(directory)) return error.InvalidWorkingDirectory;
+        return @as(?[]u8, try allocator.dupe(u8, directory));
+    }
+    return null;
+}
+
+fn isLocalWindowsDrivePath(path: []const u8) bool {
+    return path.len >= 3 and
+        std.ascii.isAlphabetic(path[0]) and
+        path[1] == ':' and
+        (path[2] == '\\' or path[2] == '/') and
+        std.mem.indexOfScalar(u8, path, 0) == null and
+        std.unicode.utf8ValidateSlice(path);
+}
+
+test "new-window working directory accepts only local Windows drive paths" {
+    try std.testing.expect(isLocalWindowsDrivePath("C:\\work"));
+    try std.testing.expect(isLocalWindowsDrivePath("d:/work"));
+    try std.testing.expect(!isLocalWindowsDrivePath("\\\\server\\share"));
+    try std.testing.expect(!isLocalWindowsDrivePath("\\\\?\\C:\\work"));
+    try std.testing.expect(!isLocalWindowsDrivePath("\\work"));
+    try std.testing.expect(!isLocalWindowsDrivePath("/home/alice"));
+    try std.testing.expect(!isLocalWindowsDrivePath("C:work"));
+    try std.testing.expect(!isLocalWindowsDrivePath("C:\\bad\x00path"));
+    try std.testing.expect(!isLocalWindowsDrivePath(&.{ 'C', ':', '\\', 0xff }));
+}
+
+test "new-window working directory argument is validated" {
+    const allocator = std.testing.allocator;
+    const accepted = [_][]const u8{ "zigonaut.exe", "--working-directory", "C:\\work" };
+    const directory = (try launchDirectoryFromArgumentsAlloc(allocator, &accepted)).?;
+    defer allocator.free(directory);
+    try std.testing.expectEqualStrings("C:\\work", directory);
+
+    const missing = [_][]const u8{ "zigonaut.exe", "--working-directory" };
+    try std.testing.expectError(error.MissingWorkingDirectory, launchDirectoryFromArgumentsAlloc(allocator, &missing));
+
+    const invalid = [_][]const u8{ "zigonaut.exe", "--working-directory", "\\\\server\\share" };
+    try std.testing.expectError(error.InvalidWorkingDirectory, launchDirectoryFromArgumentsAlloc(allocator, &invalid));
 }
 
 fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {

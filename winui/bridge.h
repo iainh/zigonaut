@@ -33,6 +33,7 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_FOCUS_UP = 25,
     ZIGONAUT_CHROME_FOCUS_DOWN = 26,
     ZIGONAUT_CHROME_CLOSE_PANE = 27,
+    ZIGONAUT_CHROME_NEW_WINDOW = 28,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

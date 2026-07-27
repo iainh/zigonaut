@@ -150,6 +150,9 @@ tabs after a clean process exit. Reloading these settings affects subsequent ses
 Use **Open Settings** and **Reload Settings** from the title-bar
 menu to edit and apply changes without restarting Zigonaut. Reloading also rebuilds the new-tab
 menu from the configured profiles.
+Valid local OSC 7 `file:` URIs override `working_directory` for new tabs and splits
+created from the reporting pane. Remote hosts, malformed escapes, and non-Windows paths
+fall back to the configured directory.
 By default, each new tab receives a random background hue with the same perceived
 darkness as the configured theme background. Set `randomize_tab_background=false`
 to use the theme background unchanged for every tab.
@@ -160,6 +163,8 @@ are supported), and Ctrl+0 to restore the configured font size. Zoom is kept bet
 
 ## Terminal workflows
 
+- `Ctrl+Shift+N` opens a separate Zigonaut window in the focused pane's reported
+  OSC 7 directory, or with normal configured startup behavior when none is valid.
 - `Ctrl+Shift+O` splits the focused pane to the right; `Ctrl+Shift+E` splits it
   downward. Drag the native divider with the mouse to resize adjacent panes.
 - `Ctrl+Alt+Left/Right/Up/Down` moves focus directionally between panes.

@@ -826,6 +826,8 @@ pub const View = struct {
             null
         else if (shift and wparam == 'T')
             win.ZIGONAUT_CHROME_NEW_DEFAULT
+        else if (shift and wparam == 'N')
+            win.ZIGONAUT_CHROME_NEW_WINDOW
         else if (shift and wparam == 'W')
             win.ZIGONAUT_CHROME_CLOSE_PANE
         else if (shift and wparam == 'O')

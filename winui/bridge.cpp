@@ -167,6 +167,7 @@ struct Bridge {
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
+    MenuFlyoutItem new_window_item{nullptr};
     MenuFlyoutItem open_settings_item{nullptr};
     MenuFlyoutItem reload_settings_item{nullptr};
     MenuFlyoutItem about_item{nullptr};
@@ -186,6 +187,7 @@ struct Bridge {
     Button::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
+    MenuFlyoutItem::Click_revoker new_window_revoker{};
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
     MenuFlyoutItem::Click_revoker reload_settings_revoker{};
     MenuFlyoutItem::Click_revoker about_revoker{};
@@ -322,6 +324,11 @@ struct Bridge {
 
         app_menu = MenuFlyout{};
         app_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        new_window_item = MenuFlyoutItem{};
+        new_window_item.Text(L"New Window");
+        new_window_item.AccessKey(L"N");
+        new_window_item.KeyboardAcceleratorTextOverride(L"Ctrl+Shift+N");
+        new_window_revoker = new_window_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WINDOW, 0); });
         open_settings_item = MenuFlyoutItem{};
         open_settings_item.Text(L"Open Settings");
         open_settings_item.AccessKey(L"S");
@@ -338,6 +345,8 @@ struct Bridge {
         quit_item.Text(L"Quit");
         quit_item.AccessKey(L"Q");
         quit_revoker = quit_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_QUIT, 0); });
+        app_menu.Items().Append(new_window_item);
+        app_menu.Items().Append(MenuFlyoutSeparator{});
         app_menu.Items().Append(open_settings_item);
         app_menu.Items().Append(reload_settings_item);
         app_menu.Items().Append(MenuFlyoutSeparator{});
@@ -382,6 +391,7 @@ struct Bridge {
             }
         });
         addAccelerator(Windows::System::VirtualKey::T, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_DEFAULT);
+        addAccelerator(Windows::System::VirtualKey::N, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_WINDOW);
         addAccelerator(Windows::System::VirtualKey::W, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_CLOSE_PANE);
         addAccelerator(Windows::System::VirtualKey::O, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_RIGHT);
         addAccelerator(Windows::System::VirtualKey::E, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_DOWN);
@@ -1270,6 +1280,7 @@ struct Bridge {
         if (about_dialog) cleanup(L"hide About dialog", [&] { about_dialog.Hide(); }, result);
         for (auto& revoker : profile_revokers) revoker.revoke();
         profile_revokers.clear();
+        new_window_revoker.revoke();
         open_settings_revoker.revoke();
         reload_settings_revoker.revoke();
         about_revoker.revoke();
@@ -1291,6 +1302,7 @@ struct Bridge {
         new_tab_menu = nullptr;
         cleanup(L"detach application menu", [&] { menu_button.Flyout(nullptr); }, result);
         cleanup(L"clear application menu", [&] { app_menu.Items().Clear(); }, result);
+        new_window_item = nullptr;
         open_settings_item = nullptr;
         reload_settings_item = nullptr;
         about_item = nullptr;

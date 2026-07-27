@@ -193,18 +193,21 @@ pub const App = struct {
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, source.session.working_directory.items, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
-        return self.splitFocusedRecord(axis, runtime, session_theme.background);
+        const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
+        defer if (reported_directory) |directory| self.allocator.free(directory);
+        const working_directory = reported_directory orelse source.session.working_directory.items;
+        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
+        return self.splitFocusedRecord(axis, runtime, session_theme.background, working_directory);
     }
 
-    fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color) !pane_tree.PaneId {
+    fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color, working_directory: ?[]const u8) !pane_tree.PaneId {
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = runtime, .background = background, .hold_on_exit = source.session.hold_on_exit };
         errdefer self.deinitSession(&session);
         try session.profile_title.appendSlice(self.allocator, source.session.profile_title.items);
         try session.command.appendSlice(self.allocator, source.session.command.items);
-        try session.working_directory.appendSlice(self.allocator, source.session.working_directory.items);
+        try session.working_directory.appendSlice(self.allocator, working_directory orelse source.session.working_directory.items);
         const source_id = source.id;
         const pane_id = self.takeObjectId();
         const split_id = self.takeObjectId();
@@ -425,12 +428,12 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
     _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background);
     app.activeSession().?.hold_on_exit = true;
     const original = app.activePane().?.id;
-    const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background);
+    const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, "D:\\reported");
     try std.testing.expect(created != original);
     try std.testing.expectEqual(created, app.activePane().?.id);
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
     try std.testing.expectEqualStrings("wsl -d Debian", app.activeSession().?.command.items);
-    try std.testing.expectEqualStrings("C:\\work", app.activeSession().?.working_directory.items);
+    try std.testing.expectEqualStrings("D:\\reported", app.activeSession().?.working_directory.items);
     try std.testing.expect(app.activeSession().?.hold_on_exit);
     const layout = try app.activeLayout(std.testing.allocator);
     defer std.testing.allocator.free(layout);
@@ -445,7 +448,7 @@ test "focus title close extraction and stale identities" {
     defer app.deinit();
     _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background);
     const first = app.activePane().?.id;
-    const second = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background);
+    const second = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background, null);
     try app.activeSession().?.title.appendSlice(std.testing.allocator, "second");
     try std.testing.expectEqualStrings("second", app.activeTab().?.displayTitle());
     try std.testing.expect(app.focusDirection(.up));

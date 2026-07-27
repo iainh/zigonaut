@@ -270,6 +270,24 @@ pub const SessionRuntime = struct {
         return self.terminal.selectedTextAlloc(allocator);
     }
 
+    pub fn currentDirectoryAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) !?[]u8 {
+        self.terminal_mutex.lock();
+        const reported = self.terminal.pwdAlloc(allocator) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        self.terminal_mutex.unlock();
+        const value = reported orelse return null;
+        defer allocator.free(value);
+
+        var hostname_wide: [std.Uri.host_name_max]u16 = undefined;
+        var hostname_length: win.DWORD = hostname_wide.len;
+        if (win.GetComputerNameW(&hostname_wide, &hostname_length) == 0) return null;
+        var hostname_utf8: [std.Uri.host_name_max * 3]u8 = undefined;
+        const utf8_length = std.unicode.utf16LeToUtf8(&hostname_utf8, hostname_wide[0..hostname_length]) catch return null;
+        return osc7WindowsPathAlloc(allocator, value, hostname_utf8[0..utf8_length]);
+    }
+
     pub fn linkAtAlloc(self: *SessionRuntime, allocator: std.mem.Allocator, point: Terminal.Point) !?Terminal.Link {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
@@ -848,4 +866,64 @@ fn deinitTestRuntime(runtime: *SessionRuntime) void {
     runtime.render_matches.deinit(runtime.allocator);
     runtime.search_cache.deinit(runtime.allocator);
     runtime.terminal.deinit();
+}
+
+fn osc7WindowsPathAlloc(allocator: std.mem.Allocator, value: []const u8, local_hostname: []const u8) !?[]u8 {
+    const uri = std.Uri.parse(value) catch return null;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "file") or uri.user != null or uri.password != null or uri.port != null or uri.query != null or uri.fragment != null) return null;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+    if (uri.host) |component| {
+        if (!validPercentEncoding(component)) return null;
+        const host = try component.toRawMaybeAlloc(temporary);
+        if (host.len != 0 and !std.ascii.eqlIgnoreCase(host, "localhost") and !std.ascii.eqlIgnoreCase(host, local_hostname)) return null;
+    }
+    if (!validPercentEncoding(uri.path)) return null;
+    const path = try uri.path.toRawMaybeAlloc(temporary);
+    if (path.len < 4 or path[0] != '/' or !std.ascii.isAlphabetic(path[1]) or path[2] != ':' or path[3] != '/' or std.mem.indexOfScalar(u8, path, 0) != null or !std.unicode.utf8ValidateSlice(path)) return null;
+
+    const result = try allocator.dupe(u8, path[1..]);
+    for (result) |*byte| if (byte.* == '/') {
+        byte.* = '\\';
+    };
+    return result;
+}
+
+fn validPercentEncoding(component: std.Uri.Component) bool {
+    const encoded = switch (component) {
+        .raw => return true,
+        .percent_encoded => |value| value,
+    };
+    var index: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, encoded, index, '%')) |percent| {
+        if (percent + 2 >= encoded.len or !std.ascii.isHex(encoded[percent + 1]) or !std.ascii.isHex(encoded[percent + 2])) return false;
+        index = percent + 3;
+    }
+    return true;
+}
+
+test "OSC 7 local file URIs become Windows working directories" {
+    const allocator = std.testing.allocator;
+    const plain = (try osc7WindowsPathAlloc(allocator, "file:///C:/Users/Alice/project", "DESKTOP-1")).?;
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("C:\\Users\\Alice\\project", plain);
+
+    const escaped = (try osc7WindowsPathAlloc(allocator, "file://desktop-1/C:/My%20Files/%E2%9C%93", "DESKTOP-1")).?;
+    defer allocator.free(escaped);
+    try std.testing.expectEqualStrings("C:\\My Files\\✓", escaped);
+
+    const localhost = (try osc7WindowsPathAlloc(allocator, "FILE://localhost/D:/work", "DESKTOP-1")).?;
+    defer allocator.free(localhost);
+    try std.testing.expectEqualStrings("D:\\work", localhost);
+}
+
+test "OSC 7 rejects remote malformed and non-Windows locations" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file://remote/C:/work", "DESKTOP-1")) == null);
+    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "https://localhost/C:/work", "DESKTOP-1")) == null);
+    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///home/alice", "DESKTOP-1")) == null);
+    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%ZZpath", "DESKTOP-1")) == null);
+    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%00path", "DESKTOP-1")) == null);
 }
