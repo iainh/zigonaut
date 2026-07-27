@@ -130,6 +130,7 @@ struct Bridge {
     struct SplitHost {
         uint64_t id{}; uint32_t axis{}; uint16_t committed{}; Grid grid{nullptr};
         RowDefinition row_a{nullptr}, row_b{nullptr}; ColumnDefinition column_a{nullptr}, column_b{nullptr};
+        Border divider{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb thumb{nullptr};
         Microsoft::UI::Input::InputCursor cursor{nullptr};
         FrameworkElement::Loaded_revoker loaded{};
@@ -137,7 +138,7 @@ struct Bridge {
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragCompleted_revoker completed{};
     };
     std::unordered_map<uint64_t, std::unique_ptr<PaneHost>> pane_hosts;
-    std::vector<std::unique_ptr<SplitHost>> split_hosts;
+    std::unordered_map<uint64_t, std::unique_ptr<SplitHost>> split_hosts;
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
@@ -453,14 +454,16 @@ struct Bridge {
 
     void detachPane(uint64_t id) {
         if (!id) throw hresult_invalid_argument();
-        for (auto& [_, host] : pane_hosts) {
-            if (host->timer) host->timer.Stop();
-            check_hresult(host->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr));
+        if (pane_hosts.count(id)) {
+            for (auto& [_, host] : pane_hosts) {
+                if (host->timer) host->timer.Stop();
+                check_hresult(host->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr));
+            }
+            content_root.Children().Clear();
+            pane_hosts.clear();
+            split_hosts.clear();
+            active_pane = 0;
         }
-        content_root.Children().Clear();
-        pane_hosts.clear();
-        split_hosts.clear();
-        active_pane = 0;
         attachments.erase(id);
     }
 
@@ -599,80 +602,111 @@ struct Bridge {
                 SendMessageW(previous->second->window, WM_KILLFOCUS, 0, 0);
             }
         }
-        for(auto& [_,p]:pane_hosts) p->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);
-        pane_hosts.clear(); split_hosts.clear(); content_root.Children().Clear();
+        content_root.Children().Clear();
+        for (auto& [_, host] : split_hosts) host->grid.Children().Clear();
+        for (auto it = pane_hosts.begin(); it != pane_hosts.end();) {
+            if (ids.count(it->first)) {
+                ++it;
+            } else {
+                if (it->second->timer) it->second->timer.Stop();
+                check_hresult(it->second->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr));
+                it = pane_hosts.erase(it);
+            }
+        }
+        for (auto it = split_hosts.begin(); it != split_hosts.end();) {
+            auto const node = std::find_if(nodes, nodes + count, [id = it->first](auto const& value) {
+                return value.kind == ZIGONAUT_LAYOUT_SPLIT && value.id == id;
+            });
+            if (node == nodes + count || node->axis != it->second->axis) {
+                it = split_hosts.erase(it);
+            } else {
+                ++it;
+            }
+        }
         std::function<FrameworkElement(uint32_t)> build = [&](uint32_t i)->FrameworkElement {
             auto const& n=nodes[i];
-            if(n.kind==ZIGONAUT_LAYOUT_LEAF){auto p=makePane(n.id,attachments.at(n.id)); auto visual=p->frame; pane_hosts.emplace(n.id,std::move(p)); return visual;}
-            auto s = std::make_unique<SplitHost>();
-            auto* h = s.get();
-            h->id = n.id;
-            h->axis = n.axis;
-            h->committed = static_cast<uint16_t>(n.ratio);
-            h->grid = Grid{};
-            h->thumb = Microsoft::UI::Xaml::Controls::Primitives::Thumb{};
-            h->cursor = Microsoft::UI::Input::InputSystemCursor::Create(
-                n.axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? Microsoft::UI::Input::InputSystemCursorShape::SizeWestEast
-                    : Microsoft::UI::Input::InputSystemCursorShape::SizeNorthSouth);
-            h->thumb.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-            h->loaded = h->thumb.Loaded(auto_revoke, [h](auto&&, auto&&) {
-                h->thumb.as<IUIElementProtected>().ProtectedCursor(h->cursor);
-                h->loaded.revoke();
-            });
-            auto divider = Border{};
-            divider.Background(application.Resources()
-                .Lookup(box_value(L"DividerStrokeColorDefaultBrush"))
-                .as<Microsoft::UI::Xaml::Media::Brush>());
-            auto first=build(i+1); auto right=i+1+nodes[i+1].subtree_size; auto second=build(right); double a=n.ratio, b=65535-n.ratio;
-            if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};h->column_a.Width({a,GridUnitType::Star});auto gap=ColumnDefinition{};gap.Width({5,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->column_b.Width({b,GridUnitType::Star});h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);h->thumb.Width(16);h->thumb.HorizontalAlignment(HorizontalAlignment::Center);Grid::SetColumn(first,0);Grid::SetColumn(divider,1);Grid::SetColumn(h->thumb,1);Grid::SetColumn(second,2);}else{h->row_a=RowDefinition{};h->row_a.Height({a,GridUnitType::Star});auto gap=RowDefinition{};gap.Height({5,GridUnitType::Pixel});h->row_b=RowDefinition{};h->row_b.Height({b,GridUnitType::Star});h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);h->thumb.Height(16);h->thumb.VerticalAlignment(VerticalAlignment::Center);Grid::SetRow(first,0);Grid::SetRow(divider,1);Grid::SetRow(h->thumb,1);Grid::SetRow(second,2);}
-            h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(divider);h->grid.Children().Append(h->thumb);
-            h->delta = h->thumb.DragDelta(auto_revoke, [h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragDeltaEventArgs const& args) {
-                auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->grid.ActualWidth() - 5
-                    : h->grid.ActualHeight() - 5;
-                if (!std::isfinite(total) || total <= 160) return;
-                auto const current = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->column_a.ActualWidth()
-                    : h->row_a.ActualHeight();
-                auto const change = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? args.HorizontalChange()
-                    : args.VerticalChange();
-                if (!std::isfinite(current) || !std::isfinite(change)) return;
-                auto const next = std::clamp(current + change, 80.0, total - 80);
-                if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
-                    h->column_a.Width({next, GridUnitType::Star});
-                    h->column_b.Width({total - next, GridUnitType::Star});
-                } else {
-                    h->row_a.Height({next, GridUnitType::Star});
-                    h->row_b.Height({total - next, GridUnitType::Star});
-                }
-            });
-            h->completed = h->thumb.DragCompleted(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
-                auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->grid.ActualWidth() - 5
-                    : h->grid.ActualHeight() - 5;
-                if (!std::isfinite(total) || total <= 0) return;
-                if (args.Canceled()) {
-                    auto const first = total * h->committed / 65535.0;
+            if(n.kind==ZIGONAUT_LAYOUT_LEAF){
+                auto existing = pane_hosts.find(n.id);
+                if (existing != pane_hosts.end()) return existing->second->frame;
+                auto p=makePane(n.id,attachments.at(n.id)); auto visual=p->frame; pane_hosts.emplace(n.id,std::move(p)); return visual;
+            }
+            auto existing = split_hosts.find(n.id);
+            SplitHost* h{};
+            if (existing != split_hosts.end()) {
+                h = existing->second.get();
+            } else {
+                auto s = std::make_unique<SplitHost>();
+                h = s.get();
+                h->id = n.id;
+                h->axis = n.axis;
+                h->grid = Grid{};
+                h->thumb = Microsoft::UI::Xaml::Controls::Primitives::Thumb{};
+                h->cursor = Microsoft::UI::Input::InputSystemCursor::Create(
+                    n.axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? Microsoft::UI::Input::InputSystemCursorShape::SizeWestEast
+                        : Microsoft::UI::Input::InputSystemCursorShape::SizeNorthSouth);
+                h->thumb.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+                h->loaded = h->thumb.Loaded(auto_revoke, [h](auto&&, auto&&) {
+                    h->thumb.as<IUIElementProtected>().ProtectedCursor(h->cursor);
+                    h->loaded.revoke();
+                });
+                h->divider = Border{};
+                h->divider.Background(application.Resources()
+                    .Lookup(box_value(L"DividerStrokeColorDefaultBrush"))
+                    .as<Microsoft::UI::Xaml::Media::Brush>());
+                if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};auto gap=ColumnDefinition{};gap.Width({5,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);h->thumb.Width(16);h->thumb.HorizontalAlignment(HorizontalAlignment::Center);}else{h->row_a=RowDefinition{};auto gap=RowDefinition{};gap.Height({5,GridUnitType::Pixel});h->row_b=RowDefinition{};h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);h->thumb.Height(16);h->thumb.VerticalAlignment(VerticalAlignment::Center);}
+                h->delta = h->thumb.DragDelta(auto_revoke, [h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragDeltaEventArgs const& args) {
+                    auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->grid.ActualWidth() - 5
+                        : h->grid.ActualHeight() - 5;
+                    if (!std::isfinite(total) || total <= 160) return;
+                    auto const current = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->column_a.ActualWidth()
+                        : h->row_a.ActualHeight();
+                    auto const change = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? args.HorizontalChange()
+                        : args.VerticalChange();
+                    if (!std::isfinite(current) || !std::isfinite(change)) return;
+                    auto const next = std::clamp(current + change, 80.0, total - 80);
                     if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
-                        h->column_a.Width({first, GridUnitType::Star});
-                        h->column_b.Width({total - first, GridUnitType::Star});
+                        h->column_a.Width({next, GridUnitType::Star});
+                        h->column_b.Width({total - next, GridUnitType::Star});
                     } else {
-                        h->row_a.Height({first, GridUnitType::Star});
-                        h->row_b.Height({total - first, GridUnitType::Star});
+                        h->row_a.Height({next, GridUnitType::Star});
+                        h->row_b.Height({total - next, GridUnitType::Star});
                     }
-                    return;
-                }
-                auto const first = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->column_a.ActualWidth()
-                    : h->row_a.ActualHeight();
-                if (!std::isfinite(first)) return;
-                h->committed = static_cast<uint16_t>(std::clamp(
-                    std::lround(first / total * 65535), 1l, 65534l));
-                paneEvent(ZIGONAUT_PANE_EVENT_COMMITTED_RATIO, h->id, h->committed);
-            });
-            auto visual=h->grid;split_hosts.push_back(std::move(s));return visual;
+                });
+                h->completed = h->thumb.DragCompleted(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
+                    auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->grid.ActualWidth() - 5
+                        : h->grid.ActualHeight() - 5;
+                    if (!std::isfinite(total) || total <= 0) return;
+                    if (args.Canceled()) {
+                        auto const first = total * h->committed / 65535.0;
+                        if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
+                            h->column_a.Width({first, GridUnitType::Star});
+                            h->column_b.Width({total - first, GridUnitType::Star});
+                        } else {
+                            h->row_a.Height({first, GridUnitType::Star});
+                            h->row_b.Height({total - first, GridUnitType::Star});
+                        }
+                        return;
+                    }
+                    auto const first = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->column_a.ActualWidth()
+                        : h->row_a.ActualHeight();
+                    if (!std::isfinite(first)) return;
+                    h->committed = static_cast<uint16_t>(std::clamp(
+                        std::lround(first / total * 65535), 1l, 65534l));
+                    paneEvent(ZIGONAUT_PANE_EVENT_COMMITTED_RATIO, h->id, h->committed);
+                });
+                split_hosts.emplace(n.id, std::move(s));
+            }
+            h->committed = static_cast<uint16_t>(n.ratio);
+            auto first=build(i+1); auto right=i+1+nodes[i+1].subtree_size; auto second=build(right); double a=n.ratio, b=65535-n.ratio;
+            if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a.Width({a,GridUnitType::Star});h->column_b.Width({b,GridUnitType::Star});Grid::SetColumn(first,0);Grid::SetColumn(h->divider,1);Grid::SetColumn(h->thumb,1);Grid::SetColumn(second,2);}else{h->row_a.Height({a,GridUnitType::Star});h->row_b.Height({b,GridUnitType::Star});Grid::SetRow(first,0);Grid::SetRow(h->divider,1);Grid::SetRow(h->thumb,1);Grid::SetRow(second,2);}
+            h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(h->divider);h->grid.Children().Append(h->thumb);
+            return h->grid;
         };
         content_root.Children().Append(build(0)); active_pane=focused; root.UpdateLayout(); layoutTerminal();
         if (auto requested=pane_hosts.find(focused); requested!=pane_hosts.end()) requested->second->input.Focus(FocusState::Programmatic);

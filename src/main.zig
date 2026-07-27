@@ -141,7 +141,6 @@ const Application = struct {
     }
 
     fn syncPresentation(self: *Application) !void {
-        try self.detachPresentation();
         const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
         const model_layout = try self.model.activeLayout(std.heap.page_allocator);
         defer std.heap.page_allocator.free(model_layout);
@@ -152,8 +151,10 @@ const Application = struct {
         for (model_layout, 0..) |item, index| switch (item) {
             .leaf => |leaf| {
                 const view = try self.ensureView(leaf.id);
-                if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain())) return error.AttachPaneFailed;
-                self.attached_panes.appendAssumeCapacity(leaf.id);
+                if (!self.isAttached(leaf.id)) {
+                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain())) return error.AttachPaneFailed;
+                    self.attached_panes.appendAssumeCapacity(leaf.id);
+                }
                 layout[index] = .{
                     .size = @sizeOf(chrome.LayoutNode),
                     .kind = chrome.layout_leaf,
@@ -179,6 +180,23 @@ const Application = struct {
         };
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
+        var attached_index = self.attached_panes.items.len;
+        while (attached_index != 0) {
+            attached_index -= 1;
+            const id = self.attached_panes.items[attached_index];
+            var present = false;
+            for (model_layout) |item| switch (item) {
+                .leaf => |leaf| if (leaf.id == id) {
+                    present = true;
+                    break;
+                },
+                else => {},
+            };
+            if (!present) {
+                if (!bridge.detachPane(id)) return error.DetachPaneFailed;
+                _ = self.attached_panes.swapRemove(attached_index);
+            }
+        }
         _ = bridge.focusPane(focused);
     }
 
