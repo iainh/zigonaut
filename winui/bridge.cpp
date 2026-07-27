@@ -146,7 +146,6 @@ struct Bridge {
     Grid content_root{nullptr};
     TabView tabs{nullptr};
     Button new_tab_button{nullptr};
-    Grid title_bar_drag_region{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
@@ -234,8 +233,9 @@ struct Bridge {
 
         tabs.IsAddTabButtonVisible(false);
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
+        tabs.HorizontalContentAlignment(HorizontalAlignment::Stretch);
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
+        tabs.TabWidthMode(TabViewWidthMode::Equal);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_button = Button{};
@@ -306,22 +306,8 @@ struct Bridge {
         new_tab_button.ContextFlyout(new_tab_menu);
 
         auto title_bar_content = Grid{};
-        auto tabs_column = ColumnDefinition{};
-        tabs_column.Width(GridLength{1, GridUnitType::Auto});
-        title_bar_content.ColumnDefinitions().Append(tabs_column);
-        auto drag_column = ColumnDefinition{};
-        drag_column.Width(GridLength{1, GridUnitType::Star});
-        title_bar_content.ColumnDefinitions().Append(drag_column);
         tabs.HorizontalAlignment(HorizontalAlignment::Left);
-        Grid::SetColumn(tabs, 0);
         title_bar_content.Children().Append(tabs);
-        title_bar_drag_region = Grid{};
-        title_bar_drag_region.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        Grid::SetColumn(title_bar_drag_region, 1);
-        TitleBar::SetIsDragRegion(
-            title_bar_drag_region,
-            box_value(true).as<Windows::Foundation::IReference<bool>>());
-        title_bar_content.Children().Append(title_bar_drag_region);
 
         app_title_bar.LeftHeader(menu_button);
         app_title_bar.Content(title_bar_content);
@@ -1010,7 +996,6 @@ struct Bridge {
             if (i == items.Size()) {
                 auto item = TabViewItem{};
                 item.Header(box_value(title));
-                item.MaxWidth(240);
                 item.IsClosable(true);
                 ToolTipService::SetToolTip(item, item.Header());
                 items.Append(item);
@@ -1103,7 +1088,6 @@ struct Bridge {
         app_menu = nullptr;
         cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
         new_tab_button = nullptr;
-        title_bar_drag_region = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach title bar content", [&] {
             app_title_bar.LeftHeader(nullptr);

@@ -26,6 +26,9 @@
 
             <HorizontalAlignment x:Key="TitleBarContentHorizontalAlignment">Stretch</HorizontalAlignment>
             <VerticalAlignment x:Key="TitleBarContentVerticalAlignment">Bottom</VerticalAlignment>
+            <x:Double x:Key="TitleBarMinDragRegionWidth">46</x:Double>
+            <Thickness x:Key="TabViewHeaderPadding">0</Thickness>
+            <Thickness x:Key="TabViewItemBorderThickness">1,1,1,0</Thickness>
 
             <Style x:Key="ZigonautTitleBarButtonStyle"
                    TargetType="Button"
