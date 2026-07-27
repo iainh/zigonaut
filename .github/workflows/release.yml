@@ -10,12 +10,17 @@ on:
         description: Version to build and smoke-test (without a leading v)
         required: true
         type: string
+      create_release:
+        description: Create or update the draft release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -27,6 +32,8 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
 
       - name: Match tag, package, and manifest versions
         id: version
@@ -64,10 +71,52 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
+  prepare_release:
+    name: Prepare draft GitHub release
+    if: github.event_name == 'push' || inputs.create_release
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or reuse draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if is_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+
+          args=(
+            "$RELEASE_TAG"
+            --verify-tag
+            --draft
+            --generate-notes
+            --title "Zigonaut $VERSION"
+          )
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+
   build:
     name: Package Windows (${{ matrix.package_arch }})
-    needs: validate
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.prepare_release.result == 'success' || needs.prepare_release.result == 'skipped')
+    needs: [validate, prepare_release]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +132,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
@@ -175,48 +226,12 @@ jobs:
           }
           taskkill /PID $process.Id /T /F | Out-Null
 
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: zigonaut-windows-${{ matrix.package_arch }}
-          path: |
-            dist/*.zip
-            dist/*.sha256
-          if-no-files-found: error
-          retention-days: 1
-
-  release:
-    name: Create draft GitHub release
-    if: github.event_name == 'push'
-    needs: [validate, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download tested packages
-        uses: actions/download-artifact@v5
-        with:
-          pattern: zigonaut-windows-*
-          path: dist
-          merge-multiple: true
-
-      - name: Create draft release
+      - name: Upload tested package to draft release
+        if: github.event_name == 'push' || inputs.create_release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-          VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          args=(
-            "$RELEASE_TAG"
-            dist/*
-            --verify-tag
-            --draft
-            --generate-notes
-            --title "Zigonaut $VERSION"
-          )
-          if [[ "$VERSION" == *-* ]]; then
-            args+=(--prerelease)
-          fi
-          gh release create "${args[@]}"
+          gh release upload "$RELEASE_TAG" dist/* --clobber
