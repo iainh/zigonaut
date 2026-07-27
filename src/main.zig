@@ -380,16 +380,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     },
                     chrome.pane_committed_ratio => {
                         if (current.value == 0 or current.value >= 65535) continue;
-                        const layout = self.model.activeLayout(std.heap.page_allocator) catch continue;
-                        defer std.heap.page_allocator.free(layout);
-                        var valid = false;
-                        for (layout) |item| switch (item) {
-                            .split => |split| if (split.id == current.target_id) {
-                                valid = true;
-                            },
-                            else => {},
-                        };
-                        if (valid) _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
+                        _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
                     },
                     else => {},
                 }

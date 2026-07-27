@@ -712,8 +712,25 @@ struct Bridge {
                         ? h->column_a.ActualWidth()
                         : h->row_a.ActualHeight();
                     if (!std::isfinite(first)) return;
-                    h->committed = static_cast<uint16_t>(std::clamp(
+                    auto const proposed = static_cast<uint16_t>(std::clamp(
                         std::lround(first / total * 65535), 1l, 65534l));
+                    auto const rounding_tolerance = static_cast<uint16_t>(std::min(
+                        std::ceil(0.5 / total * 65535), 65535.0));
+                    auto const difference = proposed > h->committed
+                        ? proposed - h->committed
+                        : h->committed - proposed;
+                    if (difference <= rounding_tolerance) {
+                        auto const committed = total * h->committed / 65535.0;
+                        if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
+                            h->column_a.Width({committed, GridUnitType::Star});
+                            h->column_b.Width({total - committed, GridUnitType::Star});
+                        } else {
+                            h->row_a.Height({committed, GridUnitType::Star});
+                            h->row_b.Height({total - committed, GridUnitType::Star});
+                        }
+                        return;
+                    }
+                    h->committed = proposed;
                     paneEvent(ZIGONAUT_PANE_EVENT_COMMITTED_RATIO, h->id, h->committed);
                 });
                 split_hosts.emplace(n.id, std::move(s));
