@@ -125,6 +125,8 @@ struct Bridge {
         uint64_t id{}; uint32_t axis{}; uint16_t committed{}; Grid grid{nullptr};
         RowDefinition row_a{nullptr}, row_b{nullptr}; ColumnDefinition column_a{nullptr}, column_b{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb thumb{nullptr};
+        Microsoft::UI::Input::InputCursor cursor{nullptr};
+        FrameworkElement::Loaded_revoker loaded{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragDelta_revoker delta{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragCompleted_revoker completed{};
     };
@@ -592,16 +594,26 @@ struct Bridge {
             h->committed = static_cast<uint16_t>(n.ratio);
             h->grid = Grid{};
             h->thumb = Microsoft::UI::Xaml::Controls::Primitives::Thumb{};
-            h->thumb.Background(application.Resources()
+            h->cursor = Microsoft::UI::Input::InputSystemCursor::Create(
+                n.axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                    ? Microsoft::UI::Input::InputSystemCursorShape::SizeWestEast
+                    : Microsoft::UI::Input::InputSystemCursorShape::SizeNorthSouth);
+            h->thumb.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+            h->loaded = h->thumb.Loaded(auto_revoke, [h](auto&&, auto&&) {
+                h->thumb.as<IUIElementProtected>().ProtectedCursor(h->cursor);
+                h->loaded.revoke();
+            });
+            auto divider = Border{};
+            divider.Background(application.Resources()
                 .Lookup(box_value(L"DividerStrokeColorDefaultBrush"))
                 .as<Microsoft::UI::Xaml::Media::Brush>());
             auto first=build(i+1); auto right=i+1+nodes[i+1].subtree_size; auto second=build(right); double a=n.ratio, b=65535-n.ratio;
-            if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};h->column_a.Width({a,GridUnitType::Star});auto gap=ColumnDefinition{};gap.Width({7,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->column_b.Width({b,GridUnitType::Star});h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);Grid::SetColumn(first,0);Grid::SetColumn(h->thumb,1);Grid::SetColumn(second,2);}else{h->row_a=RowDefinition{};h->row_a.Height({a,GridUnitType::Star});auto gap=RowDefinition{};gap.Height({7,GridUnitType::Pixel});h->row_b=RowDefinition{};h->row_b.Height({b,GridUnitType::Star});h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);Grid::SetRow(first,0);Grid::SetRow(h->thumb,1);Grid::SetRow(second,2);}
-            h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(h->thumb);
+            if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};h->column_a.Width({a,GridUnitType::Star});auto gap=ColumnDefinition{};gap.Width({5,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->column_b.Width({b,GridUnitType::Star});h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);h->thumb.Width(16);h->thumb.HorizontalAlignment(HorizontalAlignment::Center);Grid::SetColumn(first,0);Grid::SetColumn(divider,1);Grid::SetColumn(h->thumb,1);Grid::SetColumn(second,2);}else{h->row_a=RowDefinition{};h->row_a.Height({a,GridUnitType::Star});auto gap=RowDefinition{};gap.Height({5,GridUnitType::Pixel});h->row_b=RowDefinition{};h->row_b.Height({b,GridUnitType::Star});h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);h->thumb.Height(16);h->thumb.VerticalAlignment(VerticalAlignment::Center);Grid::SetRow(first,0);Grid::SetRow(divider,1);Grid::SetRow(h->thumb,1);Grid::SetRow(second,2);}
+            h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(divider);h->grid.Children().Append(h->thumb);
             h->delta = h->thumb.DragDelta(auto_revoke, [h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragDeltaEventArgs const& args) {
                 auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->grid.ActualWidth() - 7
-                    : h->grid.ActualHeight() - 7;
+                    ? h->grid.ActualWidth() - 5
+                    : h->grid.ActualHeight() - 5;
                 if (!std::isfinite(total) || total <= 160) return;
                 auto const current = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                     ? h->column_a.ActualWidth()
@@ -621,8 +633,8 @@ struct Bridge {
             });
             h->completed = h->thumb.DragCompleted(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
                 auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
-                    ? h->grid.ActualWidth() - 7
-                    : h->grid.ActualHeight() - 7;
+                    ? h->grid.ActualWidth() - 5
+                    : h->grid.ActualHeight() - 5;
                 if (!std::isfinite(total) || total <= 0) return;
                 if (args.Canceled()) {
                     auto const first = total * h->committed / 65535.0;
