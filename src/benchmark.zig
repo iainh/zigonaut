@@ -80,7 +80,6 @@ pub fn main() !void {
     const layout_cache_ns = timer.lap();
     const progress_bytewise_ns = benchmarkProgressParser(false);
     const progress_fast_ns = benchmarkProgressParser(true);
-    const search_copy = try benchmarkSearchSnapshotCopy();
     const search_highlight = try benchmarkSearchHighlight();
 
     std.debug.print(
@@ -91,8 +90,7 @@ pub fn main() !void {
             "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n" ++
             "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n" ++
-            "output metadata scan: bytewise {d:.2} ms; skip plain text {d:.2} ms ({d:.2}% faster)\n" ++
-            "unchanged search snapshot: copy every frame {d:.2} ms; generation cache {d:.2} ms ({d:.2}% faster)\n",
+            "output metadata scan: bytewise {d:.2} ms; skip plain text {d:.2} ms ({d:.2}% faster)\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -123,9 +121,6 @@ pub fn main() !void {
             milliseconds(progress_bytewise_ns),
             milliseconds(progress_fast_ns),
             improvement(progress_bytewise_ns, progress_fast_ns),
-            milliseconds(search_copy.uncached_ns),
-            milliseconds(search_copy.cached_ns),
-            improvement(search_copy.uncached_ns, search_copy.cached_ns),
         },
     );
     std.debug.print(
@@ -166,36 +161,6 @@ fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64, curso
     }
     std.mem.doNotOptimizeAway(checksum);
     return .{ .per_cell_ns = per_cell_ns, .per_row_ns = per_row_ns, .cursor_ns = timer.lap() };
-}
-
-fn benchmarkSearchSnapshotCopy() !struct { uncached_ns: u64, cached_ns: u64 } {
-    const iterations = 20_000;
-    var source = std.ArrayList(SearchMatch).empty;
-    defer source.deinit(std.heap.page_allocator);
-    try source.resize(std.heap.page_allocator, 4096);
-    for (source.items, 0..) |*match, index| match.* = .{ .row = @intCast(index), .start = 1, .end = 8 };
-    var destination = std.ArrayList(SearchMatch).empty;
-    defer destination.deinit(std.heap.page_allocator);
-    try destination.ensureTotalCapacity(std.heap.page_allocator, source.items.len);
-
-    var timer = try std.time.Timer.start();
-    for (0..iterations) |_| {
-        destination.clearRetainingCapacity();
-        destination.appendSliceAssumeCapacity(source.items);
-        std.mem.doNotOptimizeAway(destination.items.ptr);
-    }
-    const uncached_ns = timer.lap();
-    var copied_generation: u64 = 0;
-    const source_generation: u64 = 0;
-    for (0..iterations) |_| {
-        if (copied_generation != source_generation) {
-            destination.clearRetainingCapacity();
-            destination.appendSliceAssumeCapacity(source.items);
-            copied_generation = source_generation;
-        }
-        std.mem.doNotOptimizeAway(destination.items.ptr);
-    }
-    return .{ .uncached_ns = uncached_ns, .cached_ns = timer.lap() };
 }
 
 fn benchmarkProgressParser(fast: bool) u64 {
