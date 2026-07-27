@@ -59,6 +59,13 @@ struct NotificationActivationState {
     hstring nonce;
 };
 
+struct Bridge;
+
+struct LayoutDispatchState {
+    std::atomic_bool active{true};
+    Bridge* bridge{};
+};
+
 HRESULT reportFailure(wchar_t const* operation, HRESULT result) noexcept {
     wchar_t message[160]{};
     swprintf_s(message, L"Zigonaut WinUI: %s failed with HRESULT 0x%08X\n", operation, static_cast<unsigned>(result));
@@ -179,6 +186,7 @@ struct Bridge {
     bool handlers_detached = false;
     bool updating = false;
     bool appearance_initialized = false;
+    bool layout_pending = false;
     uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
     bool high_contrast = false;
     bool dark_theme = false;
@@ -192,6 +200,7 @@ struct Bridge {
     AppNotificationManager::NotificationInvoked_revoker notification_revoker{};
     bool notifications_registered = false;
     std::shared_ptr<NotificationActivationState> notification_activation;
+    std::shared_ptr<LayoutDispatchState> layout_dispatch = std::make_shared<LayoutDispatchState>();
     hstring app_version;
     hstring git_hash;
 
@@ -199,6 +208,7 @@ struct Bridge {
            std::string_view version, std::string_view hash)
         : callback(cb), pane_callback(pcb), context(ctx), application(app),
           app_version(to_hstring(version)), git_hash(to_hstring(hash)) {
+        layout_dispatch->bridge = this;
         window = Window{};
         window.Title(L"Zigonaut");
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&parent));
@@ -347,7 +357,7 @@ struct Bridge {
         window.SystemBackdrop(backdrop);
         enableTitleBar();
         layout_revoker = root.LayoutUpdated(auto_revoke, [this](auto&&, auto&&) {
-            layoutTerminal();
+            scheduleLayoutTerminal();
             updateTitleBarLayout();
         });
         window_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
@@ -772,7 +782,23 @@ struct Bridge {
         if (active != pane_hosts.end()) active->second->input.Focus(FocusState::Programmatic);
     }
 
+    void scheduleLayoutTerminal() {
+        if (closed || layout_pending) return;
+        layout_pending = true;
+        auto const state = layout_dispatch;
+        if (!notification_activation->queue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low, [state] {
+                if (!state->active.load(std::memory_order_acquire)) return;
+                auto* bridge = state->bridge;
+                if (!bridge->layout_pending) return;
+                bridge->layout_pending = false;
+                bridge->layoutTerminal();
+            })) {
+            layout_pending = false;
+        }
+    }
+
     void layoutTerminal() {
+        layout_pending = false;
         for (auto& [_, owned] : pane_hosts) {
             auto& p=*owned; if(!p.window || !IsWindow(p.window) || !p.panel.XamlRoot()) continue;
             auto o=p.panel.TransformToVisual(root).TransformPoint({0,0}); RECT n{(LONG)std::lround(o.X*rasterization_scale),(LONG)std::lround(o.Y*rasterization_scale),(LONG)std::lround((o.X+p.panel.ActualWidth())*rasterization_scale),(LONG)std::lround((o.Y+p.panel.ActualHeight())*rasterization_scale)};
@@ -1118,6 +1144,7 @@ struct Bridge {
     HRESULT close() noexcept {
         if (closed) return S_OK;
         closed = true;
+        layout_dispatch->active.store(false, std::memory_order_release);
         notification_activation->active.store(false, std::memory_order_release);
         callback = nullptr;
         pane_callback = nullptr;
