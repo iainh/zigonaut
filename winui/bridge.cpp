@@ -142,7 +142,7 @@ struct Bridge {
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     Grid root{nullptr};
-    TitleBar app_title_bar{nullptr};
+    Grid app_title_bar{nullptr};
     Grid content_root{nullptr};
     TabView tabs{nullptr};
     StackPanel new_tab_controls{nullptr};
@@ -224,7 +224,8 @@ struct Bridge {
         content_row.Height(GridLength{1, GridUnitType::Star});
         root.RowDefinitions().Append(content_row);
 
-        app_title_bar = TitleBar{};
+        app_title_bar = Grid{};
+        app_title_bar.Height(48);
         Grid::SetRow(app_title_bar, 0);
         content_root = Grid{};
         Grid::SetRow(content_root, 1);
@@ -286,8 +287,9 @@ struct Bridge {
         menu_button = Button{};
         menu_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
-        menu_button.VerticalAlignment(VerticalAlignment::Center);
-        menu_button.Margin(Thickness{4});
+        menu_button.VerticalAlignment(VerticalAlignment::Bottom);
+        menu_button.VerticalContentAlignment(VerticalAlignment::Center);
+        menu_button.Margin(Thickness{4, 0, 0, 8});
         auto const menu_icon = FontIcon{};
         menu_icon.Glyph(L"\xE700");
         menu_icon.FontSize(12);
@@ -328,12 +330,10 @@ struct Bridge {
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         profile_button.Flyout(new_tab_menu);
 
-        auto title_bar_content = Grid{};
         tabs.HorizontalAlignment(HorizontalAlignment::Left);
-        title_bar_content.Children().Append(tabs);
-
-        app_title_bar.LeftHeader(menu_button);
-        app_title_bar.Content(title_bar_content);
+        tabs.Margin(Thickness{40, 0, 0, 0});
+        app_title_bar.Children().Append(tabs);
+        app_title_bar.Children().Append(menu_button);
         root.Children().Append(content_root);
         root.Children().Append(app_title_bar);
         root.Children().Append(bottom_border);
@@ -347,6 +347,7 @@ struct Bridge {
         enableTitleBar();
         layout_revoker = root.LayoutUpdated(auto_revoke, [this](auto&&, auto&&) {
             layoutTerminal();
+            updateTitleBarLayout();
         });
         window_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_SHUTDOWN, 0);
@@ -417,6 +418,7 @@ struct Bridge {
                 .as<Windows::Foundation::IReference<Windows::UI::Color>>();
             title_bar.ButtonBackgroundColor(transparent);
             title_bar.ButtonInactiveBackgroundColor(transparent);
+            updateTitleBarLayout();
         } catch (...) {
             reportCurrentException(L"enable custom title bar");
         }
@@ -890,6 +892,19 @@ struct Bridge {
         schedulePaneScrollbarHide(pane);
     }
 
+    void updateTitleBarLayout() {
+        auto const dpi = GetDpiForWindow(parent);
+        if (!dpi) return;
+        auto const to_dips = [dpi](int32_t pixels) { return static_cast<double>(pixels) * 96.0 / dpi; };
+        auto const padding = Thickness{
+            to_dips(std::max(title_bar.LeftInset(), 0)),
+            0,
+            to_dips(std::max(title_bar.RightInset(), 0)),
+            0,
+        };
+        if (app_title_bar.Padding() != padding) app_title_bar.Padding(padding);
+    }
+
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
         if (appearance_initialized && kind == backdrop_kind &&
             high_contrast == this->high_contrast && dark_theme == this->dark_theme) return;
@@ -899,6 +914,10 @@ struct Bridge {
         this->dark_theme = dark_theme;
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
+        title_bar.PreferredTheme(high_contrast
+            ? Microsoft::UI::Windowing::TitleBarTheme::UseDefaultAppMode
+            : dark_theme ? Microsoft::UI::Windowing::TitleBarTheme::Dark
+                         : Microsoft::UI::Windowing::TitleBarTheme::Light);
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
             root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
         } else {
@@ -1019,6 +1038,7 @@ struct Bridge {
             if (i == items.Size()) {
                 auto item = TabViewItem{};
                 item.Header(box_value(title));
+                item.Height(40);
                 item.IsClosable(true);
                 ToolTipService::SetToolTip(item, item.Header());
                 items.Append(item);
@@ -1039,7 +1059,6 @@ struct Bridge {
         }
         if (changed) {
             tabs.UpdateLayout();
-            app_title_bar.RecomputeDragRegions();
         }
     }
 
@@ -1115,10 +1134,7 @@ struct Bridge {
         profile_button = nullptr;
         new_tab_controls = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
-        cleanup(L"detach title bar content", [&] {
-            app_title_bar.LeftHeader(nullptr);
-            app_title_bar.Content(nullptr);
-        }, result);
+        cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
         accelerators.clear();
         cleanup(L"detach pane swap chains", [&] { for(auto& [_,p]:pane_hosts){if(p->timer)p->timer.Stop();p->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);} }, result);
@@ -1190,7 +1206,6 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
                             bridge->terminal_loaded_revoker.revoke();
                             try {
                                 bridge->root.UpdateLayout();
-                                bridge->app_title_bar.RecomputeDragRegions();
                                 if (!started(context, bridge, bridge->parent)) {
                                     result = E_ABORT;
                                     bridge->window.Close();
