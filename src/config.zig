@@ -74,7 +74,7 @@ pub const default_contents =
     \\profile.PowerShell 7=powershell|pwsh.exe
     \\profile.Command Prompt=windows|cmd.exe
     \\profile.WSL=wsl|wsl.exe
-    \\# Working directory for new processes. Default: empty (inherit Zigonaut's).
+    \\# Working directory for new processes. Default: the user's home directory.
     \\working_directory=
     \\# Keep a new tab open after its process exits cleanly. Default: false.
     \\hold_on_exit=false

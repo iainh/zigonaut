@@ -111,7 +111,7 @@ profile.PowerShell=powershell|powershell.exe
 profile.PowerShell 7=powershell|pwsh.exe
 profile.Command Prompt=windows|cmd.exe
 profile.WSL=wsl|wsl.exe
-# Working directory for new processes. Default: empty (inherit Zigonaut's).
+# Working directory for new processes. Default: the user's home directory.
 working_directory=
 # Keep a new tab open after its process exits cleanly. Default: false.
 hold_on_exit=false
@@ -141,7 +141,7 @@ file paths are quoted. Add, remove, rename, or reorder profile entries to contro
 menu, and set `default_profile` to the name used for the initial tab and Ctrl+Shift+T. If that
 name does not exist, the first configured profile is used. Up to 32 profiles are supported.
 `working_directory` sets the current directory for new processes;
-leave it empty to inherit Zigonaut's directory. Set `hold_on_exit=true` to retain newly created
+leave it empty to use the current user's home directory. Set `hold_on_exit=true` to retain newly created
 tabs after a clean process exit. Reloading these settings affects subsequent sessions only.
 Use **Open Settings** and **Reload Settings** from the title-bar
 menu to edit and apply changes without restarting Zigonaut. Reloading also rebuilds the new-tab

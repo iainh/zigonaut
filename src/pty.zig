@@ -64,7 +64,13 @@ pub const Pty = struct {
         var process_info: win.PROCESS_INFORMATION = std.mem.zeroes(win.PROCESS_INFORMATION);
         const command_line = try std.unicode.utf8ToUtf16LeAllocZ(allocator, command);
         defer allocator.free(command_line);
-        const current_directory = if (working_directory.len == 0) null else try std.unicode.utf8ToUtf16LeAllocZ(allocator, working_directory);
+        const user_profile = if (working_directory.len == 0)
+            std.process.getEnvVarOwned(allocator, "USERPROFILE") catch null
+        else
+            null;
+        defer if (user_profile) |profile| allocator.free(profile);
+        const launch_directory = resolveWorkingDirectory(working_directory, user_profile orelse "");
+        const current_directory = if (launch_directory.len == 0) null else try std.unicode.utf8ToUtf16LeAllocZ(allocator, launch_directory);
         defer if (current_directory) |directory| allocator.free(directory);
 
         if (win.CreateProcessW(
@@ -152,4 +158,14 @@ fn windowsError() anyerror {
         win.ERROR_ACCESS_DENIED => error.AccessDenied,
         else => error.WindowsApiFailure,
     };
+}
+
+fn resolveWorkingDirectory(configured: []const u8, user_profile: []const u8) []const u8 {
+    return if (configured.len > 0) configured else user_profile;
+}
+
+test "empty working directory defaults to the user profile" {
+    try std.testing.expectEqualStrings("C:\\Users\\test", resolveWorkingDirectory("", "C:\\Users\\test"));
+    try std.testing.expectEqualStrings("C:\\work", resolveWorkingDirectory("C:\\work", "C:\\Users\\test"));
+    try std.testing.expectEqualStrings("", resolveWorkingDirectory("", ""));
 }
