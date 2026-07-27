@@ -145,7 +145,9 @@ struct Bridge {
     TitleBar app_title_bar{nullptr};
     Grid content_root{nullptr};
     TabView tabs{nullptr};
+    StackPanel new_tab_controls{nullptr};
     Button new_tab_button{nullptr};
+    Button profile_button{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
@@ -238,18 +240,35 @@ struct Bridge {
         tabs.TabWidthMode(TabViewWidthMode::Equal);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
+        new_tab_controls = StackPanel{};
+        new_tab_controls.Orientation(Orientation::Horizontal);
+        new_tab_controls.VerticalAlignment(VerticalAlignment::Center);
         new_tab_button = Button{};
         new_tab_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         new_tab_button.VerticalAlignment(VerticalAlignment::Center);
-        auto const new_tab_icon = SymbolIcon{Symbol::Add};
+        auto const new_tab_icon = FontIcon{};
+        new_tab_icon.Glyph(L"\xE710");
+        new_tab_icon.FontSize(12);
         new_tab_button.Content(new_tab_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
-        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T); right-click for profiles"));
+        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T)"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
             focusTerminal();
         });
-        tabs.TabStripFooter(new_tab_button);
+        profile_button = Button{};
+        profile_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
+        profile_button.VerticalAlignment(VerticalAlignment::Center);
+        auto const profile_icon = FontIcon{};
+        profile_icon.Glyph(L"\xE70D");
+        profile_icon.FontSize(12);
+        profile_button.Content(profile_icon);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(profile_button, L"New tab profile");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(profile_button, L"Choose a profile for the new tab");
+        ToolTipService::SetToolTip(profile_button, box_value(L"Choose a profile for the new tab"));
+        new_tab_controls.Children().Append(new_tab_button);
+        new_tab_controls.Children().Append(profile_button);
+        tabs.TabStripFooter(new_tab_controls);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
                 notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
@@ -268,7 +287,11 @@ struct Bridge {
         menu_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
         menu_button.VerticalAlignment(VerticalAlignment::Center);
-        menu_button.Content(SymbolIcon{Symbol::GlobalNavigationButton});
+        menu_button.Margin(Thickness{4});
+        auto const menu_icon = FontIcon{};
+        menu_icon.Glyph(L"\xE700");
+        menu_icon.FontSize(12);
+        menu_button.Content(menu_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
         ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
 
@@ -303,7 +326,7 @@ struct Bridge {
 
         new_tab_menu = MenuFlyout{};
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-        new_tab_button.ContextFlyout(new_tab_menu);
+        profile_button.Flyout(new_tab_menu);
 
         auto title_bar_content = Grid{};
         tabs.HorizontalAlignment(HorizontalAlignment::Left);
@@ -1075,7 +1098,7 @@ struct Bridge {
         window_closed_revoker.revoke();
         window_activated_revoker.revoke();
         handlers_detached = true;
-        cleanup(L"detach new-tab menu", [&] { new_tab_button.ContextFlyout(nullptr); }, result);
+        cleanup(L"detach new-tab menu", [&] { profile_button.Flyout(nullptr); }, result);
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         profile_items.clear();
         new_tab_menu = nullptr;
@@ -1086,8 +1109,11 @@ struct Bridge {
         about_item = nullptr;
         quit_item = nullptr;
         app_menu = nullptr;
-        cleanup(L"detach new-tab button", [&] { tabs.TabStripFooter(nullptr); }, result);
+        cleanup(L"detach new-tab controls", [&] { tabs.TabStripFooter(nullptr); }, result);
+        cleanup(L"clear new-tab controls", [&] { new_tab_controls.Children().Clear(); }, result);
         new_tab_button = nullptr;
+        profile_button = nullptr;
+        new_tab_controls = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"detach title bar content", [&] {
             app_title_bar.LeftHeader(nullptr);
