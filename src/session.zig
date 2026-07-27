@@ -443,10 +443,13 @@ pub const SessionRuntime = struct {
         notification.deinit(self.allocator);
     }
 
-    pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
+    pub fn copyTitle(self: *SessionRuntime, allocator: std.mem.Allocator, output: *std.ArrayList(u8)) !u64 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        return allocator.dupe(u8, self.title.items);
+        try output.ensureTotalCapacity(allocator, self.title.items.len);
+        output.clearRetainingCapacity();
+        output.appendSliceAssumeCapacity(self.title.items);
+        return self.title_generation.load(.monotonic);
     }
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
@@ -577,7 +580,7 @@ pub const SessionRuntime = struct {
     };
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
-    /// already holds `terminal_mutex`. Readers acquire that mutex in `titleAlloc`.
+    /// already holds `terminal_mutex`. Readers acquire that mutex in `copyTitle`.
     fn titleChanged(context: ?*anyopaque, title: []const u8) void {
         const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
         self.title.ensureTotalCapacity(self.allocator, title.len) catch return;
