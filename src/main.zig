@@ -3,6 +3,7 @@ const app_model = @import("app.zig");
 const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
+const pane_tree = @import("pane_tree.zig");
 const theme = @import("theme.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
@@ -140,44 +141,63 @@ const Application = struct {
         return std.mem.indexOfScalar(u64, self.attached_panes.items, id) != null;
     }
 
-    fn syncPresentation(self: *Application) !void {
-        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
-        const model_layout = try self.model.activeLayout(std.heap.page_allocator);
-        defer std.heap.page_allocator.free(model_layout);
-        var layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, model_layout.len);
-        defer std.heap.page_allocator.free(layout);
-        try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, model_layout.len);
-        errdefer self.detachPresentation() catch {};
-        for (model_layout, 0..) |item, index| switch (item) {
-            .leaf => |leaf| {
-                const view = try self.ensureView(leaf.id);
-                if (!self.isAttached(leaf.id)) {
-                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
-                    self.attached_panes.appendAssumeCapacity(leaf.id);
-                }
-                layout[index] = .{
-                    .size = @sizeOf(chrome.LayoutNode),
-                    .kind = chrome.layout_leaf,
-                    .id = leaf.id,
-                    .axis = 0,
-                    .ratio = 0,
-                    .subtree_size = 1,
-                    .reserved = 0,
-                };
-            },
-            .split => |split| layout[index] = .{
+    const PresentationWriter = struct {
+        application: *Application,
+        bridge: *chrome.Bridge,
+        output: []chrome.LayoutNode,
+        index: usize = 0,
+
+        pub fn leaf(self: *PresentationWriter, id: u64) !void {
+            const view = try self.application.ensureView(id);
+            if (!self.application.isAttached(id)) {
+                if (!self.bridge.attachPane(id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
+                self.application.attached_panes.appendAssumeCapacity(id);
+            }
+            self.output[self.index] = .{
+                .size = @sizeOf(chrome.LayoutNode),
+                .kind = chrome.layout_leaf,
+                .id = id,
+                .axis = 0,
+                .ratio = 0,
+                .subtree_size = 1,
+                .reserved = 0,
+            };
+            self.index += 1;
+        }
+
+        pub fn split(self: *PresentationWriter, id: u64, axis: pane_tree.Axis, ratio: u16) usize {
+            const index = self.index;
+            self.output[index] = .{
                 .size = @sizeOf(chrome.LayoutNode),
                 .kind = chrome.layout_split,
-                .id = split.id,
-                .axis = switch (split.axis) {
+                .id = id,
+                .axis = switch (axis) {
                     .left_right => chrome.axis_left_right,
                     .top_bottom => chrome.axis_top_bottom,
                 },
-                .ratio = split.ratio,
-                .subtree_size = split.subtree_size,
+                .ratio = ratio,
+                .subtree_size = 0,
                 .reserved = 0,
-            },
-        };
+            };
+            self.index += 1;
+            return index;
+        }
+
+        pub fn finishSplit(self: *PresentationWriter, index: usize, subtree_size: u32) void {
+            self.output[index].subtree_size = subtree_size;
+        }
+    };
+
+    fn syncPresentation(self: *Application) !void {
+        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+        const tab = self.model.activeTab() orelse return;
+        const node_count = tab.tree.nodeCount();
+        const layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, node_count);
+        defer std.heap.page_allocator.free(layout);
+        try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, node_count);
+        errdefer self.detachPresentation() catch {};
+        var writer = PresentationWriter{ .application = self, .bridge = bridge, .output = layout };
+        try tab.tree.writePreorder(&writer);
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
         var attached_index = self.attached_panes.items.len;
@@ -185,13 +205,12 @@ const Application = struct {
             attached_index -= 1;
             const id = self.attached_panes.items[attached_index];
             var present = false;
-            for (model_layout) |item| switch (item) {
-                .leaf => |leaf| if (leaf.id == id) {
+            for (layout) |item| {
+                if (item.kind == chrome.layout_leaf and item.id == id) {
                     present = true;
                     break;
-                },
-                else => {},
-            };
+                }
+            }
             if (!present) {
                 if (!bridge.detachPane(id)) return error.DetachPaneFailed;
                 _ = self.attached_panes.swapRemove(attached_index);

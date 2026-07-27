@@ -97,6 +97,16 @@ pub const Tree = struct {
         return items.toOwnedSlice(allocator);
     }
 
+    pub fn nodeCount(self: *const Tree) usize {
+        return if (self.root) |root| countNodes(root) else 0;
+    }
+
+    /// Emits nodes in preorder without allocating an intermediate `Item` list.
+    /// Writers fill a split slot first, then receive its completed subtree size.
+    pub fn writePreorder(self: *const Tree, writer: anytype) !void {
+        if (self.root) |root| _ = try writeNode(root, writer);
+    }
+
     pub fn close(self: *Tree, pane_id: PaneId) bool {
         if (findPane(self.root, pane_id) == null) return false;
         var previous: ?PaneId = null;
@@ -202,6 +212,28 @@ fn appendItems(node: *const Node, rect: Rect, items: *std.ArrayList(Item), alloc
     }
 }
 
+fn countNodes(node: *const Node) usize {
+    return switch (node.*) {
+        .leaf => 1,
+        .split => |split| 1 + countNodes(split.first) + countNodes(split.second),
+    };
+}
+
+fn writeNode(node: *const Node, writer: anytype) !u32 {
+    return switch (node.*) {
+        .leaf => |id| {
+            try writer.leaf(id);
+            return 1;
+        },
+        .split => |split| {
+            const index = writer.split(split.id, split.axis, split.ratio);
+            const subtree_size = 1 + try writeNode(split.first, writer) + try writeNode(split.second, writer);
+            writer.finishSplit(index, subtree_size);
+            return subtree_size;
+        },
+    };
+}
+
 fn neighbors(node: *const Node, target: PaneId, seen: *bool, previous: *?PaneId, next: *?PaneId) void {
     switch (node.*) {
         .split => |split| {
@@ -271,6 +303,7 @@ test "mixed splits, ratios, and preorder are structural" {
     try tree.split(10, 30, 101, .top_bottom);
     try tree.split(20, 40, 102, .top_bottom);
     try tree.setRatio(100, 40000);
+    try std.testing.expectEqual(@as(usize, 7), tree.nodeCount());
     const items = try tree.flatten(std.testing.allocator);
     defer std.testing.allocator.free(items);
     try std.testing.expectEqual(@as(usize, 7), items.len);
