@@ -1348,7 +1348,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_SIZE => {
-            if (view) |current| current.resizeSessions();
+            if (view) |current| {
+                current.resizeSessions();
+                current.invalidate();
+            }
             return 0;
         },
         win.WM_MOUSEWHEEL => {
