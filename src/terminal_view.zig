@@ -421,6 +421,13 @@ pub const View = struct {
         self.scrollViewport(delta);
     }
 
+    fn scrollToBottom(self: *View) void {
+        const state = self.scrollbar();
+        const bottom = state.total -| state.len;
+        if (state.offset >= bottom) return;
+        self.scrollViewport(@intCast(@min(bottom - state.offset, std.math.maxInt(isize))));
+    }
+
     pub fn handleMouseWheelDelta(self: *View, delta: i32) void {
         self.wheel_remainder += delta;
         const row_delta = @divTrunc(self.wheel_remainder, @divExact(win.WHEEL_DELTA, wheel_rows));
@@ -622,7 +629,10 @@ pub const View = struct {
             log.debug("unable to send terminal key: {}", .{err});
             return true;
         };
-        if (!released and encoded) self.input_state.suppressEncodedCharacter(event.key, event.unshifted_codepoint);
+        if (!released and encoded) {
+            self.input_state.suppressEncodedCharacter(event.key, event.unshifted_codepoint);
+            self.scrollToBottom();
+        }
         return true;
     }
 
@@ -737,7 +747,9 @@ pub const View = struct {
         }
         session.runtime.?.write(encoded) catch |err| {
             log.debug("unable to write terminal input: {}", .{err});
+            return;
         };
+        self.scrollToBottom();
     }
 
     fn beginSelection(self: *View, lparam: win.LPARAM) void {
@@ -1009,6 +1021,7 @@ pub const View = struct {
         defer std.heap.page_allocator.free(text);
         self.clearSelection();
         try runtime.paste(text);
+        if (text.len != 0) self.scrollToBottom();
     }
 
     fn pasteDroppedFiles(self: *View, drop: win.HDROP) !void {
@@ -1038,6 +1051,7 @@ pub const View = struct {
         if (command.items.len == 0) return;
         self.clearSelection();
         try runtime.paste(command.items);
+        self.scrollToBottom();
     }
 
     fn updateHoveredLink(self: *View, lparam: win.LPARAM) void {
