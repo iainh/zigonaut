@@ -1318,18 +1318,15 @@ const DirectWriteCellRenderer = struct {
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
-        self.engine.beginRow(
-            y,
-            @floatFromInt(self.origin_x),
-            @floatFromInt(self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height))),
-            @floatFromInt(self.view.cell_width),
-            @floatFromInt(self.view.cell_height),
-        );
+        // Keep glyph rendering on the per-cell path. The row batching path can
+        // drop a complete text segment while its cell backgrounds remain.
     }
 
     pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
+        if (cell.occupancy == .wide_tail) return;
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
+        const span: u32 = if (cell.occupancy == .wide) 2 else 1;
         const solid_cursor = self.view.focused and
             self.frame.?.cursor_visible and
             self.frame.?.cursor_style == .block and
@@ -1374,7 +1371,7 @@ const DirectWriteCellRenderer = struct {
             wide[0..length],
             @floatFromInt(left),
             @floatFromInt(top),
-            @floatFromInt(self.view.cell_width),
+            @floatFromInt(span * self.view.cell_width),
             @floatFromInt(self.view.cell_height),
             foreground,
             background,
@@ -1389,9 +1386,7 @@ const DirectWriteCellRenderer = struct {
         );
     }
 
-    pub fn endRow(self: *DirectWriteCellRenderer, _: u16) void {
-        self.engine.endRow();
-    }
+    pub fn endRow(_: *DirectWriteCellRenderer, _: u16) void {}
 
     pub fn drawImage(self: *DirectWriteCellRenderer, image: Terminal.Image) void {
         const cell_width: f32 = @floatFromInt(self.view.cell_width);

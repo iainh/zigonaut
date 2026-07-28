@@ -2107,6 +2107,103 @@ test "render state resolves ANSI colors through the Rasmus theme" {
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
 }
 
+test "background erase after soft wrap remains reflow content" {
+    var terminal = try Terminal.init(8, 3, theme.rasmus);
+    defer terminal.deinit();
+
+    terminal.feed("\x1b[41mabcdefghij\x1b[K\x1b[0m");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    for (snapshot.cells.items[8..16]) |cell| {
+        try std.testing.expectEqual(theme.rasmus.ansi[1], cell.background);
+    }
+    for (snapshot.cells.items[10..16]) |cell| {
+        try std.testing.expectEqual(@as(u8, 0), cell.codepoint_count);
+    }
+
+    try terminal.resize(12, 3, 9, 18);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    for (snapshot.cells.items[10..16]) |cell| {
+        try std.testing.expectEqual(theme.rasmus.ansi[1], cell.background);
+        try std.testing.expectEqual(@as(u8, 0), cell.codepoint_count);
+    }
+}
+
+test "ls background does not create blank cells across repeated reflow" {
+    var terminal = try Terminal.init(90, 12, theme.rasmus);
+    defer terminal.deinit();
+
+    for (0..40) |_| {
+        terminal.feed(
+            "drwxrwxrwx 2 iain iain 123456789 Jul 28 08:27 " ++
+                "\x1b[0m\x1b[30;42m" ++
+                "zig-x86_64-windows-0.10.1-backup-20240728-2" ++
+                "\x1b[0m\x1b[K\r\n",
+        );
+    }
+
+    for (0..4) |_| {
+        for ([_]u16{ 54, 74, 44, 79, 90 }) |columns| {
+            try terminal.resize(columns, 12, 9, 18);
+
+            var snapshot = Terminal.RenderSnapshot{};
+            defer snapshot.deinit(std.testing.allocator);
+            try snapshot.capture(std.testing.allocator, &terminal);
+            for (snapshot.cells.items, 0..) |cell, index| {
+                if (std.meta.eql(theme.rasmus.ansi[2], cell.background)) {
+                    try std.testing.expect(cell.codepoint_count != 0);
+                    const row = &snapshot.rows.items[index / snapshot.columns()];
+                    try std.testing.expect(cell.codepoints(row)[0] != ' ');
+                }
+            }
+        }
+    }
+}
+
+test "ls symlink target background does not create blank cells across reflow" {
+    var terminal = try Terminal.init(160, 12, theme.rasmus);
+    defer terminal.deinit();
+
+    for (0..20) |_| {
+        terminal.feed(
+            "lrwxrwxrwx 1 iain iain 69 Dec 16 2025 " ++
+                "\x1b[0m\x1b[01;36mNetHood\x1b[0m -> " ++
+                "\x1b[34;42m'/mnt/c/Users/Iain/AppData/Roaming/Microsoft/Windows/Network Shortcuts'" ++
+                "\x1b[0m\r\n",
+        );
+    }
+
+    for (0..4) |_| {
+        for ([_]struct { columns: u16, rows: u16 }{
+            .{ .columns = 96, .rows = 30 },
+            .{ .columns = 54, .rows = 12 },
+            .{ .columns = 120, .rows = 36 },
+            .{ .columns = 44, .rows = 11 },
+            .{ .columns = 160, .rows = 40 },
+        }) |size| {
+            try terminal.resize(size.columns, size.rows, 9, 18);
+
+            var snapshot = Terminal.RenderSnapshot{};
+            defer snapshot.deinit(std.testing.allocator);
+            try snapshot.capture(std.testing.allocator, &terminal);
+            for (snapshot.cells.items, 0..) |cell, index| {
+                if (std.meta.eql(theme.rasmus.ansi[2], cell.background)) {
+                    try std.testing.expect(cell.codepoint_count != 0);
+                    const row = &snapshot.rows.items[index / snapshot.columns()];
+                    if (cell.codepoints(row)[0] == ' ') {
+                        const x = index % snapshot.columns();
+                        try std.testing.expect(x > 0 and x + 1 < snapshot.columns());
+                        try std.testing.expectEqual(@as(u32, 'k'), snapshot.cells.items[index - 1].codepoints(row)[0]);
+                        try std.testing.expectEqual(@as(u32, 'S'), snapshot.cells.items[index + 1].codepoints(row)[0]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "render state exposes the requested cursor style" {
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
@@ -2274,6 +2371,35 @@ test "render snapshots preserve clean rows during incremental capture" {
     try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
 }
 
+test "incremental snapshots follow styled rows while the viewport scrolls" {
+    var terminal = try Terminal.init(72, 8, theme.rasmus);
+    defer terminal.deinit();
+
+    var incremental = Terminal.RenderSnapshot{};
+    defer incremental.deinit(std.testing.allocator);
+    try incremental.capture(std.testing.allocator, &terminal);
+
+    const command = "for i in {1..20}; do printf '\\033[34;42m''/mnt/c/Users/Iain/AppData/Roaming/Microsoft/Windows/Network Shortcuts''\\033[0m\\n'; done";
+    for (command) |byte| {
+        terminal.feed(&.{byte});
+        try incremental.capture(std.testing.allocator, &terminal);
+    }
+    terminal.feed("\r\n");
+
+    for (0..20) |_| {
+        terminal.feed(
+            "\x1b[34;42m'/mnt/c/Users/Iain/AppData/Roaming/Microsoft/Windows/Network Shortcuts'" ++
+                "\x1b[0m\r\n",
+        );
+        try incremental.capture(std.testing.allocator, &terminal);
+
+        var full = Terminal.RenderSnapshot{};
+        defer full.deinit(std.testing.allocator);
+        try full.capture(std.testing.allocator, &terminal);
+        try expectSnapshotsEqual(&full, &incremental);
+    }
+}
+
 test "repeated prompt reflow keeps incremental and full snapshots identical" {
     var terminal = try Terminal.init(52, 8, theme.rasmus);
     defer terminal.deinit();
@@ -2308,6 +2434,40 @@ test "repeated prompt reflow keeps incremental and full snapshots identical" {
     const viewport = try terminal.writeViewportText(&text);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, viewport, "iain@DESKTOP-2P0L7VP"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, viewport, "/mnt/c/Users/Iain/zigonaut"));
+}
+
+test "coalesced symlink reflow keeps incremental and full snapshots identical" {
+    var terminal = try Terminal.init(160, 30, theme.rasmus);
+    defer terminal.deinit();
+    for (0..20) |_| {
+        terminal.feed(
+            "lrwxrwxrwx 1 iain iain 69 Dec 16 2025 " ++
+                "\x1b[0m\x1b[01;36mNetHood\x1b[0m -> " ++
+                "\x1b[34;42m'/mnt/c/Users/Iain/AppData/Roaming/Microsoft/Windows/Network Shortcuts'" ++
+                "\x1b[0m\r\n",
+        );
+    }
+
+    var incremental = Terminal.RenderSnapshot{};
+    defer incremental.deinit(std.testing.allocator);
+    try incremental.capture(std.testing.allocator, &terminal);
+
+    // Window paints are coalesced, so multiple terminal resizes can happen
+    // before the next snapshot capture. Returning to the original dimensions
+    // must not make the stale snapshot eligible for incremental refresh.
+    for (0..8) |_| {
+        try terminal.resize(96, 24, 9, 18);
+        try terminal.resize(44, 11, 9, 18);
+        try terminal.resize(120, 36, 9, 18);
+        try terminal.resize(54, 12, 9, 18);
+        try terminal.resize(160, 30, 9, 18);
+    }
+    try incremental.capture(std.testing.allocator, &terminal);
+
+    var full = Terminal.RenderSnapshot{};
+    defer full.deinit(std.testing.allocator);
+    try full.capture(std.testing.allocator, &terminal);
+    try expectSnapshotsEqual(&full, &incremental);
 }
 
 test "incremental snapshots refresh cursor-only frame changes" {
