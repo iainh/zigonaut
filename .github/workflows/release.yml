@@ -185,6 +185,7 @@ jobs:
             'zigonaut.exe',
             'Zigonaut.WinUI.Bridge.dll',
             'Microsoft.WindowsAppRuntime.Bootstrap.dll',
+            'conpty.dll',
             'resources.pri',
             'zigonaut-about-1024.png'
           )
@@ -195,12 +196,24 @@ jobs:
             }
             Copy-Item $source $staging
           }
+          $conptyHost = Join-Path $env:GITHUB_WORKSPACE "zig-out\bin\$env:PACKAGE_ARCH\OpenConsole.exe"
+          if (-not (Test-Path $conptyHost -PathType Leaf)) {
+            throw "Release build did not produce $env:PACKAGE_ARCH\OpenConsole.exe."
+          }
+          Copy-Item (Split-Path $conptyHost -Parent) $staging -Recurse
+          if ($env:PACKAGE_ARCH -eq 'x64') {
+            $arm64Host = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\arm64'
+            if (Test-Path $arm64Host -PathType Container) {
+              Copy-Item $arm64Host $staging -Recurse
+            }
+          }
           $themes = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\themes'
           if (-not (Test-Path $themes -PathType Container)) {
             throw 'Release build did not produce the themes directory.'
           }
           Copy-Item $themes $staging -Recurse
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'README.md') $staging
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'licenses') $staging -Recurse
 
           $archive = Join-Path $dist "$name.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive

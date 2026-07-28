@@ -32,6 +32,15 @@ New-Item -ItemType Directory -Force $destination | Out-Null
 Copy-Item (Join-Path $output 'Zigonaut.WinUI.Bridge.dll') $destination -Force
 Copy-Item (Join-Path $output 'Microsoft.WindowsAppRuntime.Bootstrap.dll') $destination -Force
 Copy-Item (Join-Path $output 'Zigonaut.WinUI.Bridge.pri') (Join-Path $destination 'resources.pri') -Force
+Copy-Item (Join-Path $output 'conpty.dll') $destination -Force
+foreach ($hostArchitecture in @('x64', 'arm64')) {
+    $hostExecutable = Join-Path $output "$hostArchitecture\OpenConsole.exe"
+    if (Test-Path $hostExecutable -PathType Leaf) {
+        $hostDestination = Join-Path $destination $hostArchitecture
+        New-Item -ItemType Directory -Force $hostDestination | Out-Null
+        Copy-Item $hostExecutable $hostDestination -Force
+    }
+}
 $aboutIcon = if ($DebugIcon -or $Configuration -eq 'Debug') {
     'assets\icons\zigonaut-debug-master.png'
 } else {

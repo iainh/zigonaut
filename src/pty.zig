@@ -1,13 +1,79 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const win = @import("win32.zig").c;
 
+const log = std.log.scoped(.pty);
+
+const ConptyCreate = *const fn (win.COORD, win.HANDLE, win.HANDLE, win.DWORD, *win.HPCON) callconv(.winapi) win.HRESULT;
+const ConptyResize = *const fn (win.HPCON, win.COORD) callconv(.winapi) win.HRESULT;
+const ConptyRelease = *const fn (win.HPCON) callconv(.winapi) win.HRESULT;
+const ConptyClose = *const fn (win.HPCON) callconv(.winapi) void;
+
+const Conpty = struct {
+    module: win.HMODULE,
+    create: ConptyCreate,
+    resize: ConptyResize,
+    release: ConptyRelease,
+    close: ConptyClose,
+
+    fn load() !Conpty {
+        const host_architecture = switch (builtin.cpu.arch) {
+            .x86_64 => "x64",
+            .aarch64 => "arm64",
+            else => @compileError("side-by-side ConPTY supports only x86_64 and aarch64"),
+        };
+        const host_relative_path = switch (builtin.cpu.arch) {
+            .x86_64 => std.unicode.utf8ToUtf16LeStringLiteral("x64\\OpenConsole.exe"),
+            .aarch64 => std.unicode.utf8ToUtf16LeStringLiteral("arm64\\OpenConsole.exe"),
+            else => unreachable,
+        };
+
+        var host_path_buffer: [win.MAX_PATH]u16 = undefined;
+        const host_path = try applicationFilePath(&host_path_buffer, host_relative_path);
+        const host_attributes = win.GetFileAttributesW(host_path.ptr);
+        if (host_attributes == win.INVALID_FILE_ATTRIBUTES or host_attributes & win.FILE_ATTRIBUTE_DIRECTORY != 0) {
+            log.err("bundled ConPTY host is missing ({s}\\OpenConsole.exe beside zigonaut.exe)", .{host_architecture});
+            return error.ConptyHostNotFound;
+        }
+
+        var dll_path_buffer: [win.MAX_PATH]u16 = undefined;
+        const dll_path = try applicationFilePath(
+            &dll_path_buffer,
+            std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll"),
+        );
+        const module = win.LoadLibraryExW(
+            dll_path.ptr,
+            null,
+            win.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | win.LOAD_LIBRARY_SEARCH_APPLICATION_DIR | win.LOAD_LIBRARY_SEARCH_SYSTEM32,
+        ) orelse {
+            log.err("bundled conpty.dll could not be loaded from beside zigonaut.exe", .{});
+            return error.ConptyDllNotFound;
+        };
+        errdefer _ = win.FreeLibrary(module);
+
+        const create = symbol(ConptyCreate, module, "ConptyCreatePseudoConsole") orelse return missingExport();
+        const resize = symbol(ConptyResize, module, "ConptyResizePseudoConsole") orelse return missingExport();
+        const release = symbol(ConptyRelease, module, "ConptyReleasePseudoConsole") orelse return missingExport();
+        const close = symbol(ConptyClose, module, "ConptyClosePseudoConsole") orelse return missingExport();
+        return .{ .module = module, .create = create, .resize = resize, .release = release, .close = close };
+    }
+
+    fn unload(self: *const Conpty) void {
+        _ = win.FreeLibrary(self.module);
+    }
+};
+
 pub const Pty = struct {
+    conpty: Conpty,
     pseudo_console: win.HPCON,
     input: win.HANDLE,
     output: win.HANDLE,
     process: win.HANDLE,
 
     pub fn spawn(allocator: std.mem.Allocator, command: []const u8, working_directory: []const u8, columns: u16, rows: u16) !Pty {
+        const conpty = try Conpty.load();
+        errdefer conpty.unload();
+
         var input_read: win.HANDLE = null;
         var input_write: win.HANDLE = null;
         if (win.CreatePipe(&input_read, &input_write, null, 0) == 0) return windowsError();
@@ -26,10 +92,10 @@ pub const Pty = struct {
 
         var pseudo_console: win.HPCON = null;
         const size = win.COORD{ .X = @intCast(columns), .Y = @intCast(rows) };
-        if (win.CreatePseudoConsole(size, input_read, output_write, 0, &pseudo_console) < 0) {
+        if (conpty.create(size, input_read, output_write, 0, &pseudo_console) < 0) {
             return error.CreatePseudoConsoleFailed;
         }
-        errdefer win.ClosePseudoConsole(pseudo_console);
+        errdefer conpty.close(pseudo_console);
 
         _ = win.CloseHandle(input_read);
         input_read = null;
@@ -59,6 +125,7 @@ pub const Pty = struct {
 
         var startup: win.STARTUPINFOEXW = std.mem.zeroes(win.STARTUPINFOEXW);
         startup.StartupInfo.cb = @sizeOf(win.STARTUPINFOEXW);
+        startup.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES;
         startup.lpAttributeList = attribute_list;
 
         var process_info: win.PROCESS_INFORMATION = std.mem.zeroes(win.PROCESS_INFORMATION);
@@ -86,8 +153,14 @@ pub const Pty = struct {
             &process_info,
         ) == 0) return windowsError();
         _ = win.CloseHandle(process_info.hThread);
+        if (conpty.release(pseudo_console) < 0) {
+            _ = win.TerminateProcess(process_info.hProcess, 1);
+            _ = win.CloseHandle(process_info.hProcess);
+            return error.ReleasePseudoConsoleFailed;
+        }
 
         return .{
+            .conpty = conpty,
             .pseudo_console = pseudo_console,
             .input = input_write,
             .output = output_read,
@@ -97,7 +170,7 @@ pub const Pty = struct {
 
     pub fn resize(self: *Pty, columns: u16, rows: u16) !void {
         const size = win.COORD{ .X = @intCast(columns), .Y = @intCast(rows) };
-        if (win.ResizePseudoConsole(self.pseudo_console, size) < 0) return error.ResizePseudoConsoleFailed;
+        if (self.conpty.resize(self.pseudo_console, size) < 0) return error.ResizePseudoConsoleFailed;
     }
 
     pub fn read(self: *Pty, buffer: []u8) !usize {
@@ -140,7 +213,7 @@ pub const Pty = struct {
     }
 
     pub fn closeConsole(self: *Pty) void {
-        win.ClosePseudoConsole(self.pseudo_console);
+        self.conpty.close(self.pseudo_console);
 
         if (win.WaitForSingleObject(self.process, 2000) == win.WAIT_TIMEOUT) {
             _ = win.TerminateProcess(self.process, 1);
@@ -149,8 +222,31 @@ pub const Pty = struct {
 
     pub fn finishClose(self: *Pty) void {
         _ = win.CloseHandle(self.process);
+        self.conpty.unload();
     }
 };
+
+fn applicationFilePath(buffer: []u16, relative_path: []const u16) ![:0]u16 {
+    const path_length = win.GetModuleFileNameW(null, buffer.ptr, @intCast(buffer.len));
+    if (path_length == 0 or path_length >= buffer.len) return error.ApplicationPathUnavailable;
+    const directory_end = std.mem.lastIndexOfScalar(u16, buffer[0..path_length], '\\') orelse
+        return error.ApplicationPathUnavailable;
+    const result_length = directory_end + 1 + relative_path.len;
+    if (result_length >= buffer.len) return error.ApplicationPathTooLong;
+    @memcpy(buffer[directory_end + 1 .. result_length], relative_path);
+    buffer[result_length] = 0;
+    return buffer[0..result_length :0];
+}
+
+fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
+    const address = win.GetProcAddress(module, name) orelse return null;
+    return @ptrCast(address);
+}
+
+fn missingExport() error{ConptyExportNotFound} {
+    log.err("bundled conpty.dll does not provide the required ConPTY API", .{});
+    return error.ConptyExportNotFound;
+}
 
 fn windowsError() anyerror {
     return switch (win.GetLastError()) {

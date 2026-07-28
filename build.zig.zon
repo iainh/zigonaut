@@ -13,6 +13,7 @@
         "build.zig",
         "build.zig.zon",
         "CHANGELOG.md",
+        "licenses",
         "src",
         "winui",
         "zigonaut.manifest",

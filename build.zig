@@ -134,6 +134,25 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    const conpty_test = b.addExecutable(.{
+        .name = "conpty-resize-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/conpty_resize_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    conpty_test.linkLibC();
+    conpty_test.addIncludePath(b.path("src"));
+    conpty_test.root_module.addIncludePath(b.path("winui"));
+    conpty_test.linkSystemLibrary("kernel32");
+    const install_conpty_test = b.addInstallArtifact(conpty_test, .{});
+    const run_conpty_test = b.addSystemCommand(&.{b.getInstallPath(.bin, "conpty-resize-test.exe")});
+    run_conpty_test.step.dependOn(&install_conpty_test.step);
+    run_conpty_test.step.dependOn(winui_step);
+    const conpty_test_step = b.step("test-conpty", "Verify resize does not emit a synthetic ConPTY repaint");
+    conpty_test_step.dependOn(&run_conpty_test.step);
+
     const benchmark = b.addExecutable(.{
         .name = "zigonaut-benchmark",
         .root_module = b.createModule(.{
