@@ -371,7 +371,7 @@ struct Bridge {
         window.SetTitleBar(app_title_bar);
         title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
-        backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
+        backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::Base);
         window.SystemBackdrop(backdrop);
         enableTitleBar();
         layout_revoker = root.LayoutUpdated(auto_revoke, [this](auto&&, auto&&) {
@@ -1098,7 +1098,11 @@ struct Bridge {
             : dark_theme ? Microsoft::UI::Windowing::TitleBarTheme::Dark
                          : Microsoft::UI::Windowing::TitleBarTheme::Light);
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
-            root.Background(application.Resources().Lookup(box_value(L"TabViewBackground")).as<Microsoft::UI::Xaml::Media::Brush>());
+            auto const theme_key = high_contrast ? L"HighContrast" : dark_theme ? L"Dark" : L"Default";
+            auto const theme_resources = application.Resources().ThemeDictionaries()
+                .Lookup(box_value(theme_key)).as<ResourceDictionary>();
+            root.Background(theme_resources.Lookup(box_value(L"ZigonautWindowBackgroundBrush"))
+                .as<Microsoft::UI::Xaml::Media::Brush>());
         } else {
             root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         }
@@ -1111,7 +1115,9 @@ struct Bridge {
             return;
         }
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
-        backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt);
+        backdrop.Kind(backdrop_kind == ZIGONAUT_BACKDROP_MICA_ALT
+            ? Microsoft::UI::Composition::SystemBackdrops::MicaKind::BaseAlt
+            : Microsoft::UI::Composition::SystemBackdrops::MicaKind::Base);
         window.SystemBackdrop(backdrop);
     }
 
@@ -1518,7 +1524,7 @@ extern "C" HRESULT __cdecl zigonaut_chrome_show_notification(void* value, uint32
 extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
+    if (backdrop > ZIGONAUT_BACKDROP_MICA_ALT) return E_INVALIDARG;
     try { bridge->updateAppearance(backdrop, high_contrast != FALSE, dark_theme != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
 }
 

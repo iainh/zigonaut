@@ -648,12 +648,16 @@ pub const Terminal = struct {
     };
 
     pub fn init(columns: u16, rows: u16, terminal_theme: theme.Theme) !Terminal {
+        return initWithScrollback(columns, rows, terminal_theme, 10_000);
+    }
+
+    pub fn initWithScrollback(columns: u16, rows: u16, terminal_theme: theme.Theme, max_scrollback: u32) !Terminal {
         try installDecodePng();
         var terminal: vt.GhosttyTerminal = null;
         try check(vt.ghostty_terminal_new(null, &terminal, .{
             .cols = columns,
             .rows = rows,
-            .max_scrollback = 10_000,
+            .max_scrollback = max_scrollback,
         }));
         errdefer vt.ghostty_terminal_free(terminal);
         const image_limit: usize = kitty_image_limit;

@@ -88,6 +88,7 @@ typedef enum zigonaut_backdrop_kind {
     ZIGONAUT_BACKDROP_NONE = 0,
     ZIGONAUT_BACKDROP_MICA = 1,
     ZIGONAUT_BACKDROP_ACRYLIC = 2,
+    ZIGONAUT_BACKDROP_MICA_ALT = 3,
 } zigonaut_backdrop_kind;
 
 __declspec(dllexport) HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, zigonaut_chrome_command callback, zigonaut_pane_event_callback pane_callback, void* context, const char* version, uint32_t version_length, const char* git_hash, uint32_t git_hash_length) ZIGONAUT_NOEXCEPT;

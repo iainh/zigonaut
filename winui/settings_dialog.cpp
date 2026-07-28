@@ -7,6 +7,8 @@
 #include <winrt/Microsoft.UI.Windowing.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Text.h>
+#include <dwrite_1.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -180,6 +182,61 @@ ComboBox combo(std::string const& selected, std::initializer_list<std::wstring_v
     return result;
 }
 
+std::vector<std::wstring> monospaceFonts() {
+    std::vector<std::wstring> result;
+    com_ptr<IDWriteFactory> factory;
+    check_hresult(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(factory.put())));
+    com_ptr<IDWriteFontCollection> collection;
+    check_hresult(factory->GetSystemFontCollection(collection.put()));
+
+    for (UINT32 index = 0; index < collection->GetFontFamilyCount(); ++index) {
+        IDWriteFontFamily* family{};
+        if (FAILED(collection->GetFontFamily(index, &family))) continue;
+        IDWriteFont* font{};
+        auto const font_result = family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font);
+        if (FAILED(font_result)) { family->Release(); continue; }
+        IDWriteFont1* font1{};
+        auto const monospaced = SUCCEEDED(font->QueryInterface(&font1)) && font1->IsMonospacedFont();
+        if (font1) font1->Release();
+        font->Release();
+        if (!monospaced) { family->Release(); continue; }
+
+        IDWriteLocalizedStrings* names{};
+        if (SUCCEEDED(family->GetFamilyNames(&names))) {
+            UINT32 name_index{};
+            BOOL exists{};
+            if (FAILED(names->FindLocaleName(L"en-us", &name_index, &exists)) || !exists) name_index = 0;
+            UINT32 length{};
+            if (SUCCEEDED(names->GetStringLength(name_index, &length))) {
+                std::wstring name(length + 1, L'\0');
+                if (SUCCEEDED(names->GetString(name_index, name.data(), length + 1))) {
+                    name.resize(length);
+                    result.push_back(std::move(name));
+                }
+            }
+            names->Release();
+        }
+        family->Release();
+    }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+ComboBox fontCombo(std::string const& selected) {
+    auto result = ComboBox{};
+    result.HorizontalAlignment(HorizontalAlignment::Stretch);
+    auto choices = monospaceFonts();
+    auto const selected_name = to_hstring(selected);
+    if (std::find(choices.begin(), choices.end(), selected_name.c_str()) == choices.end()) choices.push_back(selected_name.c_str());
+    std::sort(choices.begin(), choices.end());
+    for (size_t index = 0; index < choices.size(); ++index) {
+        result.Items().Append(box_value(choices[index]));
+        if (choices[index] == selected_name.c_str()) result.SelectedIndex(static_cast<int32_t>(index));
+    }
+    return result;
+}
+
 ToggleSwitch toggle(std::string const& selected) {
     auto result = ToggleSwitch{};
     result.IsOn(selected == "true");
@@ -211,8 +268,9 @@ struct Dialog {
     std::function<void()> saved;
     bool open = true;
 
-    TextBox font_family{nullptr}, dark_theme{nullptr}, light_theme{nullptr};
-    NumberBox font_size{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
+    TextBox dark_theme{nullptr}, light_theme{nullptr};
+    ComboBox font_family{nullptr};
+    NumberBox font_size{nullptr}, scrollback_size{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr};
     ToggleSwitch random_background{nullptr};
     std::vector<TextBox> colors;
@@ -233,6 +291,11 @@ struct Dialog {
         window.Title(L"Zigonaut Settings");
         HWND settings_window{};
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&settings_window));
+        auto const app_icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
+        if (app_icon) {
+            SendMessageW(settings_window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(app_icon));
+            SendMessageW(settings_window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(app_icon));
+        }
         auto const dpi = GetDpiForWindow(settings_window);
         auto const app_window = window.AppWindow();
         auto const work_area = Microsoft::UI::Windowing::DisplayArea::GetFromWindowId(
@@ -347,8 +410,8 @@ struct Dialog {
         color_scheme = combo("", {L"Use system setting", L"Light", L"Dark"});
         color_scheme.SelectedIndex(scheme == "light" ? 1 : scheme == "dark" ? 2 : 0);
         auto const material = value(values, "backdrop", "mica");
-        backdrop = combo("", {L"None", L"Mica", L"Acrylic"});
-        backdrop.SelectedIndex(material == "none" ? 0 : material == "acrylic" ? 2 : 1);
+        backdrop = combo("", {L"None", L"Mica", L"MicaAlt", L"Acrylic"});
+        backdrop.SelectedIndex(material == "none" ? 0 : material == "mica_alt" ? 2 : material == "acrylic" ? 3 : 1);
         dark_theme = textBox(value(values, "dark_theme", value(values, "theme", "rasmus")), L"rasmus");
         light_theme = textBox(value(values, "light_theme", "campbell-light"), L"campbell-light");
         opacity = numberBox(value(values, "background_opacity", "100"), 100, 0, 100);
@@ -368,8 +431,9 @@ struct Dialog {
     }
 
     ScrollViewer makeTerminal(std::map<std::string, std::string> const& values) {
-        font_family = textBox(value(values, "font_family", "Cascadia Mono"), L"Cascadia Mono");
+        font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
+        scrollback_size = numberBox(value(values, "scrollback_size", "10000"), 10000, 0, 1000000, 1000);
         padding_horizontal = numberBox(value(values, "padding_horizontal", "8"), 8, 0, 128);
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
         auto font = StackPanel{}; font.Spacing(8);
@@ -391,6 +455,7 @@ struct Dialog {
         }
         return page(L"Terminal", L"Configure text rendering, spacing, and optional palette overrides.", {
             card(L"Font", L"Use an installed monospace font family.", font, true),
+            card(L"Scrollback size", L"Maximum number of history lines kept for new terminal sessions.", scrollback_size),
             card(L"Padding", L"Space between terminal cells and the pane edge.", padding, true),
             card(L"Palette overrides", L"Leave a field empty to use the selected theme. Colors use #RRGGBB.", palette, true),
         });
@@ -429,7 +494,8 @@ struct Dialog {
 
     std::string serialize() {
         auto string = [](TextBox const& box) { return trim(to_string(box.Text())); };
-        if (string(font_family).empty()) throw std::runtime_error("Font family cannot be empty.");
+        auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
+        if (selected_font.empty()) throw std::runtime_error("Font family cannot be empty.");
         if (string(dark_theme).empty() || string(light_theme).empty()) throw std::runtime_error("Theme names cannot be empty.");
         for (auto const& editor : colors) if (!validColor(string(editor))) throw std::runtime_error("Palette colors must be empty or use #RRGGBB.");
 
@@ -450,15 +516,16 @@ struct Dialog {
 
         std::ostringstream output;
         output << "# Zigonaut configuration\n# Generated by the Zigonaut settings page.\n\n";
-        output << "font_family=" << string(font_family) << '\n';
+        output << "font_family=" << selected_font << '\n';
         output << "font_size=" << static_cast<unsigned>(font_size.Value()) << '\n';
+        output << "scrollback_size=" << static_cast<unsigned>(scrollback_size.Value()) << '\n';
         output << "dark_theme=" << string(dark_theme) << '\n';
         output << "light_theme=" << string(light_theme) << '\n';
         output << "color_scheme=" << (color_scheme.SelectedIndex() == 1 ? "light" : color_scheme.SelectedIndex() == 2 ? "dark" : "system") << '\n';
         output << "padding_horizontal=" << static_cast<unsigned>(padding_horizontal.Value()) << '\n';
         output << "padding_vertical=" << static_cast<unsigned>(padding_vertical.Value()) << '\n';
         output << "background_opacity=" << static_cast<unsigned>(opacity.Value()) << '\n';
-        output << "backdrop=" << (backdrop.SelectedIndex() == 0 ? "none" : backdrop.SelectedIndex() == 2 ? "acrylic" : "mica") << "\n\n";
+        output << "backdrop=" << (backdrop.SelectedIndex() == 0 ? "none" : backdrop.SelectedIndex() == 2 ? "mica_alt" : backdrop.SelectedIndex() == 3 ? "acrylic" : "mica") << "\n\n";
         static char const* keys[] = { "foreground", "background", "cursor", "ansi0", "ansi1", "ansi2", "ansi3", "ansi4", "ansi5", "ansi6", "ansi7", "ansi8", "ansi9", "ansi10", "ansi11", "ansi12", "ansi13", "ansi14", "ansi15" };
         for (size_t index = 0; index < colors.size(); ++index) if (!string(colors[index]).empty()) output << keys[index] << '=' << string(colors[index]) << '\n';
         output << "\ndefault_profile=" << string(default_profile) << '\n';
@@ -498,15 +565,16 @@ struct Dialog {
 
     void registerAutoSave() {
         auto text_committed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {font_family, dark_theme, light_theme, default_profile, profiles, working_directory, pipe_command})
+        for (auto const& editor : {dark_theme, light_theme, default_profile, profiles, working_directory, pipe_command})
             editor.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {font_size, padding_horizontal, padding_vertical, opacity, clipboard_limit})
+        for (auto const& editor : {font_size, scrollback_size, padding_horizontal, padding_vertical, opacity, clipboard_limit})
             editor.ValueChanged(number_changed);
         auto selection_changed = [this](auto const&, auto const&) { save(); };
         color_scheme.SelectionChanged(selection_changed);
         backdrop.SelectionChanged(selection_changed);
+        font_family.SelectionChanged(selection_changed);
         auto toggled = [this](auto const&, auto const&) { save(); };
         for (auto const& editor : {random_background, hold_on_exit, clipboard_write}) editor.Toggled(toggled);
     }

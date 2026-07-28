@@ -163,13 +163,14 @@ pub const SessionRuntime = struct {
         refresh: Refresh,
         clipboard_write_enabled: bool,
         clipboard_write_max_bytes: u32,
+        scrollback_size: u32,
     ) !*SessionRuntime {
         const self = try allocator.create(SessionRuntime);
         errdefer allocator.destroy(self);
 
         self.* = .{
             .allocator = allocator,
-            .terminal = try Terminal.init(columns, rows, terminal_theme),
+            .terminal = try Terminal.initWithScrollback(columns, rows, terminal_theme, scrollback_size),
             .refresh = refresh,
             .clipboard_write_enabled = clipboard_write_enabled,
             .clipboard_write_max_bytes = clipboard_write_max_bytes,

@@ -11,14 +11,17 @@
 
             <ResourceDictionary.ThemeDictionaries>
                 <ResourceDictionary x:Key="Default">
+                    <SolidColorBrush x:Key="ZigonautWindowBackgroundBrush" Color="#F3F3F3" />
                     <SolidColorBrush x:Key="ZigonautTerminalBorderBrush" Color="#18000000" />
                     <SolidColorBrush x:Key="ZigonautTerminalBackgroundBrush" Color="#12000000" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="ZigonautWindowBackgroundBrush" Color="#202020" />
                     <SolidColorBrush x:Key="ZigonautTerminalBorderBrush" Color="#2EFFFFFF" />
                     <SolidColorBrush x:Key="ZigonautTerminalBackgroundBrush" Color="#16FFFFFF" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="ZigonautWindowBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
                     <SolidColorBrush x:Key="ZigonautTerminalBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
                     <SolidColorBrush x:Key="ZigonautTerminalBackgroundBrush" Color="{ThemeResource SystemColorWindowColor}" />
                 </ResourceDictionary>

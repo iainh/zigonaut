@@ -121,6 +121,7 @@ pub const App = struct {
     randomize_tab_background: bool,
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
+    scrollback_size: u32 = 10_000,
     tabs: std.ArrayList(Tab) = .empty,
     active_tab: ?usize = null,
     next_object_id: u64 = 1,
@@ -163,7 +164,7 @@ pub const App = struct {
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
+        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
@@ -246,7 +247,7 @@ pub const App = struct {
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
         const working_directory = reported_directory orelse source.session.workingDirectory();
-        const runtime = try SessionRuntime.create(self.allocator, source.session.command(), working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
+        const runtime = try SessionRuntime.create(self.allocator, source.session.command(), working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         return self.splitFocusedRecord(axis, runtime, session_theme.background, reported_directory);
     }
 
@@ -387,6 +388,10 @@ pub const App = struct {
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
             runtime.setClipboardWriteSettings(enabled, max_bytes);
         };
+    }
+
+    pub fn applyScrollbackSize(self: *App, size: u32) void {
+        self.scrollback_size = size;
     }
 
     pub fn titlesGeneration(self: *const App) u64 {

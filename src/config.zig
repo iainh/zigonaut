@@ -9,6 +9,8 @@ pub const default_contents =
     \\font_family=Cascadia Mono
     \\# Terminal font size in points (6-72). Default: 18.
     \\font_size=18
+    \\# Maximum terminal scrollback in lines (0-1000000). Default: 10000.
+    \\scrollback_size=10000
     \\# Theme used in dark application mode. Default: rasmus.
     \\dark_theme=rasmus
     \\# Theme used in light application mode. Default: campbell-light.
@@ -21,7 +23,7 @@ pub const default_contents =
     \\padding_vertical=8
     \\# Terminal background opacity percentage (0-100). Default: 100.
     \\background_opacity=100
-    \\# Window backdrop: none, mica, or acrylic. Default: mica.
+    \\# Window backdrop: none, mica, mica_alt, or acrylic. Default: mica.
     \\backdrop=mica
     \\#
     \\# Palette overrides use #RRGGBB. Their defaults come from the selected
@@ -112,12 +114,13 @@ const default_profiles = [3]Profile{
     .{ .name = "Command Prompt", .shell = .windows, .command = "cmd.exe" },
 } ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "" }} ** (max_profiles - 3);
 
-pub const Backdrop = enum { none, mica, acrylic };
+pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
 
 pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
     font_size: u16 = 18,
+    scrollback_size: u32 = 10_000,
     dark_theme: []const u8 = "rasmus",
     light_theme: []const u8 = "campbell-light",
     color_scheme: ColorScheme = .system,
@@ -243,6 +246,9 @@ pub fn parse(contents: []const u8) Config {
         } else if (std.ascii.eqlIgnoreCase(key, "font_size")) {
             const size = std.fmt.parseInt(u16, value, 10) catch continue;
             if (size >= 6 and size <= 72) result.font_size = size;
+        } else if (std.ascii.eqlIgnoreCase(key, "scrollback_size")) {
+            const size = std.fmt.parseInt(u32, value, 10) catch continue;
+            if (size <= 1_000_000) result.scrollback_size = size;
         } else if (std.ascii.eqlIgnoreCase(key, "theme") or std.ascii.eqlIgnoreCase(key, "dark_theme")) {
             if (value.len > 0 and value.len < 64) result.dark_theme = value;
         } else if (std.ascii.eqlIgnoreCase(key, "light_theme")) {
@@ -259,7 +265,7 @@ pub fn parse(contents: []const u8) Config {
             const opacity = std.fmt.parseInt(u8, value, 10) catch continue;
             if (opacity <= 100) result.background_opacity = opacity;
         } else if (std.ascii.eqlIgnoreCase(key, "backdrop")) {
-            if (std.ascii.eqlIgnoreCase(value, "none")) result.backdrop = .none else if (std.ascii.eqlIgnoreCase(value, "mica")) result.backdrop = .mica else if (std.ascii.eqlIgnoreCase(value, "acrylic")) result.backdrop = .acrylic;
+            if (std.ascii.eqlIgnoreCase(value, "none")) result.backdrop = .none else if (std.ascii.eqlIgnoreCase(value, "mica")) result.backdrop = .mica else if (std.ascii.eqlIgnoreCase(value, "mica_alt")) result.backdrop = .mica_alt else if (std.ascii.eqlIgnoreCase(value, "acrylic")) result.backdrop = .acrylic;
         } else if (std.ascii.eqlIgnoreCase(key, "foreground")) {
             result.palette.foreground = theme.parseColor(value) orelse result.palette.foreground;
         } else if (std.ascii.eqlIgnoreCase(key, "background")) {
@@ -352,6 +358,7 @@ test "configuration parses supported values and ignores invalid ones" {
     const parsed = parse(
         \\font_family = JetBrains Mono
         \\font_size=14
+        \\scrollback_size=50000
         \\dark_theme=campbell
         \\light_theme=campbell-light
         \\color_scheme=light
@@ -368,6 +375,7 @@ test "configuration parses supported values and ignores invalid ones" {
     );
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
+    try std.testing.expectEqual(@as(u32, 50_000), parsed.scrollback_size);
     try std.testing.expectEqualStrings("campbell", parsed.dark_theme);
     try std.testing.expectEqualStrings("campbell-light", parsed.light_theme);
     try std.testing.expectEqual(ColorScheme.light, parsed.color_scheme);
@@ -389,6 +397,10 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expect(invalid.randomize_tab_background);
     try std.testing.expect(!invalid.osc52_clipboard_write);
     try std.testing.expectEqual(@as(u32, 1024 * 1024), invalid.osc52_clipboard_max_bytes);
+
+    const mica_alt = parse("backdrop=mica_alt\nscrollback_size=1000000\n");
+    try std.testing.expectEqual(Backdrop.mica_alt, mica_alt.backdrop);
+    try std.testing.expectEqual(@as(u32, 1_000_000), mica_alt.scrollback_size);
 }
 
 test "configuration parses launch profiles" {
