@@ -3,6 +3,7 @@ const app_model = @import("app.zig");
 const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
+const pane_tree = @import("pane_tree.zig");
 const theme = @import("theme.zig");
 const TerminalView = @import("terminal_view.zig").View;
 
@@ -24,6 +25,7 @@ const renderer_failed_message = win.WM_APP + 7;
 const pane_event_message = win.WM_APP + 8;
 const runtime_refresh_message = win.WM_APP + 9;
 const ime_bounds_changed_message = win.WM_APP + 10;
+const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
@@ -53,6 +55,7 @@ const Application = struct {
     attached_panes: std.ArrayList(u64) = .empty,
     pane_events_mutex: std.Thread.Mutex = .{},
     pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
+    pane_events_head: usize = 0,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
@@ -103,6 +106,24 @@ const Application = struct {
     const detachTerminalRenderer = detachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
 
+    fn takePaneEvent(self: *Application) ?chrome.PaneEvent {
+        self.pane_events_mutex.lock();
+        defer self.pane_events_mutex.unlock();
+        if (self.pane_events_head == self.pane_events.items.len) return null;
+        const event = self.pane_events.items[self.pane_events_head];
+        self.pane_events_head += 1;
+        if (self.pane_events_head == self.pane_events.items.len) {
+            self.pane_events_head = 0;
+            if (self.pane_events.capacity > pane_event_release_threshold) {
+                self.pane_events.deinit(std.heap.page_allocator);
+                self.pane_events = .empty;
+            } else {
+                self.pane_events.clearRetainingCapacity();
+            }
+        }
+        return event;
+    }
+
     fn viewFor(self: *Application, id: u64) ?*TerminalView {
         for (self.views.items) |entry| if (entry.pane_id == id) return entry.view;
         return null;
@@ -149,44 +170,63 @@ const Application = struct {
         return std.mem.indexOfScalar(u64, self.attached_panes.items, id) != null;
     }
 
-    fn syncPresentation(self: *Application) !void {
-        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
-        const model_layout = try self.model.activeLayout(std.heap.page_allocator);
-        defer std.heap.page_allocator.free(model_layout);
-        var layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, model_layout.len);
-        defer std.heap.page_allocator.free(layout);
-        try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, model_layout.len);
-        errdefer self.detachPresentation() catch {};
-        for (model_layout, 0..) |item, index| switch (item) {
-            .leaf => |leaf| {
-                const view = try self.ensureView(leaf.id);
-                if (!self.isAttached(leaf.id)) {
-                    if (!bridge.attachPane(leaf.id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
-                    self.attached_panes.appendAssumeCapacity(leaf.id);
-                }
-                layout[index] = .{
-                    .size = @sizeOf(chrome.LayoutNode),
-                    .kind = chrome.layout_leaf,
-                    .id = leaf.id,
-                    .axis = 0,
-                    .ratio = 0,
-                    .subtree_size = 1,
-                    .reserved = 0,
-                };
-            },
-            .split => |split| layout[index] = .{
+    const PresentationWriter = struct {
+        application: *Application,
+        bridge: *chrome.Bridge,
+        output: []chrome.LayoutNode,
+        index: usize = 0,
+
+        pub fn leaf(self: *PresentationWriter, id: u64) !void {
+            const view = try self.application.ensureView(id);
+            if (!self.application.isAttached(id)) {
+                if (!self.bridge.attachPane(id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
+                self.application.attached_panes.appendAssumeCapacity(id);
+            }
+            self.output[self.index] = .{
+                .size = @sizeOf(chrome.LayoutNode),
+                .kind = chrome.layout_leaf,
+                .id = id,
+                .axis = 0,
+                .ratio = 0,
+                .subtree_size = 1,
+                .reserved = 0,
+            };
+            self.index += 1;
+        }
+
+        pub fn split(self: *PresentationWriter, id: u64, axis: pane_tree.Axis, ratio: u16) usize {
+            const index = self.index;
+            self.output[index] = .{
                 .size = @sizeOf(chrome.LayoutNode),
                 .kind = chrome.layout_split,
-                .id = split.id,
-                .axis = switch (split.axis) {
+                .id = id,
+                .axis = switch (axis) {
                     .left_right => chrome.axis_left_right,
                     .top_bottom => chrome.axis_top_bottom,
                 },
-                .ratio = split.ratio,
-                .subtree_size = split.subtree_size,
+                .ratio = ratio,
+                .subtree_size = 0,
                 .reserved = 0,
-            },
-        };
+            };
+            self.index += 1;
+            return index;
+        }
+
+        pub fn finishSplit(self: *PresentationWriter, index: usize, subtree_size: u32) void {
+            self.output[index].subtree_size = subtree_size;
+        }
+    };
+
+    fn syncPresentation(self: *Application) !void {
+        const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+        const tab = self.model.activeTab() orelse return;
+        const node_count = tab.tree.nodeCount();
+        const layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, node_count);
+        defer std.heap.page_allocator.free(layout);
+        try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, node_count);
+        errdefer self.detachPresentation() catch {};
+        var writer = PresentationWriter{ .application = self, .bridge = bridge, .output = layout };
+        try tab.tree.writePreorder(&writer);
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
         var attached_index = self.attached_panes.items.len;
@@ -194,13 +234,12 @@ const Application = struct {
             attached_index -= 1;
             const id = self.attached_panes.items[attached_index];
             var present = false;
-            for (model_layout) |item| switch (item) {
-                .leaf => |leaf| if (leaf.id == id) {
+            for (layout) |item| {
+                if (item.kind == chrome.layout_leaf and item.id == id) {
                     present = true;
                     break;
-                },
-                else => {},
-            };
+                }
+            }
             if (!present) {
                 if (!bridge.detachPane(id)) return error.DetachPaneFailed;
                 _ = self.attached_panes.swapRemove(attached_index);
@@ -378,11 +417,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         pane_event_message => {
-            while (true) {
-                self.pane_events_mutex.lock();
-                const event = if (self.pane_events.items.len != 0) self.pane_events.orderedRemove(0) else null;
-                self.pane_events_mutex.unlock();
-                const current = event orelse break;
+            while (self.takePaneEvent()) |current| {
                 if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
                 switch (current.kind) {
                     chrome.pane_scroll => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.scrollTo(current.value),
@@ -752,9 +787,9 @@ fn showPendingNotificationsImpl(self: *Application) void {
         const runtime = session.runtime orelse continue;
         while (runtime.takeNotification()) |notification| {
             defer runtime.freeNotification(notification);
-            const title = if (notification.title.len > 0) notification.title else session.displayTitle();
-            if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body)) continue;
-            _ = bridge.showNotification(session.id, title, notification.body);
+            const title = if (notification.title().len > 0) notification.title() else session.displayTitle();
+            if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(notification.body())) continue;
+            _ = bridge.showNotification(session.id, title, notification.body());
         }
     };
 }

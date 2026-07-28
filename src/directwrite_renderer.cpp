@@ -15,6 +15,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -35,22 +36,51 @@ struct LayoutKey {
     uint32_t width;
     uint32_t height;
     uint8_t style;
+};
 
-    bool operator<(const LayoutKey& other) const {
-        if (style != other.style) return style < other.style;
-        if (width != other.width) return width < other.width;
-        if (height != other.height) return height < other.height;
-        return text < other.text;
+struct LayoutKeyView {
+    std::u16string_view text;
+    uint32_t width;
+    uint32_t height;
+    uint8_t style;
+};
+
+LayoutKeyView view(const LayoutKey& key) {
+    return {key.text, key.width, key.height, key.style};
+}
+
+struct LayoutKeyLess {
+    using is_transparent = void;
+
+    bool operator()(const LayoutKey& left, const LayoutKey& right) const {
+        return less(view(left), view(right));
+    }
+
+    bool operator()(const LayoutKey& left, LayoutKeyView right) const {
+        return less(view(left), right);
+    }
+
+    bool operator()(LayoutKeyView left, const LayoutKey& right) const {
+        return less(left, view(right));
+    }
+
+private:
+    static bool less(LayoutKeyView left, LayoutKeyView right) {
+        if (left.style != right.style) return left.style < right.style;
+        if (left.width != right.width) return left.width < right.width;
+        if (left.height != right.height) return left.height < right.height;
+        return left.text < right.text;
     }
 };
 
 struct LayoutEntry {
     IDWriteTextLayout* layout;
-    std::list<LayoutKey>::iterator recency;
+    std::list<const LayoutKey*>::iterator recency;
 };
 
 struct RowCell {
-    std::u16string text;
+    uint32_t text_offset;
+    uint32_t text_length;
     uint32_t column;
     uint32_t foreground;
     uint32_t background;
@@ -93,18 +123,28 @@ struct OwnedColorLayer {
 
 struct RowSegment {
     std::u16string text;
-    std::vector<uint32_t> start_columns;
-    std::vector<uint32_t> end_columns;
+    std::vector<uint32_t> columns;
     uint32_t foreground = 0;
     bool bold = false;
     bool italic = false;
 
     void clear() {
         text.clear();
-        start_columns.clear();
-        end_columns.clear();
+        columns.clear();
     }
 };
+
+uint32_t packedColumns(uint32_t start, uint32_t span) {
+    return start | ((span - 1) << 16);
+}
+
+uint32_t startColumn(uint32_t packed) {
+    return packed & 0xffff;
+}
+
+uint32_t endColumn(uint32_t packed) {
+    return startColumn(packed) + 1 + ((packed >> 16) & 1);
+}
 
 struct ClusterSpan {
     uint32_t start_column = UINT32_MAX;
@@ -198,10 +238,11 @@ struct ZigonautTextEngine {
     IDXGISwapChain1* swap_chain = nullptr;
     ID2D1Bitmap1* target_bitmap = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
-    std::map<LayoutKey, LayoutEntry> layouts;
-    std::list<LayoutKey> layout_recency;
+    std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
+    std::list<const LayoutKey*> layout_recency;
     uint64_t layout_creation_count = 0;
     std::vector<RowCell> row_cells;
+    std::u16string row_text;
     RowSegment row_segment;
     GridTextRenderer* grid_renderer = nullptr;
     std::wstring family;
@@ -450,8 +491,8 @@ struct ZigonautTextEngine {
         if (result == nullptr || text_length > UINT32_MAX || format_index >= std::size(formats)) {
             return E_INVALIDARG;
         }
-        LayoutKey key{
-            std::u16string(text, text + text_length),
+        const LayoutKeyView key{
+            std::u16string_view(text, text_length),
             width,
             height,
             static_cast<uint8_t>(format_index),
@@ -464,10 +505,10 @@ struct ZigonautTextEngine {
             return S_OK;
         }
         if (layouts.size() >= max_layout_cache_entries) {
-            auto oldest = layouts.find(layout_recency.front());
+            auto oldest = layouts.find(*layout_recency.front());
             release(oldest->second.layout);
-            layouts.erase(oldest);
             layout_recency.pop_front();
+            layouts.erase(oldest);
         }
         IDWriteTextLayout* layout = nullptr;
         const HRESULT hr = factory->CreateTextLayout(
@@ -479,9 +520,17 @@ struct ZigonautTextEngine {
             &layout);
         if (FAILED(hr)) return hr;
         ++layout_creation_count;
-        layout_recency.push_back(std::move(key));
+        auto inserted = layouts.emplace(
+            LayoutKey{
+                std::u16string(text, text + text_length),
+                width,
+                height,
+                static_cast<uint8_t>(format_index),
+            },
+            LayoutEntry{layout, {}}).first;
+        layout_recency.push_back(&inserted->first);
         auto recency = std::prev(layout_recency.end());
-        layouts.emplace(*recency, LayoutEntry{layout, recency});
+        inserted->second.recency = recency;
         *result = layout;
         return S_OK;
     }
@@ -641,14 +690,15 @@ struct ZigonautTextEngine {
                 D2D1::Point2F(left + width, top + 1.0f), brush, 1.0f);
         }
         if (row_active) {
-            std::u16string cell_text;
+            const uint32_t text_offset = static_cast<uint32_t>(row_text.size());
             if (text_length != 0) {
-                cell_text.assign(
+                row_text.append(
                     reinterpret_cast<const char16_t*>(text),
                     reinterpret_cast<const char16_t*>(text) + text_length);
             }
             row_cells.push_back({
-                std::move(cell_text),
+                text_offset,
+                text_length,
                 static_cast<uint32_t>(std::lround((left - row_origin_x) / row_cell_width)),
                 foreground,
                 background,
@@ -688,6 +738,7 @@ struct ZigonautTextEngine {
         float cell_width,
         float cell_height) {
         row_cells.clear();
+        row_text.clear();
         row_origin_x = origin_x;
         row_top = top;
         row_cell_width = cell_width;
@@ -783,7 +834,7 @@ public:
             uint32_t run_end_column = 0;
             for (UINT32 index = 0; index < description->stringLength; ++index) {
                 const uint32_t text_index = description->textPosition + index;
-                if (text_index >= segment.start_columns.size()) break;
+                if (text_index >= segment.columns.size()) break;
                 const UINT16 glyph_start = description->clusterMap[index];
                 if (glyph_start >= glyph_run->glyphCount) continue;
                 auto& span = spans[glyph_start];
@@ -793,10 +844,10 @@ public:
                 }
                 span.start_column = std::min(
                     span.start_column,
-                    segment.start_columns[text_index]);
+                    startColumn(segment.columns[text_index]));
                 span.end_column = std::max(
                     span.end_column,
-                    segment.end_columns[text_index]);
+                    endColumn(segment.columns[text_index]));
                 span.first_text_index = std::min(span.first_text_index, text_index);
                 span.text_end = std::max(span.text_end, text_index + 1);
                 run_start_column = std::min(run_start_column, span.start_column);
@@ -811,12 +862,12 @@ public:
                     : glyph_run->glyphCount;
                 if (glyph_start >= glyph_end) continue;
                 const auto& span = spans[glyph_start];
-                const uint32_t cluster_left = segment.start_columns[
-                    span.first_text_index];
+                const uint32_t cluster_left = startColumn(
+                    segment.columns[span.first_text_index]);
                 const uint32_t cluster_right =
-                    span.text_end < segment.start_columns.size()
-                    ? segment.start_columns[span.text_end]
-                    : segment.end_columns[span.text_end - 1];
+                    span.text_end < segment.columns.size()
+                    ? startColumn(segment.columns[span.text_end])
+                    : endColumn(segment.columns[span.text_end - 1]);
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
                 zigonaut_fit_cluster_advances(
@@ -970,9 +1021,9 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     if (segment.text.empty()) return S_OK;
     uint32_t start_column = UINT32_MAX;
     uint32_t end_column = 0;
-    for (size_t index = 0; index < segment.start_columns.size(); ++index) {
-        start_column = std::min(start_column, segment.start_columns[index]);
-        end_column = std::max(end_column, segment.end_columns[index]);
+    for (uint32_t packed : segment.columns) {
+        start_column = std::min(start_column, startColumn(packed));
+        end_column = std::max(end_column, endColumn(packed));
     }
     if (start_column == UINT32_MAX || end_column <= start_column) return S_OK;
 
@@ -1014,6 +1065,9 @@ void ZigonautTextEngine::endRow() {
 
     for (const auto& cell : row_cells) {
         if (cell.occupancy == ZIGONAUT_CELL_WIDE_TAIL) continue;
+        const std::u16string_view cell_text = cell.text_length == 0
+            ? std::u16string_view{}
+            : std::u16string_view(row_text.data() + cell.text_offset, cell.text_length);
         if (has_segment &&
             (segment.foreground != cell.foreground ||
              segment.bold != cell.bold ||
@@ -1028,15 +1082,13 @@ void ZigonautTextEngine::endRow() {
         }
 
         const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
-        if (cell.text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
+        if (cell_text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
             segment.text.push_back(u' ');
-            segment.start_columns.push_back(cell.column);
-            segment.end_columns.push_back(cell.column + span);
+            segment.columns.push_back(packedColumns(cell.column, span));
         } else {
-            segment.text.append(cell.text);
-            for (size_t index = 0; index < cell.text.size(); ++index) {
-                segment.start_columns.push_back(cell.column);
-                segment.end_columns.push_back(cell.column + span);
+            segment.text.append(cell_text);
+            for (size_t index = 0; index < cell_text.size(); ++index) {
+                segment.columns.push_back(packedColumns(cell.column, span));
             }
         }
     }

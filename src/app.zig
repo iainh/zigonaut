@@ -12,20 +12,74 @@ test {
 
 pub const Shell = enum { powershell, windows, wsl };
 
+const LaunchMetadata = struct {
+    allocator: std.mem.Allocator,
+    references: usize = 1,
+    payload: []u8,
+    profile_title_len: usize,
+    command_len: usize,
+
+    fn create(allocator: std.mem.Allocator, profile_title: []const u8, command: []const u8, working_directory: []const u8) !*LaunchMetadata {
+        const self = try allocator.create(LaunchMetadata);
+        errdefer allocator.destroy(self);
+        const payload = try allocator.alloc(u8, profile_title.len + command.len + working_directory.len);
+        @memcpy(payload[0..profile_title.len], profile_title);
+        @memcpy(payload[profile_title.len..][0..command.len], command);
+        @memcpy(payload[profile_title.len + command.len ..], working_directory);
+        self.* = .{
+            .allocator = allocator,
+            .payload = payload,
+            .profile_title_len = profile_title.len,
+            .command_len = command.len,
+        };
+        return self;
+    }
+
+    fn retain(self: *LaunchMetadata) *LaunchMetadata {
+        self.references += 1;
+        return self;
+    }
+
+    fn release(self: *LaunchMetadata) void {
+        self.references -= 1;
+        if (self.references != 0) return;
+        self.allocator.free(self.payload);
+        self.allocator.destroy(self);
+    }
+
+    fn profileTitle(self: *const LaunchMetadata) []const u8 {
+        return self.payload[0..self.profile_title_len];
+    }
+
+    fn commandSlice(self: *const LaunchMetadata) []const u8 {
+        return self.payload[self.profile_title_len..][0..self.command_len];
+    }
+
+    fn workingDirectory(self: *const LaunchMetadata) []const u8 {
+        return self.payload[self.profile_title_len + self.command_len ..];
+    }
+};
+
 pub const Session = struct {
     id: u32,
     shell: Shell,
     runtime: ?*SessionRuntime,
     background: theme.Color,
-    profile_title: std.ArrayList(u8) = .empty,
-    command: std.ArrayList(u8) = .empty,
-    working_directory: std.ArrayList(u8) = .empty,
+    metadata: *LaunchMetadata,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
     hold_on_exit: bool = false,
 
     pub fn displayTitle(self: *const Session) []const u8 {
-        return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.profile_title.items;
+        return if (self.title.items.len > 0 and std.unicode.utf8ValidateSlice(self.title.items)) self.title.items else self.metadata.profileTitle();
+    }
+
+    pub fn command(self: *const Session) []const u8 {
+        return self.metadata.commandSlice();
+    }
+
+    pub fn workingDirectory(self: *const Session) []const u8 {
+        return self.metadata.workingDirectory();
     }
 };
 
@@ -87,9 +141,7 @@ pub const App = struct {
 
     fn deinitSession(self: *App, session: *Session) void {
         if (session.runtime) |runtime| runtime.destroy();
-        session.profile_title.deinit(self.allocator);
-        session.command.deinit(self.allocator);
-        session.working_directory.deinit(self.allocator);
+        session.metadata.release();
         session.title.deinit(self.allocator);
     }
 
@@ -112,21 +164,19 @@ pub const App = struct {
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
         const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
-        const index = self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background) catch |err| {
-            runtime.destroy();
-            return err;
-        };
+        const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
         return index;
     }
 
     fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color) !usize {
-        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = runtime, .background = background };
+        var unowned_runtime = runtime;
+        errdefer if (unowned_runtime) |value| value.destroy();
+        const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
+        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .metadata = metadata };
+        unowned_runtime = null;
         errdefer self.deinitSession(&session);
-        try session.profile_title.appendSlice(self.allocator, profile_title);
-        try session.command.appendSlice(self.allocator, command);
-        try session.working_directory.appendSlice(self.allocator, working_directory);
         const tab_id = self.takeObjectId();
         const pane_id = self.takeObjectId();
         var tree = try pane_tree.Tree.init(self.allocator, pane_id);
@@ -195,19 +245,23 @@ pub const App = struct {
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
-        const working_directory = reported_directory orelse source.session.working_directory.items;
-        const runtime = try SessionRuntime.create(self.allocator, source.session.command.items, working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
-        return self.splitFocusedRecord(axis, runtime, session_theme.background, working_directory);
+        const working_directory = reported_directory orelse source.session.workingDirectory();
+        const runtime = try SessionRuntime.create(self.allocator, source.session.command(), working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes);
+        return self.splitFocusedRecord(axis, runtime, session_theme.background, reported_directory);
     }
 
     fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color, working_directory: ?[]const u8) !pane_tree.PaneId {
+        var unowned_runtime = runtime;
+        errdefer if (unowned_runtime) |value| value.destroy();
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
-        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = runtime, .background = background, .hold_on_exit = source.session.hold_on_exit };
+        const metadata = if (working_directory) |directory|
+            try LaunchMetadata.create(self.allocator, source.session.metadata.profileTitle(), source.session.command(), directory)
+        else
+            source.session.metadata.retain();
+        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = unowned_runtime, .background = background, .metadata = metadata, .hold_on_exit = source.session.hold_on_exit };
+        unowned_runtime = null;
         errdefer self.deinitSession(&session);
-        try session.profile_title.appendSlice(self.allocator, source.session.profile_title.items);
-        try session.command.appendSlice(self.allocator, source.session.command.items);
-        try session.working_directory.appendSlice(self.allocator, working_directory orelse source.session.working_directory.items);
         const source_id = source.id;
         const pane_id = self.takeObjectId();
         const split_id = self.takeObjectId();
@@ -373,10 +427,7 @@ pub const App = struct {
             const runtime = session.runtime orelse continue;
             const generation = runtime.titleGeneration();
             if (generation == session.title_generation) continue;
-            const title = runtime.titleAlloc(self.allocator) catch continue;
-            session.title.deinit(self.allocator);
-            session.title = .fromOwnedSlice(title);
-            session.title_generation = generation;
+            session.title_generation = runtime.copyTitle(self.allocator, &session.title) catch continue;
             changed = true;
         };
         return changed;
@@ -390,7 +441,7 @@ test "tabs are added selected and titled by focused pane" {
     _ = try app.addSessionRecord(.wsl, "Linux", "wsl", "two", null, theme.rasmus.background);
     try std.testing.expectEqual(@as(usize, 2), app.tabCount());
     try std.testing.expectEqualStrings("Linux", app.activeTab().?.displayTitle());
-    try std.testing.expectEqualStrings("wsl", app.activeSession().?.command.items);
+    try std.testing.expectEqualStrings("wsl", app.activeSession().?.command());
     app.activateTab(0);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
 }
@@ -428,12 +479,15 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
     _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background);
     app.activeSession().?.hold_on_exit = true;
     const original = app.activePane().?.id;
+    const metadata = app.activeSession().?.metadata;
     const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, "D:\\reported");
     try std.testing.expect(created != original);
     try std.testing.expectEqual(created, app.activePane().?.id);
+    try std.testing.expect(metadata != app.activeSession().?.metadata);
+    try std.testing.expectEqual(@as(usize, 1), metadata.references);
     try std.testing.expectEqual(Shell.wsl, app.activeSession().?.shell);
-    try std.testing.expectEqualStrings("wsl -d Debian", app.activeSession().?.command.items);
-    try std.testing.expectEqualStrings("D:\\reported", app.activeSession().?.working_directory.items);
+    try std.testing.expectEqualStrings("wsl -d Debian", app.activeSession().?.command());
+    try std.testing.expectEqualStrings("D:\\reported", app.activeSession().?.workingDirectory());
     try std.testing.expect(app.activeSession().?.hold_on_exit);
     const layout = try app.activeLayout(std.testing.allocator);
     defer std.testing.allocator.free(layout);

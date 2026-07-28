@@ -31,19 +31,17 @@ pub const SessionRuntime = struct {
     progress_parser: progress.Parser = .{},
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    notifications: std.ArrayList(Notification) = .empty,
+    notifications: NotificationQueue = .{},
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
     pending_clipboard_write: ?PendingClipboardWrite = null,
     render_snapshot: Terminal.RenderSnapshot = .{},
-    render_query: std.ArrayList(u8) = .empty,
-    render_matches: std.ArrayList(SearchMatch) = .empty,
-    search_render_generation: u64 = 0,
-    rendered_search_generation: u64 = std.math.maxInt(u64),
     render_search_enabled: bool = false,
     render_search_active: ?usize = null,
     render_search_scanning: bool = false,
     render_scroll_offset: usize = 0,
+    // Search state is UI-thread-owned. The reader thread only changes terminal
+    // content and generations, so synchronous rendering can borrow these lists.
     search_cache: Terminal.SearchCache = .{},
     search_cache_generation: u64 = std.math.maxInt(u64),
     columns: u16,
@@ -99,12 +97,54 @@ pub const SessionRuntime = struct {
     };
 
     pub const Notification = struct {
-        title: []u8,
-        body: []u8,
+        payload: []u8,
+        title_len: u16,
+
+        pub fn title(self: Notification) []const u8 {
+            return self.payload[0..self.title_len];
+        }
+
+        pub fn body(self: Notification) []const u8 {
+            return self.payload[self.title_len..];
+        }
 
         pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
-            allocator.free(self.title);
-            allocator.free(self.body);
+            allocator.free(self.payload);
+        }
+    };
+
+    const NotificationQueue = struct {
+        const capacity = 32;
+        slots: std.ArrayList(Notification) = .empty,
+        head: usize = 0,
+        count: usize = 0,
+
+        fn deinit(self: *NotificationQueue, allocator: std.mem.Allocator) void {
+            while (self.pop()) |notification| notification.deinit(allocator);
+            self.slots.deinit(allocator);
+            self.* = .{};
+        }
+
+        fn push(self: *NotificationQueue, allocator: std.mem.Allocator, notification: Notification) !void {
+            if (self.slots.items.len == 0) try self.slots.resize(allocator, capacity);
+            if (self.count == capacity) {
+                self.slots.items[self.head].deinit(allocator);
+                self.slots.items[self.head] = notification;
+                self.head = (self.head + 1) % capacity;
+                return;
+            }
+            const index = (self.head + self.count) % capacity;
+            self.slots.items[index] = notification;
+            self.count += 1;
+        }
+
+        fn pop(self: *NotificationQueue) ?Notification {
+            if (self.count == 0) return null;
+            const notification = self.slots.items[self.head];
+            self.head = (self.head + 1) % capacity;
+            self.count -= 1;
+            if (self.count == 0) self.head = 0;
+            return notification;
         }
     };
 
@@ -174,12 +214,9 @@ pub const SessionRuntime = struct {
         }
         self.title.deinit(self.allocator);
         if (self.pending_clipboard_write) |pending| self.freePendingClipboardWrite(pending);
-        for (self.notifications.items) |notification| notification.deinit(self.allocator);
         self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
         self.render_snapshot.deinit(self.allocator);
-        self.render_query.deinit(self.allocator);
-        self.render_matches.deinit(self.allocator);
         self.search_cache.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
@@ -303,21 +340,6 @@ pub const SessionRuntime = struct {
             return false;
         }
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
-        if (self.rendered_search_generation != self.search_render_generation) {
-            self.render_query.ensureTotalCapacity(self.allocator, self.search.query.items.len) catch |err| {
-                self.terminal_mutex.unlock();
-                return err;
-            };
-            self.render_matches.ensureTotalCapacity(self.allocator, self.search.matches.items.len) catch |err| {
-                self.terminal_mutex.unlock();
-                return err;
-            };
-            self.render_query.clearRetainingCapacity();
-            self.render_query.appendSliceAssumeCapacity(self.search.query.items);
-            self.render_matches.clearRetainingCapacity();
-            self.render_matches.appendSliceAssumeCapacity(self.search.matches.items);
-            self.rendered_search_generation = self.search_render_generation;
-        }
         self.render_search_enabled = self.search.enabled;
         self.render_search_active = self.search.active;
         self.render_search_scanning = self.search.scanning;
@@ -331,7 +353,7 @@ pub const SessionRuntime = struct {
     }
 
     pub fn replayPreparedViewport(self: *SessionRuntime, renderer: anytype) void {
-        renderer.searchState(self.render_search_enabled, self.render_query.items, self.render_matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
         self.render_snapshot.replay(renderer);
     }
 
@@ -397,7 +419,6 @@ pub const SessionRuntime = struct {
         }
         self.search.enabled = true;
         self.search.reset();
-        self.search_render_generation +%= 1;
     }
 
     pub fn searchCancel(self: *SessionRuntime) void {
@@ -416,7 +437,6 @@ pub const SessionRuntime = struct {
         self.search.saved_offset = null;
         self.search.query.clearRetainingCapacity();
         self.search.reset();
-        self.search_render_generation +%= 1;
     }
 
     pub fn searchAppend(self: *SessionRuntime, bytes: []const u8) !void {
@@ -424,7 +444,6 @@ pub const SessionRuntime = struct {
         defer self.terminal_mutex.unlock();
         try self.search.query.appendSlice(self.allocator, bytes);
         self.search.reset();
-        self.search_render_generation +%= 1;
     }
     pub fn searchBackspace(self: *SessionRuntime) void {
         self.terminal_mutex.lock();
@@ -434,7 +453,6 @@ pub const SessionRuntime = struct {
             while (end > 0 and self.search.query.items[end] & 0xc0 == 0x80) end -= 1;
             self.search.query.shrinkRetainingCapacity(end);
             self.search.reset();
-            self.search_render_generation +%= 1;
         }
     }
 
@@ -443,7 +461,6 @@ pub const SessionRuntime = struct {
         defer self.terminal_mutex.unlock();
         self.search.query.clearRetainingCapacity();
         self.search.reset();
-        self.search_render_generation +%= 1;
     }
 
     pub fn searchEnabled(self: *SessionRuntime) bool {
@@ -462,7 +479,6 @@ pub const SessionRuntime = struct {
         if (generation != self.search.scanned_generation) {
             self.search.reset();
             self.search.scanned_generation = generation;
-            self.search_render_generation +%= 1;
         }
         if (self.search_cache_generation != self.search_content_generation) {
             self.search_cache.clear(self.allocator);
@@ -486,7 +502,6 @@ pub const SessionRuntime = struct {
             self.search.scanned_generation = generation;
         }
         const changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning;
-        if (changed) self.search_render_generation +%= 1;
         return .{
             .changed = changed,
             .scanning = self.search.scanning,
@@ -497,7 +512,6 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         const match = self.search.navigate(forward) orelse return null;
-        self.search_render_generation +%= 1;
         const state = self.terminal.scrollbar() catch return match;
         const target = @min(@as(u64, match.row), state.total -| state.len);
         const delta: isize = if (target >= state.offset) @intCast(target - state.offset) else -@as(isize, @intCast(state.offset - target));
@@ -526,14 +540,13 @@ pub const SessionRuntime = struct {
     pub fn takeNotification(self: *SessionRuntime) ?Notification {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        if (self.notifications.items.len == 0) return null;
-        return self.notifications.orderedRemove(0);
+        return self.notifications.pop();
     }
 
     pub fn hasPendingNotification(self: *SessionRuntime) bool {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        return self.notifications.items.len > 0;
+        return self.notifications.count > 0;
     }
 
     pub fn freeNotification(self: *SessionRuntime, notification: Notification) void {
@@ -573,10 +586,13 @@ pub const SessionRuntime = struct {
         }
     }
 
-    pub fn titleAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]u8 {
+    pub fn copyTitle(self: *SessionRuntime, allocator: std.mem.Allocator, output: *std.ArrayList(u8)) !u64 {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        return allocator.dupe(u8, self.title.items);
+        try output.ensureTotalCapacity(allocator, self.title.items.len);
+        output.clearRetainingCapacity();
+        output.appendSliceAssumeCapacity(self.title.items);
+        return self.title_generation.load(.monotonic);
     }
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
@@ -693,18 +709,11 @@ pub const SessionRuntime = struct {
             const runtime = self.runtime;
             if (update == .notification) {
                 const event = update.notification;
-                const title = runtime.allocator.dupe(u8, event.title) catch return;
-                const body = runtime.allocator.dupe(u8, event.body) catch {
-                    runtime.allocator.free(title);
-                    return;
-                };
-                if (runtime.notifications.items.len == 32) {
-                    runtime.notifications.orderedRemove(0).deinit(runtime.allocator);
-                }
-                runtime.notifications.append(runtime.allocator, .{ .title = title, .body = body }) catch {
-                    runtime.allocator.free(title);
-                    runtime.allocator.free(body);
-                };
+                const payload = runtime.allocator.alloc(u8, event.title.len + event.body.len) catch return;
+                @memcpy(payload[0..event.title.len], event.title);
+                @memcpy(payload[event.title.len..], event.body);
+                const notification = Notification{ .payload = payload, .title_len = @intCast(event.title.len) };
+                runtime.notifications.push(runtime.allocator, notification) catch notification.deinit(runtime.allocator);
                 return;
             }
             runtime.taskbar_progress = switch (update) {
@@ -724,7 +733,7 @@ pub const SessionRuntime = struct {
     };
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
-    /// already holds `terminal_mutex`. Readers acquire that mutex in `titleAlloc`.
+    /// already holds `terminal_mutex`. Readers acquire that mutex in `copyTitle`.
     fn titleChanged(context: ?*anyopaque, title: []const u8) void {
         const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
         self.title.ensureTotalCapacity(self.allocator, title.len) catch return;
@@ -862,8 +871,6 @@ test "session applies clipboard write policy and decoded size limit" {
 fn deinitTestRuntime(runtime: *SessionRuntime) void {
     if (runtime.pending_clipboard_write) |pending| runtime.freePendingClipboardWrite(pending);
     runtime.render_snapshot.deinit(runtime.allocator);
-    runtime.render_query.deinit(runtime.allocator);
-    runtime.render_matches.deinit(runtime.allocator);
     runtime.search_cache.deinit(runtime.allocator);
     runtime.terminal.deinit();
 }
@@ -926,4 +933,24 @@ test "OSC 7 rejects remote malformed and non-Windows locations" {
     try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///home/alice", "DESKTOP-1")) == null);
     try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%ZZpath", "DESKTOP-1")) == null);
     try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%00path", "DESKTOP-1")) == null);
+}
+
+test "notification queue preserves FIFO order and evicts its oldest entry" {
+    var queue = SessionRuntime.NotificationQueue{};
+    defer queue.deinit(std.testing.allocator);
+
+    for (0..33) |index| {
+        const payload = try std.testing.allocator.alloc(u8, 1);
+        payload[0] = @intCast(index);
+        const notification = SessionRuntime.Notification{ .payload = payload, .title_len = 0 };
+        queue.push(std.testing.allocator, notification) catch |err| {
+            notification.deinit(std.testing.allocator);
+            return err;
+        };
+    }
+
+    try std.testing.expectEqual(@as(usize, 32), queue.count);
+    const first = queue.pop().?;
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 1), first.body()[0]);
 }
