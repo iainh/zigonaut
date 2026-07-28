@@ -7,9 +7,7 @@ const vt = @cImport({
     @cDefine("GHOSTTY_STATIC", "1");
     @cInclude("ghostty/vt.h");
 });
-const image_native = @cImport({
-    @cInclude("directwrite_renderer.h");
-});
+const image_native = @import("win32.zig").c;
 
 const kitty_image_limit: usize = 32 * 1024 * 1024;
 var decode_png_mutex: std.Thread.Mutex = .{};
