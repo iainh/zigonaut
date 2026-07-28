@@ -114,12 +114,11 @@ pipe_command_output=
 # Profile opened initially and by Ctrl+Shift+T. Default: PowerShell.
 default_profile=PowerShell
 # Launch profiles use profile.<name>=<shell type>|<command line>.
-# Shell types are powershell, windows, and wsl. These four profiles are
+# Shell types are powershell, windows, and wsl. These three profiles are
 # the defaults; declaring any profile.* key replaces the default set.
 profile.PowerShell=powershell|powershell.exe
-profile.PowerShell 7=powershell|pwsh.exe
-profile.Command Prompt=windows|cmd.exe
 profile.WSL=wsl|wsl.exe
+profile.Command Prompt=windows|cmd.exe
 # Working directory for new processes. Default: the user's home directory.
 working_directory=
 # Keep a new tab open after its process exits cleanly. Default: false.
@@ -152,9 +151,10 @@ name does not exist, the first configured profile is used. Up to 32 profiles are
 `working_directory` sets the current directory for new processes;
 leave it empty to use the current user's home directory. Set `hold_on_exit=true` to retain newly created
 tabs after a clean process exit. Reloading these settings affects subsequent sessions only.
-Use **Open Settings** and **Reload Settings** from the title-bar
-menu to edit and apply changes without restarting Zigonaut. Reloading also rebuilds the new-tab
-menu from the configured profiles.
+Use **Open Settings** from the title-bar menu for a full-window Fluent settings page covering
+appearance, terminal rendering, palette overrides, profiles, and advanced integration options.
+Valid changes are saved and applied automatically. **Reload Settings** remains available for changes
+made directly in the file and also rebuilds the new-tab menu from the configured profiles.
 Valid local OSC 7 `file:` URIs override `working_directory` for new tabs and splits
 created from the reporting pane. Remote hosts, malformed escapes, and non-Windows paths
 fall back to the configured directory.

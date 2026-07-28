@@ -99,6 +99,7 @@ const Application = struct {
     const spawnNewWindow = spawnNewWindowImpl;
     const pipeCommandOutput = pipeCommandOutputImpl;
     const syncProfiles = syncProfilesImpl;
+    const openSettingsPage = openSettingsPageImpl;
     const reloadSettings = reloadSettingsImpl;
     const updateTheme = updateThemeImpl;
     const setZoomedFontSize = setZoomedFontSizeImpl;
@@ -541,7 +542,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
                 .open_settings => {
-                    openSettings(hwnd) catch |err| log.err("unable to open settings: {}", .{err});
+                    self.openSettingsPage() catch |err| log.err("unable to open settings: {}", .{err});
                     return 0;
                 },
                 .reload_settings => {
@@ -1145,13 +1146,11 @@ fn createFont(font_family: []const u8, font_size: u16, dpi: u32) win.HFONT {
     );
 }
 
-fn openSettings(hwnd: win.HWND) !void {
+fn openSettingsPageImpl(self: *Application) !void {
     const path = try config.pathAlloc(std.heap.page_allocator);
     defer std.heap.page_allocator.free(path);
-    const wide_path = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
-    defer std.heap.page_allocator.free(wide_path);
-    const result = win.ShellExecuteW(hwnd, open_operation, wide_path.ptr, null, null, win.SW_SHOWNORMAL);
-    if (@intFromPtr(result) <= 32) return error.OpenSettingsFailed;
+    const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
+    if (!bridge.showSettings(path, self.loaded.contents)) return error.OpenSettingsFailed;
 }
 
 fn reloadSettingsImpl(self: *Application) !void {

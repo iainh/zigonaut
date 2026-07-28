@@ -47,6 +47,19 @@
                 <Setter Property="Background" Value="{ThemeResource ZigonautTerminalBackgroundBrush}" />
             </Style>
 
+            <Style x:Key="ZigonautSettingsCardStyle" TargetType="Border">
+                <Setter Property="MinWidth" Value="148" />
+                <Setter Property="MinHeight" Value="68" />
+                <Setter Property="Padding" Value="16" />
+                <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}" />
+                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="BackgroundSizing" Value="InnerBorderEdge" />
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="VerticalAlignment" Value="Top" />
+            </Style>
+
             <Style x:Key="ZigonautTitleBarDividerStyle" TargetType="Border">
                 <Setter Property="Height" Value="1" />
                 <Setter Property="VerticalAlignment" Value="Bottom" />

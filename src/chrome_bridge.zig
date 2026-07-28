@@ -62,6 +62,7 @@ const UpdateScrollbar = *const fn (?*anyopaque, u64, u32, u32, u32, win.BOOL) ca
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
+const ShowSettings = *const fn (?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const UpdateImeBounds = *const fn (?*anyopaque, u64, *const win.zigonaut_ime_bounds) callconv(.c) win.HRESULT;
 
 /// UI-thread-owned full WinUI window. `run` owns the WinUI application pump and
@@ -81,6 +82,7 @@ pub const Bridge = struct {
     update_taskbar_progress_fn: UpdateTaskbarProgress,
     show_notification_fn: ShowNotification,
     update_appearance_fn: UpdateAppearance,
+    show_settings_fn: ShowSettings,
     update_ime_bounds_fn: UpdateImeBounds,
 
     pub fn load() ?Bridge {
@@ -112,6 +114,7 @@ pub const Bridge = struct {
         const update_taskbar_progress_fn = symbol(UpdateTaskbarProgress, module, "zigonaut_chrome_update_taskbar_progress") orelse return null;
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
+        const show_settings_fn = symbol(ShowSettings, module, "zigonaut_chrome_show_settings") orelse return null;
         const update_ime_bounds_fn = symbol(UpdateImeBounds, module, "zigonaut_chrome_update_ime_bounds") orelse return null;
         loaded = true;
         return .{
@@ -127,6 +130,7 @@ pub const Bridge = struct {
             .update_taskbar_progress_fn = update_taskbar_progress_fn,
             .show_notification_fn = show_notification_fn,
             .update_appearance_fn = update_appearance_fn,
+            .show_settings_fn = show_settings_fn,
             .update_ime_bounds_fn = update_ime_bounds_fn,
         };
     }
@@ -211,6 +215,13 @@ pub const Bridge = struct {
     pub fn updateAppearance(self: *Bridge, backdrop: u32, high_contrast: bool, dark_theme: bool) bool {
         const instance = self.instance orelse return false;
         return succeeded(self.update_appearance_fn(instance, backdrop, @intFromBool(high_contrast), @intFromBool(dark_theme)));
+    }
+
+    pub fn showSettings(self: *Bridge, path: []const u8, contents: []const u8) bool {
+        const instance = self.instance orelse return false;
+        const path_length = stringLength(path.len) orelse return false;
+        const contents_length = stringLength(contents.len) orelse return false;
+        return succeeded(self.show_settings_fn(instance, path.ptr, path_length, contents.ptr, contents_length));
     }
 
     pub fn updateImeBounds(self: *Bridge, pane_id: u64, bounds: win.zigonaut_ime_bounds) bool {

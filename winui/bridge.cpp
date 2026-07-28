@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "App.xaml.h"
 #include "bridge.h"
+#include "settings_dialog.h"
 #include "tsf.h"
 #include <MddBootstrap.h>
 #include <WindowsAppSDK-VersionInfo.h>
@@ -174,6 +175,7 @@ struct Bridge {
     MenuFlyoutItem quit_item{nullptr};
     ContentDialog about_dialog{nullptr};
     Windows::Foundation::IAsyncOperation<ContentDialogResult> about_operation{nullptr};
+    std::shared_ptr<ZigonautSettings::Dialog> settings_dialog;
     MenuFlyout new_tab_menu{nullptr};
     std::vector<MenuFlyoutItem> profile_items;
     std::vector<MenuFlyoutItem::Click_revoker> profile_revokers;
@@ -1090,6 +1092,7 @@ struct Bridge {
         this->dark_theme = dark_theme;
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
+        ZigonautSettings::setTheme(settings_dialog, high_contrast, dark_theme);
         title_bar.PreferredTheme(high_contrast
             ? Microsoft::UI::Windowing::TitleBarTheme::UseDefaultAppMode
             : dark_theme ? Microsoft::UI::Windowing::TitleBarTheme::Dark
@@ -1257,6 +1260,16 @@ struct Bridge {
         }
     }
 
+    void showSettings(std::string_view path, std::string_view contents) {
+        if (ZigonautSettings::isOpen(settings_dialog)) {
+            ZigonautSettings::activate(settings_dialog);
+            return;
+        }
+        settings_dialog = ZigonautSettings::show(path, contents, high_contrast, dark_theme, [this] {
+            notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0);
+        });
+    }
+
     HRESULT close() noexcept {
         if (closed) return S_OK;
         closed = true;
@@ -1275,6 +1288,8 @@ struct Bridge {
         notification_manager = nullptr;
         if (new_tab_menu) cleanup(L"hide new-tab menu", [&] { new_tab_menu.Hide(); }, result);
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
+        if (ZigonautSettings::isOpen(settings_dialog)) cleanup(L"close settings window", [&] { ZigonautSettings::close(settings_dialog); }, result);
+        settings_dialog.reset();
         about_closed_revoker.revoke();
         if (about_dialog) cleanup(L"hide About dialog", [&] { about_dialog.Hide(); }, result);
         for (auto& revoker : profile_revokers) revoker.revoke();
@@ -1505,6 +1520,16 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_appearance(void* value, uint32
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
     if (backdrop > ZIGONAUT_BACKDROP_ACRYLIC) return E_INVALIDARG;
     try { bridge->updateAppearance(backdrop, high_contrast != FALSE, dark_theme != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update appearance"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_show_settings(void* value, const char* path, uint32_t path_length, const char* contents, uint32_t contents_length) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (!validString(path, path_length) || !path_length || !validString(contents, contents_length)) return E_INVALIDARG;
+    try {
+        bridge->showSettings(std::string_view{path, path_length}, std::string_view{contents ? contents : "", contents_length});
+        return S_OK;
+    } catch (...) { return reportCurrentException(L"show settings"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update_ime_bounds(void* value, uint64_t pane_id, const zigonaut_ime_bounds* bounds) noexcept {
