@@ -290,7 +290,7 @@ pub const Terminal = struct {
             var iterator: vt.GhosttyKittyGraphicsPlacementIterator = null;
             try check(vt.ghostty_kitty_graphics_placement_iterator_new(null, &iterator));
             defer vt.ghostty_kitty_graphics_placement_iterator_free(iterator);
-            try check(vt.ghostty_kitty_graphics_get(graphics, vt.GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, iterator));
+            try check(vt.ghostty_kitty_graphics_get(graphics, vt.GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, @ptrCast(&iterator)));
             while (vt.ghostty_kitty_graphics_placement_next(iterator)) {
                 var image_id: u32 = 0;
                 var virtual = false;
@@ -2146,7 +2146,8 @@ test "render snapshots own cell graphemes" {
 test "render snapshots own direct Kitty PNG placements" {
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
-    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=\x1b\\");
+    try terminal.resize(4, 2, 8, 16);
+    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
 
     var snapshot = Terminal.RenderSnapshot{};
     defer snapshot.deinit(std.testing.allocator);
@@ -2176,7 +2177,7 @@ test "render snapshots own direct Kitty PNG placements" {
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
     try std.testing.expectEqual(@as(usize, 4), image.pixels.len);
-    try std.testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, image.pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.pixels);
     try std.testing.expectEqual(@as(i32, 0), image.viewport_col);
     try std.testing.expectEqual(@as(i32, 0), image.viewport_row);
     try std.testing.expectEqual(@as(u32, 1), image.source_width);
@@ -2194,7 +2195,8 @@ test "render snapshots own direct Kitty PNG placements" {
 test "Kitty snapshot placements share image storage" {
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
-    terminal.feed("\x1b_Gf=100,a=T,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=\x1b\\");
+    try terminal.resize(4, 2, 8, 16);
+    terminal.feed("\x1b_Gf=100,a=T,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
     terminal.feed("\x1b_Ga=p,i=7,p=2\x1b\\");
 
     var snapshot = Terminal.RenderSnapshot{};

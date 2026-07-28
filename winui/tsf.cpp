@@ -3,8 +3,6 @@
 #include <climits>
 #include <string>
 
-#pragma comment(lib, "msctf.lib")
-
 template<class T> static void release(T*& p) noexcept { if (p) { p->Release(); p = nullptr; } }
 
 static HRESULT rangeLength(ITfRange* range, TfEditCookie ec, LONG* out) noexcept {
