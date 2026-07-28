@@ -273,7 +273,6 @@ struct Bridge {
         new_tab_icon.FontSize(12);
         new_tab_button.Content(new_tab_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
-        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T)"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
             focusTerminal();
