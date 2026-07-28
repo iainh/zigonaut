@@ -2,6 +2,31 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.3.0] - 2026-07-28
+
+### Added
+
+- Direct Kitty graphics protocol rendering for inline PNG images.
+- Native IME composition and forwarding of terminal-generated responses to ConPTY.
+- Synchronized terminal output and guarded terminal clipboard writes.
+- Live terminal working-directory tracking and configurable actions that receive
+  command output.
+
+### Changed
+
+- Split panes now preserve model-owned ratios while snapping dividers and minimum
+  sizes to terminal cells.
+- New terminals open in the user's home directory, and the viewport returns to the
+  current input when appropriate.
+- Reduced rendering, layout, search, notification, launch-metadata, and snapshot
+  overhead through reuse, coalescing, compact storage, and fewer intermediate copies.
+
+### Fixed
+
+- Bundled the matching side-by-side ConPTY components to prevent resize corruption.
+- Corrected styled soft-wrap rendering and stale incremental snapshots during reflow.
+- Fixed terminal rendering, WinUI bridge builds, and ARM64 C-import collisions.
+
 ## [0.1.0] - 2026-07-25
 
 ### Added
@@ -33,4 +58,5 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.3.0]: https://github.com/iainh/zigonaut/releases/tag/v0.3.0
 [0.1.0]: https://github.com/iainh/zigonaut/releases/tag/v0.1.0
