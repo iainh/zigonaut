@@ -96,7 +96,8 @@ pub fn build(b: *std.Build) void {
         const winui_cmd = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
         winui_cmd.addFileArg(b.path("winui/build.ps1"));
         const target_arch: []const u8 = if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64";
-        winui_cmd.addArgs(&.{ "-TargetArch", target_arch, "-Configuration", "Release" });
+        const configuration = if (debug_build) "Debug" else "Release";
+        winui_cmd.addArgs(&.{ "-TargetArch", target_arch, "-Configuration", configuration });
         if (debug_build) winui_cmd.addArg("-DebugIcon");
         winui_cmd.step.dependOn(&install_exe.step);
         winui_step.dependOn(&winui_cmd.step);
