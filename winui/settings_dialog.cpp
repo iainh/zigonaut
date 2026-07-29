@@ -11,6 +11,7 @@
 #include <dwrite_1.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -34,51 +35,67 @@ std::string trim(std::string value) {
 
 std::map<std::string, std::string> parse(std::string_view contents) {
     std::map<std::string, std::string> values;
-    std::istringstream lines{std::string{contents}};
-    for (std::string line; std::getline(lines, line);) {
-        line = trim(std::move(line));
-        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-        auto const separator = line.find('=');
-        if (separator == std::string::npos) continue;
-        values[trim(line.substr(0, separator))] = trim(line.substr(separator + 1));
+    auto const root = Windows::Data::Json::JsonObject::Parse(to_hstring(contents));
+    auto const appearance = root.GetNamedObject(L"appearance");
+    auto const font = appearance.GetNamedObject(L"font");
+    auto const themes = appearance.GetNamedObject(L"themes");
+    auto const padding = appearance.GetNamedObject(L"padding");
+    auto const background = appearance.GetNamedObject(L"background");
+    auto const palette = appearance.GetNamedObject(L"palette");
+    auto const terminal = root.GetNamedObject(L"terminal");
+    auto const initial_size = terminal.GetNamedObject(L"initialSize");
+    auto const profiles = root.GetNamedObject(L"profiles");
+    auto const advanced = root.GetNamedObject(L"advanced");
+    auto const clipboard = advanced.GetNamedObject(L"clipboard");
+    auto number = [](double value) { return std::to_string(static_cast<uint64_t>(value)); };
+
+    values["font_family"] = to_string(font.GetNamedString(L"family"));
+    values["font_size"] = number(font.GetNamedNumber(L"size"));
+    values["scrollback_size"] = number(terminal.GetNamedNumber(L"scrollbackSize"));
+    values["initial_columns"] = number(initial_size.GetNamedNumber(L"columns"));
+    values["initial_rows"] = number(initial_size.GetNamedNumber(L"rows"));
+    values["dark_theme"] = to_string(themes.GetNamedString(L"dark"));
+    values["light_theme"] = to_string(themes.GetNamedString(L"light"));
+    values["color_scheme"] = to_string(themes.GetNamedString(L"colorScheme"));
+    values["padding_horizontal"] = number(padding.GetNamedNumber(L"horizontal"));
+    values["padding_vertical"] = number(padding.GetNamedNumber(L"vertical"));
+    values["background_opacity"] = number(background.GetNamedNumber(L"opacity"));
+    values["backdrop"] = to_string(background.GetNamedString(L"backdrop"));
+    values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
+    values["default_profile"] = to_string(profiles.GetNamedString(L"default"));
+    values["working_directory"] = to_string(profiles.GetNamedString(L"workingDirectory"));
+    values["hold_on_exit"] = profiles.GetNamedBoolean(L"holdOnExit") ? "true" : "false";
+    values["osc52_clipboard_write"] = clipboard.GetNamedBoolean(L"terminalWrites") ? "true" : "false";
+    values["osc52_clipboard_max_bytes"] = number(clipboard.GetNamedNumber(L"maximumBytes"));
+    values["pipe_command_output"] = to_string(advanced.GetNamedString(L"pipeCommandOutput"));
+
+    for (auto const& [name, key] : std::initializer_list<std::pair<char const*, wchar_t const*>>{
+             {"foreground", L"foreground"}, {"background", L"background"}, {"cursor", L"cursor"}}) {
+        if (palette.HasKey(key) && palette.GetNamedValue(key).ValueType() == Windows::Data::Json::JsonValueType::String)
+            values[name] = to_string(palette.GetNamedString(key));
+    }
+    if (palette.HasKey(L"ansi") && palette.GetNamedValue(L"ansi").ValueType() == Windows::Data::Json::JsonValueType::Array) {
+        auto const ansi = palette.GetNamedArray(L"ansi");
+        for (uint32_t index = 0; index < ansi.Size() && index < 16; ++index) {
+            auto const item = ansi.GetAt(index);
+            if (item.ValueType() == Windows::Data::Json::JsonValueType::String)
+                values["ansi" + std::to_string(index)] = to_string(item.GetString());
+        }
     }
     return values;
 }
 
 std::string profileText(std::string_view contents) {
-    struct ProfileLine { std::string name; std::string value; };
-    std::vector<ProfileLine> profiles;
-    std::istringstream lines{std::string{contents}};
-    for (std::string line; std::getline(lines, line);) {
-        line = trim(std::move(line));
-        if (!line.starts_with("profile.")) continue;
-        auto const separator = line.find('=');
-        if (separator == std::string::npos || separator <= 8) continue;
-        profiles.push_back({trim(line.substr(8, separator - 8)), trim(line.substr(separator + 1))});
-    }
-
+    auto const profiles = Windows::Data::Json::JsonObject::Parse(to_hstring(contents))
+                              .GetNamedObject(L"profiles").GetNamedArray(L"items");
     std::string result;
-    auto append = [&result](std::string const& name, std::string const& profile) {
+    for (auto const& item : profiles) {
+        auto const profile = item.GetObject();
         if (!result.empty()) result += "\r\n";
-        result += name + "|" + profile;
-    };
-    if (contents.find("# Generated by the Zigonaut settings page.") != std::string_view::npos) {
-        static ProfileLine const defaults[] = {
-            {"PowerShell", "powershell|powershell.exe"},
-            {"WSL", "wsl|wsl.exe"},
-            {"Command Prompt", "windows|cmd.exe"},
-        };
-        for (auto const& fallback : defaults) {
-            auto configured = std::find_if(profiles.begin(), profiles.end(), [&](auto const& candidate) { return candidate.name == fallback.name; });
-            append(fallback.name, configured == profiles.end() ? fallback.value : configured->value);
-        }
-        for (auto const& profile : profiles) {
-            auto built_in = std::find_if(std::begin(defaults), std::end(defaults), [&](auto const& fallback) { return fallback.name == profile.name; });
-            if (built_in == std::end(defaults)) append(profile.name, profile.value);
-        }
-        return result;
+        result += to_string(profile.GetNamedString(L"name")) + "|";
+        result += to_string(profile.GetNamedString(L"shell")) + "|";
+        result += to_string(profile.GetNamedString(L"command"));
     }
-    for (auto const& profile : profiles) append(profile.name, profile.value);
     return result;
 }
 
@@ -630,11 +647,29 @@ struct Dialog {
             return trim(to_string(box.SelectedItem().as<ComboBoxItem>().Tag().as<hstring>()));
         };
         auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
-        if (selected_font.empty()) throw std::runtime_error("Font family cannot be empty.");
-        if (selectedTheme(dark_theme).empty() || selectedTheme(light_theme).empty()) throw std::runtime_error("Theme names cannot be empty.");
+        auto const selected_dark_theme = selectedTheme(dark_theme);
+        auto const selected_light_theme = selectedTheme(light_theme);
+        auto integer = [](NumberBox const& box, double minimum, double maximum) {
+            auto const value = box.Value();
+            if (!std::isfinite(value) || std::trunc(value) != value || value < minimum || value > maximum)
+                throw std::runtime_error("Numeric settings must be whole numbers within their displayed ranges.");
+            return value;
+        };
+        auto const font_size_value = integer(font_size, 6, 72);
+        auto const scrollback_value = integer(scrollback_size, 0, 1000000);
+        auto const columns_value = integer(initial_columns, 10, 1000);
+        auto const rows_value = integer(initial_rows, 4, 1000);
+        auto const horizontal_padding_value = integer(padding_horizontal, 0, 128);
+        auto const vertical_padding_value = integer(padding_vertical, 0, 128);
+        auto const opacity_value = integer(opacity, 0, 100);
+        auto const clipboard_limit_value = integer(clipboard_limit, 1, 16777216);
+        if (selected_font.empty() || selected_font.size() >= 128) throw std::runtime_error("Font family must be between 1 and 127 UTF-8 bytes.");
+        if (selected_dark_theme.empty() || selected_dark_theme.size() >= 64 || selected_light_theme.empty() || selected_light_theme.size() >= 64)
+            throw std::runtime_error("Theme names must be between 1 and 63 UTF-8 bytes.");
         for (auto const& editor : colors) if (!validColor(string(editor))) throw std::runtime_error("Palette colors must be empty or use #RRGGBB.");
 
-        std::vector<std::string> profile_lines;
+        struct ProfileValue { std::string name, shell, command; };
+        std::vector<ProfileValue> profile_values;
         std::istringstream lines{to_string(profiles.Text())};
         for (std::string line; std::getline(lines, line);) {
             line = trim(std::move(line));
@@ -645,38 +680,99 @@ struct Dialog {
                 throw std::runtime_error("Every profile must use name|shell type|command.");
             auto kind = trim(line.substr(first + 1, second - first - 1));
             if (kind != "powershell" && kind != "windows" && kind != "wsl") throw std::runtime_error("Profile shell types must be powershell, windows, or wsl.");
-            profile_lines.push_back(line);
+            auto name = trim(line.substr(0, first));
+            auto command = trim(line.substr(second + 1));
+            if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
+                throw std::runtime_error("Profile names must be between 1 and 127 UTF-8 bytes and cannot contain | or line breaks.");
+            if (command.empty() || command.find_first_of("\r\n\0", 0, 3) != std::string::npos)
+                throw std::runtime_error("Profile commands cannot be empty or contain line breaks or NUL characters.");
+            if (std::any_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), name.c_str()) == 0; }))
+                throw std::runtime_error("Profile names must be unique.");
+            profile_values.push_back({std::move(name), std::move(kind), std::move(command)});
         }
-        if (profile_lines.empty() || profile_lines.size() > 32) throw std::runtime_error("Add between 1 and 32 profiles.");
+        if (profile_values.empty() || profile_values.size() > 32) throw std::runtime_error("Add between 1 and 32 profiles.");
+        auto const selected_default = string(default_profile);
+        if (selected_default.empty() || selected_default.size() >= 128) throw std::runtime_error("Default profile must be between 1 and 127 UTF-8 bytes.");
+        if (std::none_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), selected_default.c_str()) == 0; }))
+            throw std::runtime_error("The default profile must match a launch profile name.");
+        auto const selected_pipe_command = string(pipe_command);
+        if (selected_pipe_command.size() >= 4096 || selected_pipe_command.find('\0') != std::string::npos)
+            throw std::runtime_error("Pipe command must be shorter than 4096 UTF-8 bytes and cannot contain NUL characters.");
 
-        std::ostringstream output;
-        output << "# Zigonaut configuration\n# Generated by the Zigonaut settings page.\n\n";
-        output << "font_family=" << selected_font << '\n';
-        output << "font_size=" << static_cast<unsigned>(font_size.Value()) << '\n';
-        output << "scrollback_size=" << static_cast<unsigned>(scrollback_size.Value()) << '\n';
-        output << "initial_columns=" << static_cast<unsigned>(initial_columns.Value()) << '\n';
-        output << "initial_rows=" << static_cast<unsigned>(initial_rows.Value()) << '\n';
-        output << "dark_theme=" << selectedTheme(dark_theme) << '\n';
-        output << "light_theme=" << selectedTheme(light_theme) << '\n';
-        output << "color_scheme=" << (color_scheme.SelectedIndex() == 1 ? "light" : color_scheme.SelectedIndex() == 2 ? "dark" : "system") << '\n';
-        output << "padding_horizontal=" << static_cast<unsigned>(padding_horizontal.Value()) << '\n';
-        output << "padding_vertical=" << static_cast<unsigned>(padding_vertical.Value()) << '\n';
-        output << "background_opacity=" << static_cast<unsigned>(opacity.Value()) << '\n';
-        output << "backdrop=" << (backdrop.SelectedIndex() == 0 ? "none" : backdrop.SelectedIndex() == 2 ? "mica_alt" : backdrop.SelectedIndex() == 3 ? "acrylic" : "mica") << "\n\n";
-        static char const* keys[] = { "foreground", "background", "cursor", "ansi0", "ansi1", "ansi2", "ansi3", "ansi4", "ansi5", "ansi6", "ansi7", "ansi8", "ansi9", "ansi10", "ansi11", "ansi12", "ansi13", "ansi14", "ansi15" };
-        for (size_t index = 0; index < colors.size(); ++index) if (!string(colors[index]).empty()) output << keys[index] << '=' << string(colors[index]) << '\n';
-        output << "\ndefault_profile=" << string(default_profile) << '\n';
-        for (auto const& profile : profile_lines) {
-            auto const split = profile.find('|');
-            output << "profile." << trim(profile.substr(0, split)) << '=' << trim(profile.substr(split + 1)) << '\n';
+        using Windows::Data::Json::JsonArray;
+        using Windows::Data::Json::JsonObject;
+        using Windows::Data::Json::JsonValue;
+        auto text = [](std::string const& value) { return JsonValue::CreateStringValue(to_hstring(value)); };
+        auto number = [](double value) { return JsonValue::CreateNumberValue(value); };
+        auto boolean = [](bool value) { return JsonValue::CreateBooleanValue(value); };
+
+        JsonObject root;
+        root.Insert(L"version", number(1));
+        JsonObject appearance;
+        JsonObject font;
+        font.Insert(L"family", text(selected_font));
+        font.Insert(L"size", number(font_size_value));
+        appearance.Insert(L"font", font);
+        JsonObject selected_themes;
+        selected_themes.Insert(L"dark", text(selected_dark_theme));
+        selected_themes.Insert(L"light", text(selected_light_theme));
+        selected_themes.Insert(L"colorScheme", text(color_scheme.SelectedIndex() == 1 ? "light" : color_scheme.SelectedIndex() == 2 ? "dark" : "system"));
+        appearance.Insert(L"themes", selected_themes);
+        JsonObject padding;
+        padding.Insert(L"horizontal", number(horizontal_padding_value));
+        padding.Insert(L"vertical", number(vertical_padding_value));
+        appearance.Insert(L"padding", padding);
+        JsonObject terminal_background;
+        terminal_background.Insert(L"opacity", number(opacity_value));
+        terminal_background.Insert(L"backdrop", text(backdrop.SelectedIndex() == 0 ? "none" : backdrop.SelectedIndex() == 2 ? "mica_alt" : backdrop.SelectedIndex() == 3 ? "acrylic" : "mica"));
+        appearance.Insert(L"background", terminal_background);
+        JsonObject palette;
+        static wchar_t const* palette_keys[] = {L"foreground", L"background", L"cursor"};
+        for (size_t index = 0; index < 3; ++index) if (!string(colors[index]).empty()) palette.Insert(palette_keys[index], text(string(colors[index])));
+        auto has_ansi = std::any_of(colors.begin() + 3, colors.end(), [&](auto const& editor) { return !string(editor).empty(); });
+        if (has_ansi) {
+            JsonArray ansi;
+            for (size_t index = 3; index < colors.size(); ++index)
+                ansi.Append(string(colors[index]).empty() ? JsonValue::CreateNullValue() : text(string(colors[index])));
+            palette.Insert(L"ansi", ansi);
         }
-        output << "working_directory=" << string(working_directory) << '\n';
-        output << "hold_on_exit=" << (hold_on_exit.IsOn() ? "true" : "false") << '\n';
-        output << "randomize_tab_background=" << (random_background.IsOn() ? "true" : "false") << '\n';
-        output << "osc52_clipboard_write=" << (clipboard_write.IsOn() ? "true" : "false") << '\n';
-        output << "osc52_clipboard_max_bytes=" << static_cast<unsigned>(clipboard_limit.Value()) << '\n';
-        output << "pipe_command_output=" << string(pipe_command) << '\n';
-        return output.str();
+        appearance.Insert(L"palette", palette);
+        appearance.Insert(L"randomizeTabBackground", boolean(random_background.IsOn()));
+        root.Insert(L"appearance", appearance);
+
+        JsonObject terminal;
+        terminal.Insert(L"scrollbackSize", number(scrollback_value));
+        JsonObject initial_size;
+        initial_size.Insert(L"columns", number(columns_value));
+        initial_size.Insert(L"rows", number(rows_value));
+        terminal.Insert(L"initialSize", initial_size);
+        root.Insert(L"terminal", terminal);
+
+        JsonObject profile_settings;
+        profile_settings.Insert(L"default", text(selected_default));
+        JsonArray profile_items;
+        for (auto const& profile_value : profile_values) {
+            JsonObject profile;
+            profile.Insert(L"name", text(profile_value.name));
+            profile.Insert(L"shell", text(profile_value.shell));
+            profile.Insert(L"command", text(profile_value.command));
+            profile_items.Append(profile);
+        }
+        profile_settings.Insert(L"items", profile_items);
+        profile_settings.Insert(L"workingDirectory", text(string(working_directory)));
+        profile_settings.Insert(L"holdOnExit", boolean(hold_on_exit.IsOn()));
+        root.Insert(L"profiles", profile_settings);
+
+        JsonObject advanced;
+        JsonObject clipboard;
+        clipboard.Insert(L"terminalWrites", boolean(clipboard_write.IsOn()));
+        clipboard.Insert(L"maximumBytes", number(clipboard_limit_value));
+        advanced.Insert(L"clipboard", clipboard);
+        advanced.Insert(L"pipeCommandOutput", text(selected_pipe_command));
+        root.Insert(L"advanced", advanced);
+        auto output = to_string(root.Stringify());
+        if (output.size() > 64 * 1024) throw std::runtime_error("Configuration must not exceed 64 KiB.");
+        return output;
     }
 
     void save() noexcept {

@@ -3,99 +3,35 @@ const win32 = @import("win32.zig");
 const theme = @import("theme.zig");
 
 pub const default_contents =
-    \\# Zigonaut configuration
-    \\# Changes are applied when Zigonaut starts or reloads settings.
-    \\#
-    \\# Terminal font family. Default: Cascadia Mono.
-    \\font_family=Cascadia Mono
-    \\# Terminal font size in points (6-72). Default: 18.
-    \\font_size=18
-    \\# Maximum terminal scrollback in lines (0-1000000). Default: 10000.
-    \\scrollback_size=10000
-    \\# Initial window width in terminal columns (10-1000). Default: 80.
-    \\initial_columns=80
-    \\# Initial window height in terminal rows (4-1000). Default: 24.
-    \\initial_rows=24
-    \\# Theme used in dark application mode. Default: rasmus.
-    \\dark_theme=rasmus
-    \\# Theme used in light application mode. Default: campbell-light.
-    \\light_theme=campbell-light
-    \\# Application color scheme: system, light, or dark. Default: system.
-    \\color_scheme=system
-    \\# Horizontal terminal padding in pixels (0-128). Default: 8.
-    \\padding_horizontal=8
-    \\# Vertical terminal padding in pixels (0-128). Default: 8.
-    \\padding_vertical=8
-    \\# Terminal background opacity percentage (0-100). Default: 100.
-    \\background_opacity=100
-    \\# Window backdrop: none, mica, mica_alt, or acrylic. Default: mica.
-    \\backdrop=mica
-    \\#
-    \\# Palette overrides use #RRGGBB. Their defaults come from the selected
-    \\# dark_theme or light_theme, so they are commented out unless overridden.
-    \\# Terminal foreground color. Default: selected theme foreground.
-    \\#foreground=#RRGGBB
-    \\# Terminal background color. Default: selected theme background.
-    \\#background=#RRGGBB
-    \\# Terminal cursor color. Default: selected theme cursor.
-    \\#cursor=#RRGGBB
-    \\# ANSI black. Default: selected theme ANSI 0.
-    \\#ansi0=#RRGGBB
-    \\# ANSI red. Default: selected theme ANSI 1.
-    \\#ansi1=#RRGGBB
-    \\# ANSI green. Default: selected theme ANSI 2.
-    \\#ansi2=#RRGGBB
-    \\# ANSI yellow. Default: selected theme ANSI 3.
-    \\#ansi3=#RRGGBB
-    \\# ANSI blue. Default: selected theme ANSI 4.
-    \\#ansi4=#RRGGBB
-    \\# ANSI magenta. Default: selected theme ANSI 5.
-    \\#ansi5=#RRGGBB
-    \\# ANSI cyan. Default: selected theme ANSI 6.
-    \\#ansi6=#RRGGBB
-    \\# ANSI white. Default: selected theme ANSI 7.
-    \\#ansi7=#RRGGBB
-    \\# ANSI bright black. Default: selected theme ANSI 8.
-    \\#ansi8=#RRGGBB
-    \\# ANSI bright red. Default: selected theme ANSI 9.
-    \\#ansi9=#RRGGBB
-    \\# ANSI bright green. Default: selected theme ANSI 10.
-    \\#ansi10=#RRGGBB
-    \\# ANSI bright yellow. Default: selected theme ANSI 11.
-    \\#ansi11=#RRGGBB
-    \\# ANSI bright blue. Default: selected theme ANSI 12.
-    \\#ansi12=#RRGGBB
-    \\# ANSI bright magenta. Default: selected theme ANSI 13.
-    \\#ansi13=#RRGGBB
-    \\# ANSI bright cyan. Default: selected theme ANSI 14.
-    \\#ansi14=#RRGGBB
-    \\# ANSI bright white. Default: selected theme ANSI 15.
-    \\#ansi15=#RRGGBB
-    \\#
-    \\# Profile opened initially and by Ctrl+Shift+T. Default: PowerShell.
-    \\default_profile=PowerShell
-    \\# Launch profiles use profile.<name>=<shell type>|<command line>.
-    \\# Shell types are powershell, windows, and wsl. These three profiles are
-    \\# the defaults; declaring any profile.* key replaces the default set.
-    \\profile.PowerShell=powershell|powershell.exe
-    \\profile.WSL=wsl|wsl.exe
-    \\profile.Command Prompt=windows|cmd.exe
-    \\# Working directory for new processes. Default: the user's home directory.
-    \\working_directory=
-    \\# Keep a new tab open after its process exits cleanly. Default: false.
-    \\hold_on_exit=false
-    \\# Give each new tab a randomized background hue. Default: true.
-    \\randomize_tab_background=true
-    \\# Allow OSC 52 and OSC 1337 Copy writes to the Windows clipboard. Default: false.
-    \\osc52_clipboard_write=false
-    \\# Maximum decoded terminal clipboard payload in bytes (1-16777216). Default: 1048576.
-    \\osc52_clipboard_max_bytes=1048576
-    \\# Windows command that receives the latest OSC 133 command output on stdin.
-    \\# Leave empty to copy the output to the clipboard. Default: empty.
-    \\pipe_command_output=
-    \\#
-    \\# Legacy alias: theme sets dark_theme. Default: not set.
-    \\#theme=rasmus
+    \\{
+    \\  "version": 1,
+    \\  "appearance": {
+    \\    "font": { "family": "Cascadia Mono", "size": 18 },
+    \\    "themes": { "dark": "rasmus", "light": "campbell-light", "colorScheme": "system" },
+    \\    "padding": { "horizontal": 8, "vertical": 8 },
+    \\    "background": { "opacity": 100, "backdrop": "mica" },
+    \\    "palette": {},
+    \\    "randomizeTabBackground": true
+    \\  },
+    \\  "terminal": {
+    \\    "scrollbackSize": 10000,
+    \\    "initialSize": { "columns": 80, "rows": 24 }
+    \\  },
+    \\  "profiles": {
+    \\    "default": "PowerShell",
+    \\    "items": [
+    \\      { "name": "PowerShell", "shell": "powershell", "command": "powershell.exe" },
+    \\      { "name": "WSL", "shell": "wsl", "command": "wsl.exe" },
+    \\      { "name": "Command Prompt", "shell": "windows", "command": "cmd.exe" }
+    \\    ],
+    \\    "workingDirectory": "",
+    \\    "holdOnExit": false
+    \\  },
+    \\  "advanced": {
+    \\    "clipboard": { "terminalWrites": false, "maximumBytes": 1048576 },
+    \\    "pipeCommandOutput": ""
+    \\  }
+    \\}
     \\
 ;
 
@@ -121,6 +57,62 @@ const default_profiles = [3]Profile{
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
+
+const JsonProfile = struct {
+    name: []const u8,
+    shell: Shell,
+    command: []const u8,
+};
+
+const JsonConfig = struct {
+    version: u32,
+    appearance: struct {
+        font: struct {
+            family: []const u8,
+            size: u16,
+        },
+        themes: struct {
+            dark: []const u8,
+            light: []const u8,
+            colorScheme: ColorScheme,
+        },
+        padding: struct {
+            horizontal: u16,
+            vertical: u16,
+        },
+        background: struct {
+            opacity: u8,
+            backdrop: Backdrop,
+        },
+        palette: struct {
+            foreground: ?[]const u8 = null,
+            background: ?[]const u8 = null,
+            cursor: ?[]const u8 = null,
+            ansi: ?[16]?[]const u8 = null,
+        },
+        randomizeTabBackground: bool,
+    },
+    terminal: struct {
+        scrollbackSize: u32,
+        initialSize: struct {
+            columns: u16,
+            rows: u16,
+        },
+    },
+    profiles: struct {
+        @"default": []const u8,
+        items: []const JsonProfile,
+        workingDirectory: []const u8,
+        holdOnExit: bool,
+    },
+    advanced: struct {
+        clipboard: struct {
+            terminalWrites: bool,
+            maximumBytes: u32,
+        },
+        pipeCommandOutput: []const u8,
+    },
+};
 
 pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
@@ -192,14 +184,16 @@ pub fn clampZoom(current: u16, delta: i8) u16 {
     return @intCast(std.math.clamp(changed, 6, 72));
 }
 
-/// Owns the file contents backing borrowed string fields in `value`.
+/// Owns the parsed JSON and file contents backing string fields in `value`.
 /// Keep this object alive for as long as its `Config` is in use.
 pub const Loaded = struct {
     allocator: std.mem.Allocator,
     contents: []u8,
+    parsed: std.json.Parsed(JsonConfig),
     value: Config,
 
     pub fn deinit(self: *Loaded) void {
+        self.parsed.deinit();
         self.allocator.free(self.contents);
     }
 };
@@ -208,7 +202,7 @@ pub const Loaded = struct {
 pub fn pathAlloc(allocator: std.mem.Allocator) ![]u8 {
     const app_data = try win32.environmentVariableAlloc(allocator, "APPDATA");
     defer allocator.free(app_data);
-    return std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut", "zigonaut.conf" });
+    return std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut", "zigonaut.json" });
 }
 
 pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
@@ -229,222 +223,139 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
     defer file.close(io);
 
     const contents = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024));
+    errdefer allocator.free(contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, allocator, contents, .{ .ignore_unknown_fields = true });
+    errdefer parsed.deinit();
     return .{
         .allocator = allocator,
         .contents = contents,
-        .value = parse(contents),
+        .value = try configFromJson(parsed.value),
+        .parsed = parsed,
     };
 }
 
-pub fn parse(contents: []const u8) Config {
-    var result = Config{};
-    const generated_by_settings = std.mem.indexOf(u8, contents, "# Generated by the Zigonaut settings page.") != null;
-    var declared_profiles = false;
-    var lines = std.mem.splitScalar(u8, contents, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
-        const separator = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..separator], " \t");
-        const value = std.mem.trim(u8, line[separator + 1 ..], " \t");
+fn configFromJson(json: JsonConfig) !Config {
+    if (json.version != 1) return error.UnsupportedConfigVersion;
+    if (json.appearance.font.family.len == 0 or json.appearance.font.family.len >= 128 or
+        json.appearance.font.size < 6 or json.appearance.font.size > 72 or
+        json.terminal.scrollbackSize > 1_000_000 or
+        json.terminal.initialSize.columns < 10 or json.terminal.initialSize.columns > 1000 or
+        json.terminal.initialSize.rows < 4 or json.terminal.initialSize.rows > 1000 or
+        json.appearance.themes.dark.len == 0 or json.appearance.themes.dark.len >= 64 or
+        json.appearance.themes.light.len == 0 or json.appearance.themes.light.len >= 64 or
+        json.appearance.padding.horizontal > 128 or json.appearance.padding.vertical > 128 or
+        json.appearance.background.opacity > 100 or
+        json.profiles.@"default".len == 0 or json.profiles.@"default".len >= 128 or
+        json.profiles.items.len == 0 or json.profiles.items.len > max_profiles or
+        json.advanced.clipboard.maximumBytes < 1 or json.advanced.clipboard.maximumBytes > 16 * 1024 * 1024 or
+        json.advanced.pipeCommandOutput.len >= 4096 or
+        std.mem.indexOfScalar(u8, json.advanced.pipeCommandOutput, 0) != null)
+        return error.InvalidConfig;
 
-        if (std.ascii.eqlIgnoreCase(key, "font_family")) {
-            if (value.len > 0 and value.len < 128) result.font_family = value;
-        } else if (std.ascii.eqlIgnoreCase(key, "font_size")) {
-            const size = std.fmt.parseInt(u16, value, 10) catch continue;
-            if (size >= 6 and size <= 72) result.font_size = size;
-        } else if (std.ascii.eqlIgnoreCase(key, "scrollback_size")) {
-            const size = std.fmt.parseInt(u32, value, 10) catch continue;
-            if (size <= 1_000_000) result.scrollback_size = size;
-        } else if (std.ascii.eqlIgnoreCase(key, "initial_columns")) {
-            const columns = std.fmt.parseInt(u16, value, 10) catch continue;
-            if (columns >= 10 and columns <= 1000) result.initial_columns = columns;
-        } else if (std.ascii.eqlIgnoreCase(key, "initial_rows")) {
-            const rows = std.fmt.parseInt(u16, value, 10) catch continue;
-            if (rows >= 4 and rows <= 1000) result.initial_rows = rows;
-        } else if (std.ascii.eqlIgnoreCase(key, "theme") or std.ascii.eqlIgnoreCase(key, "dark_theme")) {
-            if (value.len > 0 and value.len < 64) result.dark_theme = value;
-        } else if (std.ascii.eqlIgnoreCase(key, "light_theme")) {
-            if (value.len > 0 and value.len < 64) result.light_theme = value;
-        } else if (std.ascii.eqlIgnoreCase(key, "color_scheme")) {
-            if (std.ascii.eqlIgnoreCase(value, "system")) result.color_scheme = .system else if (std.ascii.eqlIgnoreCase(value, "light")) result.color_scheme = .light else if (std.ascii.eqlIgnoreCase(value, "dark")) result.color_scheme = .dark;
-        } else if (std.ascii.eqlIgnoreCase(key, "padding_horizontal")) {
-            const padding = std.fmt.parseInt(u16, value, 10) catch continue;
-            if (padding <= 128) result.padding_horizontal = padding;
-        } else if (std.ascii.eqlIgnoreCase(key, "padding_vertical")) {
-            const padding = std.fmt.parseInt(u16, value, 10) catch continue;
-            if (padding <= 128) result.padding_vertical = padding;
-        } else if (std.ascii.eqlIgnoreCase(key, "background_opacity")) {
-            const opacity = std.fmt.parseInt(u8, value, 10) catch continue;
-            if (opacity <= 100) result.background_opacity = opacity;
-        } else if (std.ascii.eqlIgnoreCase(key, "backdrop")) {
-            if (std.ascii.eqlIgnoreCase(value, "none")) result.backdrop = .none else if (std.ascii.eqlIgnoreCase(value, "mica")) result.backdrop = .mica else if (std.ascii.eqlIgnoreCase(value, "mica_alt")) result.backdrop = .mica_alt else if (std.ascii.eqlIgnoreCase(value, "acrylic")) result.backdrop = .acrylic;
-        } else if (std.ascii.eqlIgnoreCase(key, "foreground")) {
-            result.palette.foreground = theme.parseColor(value) orelse result.palette.foreground;
-        } else if (std.ascii.eqlIgnoreCase(key, "background")) {
-            result.palette.background = theme.parseColor(value) orelse result.palette.background;
-        } else if (std.ascii.eqlIgnoreCase(key, "cursor")) {
-            result.palette.cursor = theme.parseColor(value) orelse result.palette.cursor;
-        } else if (key.len > 4 and std.ascii.eqlIgnoreCase(key[0..4], "ansi")) {
-            const index = std.fmt.parseInt(u8, key[4..], 10) catch continue;
-            if (index < 16) result.palette.ansi[index] = theme.parseColor(value) orelse result.palette.ansi[index];
-        } else if (std.ascii.eqlIgnoreCase(key, "default_profile")) {
-            if (value.len > 0 and value.len < 128) result.default_profile = value;
-        } else if (key.len > "profile.".len and std.ascii.eqlIgnoreCase(key[0.."profile.".len], "profile.")) {
-            const name = std.mem.trim(u8, key["profile.".len..], " \t");
-            const kind_end = std.mem.indexOfScalar(u8, value, '|') orelse continue;
-            const kind = std.mem.trim(u8, value[0..kind_end], " \t");
-            const command = std.mem.trim(u8, value[kind_end + 1 ..], " \t");
-            const shell: Shell = if (std.ascii.eqlIgnoreCase(kind, "powershell"))
-                .powershell
-            else if (std.ascii.eqlIgnoreCase(kind, "windows"))
-                .windows
-            else if (std.ascii.eqlIgnoreCase(kind, "wsl"))
-                .wsl
-            else
-                continue;
-            if (name.len == 0 or name.len >= 128 or !std.unicode.utf8ValidateSlice(name) or command.len == 0) continue;
-            if (!declared_profiles) {
-                result.profile_count = 0;
-                declared_profiles = true;
-            }
-            if (result.profile_count < max_profiles) {
-                result.profiles[result.profile_count] = .{ .name = name, .shell = shell, .command = command };
-                result.profile_count += 1;
-            }
-        } else if (std.ascii.eqlIgnoreCase(key, "working_directory")) {
-            result.working_directory = value;
-        } else if (std.ascii.eqlIgnoreCase(key, "hold_on_exit")) {
-            if (std.ascii.eqlIgnoreCase(value, "true")) result.hold_on_exit = true else if (std.ascii.eqlIgnoreCase(value, "false")) result.hold_on_exit = false;
-        } else if (std.ascii.eqlIgnoreCase(key, "randomize_tab_background")) {
-            if (std.ascii.eqlIgnoreCase(value, "true")) {
-                result.randomize_tab_background = true;
-            } else if (std.ascii.eqlIgnoreCase(value, "false")) {
-                result.randomize_tab_background = false;
-            }
-        } else if (std.ascii.eqlIgnoreCase(key, "osc52_clipboard_write")) {
-            if (std.ascii.eqlIgnoreCase(value, "true")) result.osc52_clipboard_write = true else if (std.ascii.eqlIgnoreCase(value, "false")) result.osc52_clipboard_write = false;
-        } else if (std.ascii.eqlIgnoreCase(key, "osc52_clipboard_max_bytes")) {
-            const limit = std.fmt.parseInt(u32, value, 10) catch continue;
-            if (limit >= 1 and limit <= 16 * 1024 * 1024) result.osc52_clipboard_max_bytes = limit;
-        } else if (std.ascii.eqlIgnoreCase(key, "pipe_command_output")) {
-            if (value.len < 4096 and std.mem.indexOfScalar(u8, value, 0) == null and std.unicode.utf8ValidateSlice(value)) result.pipe_command_output = value;
+    var result = Config{};
+    result.font_family = json.appearance.font.family;
+    result.font_size = json.appearance.font.size;
+    result.scrollback_size = json.terminal.scrollbackSize;
+    result.initial_columns = json.terminal.initialSize.columns;
+    result.initial_rows = json.terminal.initialSize.rows;
+    result.dark_theme = json.appearance.themes.dark;
+    result.light_theme = json.appearance.themes.light;
+    result.color_scheme = json.appearance.themes.colorScheme;
+    result.padding_horizontal = json.appearance.padding.horizontal;
+    result.padding_vertical = json.appearance.padding.vertical;
+    result.background_opacity = json.appearance.background.opacity;
+    result.backdrop = json.appearance.background.backdrop;
+    result.randomize_tab_background = json.appearance.randomizeTabBackground;
+    result.default_profile = json.profiles.@"default";
+    result.profile_count = 0;
+    for (json.profiles.items) |profile| {
+        if (profile.name.len == 0 or profile.name.len >= 128 or profile.command.len == 0 or
+            !std.unicode.utf8ValidateSlice(profile.name) or !std.unicode.utf8ValidateSlice(profile.command) or
+            std.mem.indexOfScalar(u8, profile.name, '|') != null or
+            std.mem.indexOfScalar(u8, profile.name, '\r') != null or
+            std.mem.indexOfScalar(u8, profile.name, '\n') != null or
+            std.mem.indexOfScalar(u8, profile.command, '\r') != null or
+            std.mem.indexOfScalar(u8, profile.command, '\n') != null or
+            std.mem.indexOfScalar(u8, profile.command, 0) != null)
+            return error.InvalidProfile;
+        for (result.profiles[0..result.profile_count]) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing.name, profile.name)) return error.DuplicateProfile;
+        }
+        result.profiles[result.profile_count] = .{ .name = profile.name, .shell = profile.shell, .command = profile.command };
+        result.profile_count += 1;
+    }
+    var found_default = false;
+    for (result.profileSlice()) |profile| {
+        if (std.ascii.eqlIgnoreCase(profile.name, result.default_profile)) found_default = true;
+    }
+    if (!found_default) return error.InvalidDefaultProfile;
+    result.working_directory = json.profiles.workingDirectory;
+    result.hold_on_exit = json.profiles.holdOnExit;
+    result.osc52_clipboard_write = json.advanced.clipboard.terminalWrites;
+    result.osc52_clipboard_max_bytes = json.advanced.clipboard.maximumBytes;
+    result.pipe_command_output = json.advanced.pipeCommandOutput;
+    if (json.appearance.palette.foreground) |color| result.palette.foreground = theme.parseColor(color) orelse return error.InvalidColor;
+    if (json.appearance.palette.background) |color| result.palette.background = theme.parseColor(color) orelse return error.InvalidColor;
+    if (json.appearance.palette.cursor) |color| result.palette.cursor = theme.parseColor(color) orelse return error.InvalidColor;
+    if (json.appearance.palette.ansi) |colors| {
+        for (colors, 0..) |color, index| {
+            if (color) |value| result.palette.ansi[index] = theme.parseColor(value) orelse return error.InvalidColor;
         }
     }
-    if (generated_by_settings and declared_profiles) normalizeGeneratedProfiles(&result);
     return result;
 }
 
-fn normalizeGeneratedProfiles(result: *Config) void {
-    const configured = result.profiles;
-    const configured_count = result.profile_count;
-    result.profile_count = 0;
-
-    for (default_profiles[0..3]) |fallback| {
-        var profile = fallback;
-        for (configured[0..configured_count]) |candidate| {
-            if (std.ascii.eqlIgnoreCase(candidate.name, fallback.name)) {
-                profile = candidate;
-                break;
-            }
-        }
-        result.profiles[result.profile_count] = profile;
-        result.profile_count += 1;
-    }
-
-    for (configured[0..configured_count]) |candidate| {
-        var built_in = false;
-        for (default_profiles[0..3]) |fallback| {
-            if (std.ascii.eqlIgnoreCase(candidate.name, fallback.name)) {
-                built_in = true;
-                break;
-            }
-        }
-        if (!built_in and result.profile_count < max_profiles) {
-            result.profiles[result.profile_count] = candidate;
-            result.profile_count += 1;
-        }
-    }
+test "configuration parses structured JSON" {
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator,
+        \\{
+        \\  "version": 1,
+        \\  "appearance": {
+        \\    "font": { "family": "JetBrains Mono", "size": 14 },
+        \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
+        \\    "padding": { "horizontal": 12, "vertical": 4 },
+        \\    "background": { "opacity": 82, "backdrop": "acrylic" },
+        \\    "palette": { "ansi": ["#000000", null, null, null, null, null, null, null, null, null, null, null, null, null, null, "#abcdef"] },
+        \\    "randomizeTabBackground": false
+        \\  },
+        \\  "terminal": { "scrollbackSize": 50000, "initialSize": { "columns": 120, "rows": 40 } },
+        \\  "profiles": {
+        \\    "default": "Dev Shell",
+        \\    "items": [
+        \\      { "name": "Dev Shell", "shell": "windows", "command": "tool.exe --flag" },
+        \\      { "name": "Linux", "shell": "wsl", "command": "ubuntu.exe" }
+        \\    ],
+        \\    "workingDirectory": "C:\\work",
+        \\    "holdOnExit": true
+        \\  },
+        \\  "advanced": { "clipboard": { "terminalWrites": true, "maximumBytes": 65536 }, "pipeCommandOutput": "jq . > latest.json" }
+        \\}
+    , .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqualStrings("JetBrains Mono", value.font_family);
+    try std.testing.expectEqual(@as(u16, 14), value.font_size);
+    try std.testing.expectEqual(@as(u32, 50_000), value.scrollback_size);
+    try std.testing.expectEqual(@as(u16, 120), value.initial_columns);
+    try std.testing.expectEqual(@as(u16, 40), value.initial_rows);
+    try std.testing.expectEqual(ColorScheme.light, value.color_scheme);
+    try std.testing.expectEqual(Backdrop.acrylic, value.backdrop);
+    try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, value.palette.ansi[15].?);
+    try std.testing.expectEqualStrings("Dev Shell", value.defaultProfile().name);
+    try std.testing.expectEqual(@as(usize, 2), value.profile_count);
+    try std.testing.expectEqualStrings("C:\\work", value.working_directory);
+    try std.testing.expect(value.hold_on_exit);
+    try std.testing.expect(!value.randomize_tab_background);
+    try std.testing.expect(value.osc52_clipboard_write);
+    try std.testing.expectEqual(@as(u32, 65536), value.osc52_clipboard_max_bytes);
+    try std.testing.expectEqualStrings("jq . > latest.json", value.pipe_command_output);
 }
 
-test "configuration parses supported values and ignores invalid ones" {
-    const parsed = parse(
-        \\font_family = JetBrains Mono
-        \\font_size=14
-        \\scrollback_size=50000
-        \\initial_columns=120
-        \\initial_rows=40
-        \\dark_theme=campbell
-        \\light_theme=campbell-light
-        \\color_scheme=light
-        \\padding_horizontal=12
-        \\padding_vertical=4
-        \\background_opacity=82
-        \\backdrop=acrylic
-        \\ansi15=#abcdef
-        \\default_profile=WSL
-        \\randomize_tab_background=false
-        \\osc52_clipboard_write=true
-        \\osc52_clipboard_max_bytes=65536
-        \\pipe_command_output=jq . > latest.json
-    );
-    try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
-    try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
-    try std.testing.expectEqual(@as(u32, 50_000), parsed.scrollback_size);
-    try std.testing.expectEqual(@as(u16, 120), parsed.initial_columns);
-    try std.testing.expectEqual(@as(u16, 40), parsed.initial_rows);
-    try std.testing.expectEqualStrings("campbell", parsed.dark_theme);
-    try std.testing.expectEqualStrings("campbell-light", parsed.light_theme);
-    try std.testing.expectEqual(ColorScheme.light, parsed.color_scheme);
-    try std.testing.expectEqual(@as(u16, 12), parsed.padding_horizontal);
-    try std.testing.expectEqual(@as(u16, 4), parsed.padding_vertical);
-    try std.testing.expectEqual(@as(u8, 82), parsed.background_opacity);
-    try std.testing.expectEqual(Backdrop.acrylic, parsed.backdrop);
-    try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, parsed.palette.ansi[15].?);
-    try std.testing.expectEqualStrings("WSL", parsed.defaultProfile().name);
-    try std.testing.expect(!parsed.randomize_tab_background);
-    try std.testing.expect(parsed.osc52_clipboard_write);
-    try std.testing.expectEqual(@as(u32, 65536), parsed.osc52_clipboard_max_bytes);
-    try std.testing.expectEqualStrings("jq . > latest.json", parsed.pipe_command_output);
-
-    const invalid = parse("font_size=500\ninitial_columns=9\ninitial_rows=1001\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\nosc52_clipboard_write=perhaps\nosc52_clipboard_max_bytes=999999999\n");
-    try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
-    try std.testing.expectEqual(@as(u16, 80), invalid.initial_columns);
-    try std.testing.expectEqual(@as(u16, 24), invalid.initial_rows);
-    try std.testing.expectEqualStrings("unknown", invalid.dark_theme);
-    try std.testing.expectEqualStrings("PowerShell", invalid.defaultProfile().name);
-    try std.testing.expect(invalid.randomize_tab_background);
-    try std.testing.expect(!invalid.osc52_clipboard_write);
-    try std.testing.expectEqual(@as(u32, 1024 * 1024), invalid.osc52_clipboard_max_bytes);
-
-    const mica_alt = parse("backdrop=mica_alt\nscrollback_size=1000000\n");
-    try std.testing.expectEqual(Backdrop.mica_alt, mica_alt.backdrop);
-    try std.testing.expectEqual(@as(u32, 1_000_000), mica_alt.scrollback_size);
-}
-
-test "configuration parses launch profiles" {
-    const parsed = parse("default_profile=Dev Shell\nprofile.Dev Shell=windows|tool.exe --flag\nprofile.Linux=wsl|ubuntu.exe\nworking_directory=C:\\work\nhold_on_exit=true\n");
-    try std.testing.expectEqual(@as(usize, 2), parsed.profile_count);
-    try std.testing.expectEqualStrings("Dev Shell", parsed.defaultProfile().name);
-    try std.testing.expectEqual(Shell.windows, parsed.defaultProfile().shell);
-    try std.testing.expectEqualStrings("tool.exe --flag", parsed.defaultProfile().command);
-    try std.testing.expectEqualStrings("Linux", parsed.profiles[1].name);
-    try std.testing.expectEqual(Shell.wsl, parsed.profiles[1].shell);
-    try std.testing.expectEqualStrings("C:\\work", parsed.working_directory);
-    try std.testing.expect(parsed.hold_on_exit);
-}
-
-test "settings-generated configurations restore missing built-in profiles" {
-    const parsed = parse(
-        \\# Generated by the Zigonaut settings page.
-        \\default_profile=WSL
-        \\profile.PowerShell=powershell|powershell.exe
-    );
-    try std.testing.expectEqual(@as(usize, 3), parsed.profile_count);
-    try std.testing.expectEqualStrings("PowerShell", parsed.profiles[0].name);
-    try std.testing.expectEqualStrings("WSL", parsed.profiles[1].name);
-    try std.testing.expectEqualStrings("Command Prompt", parsed.profiles[2].name);
-    try std.testing.expectEqualStrings("WSL", parsed.defaultProfile().name);
+test "default JSON configuration parses" {
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, default_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(@as(usize, 3), value.profile_count);
+    try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
 }
 
 test "configuration changes are classified by subsystem" {

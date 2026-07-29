@@ -53,8 +53,10 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 Zigonaut creates its configuration file on first launch at:
 
 ```text
-%APPDATA%\spiralpoint\zigonaut\zigonaut.conf
+%APPDATA%\spiralpoint\zigonaut\zigonaut.json
 ```
+
+The versioned JSON document is managed by the settings window and uses ordered profile objects so profile definitions can grow without introducing another line-based mini-language.
 
 ## Keyboard shortcuts
 
