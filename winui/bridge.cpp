@@ -210,6 +210,7 @@ struct Bridge {
     bool high_contrast = false;
     bool dark_theme = false;
     double rasterization_scale = 1;
+    bool initial_size_applied = false;
     bool closed = false;
     com_ptr<ITaskbarList3> taskbar;
     bool taskbar_state_initialized = false;
@@ -233,7 +234,6 @@ struct Bridge {
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&parent));
         app_window = window.AppWindow();
         title_bar = app_window.TitleBar();
-        app_window.Resize({1100, 700});
 
         GUID nonce{};
         check_hresult(CoCreateGuid(&nonce));
@@ -508,12 +508,26 @@ struct Bridge {
         accelerators.emplace_back(std::move(accelerator));
     }
 
-    void attachPane(uint64_t id, HWND child, void* value, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height) {
-        if (!id || !child || GetParent(child) != parent || !value || !cell_width || !cell_height || !minimum_width || !minimum_height) throw hresult_invalid_argument();
+    void attachPane(uint64_t id, HWND child, void* value, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height, uint32_t initial_width, uint32_t initial_height) {
+        if (!id || !child || GetParent(child) != parent || !value || !cell_width || !cell_height || !minimum_width || !minimum_height || !initial_width || !initial_height) throw hresult_invalid_argument();
         Attachment attachment{child, {}, cell_width, cell_height, minimum_width, minimum_height};
         static_cast<IDXGISwapChain*>(value)->QueryInterface(IID_PPV_ARGS(attachment.swap_chain.put()));
         if (!attachment.swap_chain) throw hresult_invalid_argument();
         attachments.insert_or_assign(id, std::move(attachment));
+        if (!initial_size_applied) {
+            initial_size_applied = true;
+            RECT window_bounds{}, client_bounds{};
+            if (GetWindowRect(parent, &window_bounds) && GetClientRect(parent, &client_bounds)) {
+                auto const dpi = GetDpiForWindow(parent);
+                auto const title_height = MulDiv(48, dpi ? dpi : 96, 96);
+                auto const frame_width = (window_bounds.right - window_bounds.left) - client_bounds.right;
+                auto const frame_height = (window_bounds.bottom - window_bounds.top) - client_bounds.bottom;
+                app_window.Resize({
+                    static_cast<int32_t>(initial_width) + frame_width,
+                    static_cast<int32_t>(initial_height) + title_height + frame_height,
+                });
+            }
+        }
     }
 
     void detachPane(uint64_t id) {
@@ -1494,10 +1508,10 @@ extern "C" HRESULT __cdecl zigonaut_window_run(zigonaut_window_started started, 
     return result;
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_attach_pane(void* value, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_attach_pane(void* value, uint64_t pane_id, HWND terminal, void* swap_chain, uint32_t cell_width, uint32_t cell_height, uint32_t minimum_width, uint32_t minimum_height, uint32_t initial_width, uint32_t initial_height) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    try { bridge->attachPane(pane_id, terminal, swap_chain, cell_width, cell_height, minimum_width, minimum_height); return S_OK; } catch (...) { return reportCurrentException(L"attach pane"); }
+    try { bridge->attachPane(pane_id, terminal, swap_chain, cell_width, cell_height, minimum_width, minimum_height, initial_width, initial_height); return S_OK; } catch (...) { return reportCurrentException(L"attach pane"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_detach_pane(void* value, uint64_t pane_id) noexcept {

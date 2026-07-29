@@ -12,6 +12,10 @@ pub const default_contents =
     \\font_size=18
     \\# Maximum terminal scrollback in lines (0-1000000). Default: 10000.
     \\scrollback_size=10000
+    \\# Initial window width in terminal columns (10-1000). Default: 80.
+    \\initial_columns=80
+    \\# Initial window height in terminal rows (4-1000). Default: 24.
+    \\initial_rows=24
     \\# Theme used in dark application mode. Default: rasmus.
     \\dark_theme=rasmus
     \\# Theme used in light application mode. Default: campbell-light.
@@ -122,6 +126,8 @@ pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
     font_size: u16 = 18,
     scrollback_size: u32 = 10_000,
+    initial_columns: u16 = 80,
+    initial_rows: u16 = 24,
     dark_theme: []const u8 = "rasmus",
     light_theme: []const u8 = "campbell-light",
     color_scheme: ColorScheme = .system,
@@ -250,6 +256,12 @@ pub fn parse(contents: []const u8) Config {
         } else if (std.ascii.eqlIgnoreCase(key, "scrollback_size")) {
             const size = std.fmt.parseInt(u32, value, 10) catch continue;
             if (size <= 1_000_000) result.scrollback_size = size;
+        } else if (std.ascii.eqlIgnoreCase(key, "initial_columns")) {
+            const columns = std.fmt.parseInt(u16, value, 10) catch continue;
+            if (columns >= 10 and columns <= 1000) result.initial_columns = columns;
+        } else if (std.ascii.eqlIgnoreCase(key, "initial_rows")) {
+            const rows = std.fmt.parseInt(u16, value, 10) catch continue;
+            if (rows >= 4 and rows <= 1000) result.initial_rows = rows;
         } else if (std.ascii.eqlIgnoreCase(key, "theme") or std.ascii.eqlIgnoreCase(key, "dark_theme")) {
             if (value.len > 0 and value.len < 64) result.dark_theme = value;
         } else if (std.ascii.eqlIgnoreCase(key, "light_theme")) {
@@ -360,6 +372,8 @@ test "configuration parses supported values and ignores invalid ones" {
         \\font_family = JetBrains Mono
         \\font_size=14
         \\scrollback_size=50000
+        \\initial_columns=120
+        \\initial_rows=40
         \\dark_theme=campbell
         \\light_theme=campbell-light
         \\color_scheme=light
@@ -377,6 +391,8 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqualStrings("JetBrains Mono", parsed.font_family);
     try std.testing.expectEqual(@as(u16, 14), parsed.font_size);
     try std.testing.expectEqual(@as(u32, 50_000), parsed.scrollback_size);
+    try std.testing.expectEqual(@as(u16, 120), parsed.initial_columns);
+    try std.testing.expectEqual(@as(u16, 40), parsed.initial_rows);
     try std.testing.expectEqualStrings("campbell", parsed.dark_theme);
     try std.testing.expectEqualStrings("campbell-light", parsed.light_theme);
     try std.testing.expectEqual(ColorScheme.light, parsed.color_scheme);
@@ -391,8 +407,10 @@ test "configuration parses supported values and ignores invalid ones" {
     try std.testing.expectEqual(@as(u32, 65536), parsed.osc52_clipboard_max_bytes);
     try std.testing.expectEqualStrings("jq . > latest.json", parsed.pipe_command_output);
 
-    const invalid = parse("font_size=500\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\nosc52_clipboard_write=perhaps\nosc52_clipboard_max_bytes=999999999\n");
+    const invalid = parse("font_size=500\ninitial_columns=9\ninitial_rows=1001\ntheme=unknown\ndefault_profile=missing\nrandomize_tab_background=perhaps\nosc52_clipboard_write=perhaps\nosc52_clipboard_max_bytes=999999999\n");
     try std.testing.expectEqual(@as(u16, 18), invalid.font_size);
+    try std.testing.expectEqual(@as(u16, 80), invalid.initial_columns);
+    try std.testing.expectEqual(@as(u16, 24), invalid.initial_rows);
     try std.testing.expectEqualStrings("unknown", invalid.dark_theme);
     try std.testing.expectEqualStrings("PowerShell", invalid.defaultProfile().name);
     try std.testing.expect(invalid.randomize_tab_background);

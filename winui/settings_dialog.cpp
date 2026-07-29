@@ -380,7 +380,7 @@ struct Dialog {
     bool open = true;
 
     ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr};
-    NumberBox font_size{nullptr}, scrollback_size{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
+    NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr};
     ToggleSwitch random_background{nullptr};
     std::vector<TextBox> colors;
@@ -560,6 +560,8 @@ struct Dialog {
         font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
         scrollback_size = numberBox(value(values, "scrollback_size", "10000"), 10000, 0, 1000000, 1000);
+        initial_columns = numberBox(value(values, "initial_columns", "80"), 80, 10, 1000);
+        initial_rows = numberBox(value(values, "initial_rows", "24"), 24, 4, 1000);
         padding_horizontal = numberBox(value(values, "padding_horizontal", "8"), 8, 0, 128);
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
         auto font = StackPanel{}; font.Spacing(8);
@@ -568,6 +570,9 @@ struct Dialog {
         auto padding = StackPanel{}; padding.Spacing(8);
         padding.Children().Append(label(L"Horizontal (pixels)")); padding.Children().Append(padding_horizontal);
         padding.Children().Append(label(L"Vertical (pixels)")); padding.Children().Append(padding_vertical);
+        auto initial_size = StackPanel{}; initial_size.Spacing(8);
+        initial_size.Children().Append(label(L"Columns")); initial_size.Children().Append(initial_columns);
+        initial_size.Children().Append(label(L"Rows")); initial_size.Children().Append(initial_rows);
 
         colors.reserve(19);
         auto palette = StackPanel{}; palette.Spacing(8);
@@ -582,6 +587,7 @@ struct Dialog {
         return page(L"Terminal", L"Configure text rendering, spacing, and optional palette overrides.", {
             card(L"Font", L"Use an installed monospace font family.", font, true),
             card(L"Scrollback size", L"Maximum number of history lines kept for new terminal sessions.", scrollback_size),
+            card(L"Initial window size", L"Terminal columns and rows used when opening a new window.", initial_size, true),
             card(L"Padding", L"Space between terminal cells and the pane edge.", padding, true),
             card(L"Palette overrides", L"Leave a field empty to use the selected theme. Colors use #RRGGBB.", palette, true),
         });
@@ -648,6 +654,8 @@ struct Dialog {
         output << "font_family=" << selected_font << '\n';
         output << "font_size=" << static_cast<unsigned>(font_size.Value()) << '\n';
         output << "scrollback_size=" << static_cast<unsigned>(scrollback_size.Value()) << '\n';
+        output << "initial_columns=" << static_cast<unsigned>(initial_columns.Value()) << '\n';
+        output << "initial_rows=" << static_cast<unsigned>(initial_rows.Value()) << '\n';
         output << "dark_theme=" << selectedTheme(dark_theme) << '\n';
         output << "light_theme=" << selectedTheme(light_theme) << '\n';
         output << "color_scheme=" << (color_scheme.SelectedIndex() == 1 ? "light" : color_scheme.SelectedIndex() == 2 ? "dark" : "system") << '\n';
@@ -698,7 +706,7 @@ struct Dialog {
             editor.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {font_size, scrollback_size, padding_horizontal, padding_vertical, opacity, clipboard_limit})
+        for (auto const& editor : {font_size, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
             editor.ValueChanged(number_changed);
         auto selection_changed = [this](auto const&, auto const&) { save(); };
         color_scheme.SelectionChanged(selection_changed);

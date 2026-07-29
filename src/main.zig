@@ -183,7 +183,17 @@ const Application = struct {
         pub fn leaf(self: *PresentationWriter, id: u64) !void {
             const view = try self.application.ensureView(id);
             if (!self.application.isAttached(id)) {
-                if (!self.bridge.attachPane(id, view.hwnd, view.swapChain(), view.cellWidth(), view.cellHeight(), view.minimumWidth(), view.minimumHeight())) return error.AttachPaneFailed;
+                if (!self.bridge.attachPane(
+                    id,
+                    view.hwnd,
+                    view.swapChain(),
+                    view.cellWidth(),
+                    view.cellHeight(),
+                    view.minimumWidth(),
+                    view.minimumHeight(),
+                    view.widthForColumns(self.application.settings.initial_columns),
+                    view.heightForRows(self.application.settings.initial_rows),
+                )) return error.AttachPaneFailed;
                 self.application.attached_panes.appendAssumeCapacity(id);
             }
             self.output[self.index] = .{

@@ -216,6 +216,16 @@ pub const View = struct {
         return minimum_rows * self.cell_height + 2 * padding;
     }
 
+    pub fn widthForColumns(self: *const View, columns: u16) u32 {
+        const padding: u32 = @intCast(@max(scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd)), 0));
+        return @as(u32, columns) * self.cell_width + 2 * padding;
+    }
+
+    pub fn heightForRows(self: *const View, rows: u16) u32 {
+        const padding: u32 = @intCast(@max(scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd)), 0));
+        return @as(u32, rows) * self.cell_height + 2 * padding;
+    }
+
     pub fn updateFont(self: *View, font: win.HFONT, dpi: u32) void {
         self.font = font;
         if (self.text_engine) |*engine| engine.setDpi(dpi) catch |err| {
