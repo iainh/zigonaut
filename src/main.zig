@@ -29,10 +29,11 @@ const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
-var process_spawn_mutex: std.Thread.Mutex = .{};
+var process_spawn_mutex: @import("win32.zig").Mutex = .{};
 
 const Application = struct {
     const ViewEntry = struct { pane_id: u64, view: *TerminalView };
+    io: std.Io,
     loaded: config.Loaded,
     themes: theme.Catalog,
     settings: config.Config,
@@ -53,20 +54,21 @@ const Application = struct {
     refresh_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     chrome: ?chrome.Bridge = null,
     attached_panes: std.ArrayList(u64) = .empty,
-    pane_events_mutex: std.Thread.Mutex = .{},
+    pane_events_mutex: @import("win32.zig").Mutex = .{},
     pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
     pane_events_head: usize = 0,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
-    fn init(loaded: config.Loaded, themes: theme.Catalog, initial_working_directory: ?[]u8) Application {
+    fn init(io: std.Io, loaded: config.Loaded, themes: theme.Catalog, initial_working_directory: ?[]u8) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
         var result = Application{
+            .io = io,
             .settings = loaded.value,
             .loaded = loaded,
             .themes = themes,
             .initial_working_directory = initial_working_directory,
-            .model = app_model.App.init(std.heap.page_allocator, config.terminalTheme(loaded.value, &themes, dark_theme), loaded.value.randomize_tab_background),
+            .model = app_model.App.init(std.heap.page_allocator, io, config.terminalTheme(loaded.value, &themes, dark_theme), loaded.value.randomize_tab_background),
             .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
         };
@@ -285,16 +287,16 @@ const Application = struct {
     }
 };
 
-pub fn main() !void {
-    var initial_working_directory = try launchDirectoryFromArgsAlloc(std.heap.page_allocator);
+pub fn main(init: std.process.Init) !void {
+    var initial_working_directory = try launchDirectoryFromArgsAlloc(std.heap.page_allocator, init.minimal.args);
     errdefer if (initial_working_directory) |directory| std.heap.page_allocator.free(directory);
-    var loaded = try config.loadOrCreate(std.heap.page_allocator);
-    const themes = theme.Catalog.load(std.heap.page_allocator);
+    var loaded = try config.loadOrCreate(std.heap.page_allocator, init.io);
+    const themes = theme.Catalog.load(std.heap.page_allocator, init.io);
     const application = std.heap.page_allocator.create(Application) catch |err| {
         loaded.deinit();
         return err;
     };
-    application.* = Application.init(loaded, themes, initial_working_directory);
+    application.* = Application.init(init.io, loaded, themes, initial_working_directory);
     initial_working_directory = null;
     defer {
         // If synchronous window destruction fails, retain the owner until
@@ -877,7 +879,7 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
 
 fn spawnNewWindowImpl(self: *Application) !void {
     const allocator = std.heap.page_allocator;
-    const executable = try std.fs.selfExePathAlloc(allocator);
+    const executable = try std.process.executablePathAlloc(self.io, allocator);
     defer allocator.free(executable);
     const directory = if (self.model.activeSession()) |session|
         if (session.runtime) |runtime| try runtime.currentDirectoryAlloc(allocator) else null
@@ -889,12 +891,11 @@ fn spawnNewWindowImpl(self: *Application) !void {
         &.{ executable, "--working-directory", value }
     else
         &.{executable};
-    var child = std.process.Child.init(argv, allocator);
     process_spawn_mutex.lock();
     defer process_spawn_mutex.unlock();
-    try child.spawn();
+    const child = try std.process.spawn(self.io, .{ .argv = argv });
     std.os.windows.CloseHandle(child.thread_handle);
-    std.os.windows.CloseHandle(child.id);
+    std.os.windows.CloseHandle(child.id.?);
 }
 
 fn pipeCommandOutputImpl(self: *Application) !void {
@@ -1054,10 +1055,17 @@ fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []c
     _ = win.CloseHandle(process.hProcess);
 }
 
-fn launchDirectoryFromArgsAlloc(allocator: std.mem.Allocator) !?[]u8 {
-    const arguments = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, arguments);
-    return launchDirectoryFromArgumentsAlloc(allocator, arguments);
+fn launchDirectoryFromArgsAlloc(allocator: std.mem.Allocator, args: std.process.Args) !?[]u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
+    defer iterator.deinit();
+    _ = iterator.next();
+    while (iterator.next()) |argument| {
+        if (!std.mem.eql(u8, argument, "--working-directory")) continue;
+        const directory = iterator.next() orelse return error.MissingWorkingDirectory;
+        if (!isLocalWindowsDrivePath(directory)) return error.InvalidWorkingDirectory;
+        return @as(?[]u8, try allocator.dupe(u8, directory));
+    }
+    return null;
 }
 
 fn launchDirectoryFromArgumentsAlloc(allocator: std.mem.Allocator, arguments: []const []const u8) !?[]u8 {
@@ -1155,7 +1163,7 @@ fn openSettingsPageImpl(self: *Application) !void {
 }
 
 fn reloadSettingsImpl(self: *Application) !void {
-    var replacement = try config.loadOrCreate(std.heap.page_allocator);
+    var replacement = try config.loadOrCreate(std.heap.page_allocator, self.io);
     errdefer replacement.deinit();
 
     const next = replacement.value;

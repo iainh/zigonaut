@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const win = @import("win32.zig").c;
+const win32 = @import("win32.zig");
+const win = win32.c;
 
 const log = std.log.scoped(.pty);
 
@@ -132,7 +133,7 @@ pub const Pty = struct {
         const command_line = try std.unicode.utf8ToUtf16LeAllocZ(allocator, command);
         defer allocator.free(command_line);
         const user_profile = if (working_directory.len == 0)
-            std.process.getEnvVarOwned(allocator, "USERPROFILE") catch null
+            win32.environmentVariableAlloc(allocator, "USERPROFILE") catch null
         else
             null;
         defer if (user_profile) |profile| allocator.free(profile);

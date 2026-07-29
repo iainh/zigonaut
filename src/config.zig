@@ -1,4 +1,5 @@
 const std = @import("std");
+const win32 = @import("win32.zig");
 const theme = @import("theme.zig");
 
 pub const default_contents =
@@ -199,29 +200,29 @@ pub const Loaded = struct {
 
 /// Returns the absolute configuration path owned by the caller.
 pub fn pathAlloc(allocator: std.mem.Allocator) ![]u8 {
-    const app_data = try std.process.getEnvVarOwned(allocator, "APPDATA");
+    const app_data = try win32.environmentVariableAlloc(allocator, "APPDATA");
     defer allocator.free(app_data);
     return std.fs.path.join(allocator, &.{ app_data, "spiralpoint", "zigonaut", "zigonaut.conf" });
 }
 
-pub fn loadOrCreate(allocator: std.mem.Allocator) !Loaded {
+pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
     const path = try pathAlloc(allocator);
     defer allocator.free(path);
     const directory = std.fs.path.dirname(path) orelse return error.InvalidConfigPath;
 
-    try std.fs.cwd().makePath(directory);
-    var file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+    try std.Io.Dir.cwd().createDirPath(io, directory);
+    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => create: {
-            var created = try std.fs.createFileAbsolute(path, .{});
-            try created.writeAll(default_contents);
-            created.close();
-            break :create try std.fs.openFileAbsolute(path, .{});
+            var created = try std.Io.Dir.createFileAbsolute(io, path, .{});
+            try created.writeStreamingAll(io, default_contents);
+            created.close(io);
+            break :create try std.Io.Dir.openFileAbsolute(io, path, .{});
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const contents = try file.readToEndAlloc(allocator, 64 * 1024);
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024));
     return .{
         .allocator = allocator,
         .contents = contents,

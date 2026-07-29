@@ -19,8 +19,8 @@ pub const SessionRuntime = struct {
     pty: ?Pty = null,
     reader_thread: ?std.Thread = null,
     refresh: Refresh,
-    terminal_mutex: std.Thread.Mutex = .{},
-    pty_mutex: std.Thread.Mutex = .{},
+    terminal_mutex: @import("win32.zig").Mutex = .{},
+    pty_mutex: @import("win32.zig").Mutex = .{},
     closing: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
@@ -318,10 +318,10 @@ pub const SessionRuntime = struct {
         const value = reported orelse return null;
         defer allocator.free(value);
 
-        var hostname_wide: [std.Uri.host_name_max]u16 = undefined;
+        var hostname_wide: [256]u16 = undefined;
         var hostname_length: win.DWORD = hostname_wide.len;
         if (win.GetComputerNameW(&hostname_wide, &hostname_length) == 0) return null;
-        var hostname_utf8: [std.Uri.host_name_max * 3]u8 = undefined;
+        var hostname_utf8: [256 * 3]u8 = undefined;
         const utf8_length = std.unicode.utf16LeToUtf8(&hostname_utf8, hostname_wide[0..hostname_length]) catch return null;
         return osc7WindowsPathAlloc(allocator, value, hostname_utf8[0..utf8_length]);
     }
@@ -489,13 +489,14 @@ pub const SessionRuntime = struct {
             .changed = previous_matches != self.search.matches.items.len or previous_scanning != self.search.scanning,
             .scanning = self.search.scanning,
         };
-        var timer = std.time.Timer.start() catch null;
+        const started_at = @import("win32.zig").monotonicNanoseconds();
         var count: usize = 0;
         while (self.search.scanning and self.search.next_row < total) : (count += 1) {
             self.terminal.searchRowCached(self.allocator, &self.search_cache, self.search.next_row, self.search.query.items, &self.search.matches) catch break;
             self.search.next_row += 1;
-            if (timer) |*clock| {
-                if (clock.read() >= time_budget_ns) break;
+            if (started_at) |start| {
+                const now = @import("win32.zig").monotonicNanoseconds() orelse break;
+                if (now -| start >= time_budget_ns) break;
             } else if (count >= 31) break;
         }
         if (self.search.next_row >= total) {

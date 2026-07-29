@@ -117,6 +117,7 @@ pub const Tab = struct {
 
 pub const App = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     terminal_theme: theme.Theme,
     randomize_tab_background: bool,
     clipboard_write_enabled: bool = false,
@@ -131,8 +132,8 @@ pub const App = struct {
 
     const TerminalSize = struct { columns: u16, rows: u16, cell_width: u32, cell_height: u32 };
 
-    pub fn init(allocator: std.mem.Allocator, terminal_theme: theme.Theme, randomize_tab_background: bool) App {
-        return .{ .allocator = allocator, .terminal_theme = terminal_theme, .randomize_tab_background = randomize_tab_background };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, terminal_theme: theme.Theme, randomize_tab_background: bool) App {
+        return .{ .allocator = allocator, .io = io, .terminal_theme = terminal_theme, .randomize_tab_background = randomize_tab_background };
     }
 
     pub fn deinit(self: *App) void {
@@ -163,7 +164,8 @@ pub const App = struct {
     }
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
-        const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
+        const random_source: std.Random.IoSource = .{ .io = self.io };
+        const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, random_source.interface().int(u16)) else self.terminal_theme;
         const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background);
         self.activeSession().?.hold_on_exit = hold_on_exit;
@@ -243,7 +245,8 @@ pub const App = struct {
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
-        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, std.crypto.random.int(u16)) else self.terminal_theme;
+        const random_source: std.Random.IoSource = .{ .io = self.io };
+        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, random_source.interface().int(u16)) else self.terminal_theme;
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
         const working_directory = reported_directory orelse source.session.workingDirectory();
@@ -375,8 +378,9 @@ pub const App = struct {
     pub fn applySettings(self: *App, terminal_theme: theme.Theme, randomize_tab_background: bool) void {
         self.terminal_theme = terminal_theme;
         self.randomize_tab_background = randomize_tab_background;
+        const random_source: std.Random.IoSource = .{ .io = self.io };
         for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
-            const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, std.crypto.random.int(u16)) else terminal_theme;
+            const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, random_source.interface().int(u16)) else terminal_theme;
             pane.session.background = session_theme.background;
             if (pane.session.runtime) |runtime| runtime.setTheme(session_theme);
         };
@@ -440,7 +444,7 @@ pub const App = struct {
 };
 
 test "tabs are added selected and titled by focused pane" {
-    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
     _ = try app.addSessionRecord(.powershell, "PowerShell", "pwsh", "one", null, theme.rasmus.background);
     _ = try app.addSessionRecord(.wsl, "Linux", "wsl", "two", null, theme.rasmus.background);
@@ -452,7 +456,7 @@ test "tabs are added selected and titled by focused pane" {
 }
 
 test "notification identity selects its tab and pane" {
-    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
     _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
     _ = try app.addSessionRecord(.wsl, "Linux", "", "", null, theme.rasmus.background);
@@ -463,7 +467,7 @@ test "notification identity selects its tab and pane" {
 }
 
 test "settings traverse panes and closing tabs preserves selection" {
-    var app = App.init(std.testing.allocator, theme.rasmus, true);
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
     _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
     _ = try app.addSessionRecord(.wsl, "WSL", "", "", null, theme.rasmus.background);
@@ -479,7 +483,7 @@ test "settings traverse panes and closing tabs preserves selection" {
 }
 
 test "split clones launch metadata, focuses new pane, and snapshots structure" {
-    var app = App.init(std.testing.allocator, theme.rasmus, false);
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
     defer app.deinit();
     _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background);
     app.activeSession().?.hold_on_exit = true;
@@ -503,7 +507,7 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
 }
 
 test "focus title close extraction and stale identities" {
-    var app = App.init(std.testing.allocator, theme.rasmus, false);
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
     defer app.deinit();
     _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background);
     const first = app.activePane().?.id;

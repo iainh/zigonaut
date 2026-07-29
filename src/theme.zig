@@ -92,15 +92,15 @@ pub const Catalog = struct {
     entries: [max_themes]Entry = undefined,
     count: usize = 0,
 
-    pub fn load(allocator: std.mem.Allocator) Catalog {
+    pub fn load(allocator: std.mem.Allocator, io: std.Io) Catalog {
         var result = Catalog{};
-        const executable_directory = std.fs.selfExeDirPathAlloc(allocator) catch return result;
+        const executable_directory = std.process.executableDirPathAlloc(io, allocator) catch return result;
         defer allocator.free(executable_directory);
         const path = std.fs.path.join(allocator, &.{ executable_directory, "themes" }) catch return result;
         defer allocator.free(path);
-        var directory = std.fs.openDirAbsolute(path, .{ .iterate = true }) catch return result;
-        defer directory.close();
-        result.loadDirectory(allocator, directory) catch |err| log.warn("unable to load themes: {}", .{err});
+        var directory = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return result;
+        defer directory.close(io);
+        result.loadDirectory(allocator, io, directory) catch |err| log.warn("unable to load themes: {}", .{err});
         return result;
     }
 
@@ -111,13 +111,13 @@ pub const Catalog = struct {
         return rasmus;
     }
 
-    fn loadDirectory(self: *Catalog, allocator: std.mem.Allocator, directory: std.fs.Dir) !void {
+    fn loadDirectory(self: *Catalog, allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir) !void {
         var iterator = directory.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(io)) |entry| {
             if (entry.kind != .file or !std.ascii.endsWithIgnoreCase(entry.name, ".json")) continue;
             const name = entry.name[0 .. entry.name.len - ".json".len];
             if (name.len == 0 or name.len > max_name_length or self.count == max_themes) continue;
-            const contents = directory.readFileAlloc(allocator, entry.name, 64 * 1024) catch |err| {
+            const contents = directory.readFileAlloc(io, entry.name, allocator, .limited(64 * 1024)) catch |err| {
                 log.warn("unable to read theme {s}: {}", .{ entry.name, err });
                 continue;
             };

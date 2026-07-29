@@ -10,7 +10,7 @@ const vt = @cImport({
 const image_native = @import("win32.zig").c;
 
 const kitty_image_limit: usize = 32 * 1024 * 1024;
-var decode_png_mutex: std.Thread.Mutex = .{};
+var decode_png_mutex: @import("win32.zig").Mutex = .{};
 var decode_png_installed = false;
 
 fn installDecodePng() !void {
@@ -665,7 +665,7 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY, &image_limit));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &disabled));
-        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE, &disabled));
+        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE, null));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM, &disabled));
 
         var render_state: vt.GhosttyRenderState = null;
@@ -1456,10 +1456,10 @@ pub const Terminal = struct {
             @ptrCast(&self.row_iterator),
         ));
 
-        var stream = std.io.fixedBufferStream(output);
+        var writer: std.Io.Writer = .fixed(output);
         var row_index: usize = 0;
         while (vt.ghostty_render_state_row_iterator_next(self.row_iterator)) : (row_index += 1) {
-            if (row_index != 0) try stream.writer().writeByte('\n');
+            if (row_index != 0) try writer.writeByte('\n');
             try check(vt.ghostty_render_state_row_get(
                 self.row_iterator,
                 vt.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
@@ -1476,7 +1476,7 @@ pub const Terminal = struct {
                 ));
                 if (codepoint_count == 0) {
                     if (occupancy == .narrow or occupancy == .wrap_spacer) {
-                        try stream.writer().writeByte(' ');
+                        try writer.writeByte(' ');
                     }
                     continue;
                 }
@@ -1492,13 +1492,13 @@ pub const Terminal = struct {
                     var encoded: [4]u8 = undefined;
                     const scalar = std.math.cast(u21, codepoint) orelse return error.InvalidCodepoint;
                     const length = try std.unicode.utf8Encode(scalar, &encoded);
-                    try stream.writer().writeAll(encoded[0..length]);
+                    try writer.writeAll(encoded[0..length]);
                 }
             }
-            while (stream.pos > 0 and output[stream.pos - 1] == ' ') stream.pos -= 1;
+            while (writer.end > 0 and output[writer.end - 1] == ' ') writer.end -= 1;
         }
 
-        return std.mem.trimRight(u8, stream.getWritten(), " \n");
+        return std.mem.trimEnd(u8, writer.buffered(), " \n");
     }
 
     pub fn setSelection(self: *Terminal, selection: ?Selection) !void {

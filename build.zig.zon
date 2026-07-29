@@ -1,12 +1,12 @@
 .{
     .name = .zigonaut,
     .version = "0.3.0",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0xdfc39dc8b860abe1,
     .dependencies = .{
         .ghostty = .{
-            .url = "https://github.com/ghostty-org/ghostty/archive/d4ac93a0395d321b043ee0116dc8a1a384f0fb83.zip",
-            .hash = "ghostty-1.3.2-dev-5UdBCw0sIAVn70r2K3vyMEvdSVZ2fFqLj2I0w5N9iouO",
+            .url = "https://github.com/ghostty-org/ghostty/archive/84254a9d8cb7d8bd28852933484be3f499cfbeee.zip",
+            .hash = "ghostty-1.3.2-dev-5UdBC3mQJQW3jDUglfXd3KsF7zQDn4zzz41LfzrjWaB4",
         },
     },
     .paths = .{

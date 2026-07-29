@@ -12,13 +12,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .@"emit-lib-vt" = true,
-        .simd = false,
+        .simd = true,
     });
 
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .Debug,
     });
     app_module.addOptions("build_options", build_options);
     app_module.addIncludePath(b.path("winui"));
@@ -35,9 +36,10 @@ pub fn build(b: *std.Build) void {
     else
         "assets/icons/zigonaut.ico";
     const icon_bytes = b.build_root.handle.readFileAlloc(
-        b.allocator,
+        b.graph.io,
         icon_path,
-        1024 * 1024,
+        b.allocator,
+        .limited(1024 * 1024),
     ) catch @panic("unable to read application icon");
     const icon_hash = std.hash.Wyhash.hash(0, icon_bytes);
     const resource_flags: []const []const u8 = if (debug_build)
@@ -51,26 +53,26 @@ pub fn build(b: *std.Build) void {
         .flags = resource_flags,
     });
     exe.subsystem = .Windows;
-    exe.linkLibC();
-    exe.linkLibCpp();
-    exe.addIncludePath(b.path("src"));
-    exe.addCSourceFile(.{
+    exe.root_module.link_libc = true;
+    exe.root_module.link_libcpp = true;
+    exe.root_module.addIncludePath(b.path("src"));
+    exe.root_module.addCSourceFile(.{
         .file = b.path("src/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
-    exe.linkSystemLibrary("user32");
-    exe.linkSystemLibrary("comctl32");
-    exe.linkSystemLibrary("gdi32");
-    exe.linkSystemLibrary("d2d1");
-    exe.linkSystemLibrary("d3d11");
-    exe.linkSystemLibrary("dwrite");
-    exe.linkSystemLibrary("dxgi");
-    exe.linkSystemLibrary("dwmapi");
-    exe.linkSystemLibrary("advapi32");
-    exe.linkSystemLibrary("kernel32");
-    exe.linkSystemLibrary("shell32");
-    exe.linkSystemLibrary("windowscodecs");
-    exe.linkSystemLibrary("ole32");
+    exe.root_module.linkSystemLibrary("user32", .{});
+    exe.root_module.linkSystemLibrary("comctl32", .{});
+    exe.root_module.linkSystemLibrary("gdi32", .{});
+    exe.root_module.linkSystemLibrary("d2d1", .{});
+    exe.root_module.linkSystemLibrary("d3d11", .{});
+    exe.root_module.linkSystemLibrary("dwrite", .{});
+    exe.root_module.linkSystemLibrary("dxgi", .{});
+    exe.root_module.linkSystemLibrary("dwmapi", .{});
+    exe.root_module.linkSystemLibrary("advapi32", .{});
+    exe.root_module.linkSystemLibrary("kernel32", .{});
+    exe.root_module.linkSystemLibrary("shell32", .{});
+    exe.root_module.linkSystemLibrary("windowscodecs", .{});
+    exe.root_module.linkSystemLibrary("ole32", .{});
     const check_step = b.step("check", "Compile Zigonaut without installing it");
     check_step.dependOn(&exe.step);
     const install_exe = b.addInstallArtifact(exe, .{});
@@ -113,23 +115,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addOptions("build_options", build_options);
-    tests.linkLibC();
-    tests.linkLibCpp();
-    tests.addIncludePath(b.path("src"));
+    tests.root_module.link_libc = true;
+    tests.root_module.link_libcpp = true;
+    tests.root_module.addIncludePath(b.path("src"));
     tests.root_module.addIncludePath(b.path("winui"));
-    tests.addCSourceFile(.{
+    tests.root_module.addCSourceFile(.{
         .file = b.path("src/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
-    tests.linkSystemLibrary("user32");
-    tests.linkSystemLibrary("gdi32");
-    tests.linkSystemLibrary("d2d1");
-    tests.linkSystemLibrary("d3d11");
-    tests.linkSystemLibrary("dwrite");
-    tests.linkSystemLibrary("dxgi");
-    tests.linkSystemLibrary("kernel32");
-    tests.linkSystemLibrary("windowscodecs");
-    tests.linkSystemLibrary("ole32");
+    tests.root_module.linkSystemLibrary("user32", .{});
+    tests.root_module.linkSystemLibrary("gdi32", .{});
+    tests.root_module.linkSystemLibrary("d2d1", .{});
+    tests.root_module.linkSystemLibrary("d3d11", .{});
+    tests.root_module.linkSystemLibrary("dwrite", .{});
+    tests.root_module.linkSystemLibrary("dxgi", .{});
+    tests.root_module.linkSystemLibrary("kernel32", .{});
+    tests.root_module.linkSystemLibrary("windowscodecs", .{});
+    tests.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(tests.root_module, ghostty);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -142,10 +144,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    conpty_test.linkLibC();
-    conpty_test.addIncludePath(b.path("src"));
+    conpty_test.root_module.link_libc = true;
+    conpty_test.root_module.addIncludePath(b.path("src"));
     conpty_test.root_module.addIncludePath(b.path("winui"));
-    conpty_test.linkSystemLibrary("kernel32");
+    conpty_test.root_module.linkSystemLibrary("kernel32", .{});
     const install_conpty_test = b.addInstallArtifact(conpty_test, .{});
     const run_conpty_test = b.addSystemCommand(&.{b.getInstallPath(.bin, "conpty-resize-test.exe")});
     run_conpty_test.step.dependOn(&install_conpty_test.step);
@@ -161,23 +163,23 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    benchmark.linkLibC();
-    benchmark.linkLibCpp();
-    benchmark.addIncludePath(b.path("src"));
+    benchmark.root_module.link_libc = true;
+    benchmark.root_module.link_libcpp = true;
+    benchmark.root_module.addIncludePath(b.path("src"));
     benchmark.root_module.addIncludePath(b.path("winui"));
-    benchmark.addCSourceFile(.{
+    benchmark.root_module.addCSourceFile(.{
         .file = b.path("src/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
-    benchmark.linkSystemLibrary("user32");
-    benchmark.linkSystemLibrary("gdi32");
-    benchmark.linkSystemLibrary("d2d1");
-    benchmark.linkSystemLibrary("d3d11");
-    benchmark.linkSystemLibrary("dwrite");
-    benchmark.linkSystemLibrary("dxgi");
-    benchmark.linkSystemLibrary("kernel32");
-    benchmark.linkSystemLibrary("windowscodecs");
-    benchmark.linkSystemLibrary("ole32");
+    benchmark.root_module.linkSystemLibrary("user32", .{});
+    benchmark.root_module.linkSystemLibrary("gdi32", .{});
+    benchmark.root_module.linkSystemLibrary("d2d1", .{});
+    benchmark.root_module.linkSystemLibrary("d3d11", .{});
+    benchmark.root_module.linkSystemLibrary("dwrite", .{});
+    benchmark.root_module.linkSystemLibrary("dxgi", .{});
+    benchmark.root_module.linkSystemLibrary("kernel32", .{});
+    benchmark.root_module.linkSystemLibrary("windowscodecs", .{});
+    benchmark.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(benchmark.root_module, ghostty);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);
@@ -194,7 +196,7 @@ fn gitHash(b: *std.Build) []const u8 {
     const output = b.runAllowFail(
         &.{ "git", "rev-parse", "HEAD" },
         &exit_code,
-        .Ignore,
+        .ignore,
     ) catch return "unknown";
     return std.mem.trim(u8, output, " \t\r\n");
 }

@@ -32,7 +32,7 @@ pub const Command = enum(u32) {
 };
 
 pub fn commandFromInt(value: u32) ?Command {
-    return std.meta.intToEnum(Command, value) catch null;
+    return std.enums.fromInt(Command, value);
 }
 
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;

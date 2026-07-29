@@ -79,7 +79,7 @@ Drag to select and copy text automatically. Hold `Alt` for rectangular selection
 ### Requirements
 
 - Windows 10 version 1809 or later, or Windows 11
-- [Zig 0.15.2](https://ziglang.org/download/)
+- [Zig 0.16.0](https://ziglang.org/download/)
 - Visual Studio 2022 with the **Desktop development with C++** workload
 - Windows App Runtime 2.3.1 for the target architecture
 

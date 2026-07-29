@@ -5,6 +5,7 @@ const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const directwrite = @import("directwrite_renderer.zig");
 const progress = @import("progress.zig");
+const win32 = @import("win32.zig");
 
 const columns = 120;
 const rows = 40;
@@ -20,7 +21,7 @@ pub fn main() !void {
     var terminal = try Terminal.init(columns, rows, theme.rasmus);
     defer terminal.deinit();
 
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     for (0..feed_iterations) |_| terminal.feed(line);
     const feed_ns = timer.lap();
 
@@ -142,7 +143,7 @@ fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64, curso
     var matches: [4096]SearchMatch = undefined;
     for (&matches, 0..) |*match, row| match.* = .{ .row = @intCast(row), .start = 40, .end = 48 };
     var checksum: u64 = 0;
-    var timer = try std.time.Timer.start();
+    var timer = try Timer.start();
     for (0..iterations) |_| for (0..rows) |y| for (0..columns) |x| {
         checksum +%= search.highlight(&matches, 4030, 4000 + y, @intCast(x));
     };
@@ -167,7 +168,7 @@ fn benchmarkProgressParser(fast: bool) u64 {
     const iterations = 100_000;
     var parser = progress.Parser{};
     var handler = ProgressBenchmarkHandler{};
-    var timer = std.time.Timer.start() catch return 0;
+    var timer = Timer.start() catch return 0;
     for (0..iterations) |_| {
         if (fast) {
             parser.feedEach(line, &handler);
@@ -223,3 +224,21 @@ fn improvement(before: u64, after: u64) f64 {
     return (@as(f64, @floatFromInt(before)) - @as(f64, @floatFromInt(after))) /
         @as(f64, @floatFromInt(before)) * 100.0;
 }
+
+const Timer = struct {
+    started: u64,
+
+    fn start() !Timer {
+        return .{ .started = win32.monotonicNanoseconds() orelse return error.TimerUnavailable };
+    }
+
+    fn lap(self: *Timer) u64 {
+        const now = win32.monotonicNanoseconds() orelse self.started;
+        defer self.started = now;
+        return now - self.started;
+    }
+
+    fn read(self: *const Timer) u64 {
+        return (win32.monotonicNanoseconds() orelse self.started) - self.started;
+    }
+};
