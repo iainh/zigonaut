@@ -6,6 +6,18 @@ pub const CacheBenchmark = struct {
     cache_entries: u32,
 };
 
+export fn zigonaut_fit_cluster_advances(
+    advances: ?[*]f32,
+    glyph_count: u32,
+    expected_width: f32,
+) callconv(.c) void {
+    if (advances == null or glyph_count == 0) return;
+    const values = advances.?[0..glyph_count];
+    var natural_width: f32 = 0;
+    for (values) |value| natural_width += value;
+    values[values.len - 1] += expected_width - natural_width;
+}
+
 pub fn benchmarkLayoutCache(repetitions: u32) !CacheBenchmark {
     var result: native.ZigonautLayoutCacheBenchmark = undefined;
     if (native.zigonaut_benchmark_layout_cache(repetitions, &result) < 0) {
@@ -193,11 +205,11 @@ pub const Engine = struct {
 test "cluster advances fit exact terminal spans" {
     const std = @import("std");
     var ligature = [_]f32{ 3.0, 4.0, 2.0 };
-    native.zigonaut_fit_cluster_advances(&ligature, ligature.len, 20.0);
+    zigonaut_fit_cluster_advances(&ligature, ligature.len, 20.0);
     try std.testing.expectApproxEqAbs(@as(f32, 20.0), sum(&ligature), 0.001);
 
     var combining = [_]f32{ 9.0, 0.0 };
-    native.zigonaut_fit_cluster_advances(&combining, combining.len, 10.0);
+    zigonaut_fit_cluster_advances(&combining, combining.len, 10.0);
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), sum(&combining), 0.001);
 }
 

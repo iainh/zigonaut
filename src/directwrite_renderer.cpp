@@ -1392,15 +1392,3 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     if (FAILED(hr)) return hr;
     return engine->swap_chain->Present(1, 0);
 }
-
-extern "C" void zigonaut_fit_cluster_advances(
-    float* advances,
-    uint32_t glyph_count,
-    float expected_width) {
-    if (advances == nullptr || glyph_count == 0) return;
-    float natural_width = 0.0f;
-    for (uint32_t index = 0; index < glyph_count; ++index) {
-        natural_width += advances[index];
-    }
-    advances[glyph_count - 1] += expected_width - natural_width;
-}
