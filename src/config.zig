@@ -100,7 +100,7 @@ const JsonConfig = struct {
         },
     },
     profiles: struct {
-        @"default": []const u8,
+        default: []const u8,
         items: []const JsonProfile,
         workingDirectory: []const u8,
         holdOnExit: bool,
@@ -234,9 +234,13 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
     };
 }
 
+fn validWindowsText(value: []const u8) bool {
+    return std.mem.indexOfScalar(u8, value, 0) == null and std.unicode.utf8ValidateSlice(value);
+}
+
 fn configFromJson(json: JsonConfig) !Config {
     if (json.version != 1) return error.UnsupportedConfigVersion;
-    if (json.appearance.font.family.len == 0 or json.appearance.font.family.len >= 128 or
+    if (json.appearance.font.family.len == 0 or json.appearance.font.family.len >= 128 or !validWindowsText(json.appearance.font.family) or
         json.appearance.font.size < 6 or json.appearance.font.size > 72 or
         json.terminal.scrollbackSize > 1_000_000 or
         json.terminal.initialSize.columns < 10 or json.terminal.initialSize.columns > 1000 or
@@ -245,11 +249,12 @@ fn configFromJson(json: JsonConfig) !Config {
         json.appearance.themes.light.len == 0 or json.appearance.themes.light.len >= 64 or
         json.appearance.padding.horizontal > 128 or json.appearance.padding.vertical > 128 or
         json.appearance.background.opacity > 100 or
-        json.profiles.@"default".len == 0 or json.profiles.@"default".len >= 128 or
+        json.profiles.default.len == 0 or json.profiles.default.len >= 128 or
         json.profiles.items.len == 0 or json.profiles.items.len > max_profiles or
+        !validWindowsText(json.profiles.workingDirectory) or
         json.advanced.clipboard.maximumBytes < 1 or json.advanced.clipboard.maximumBytes > 16 * 1024 * 1024 or
         json.advanced.pipeCommandOutput.len >= 4096 or
-        std.mem.indexOfScalar(u8, json.advanced.pipeCommandOutput, 0) != null)
+        !validWindowsText(json.advanced.pipeCommandOutput))
         return error.InvalidConfig;
 
     var result = Config{};
@@ -266,11 +271,11 @@ fn configFromJson(json: JsonConfig) !Config {
     result.background_opacity = json.appearance.background.opacity;
     result.backdrop = json.appearance.background.backdrop;
     result.randomize_tab_background = json.appearance.randomizeTabBackground;
-    result.default_profile = json.profiles.@"default";
+    result.default_profile = json.profiles.default;
     result.profile_count = 0;
     for (json.profiles.items) |profile| {
         if (profile.name.len == 0 or profile.name.len >= 128 or profile.command.len == 0 or
-            !std.unicode.utf8ValidateSlice(profile.name) or !std.unicode.utf8ValidateSlice(profile.command) or
+            !validWindowsText(profile.name) or !validWindowsText(profile.command) or
             std.mem.indexOfScalar(u8, profile.name, '|') != null or
             std.mem.indexOfScalar(u8, profile.name, '\r') != null or
             std.mem.indexOfScalar(u8, profile.name, '\n') != null or
@@ -356,6 +361,34 @@ test "default JSON configuration parses" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
+}
+
+test "configuration rejects strings Windows cannot represent" {
+    try std.testing.expect(!validWindowsText(&.{0xff}));
+    try std.testing.expect(!validWindowsText("embedded\x00nul"));
+
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, default_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    parsed.value.appearance.font.family = "Bad\x00Font";
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.appearance.font.family = "Cascadia Mono";
+
+    parsed.value.profiles.workingDirectory = "C:\\bad\x00path";
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.profiles.workingDirectory = "";
+
+    parsed.value.advanced.pipeCommandOutput = "cmd.exe\x00 /c exit";
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.advanced.pipeCommandOutput = "";
+
+    var profiles = [_]JsonProfile{.{ .name = "Bad\x00Name", .shell = .powershell, .command = "powershell.exe" }};
+    parsed.value.profiles.items = &profiles;
+    try std.testing.expectError(error.InvalidProfile, configFromJson(parsed.value));
+    profiles[0].name = "PowerShell";
+
+    profiles[0].command = "cmd.exe\x00 /c exit";
+    try std.testing.expectError(error.InvalidProfile, configFromJson(parsed.value));
 }
 
 test "configuration changes are classified by subsystem" {
