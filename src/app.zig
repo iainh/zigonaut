@@ -396,7 +396,7 @@ pub const App = struct {
         };
     }
 
-    pub fn applyScrollbackSize(self: *App, size: u32) void {
+    pub fn setDefaultScrollbackSize(self: *App, size: u32) void {
         self.scrollback_size = size;
     }
 

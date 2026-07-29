@@ -73,7 +73,7 @@ const Application = struct {
             .zoomed_font_size = loaded.value.font_size,
         };
         result.model.applyClipboardWriteSettings(loaded.value.osc52_clipboard_write, loaded.value.osc52_clipboard_max_bytes);
-        result.model.applyScrollbackSize(loaded.value.scrollback_size);
+        result.model.setDefaultScrollbackSize(loaded.value.scrollback_size);
         return result;
     }
 
@@ -1222,7 +1222,7 @@ fn reloadSettingsImpl(self: *Application) !void {
         self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     }
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
-    self.model.applyScrollbackSize(self.settings.scrollback_size);
+    self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
     self.updateTheme();
     if (new_font != null) _ = win.DeleteObject(old_font);
