@@ -5,13 +5,16 @@
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Windowing.h>
+#include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Text.h>
 #include <dwrite_1.h>
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -182,6 +185,114 @@ ComboBox combo(std::string const& selected, std::initializer_list<std::wstring_v
     return result;
 }
 
+struct ThemeChoice {
+    std::string name;
+    std::array<uint32_t, 19> colors;
+};
+
+std::optional<uint32_t> parseColor(std::string const& text) {
+    if (text.size() != 7 || text[0] != '#') return std::nullopt;
+    try {
+        size_t parsed{};
+        auto const result = std::stoul(text.substr(1), &parsed, 16);
+        if (parsed != 6 || result > 0xffffff) return std::nullopt;
+        return static_cast<uint32_t>(result);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+ThemeChoice rasmusTheme(std::string name = "rasmus") {
+    return {
+        std::move(name),
+        {
+            0x1a1a19, 0xd1d1d1, 0xd1d1d1,
+            0x333332, 0xff968c, 0x61957f, 0xffc591,
+            0x8db4d4, 0xde9bc8, 0x7bb099, 0xd1d1d1,
+            0x4c4c4b, 0xffafa5, 0x7aae98, 0xffdeaa,
+            0xa6cded, 0xf7b4e1, 0x94c9b2, 0xeaeaea,
+        },
+    };
+}
+
+std::optional<ThemeChoice> parseTheme(std::string name, std::string const& contents) {
+    try {
+        auto const object = Windows::Data::Json::JsonObject::Parse(to_hstring(contents));
+        ThemeChoice result{std::move(name)};
+        for (auto const& [index, key] : std::initializer_list<std::pair<size_t, wchar_t const*>>{
+                 {0, L"background"}, {1, L"foreground"}, {2, L"cursor"}}) {
+            auto const color = parseColor(to_string(object.GetNamedString(key)));
+            if (!color) return std::nullopt;
+            result.colors[index] = *color;
+        }
+        auto const ansi = object.GetNamedArray(L"ansi");
+        if (ansi.Size() != 16) return std::nullopt;
+        for (uint32_t index = 0; index < ansi.Size(); ++index) {
+            auto const color = parseColor(to_string(ansi.GetStringAt(index)));
+            if (!color) return std::nullopt;
+            result.colors[index + 3] = *color;
+        }
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::vector<ThemeChoice> loadThemes() {
+    std::vector<ThemeChoice> result{rasmusTheme()};
+    std::wstring executable(32768, L'\0');
+    auto const length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (length == 0 || length == executable.size()) return result;
+    executable.resize(length);
+    auto const directory = std::filesystem::path{executable}.parent_path() / L"themes";
+    std::error_code error;
+    for (auto const& entry : std::filesystem::directory_iterator{directory, error}) {
+        if (!entry.is_regular_file(error) || entry.path().extension() != L".json") continue;
+        std::ifstream file{entry.path(), std::ios::binary};
+        std::ostringstream contents;
+        if (!file || !(contents << file.rdbuf())) continue;
+        auto theme = parseTheme(to_string(entry.path().stem().wstring()), contents.str());
+        if (theme) result.push_back(std::move(*theme));
+    }
+    std::sort(result.begin(), result.end(), [](auto const& left, auto const& right) { return left.name < right.name; });
+    return result;
+}
+
+Windows::UI::Color xamlColor(uint32_t color) {
+    Windows::UI::Color result{};
+    result.A = 255;
+    result.R = static_cast<uint8_t>(color >> 16);
+    result.G = static_cast<uint8_t>(color >> 8);
+    result.B = static_cast<uint8_t>(color);
+    return result;
+}
+
+ComboBoxItem themeItem(ThemeChoice const& theme) {
+    auto row = StackPanel{};
+    row.Orientation(Orientation::Horizontal);
+    row.Spacing(12);
+    auto name = TextBlock{};
+    name.Text(to_hstring(theme.name));
+    name.Width(112);
+    name.VerticalAlignment(VerticalAlignment::Center);
+    row.Children().Append(name);
+    auto palette = StackPanel{};
+    palette.Orientation(Orientation::Horizontal);
+    palette.Spacing(1);
+    for (auto color : theme.colors) {
+        auto tile = Border{};
+        tile.Width(8);
+        tile.Height(20);
+        tile.Background(Media::SolidColorBrush{xamlColor(color)});
+        palette.Children().Append(tile);
+    }
+    row.Children().Append(palette);
+    auto item = ComboBoxItem{};
+    item.Tag(box_value(to_hstring(theme.name)));
+    item.Content(row);
+    return item;
+}
+
 std::vector<std::wstring> monospaceFonts() {
     std::vector<std::wstring> result;
     com_ptr<IDWriteFactory> factory;
@@ -268,12 +379,12 @@ struct Dialog {
     std::function<void()> saved;
     bool open = true;
 
-    TextBox dark_theme{nullptr}, light_theme{nullptr};
-    ComboBox font_family{nullptr};
+    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr};
     ToggleSwitch random_background{nullptr};
     std::vector<TextBox> colors;
+    std::vector<ThemeChoice> themes;
 
     TextBox default_profile{nullptr}, profiles{nullptr}, working_directory{nullptr};
     ToggleSwitch hold_on_exit{nullptr};
@@ -285,7 +396,7 @@ struct Dialog {
     NavigationView::SelectionChanged_revoker navigation_revoker{};
 
     Dialog(std::string_view config_path, std::string_view contents, bool high_contrast, bool dark_theme, std::function<void()> on_saved)
-        : path(to_hstring(config_path).c_str()), saved(std::move(on_saved)) {
+        : path(to_hstring(config_path).c_str()), saved(std::move(on_saved)), themes(loadThemes()) {
         auto const values = parse(contents);
         window = Window{};
         window.Title(L"Zigonaut Settings");
@@ -412,8 +523,8 @@ struct Dialog {
         auto const material = value(values, "backdrop", "mica");
         backdrop = combo("", {L"None", L"Mica", L"MicaAlt", L"Acrylic"});
         backdrop.SelectedIndex(material == "none" ? 0 : material == "mica_alt" ? 2 : material == "acrylic" ? 3 : 1);
-        dark_theme = textBox(value(values, "dark_theme", value(values, "theme", "rasmus")), L"rasmus");
-        light_theme = textBox(value(values, "light_theme", "campbell-light"), L"campbell-light");
+        dark_theme = themeCombo(value(values, "dark_theme", value(values, "theme", "rasmus")));
+        light_theme = themeCombo(value(values, "light_theme", "campbell-light"));
         opacity = numberBox(value(values, "background_opacity", "100"), 100, 0, 100);
         random_background = toggle(value(values, "randomize_tab_background", "true"));
 
@@ -428,6 +539,21 @@ struct Dialog {
             card(L"Background opacity", L"Percentage opacity for the terminal background.", opacity),
             card(L"Random tab colors", L"Give each new tab a background hue with the same perceived brightness.", random_background),
         });
+    }
+
+    ComboBox themeCombo(std::string const& selected) {
+        auto found = std::find_if(themes.begin(), themes.end(), [&](auto const& theme) { return theme.name == selected; });
+        if (found == themes.end()) {
+            themes.push_back(rasmusTheme(selected));
+            found = themes.end() - 1;
+        }
+        auto result = ComboBox{};
+        result.HorizontalAlignment(HorizontalAlignment::Stretch);
+        for (size_t index = 0; index < themes.size(); ++index) {
+            result.Items().Append(themeItem(themes[index]));
+            if (themes[index].name == selected) result.SelectedIndex(static_cast<int32_t>(index));
+        }
+        return result;
     }
 
     ScrollViewer makeTerminal(std::map<std::string, std::string> const& values) {
@@ -494,9 +620,12 @@ struct Dialog {
 
     std::string serialize() {
         auto string = [](TextBox const& box) { return trim(to_string(box.Text())); };
+        auto selectedTheme = [](ComboBox const& box) {
+            return trim(to_string(box.SelectedItem().as<ComboBoxItem>().Tag().as<hstring>()));
+        };
         auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
         if (selected_font.empty()) throw std::runtime_error("Font family cannot be empty.");
-        if (string(dark_theme).empty() || string(light_theme).empty()) throw std::runtime_error("Theme names cannot be empty.");
+        if (selectedTheme(dark_theme).empty() || selectedTheme(light_theme).empty()) throw std::runtime_error("Theme names cannot be empty.");
         for (auto const& editor : colors) if (!validColor(string(editor))) throw std::runtime_error("Palette colors must be empty or use #RRGGBB.");
 
         std::vector<std::string> profile_lines;
@@ -519,8 +648,8 @@ struct Dialog {
         output << "font_family=" << selected_font << '\n';
         output << "font_size=" << static_cast<unsigned>(font_size.Value()) << '\n';
         output << "scrollback_size=" << static_cast<unsigned>(scrollback_size.Value()) << '\n';
-        output << "dark_theme=" << string(dark_theme) << '\n';
-        output << "light_theme=" << string(light_theme) << '\n';
+        output << "dark_theme=" << selectedTheme(dark_theme) << '\n';
+        output << "light_theme=" << selectedTheme(light_theme) << '\n';
         output << "color_scheme=" << (color_scheme.SelectedIndex() == 1 ? "light" : color_scheme.SelectedIndex() == 2 ? "dark" : "system") << '\n';
         output << "padding_horizontal=" << static_cast<unsigned>(padding_horizontal.Value()) << '\n';
         output << "padding_vertical=" << static_cast<unsigned>(padding_vertical.Value()) << '\n';
@@ -565,7 +694,7 @@ struct Dialog {
 
     void registerAutoSave() {
         auto text_committed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {dark_theme, light_theme, default_profile, profiles, working_directory, pipe_command})
+        for (auto const& editor : {default_profile, profiles, working_directory, pipe_command})
             editor.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
@@ -574,6 +703,8 @@ struct Dialog {
         auto selection_changed = [this](auto const&, auto const&) { save(); };
         color_scheme.SelectionChanged(selection_changed);
         backdrop.SelectionChanged(selection_changed);
+        dark_theme.SelectionChanged(selection_changed);
+        light_theme.SelectionChanged(selection_changed);
         font_family.SelectionChanged(selection_changed);
         auto toggled = [this](auto const&, auto const&) { save(); };
         for (auto const& editor : {random_background, hold_on_exit, clipboard_write}) editor.Toggled(toggled);
