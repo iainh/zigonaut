@@ -290,9 +290,12 @@ const Application = struct {
         }
         try self.detachPresentation();
         for (self.views.items, prepared) |entry, value| entry.view.commitReload(value);
+    }
+
+    fn publishReloadedViews(self: *Application, operation: []const u8) void {
         self.syncPresentation() catch |err| {
             if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-            log.err("unable to republish reloaded renderers: {}", .{err});
+            log.err("unable to republish {s}: {}", .{ operation, err });
         };
     }
 };
@@ -697,6 +700,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 self.font = new_font;
                 self.dpi = new_dpi;
                 _ = win.DeleteObject(old_font);
+                self.publishReloadedViews("renderers after DPI change");
                 _ = win.InvalidateRect(hwnd, null, 0);
             }
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
@@ -1174,7 +1178,8 @@ fn openSettingsPageImpl(self: *Application) !void {
 
 fn reloadSettingsImpl(self: *Application) !void {
     var replacement = try config.loadOrCreate(std.heap.page_allocator, self.io);
-    errdefer replacement.deinit();
+    var replacement_owned = true;
+    errdefer if (replacement_owned) replacement.deinit();
 
     const next = replacement.value;
     const changed = config.changes(self.settings, next);
@@ -1182,23 +1187,34 @@ fn reloadSettingsImpl(self: *Application) !void {
         self.settings.padding_vertical != next.padding_vertical;
     const new_font = if (changed.font) createFontFor(next, self.dpi) else null;
     if (changed.font and new_font == null) return error.CreateFontFailed;
+    var new_font_owned = new_font != null;
     errdefer {
-        if (new_font != null) _ = win.DeleteObject(new_font);
+        if (new_font_owned) _ = win.DeleteObject(new_font);
     }
-    errdefer self.syncProfiles(&self.settings) catch {
-        if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-    };
+    var profiles_committed = false;
+    errdefer {
+        if (!profiles_committed) self.syncProfiles(&self.settings) catch {
+            if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+        };
+    }
     try self.syncProfiles(&next);
     if (new_font != null) {
         try self.reloadViews(new_font, next.font_family, next.font_size, self.dpi);
-        self.zoomed_font_size = next.font_size;
+    } else if (padding_changed) {
+        try self.detachPresentation();
     }
 
     const old_font = self.font;
-    if (new_font != null) self.font = new_font;
+    if (new_font != null) {
+        self.font = new_font;
+        self.zoomed_font_size = next.font_size;
+        new_font_owned = false;
+    }
     var previous = self.loaded;
     self.loaded = replacement;
     self.settings = self.loaded.value;
+    replacement_owned = false;
+    profiles_committed = true;
     previous.deinit();
 
     if (changed.theme) {
@@ -1208,13 +1224,10 @@ fn reloadSettingsImpl(self: *Application) !void {
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.applyScrollbackSize(self.settings.scrollback_size);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
-    if (padding_changed) {
-        try self.detachPresentation();
-        try self.syncPresentation();
-    }
     self.updateTheme();
     if (new_font != null) _ = win.DeleteObject(old_font);
     for (self.views.items) |entry| entry.view.invalidate();
+    if (changed.font or padding_changed) self.publishReloadedViews("views after settings reload");
 }
 
 fn scaled(value: anytype, dpi: u32) i32 {
@@ -1245,6 +1258,7 @@ fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
     _ = win.DeleteObject(self.font);
     self.font = new_font;
     self.zoomed_font_size = size;
+    self.publishReloadedViews("renderers after zoom change");
 }
 
 fn attachTerminalRendererImpl(self: *Application) bool {
@@ -1269,6 +1283,7 @@ fn recoverTerminalRendererImpl(self: *Application) void {
     };
     _ = win.DeleteObject(self.font);
     self.font = new_font;
+    self.publishReloadedViews("renderers after recovery");
 }
 
 fn appsUseDarkTheme() bool {
