@@ -1033,10 +1033,11 @@ struct Bridge {
         content.Padding(Thickness{0, 8, 0, 0});
         content.HorizontalAlignment(HorizontalAlignment::Stretch);
 
-        wchar_t module_path[MAX_PATH]{};
-        auto const module_path_length = GetModuleFileNameW(nullptr, module_path, static_cast<DWORD>(std::size(module_path)));
-        if (module_path_length && module_path_length < std::size(module_path)) {
-            std::wstring path(module_path, module_path_length);
+        std::wstring module_path(32768, L'\0');
+        auto const module_path_length = GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
+        if (module_path_length && module_path_length < module_path.size()) {
+            module_path.resize(module_path_length);
+            std::wstring path(module_path);
             auto const separator = path.find_last_of(L"\\/");
             path.resize(separator == std::wstring::npos ? 0 : separator + 1);
             path += L"zigonaut-about-1024.png";

@@ -26,6 +26,21 @@ pub fn environmentVariableAlloc(allocator: std.mem.Allocator, name: []const u8) 
     return std.unicode.utf16LeToUtf8Alloc(allocator, wide_value[0..length]);
 }
 
+pub fn applicationFilePathAlloc(allocator: std.mem.Allocator, relative_path: []const u16) ![:0]u16 {
+    const buffer = try allocator.alloc(u16, 32_768);
+    defer allocator.free(buffer);
+    const path_length = c.GetModuleFileNameW(null, buffer.ptr, @intCast(buffer.len));
+    if (path_length == 0 or path_length >= buffer.len) return error.ApplicationPathUnavailable;
+    const directory_end = std.mem.lastIndexOfScalar(u16, buffer[0..path_length], '\\') orelse
+        return error.ApplicationPathUnavailable;
+    const result_length = directory_end + 1 + relative_path.len;
+    if (result_length >= buffer.len) return error.ApplicationPathTooLong;
+    const result = try allocator.allocSentinel(u16, result_length, 0);
+    @memcpy(result[0 .. directory_end + 1], buffer[0 .. directory_end + 1]);
+    @memcpy(result[directory_end + 1 ..], relative_path);
+    return result;
+}
+
 pub const Mutex = struct {
     state: c.SRWLOCK = std.mem.zeroes(c.SRWLOCK),
 

@@ -1,5 +1,6 @@
-const win = @import("win32.zig").c;
 const std = @import("std");
+const win32 = @import("win32.zig");
+const win = win32.c;
 
 const dll_name = std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut.WinUI.Bridge.dll");
 
@@ -86,16 +87,11 @@ pub const Bridge = struct {
     update_ime_bounds_fn: UpdateImeBounds,
 
     pub fn load() ?Bridge {
-        var path: [win.MAX_PATH]u16 = undefined;
-        const path_length = win.GetModuleFileNameW(null, &path, path.len);
-        if (path_length == 0 or path_length >= path.len) return null;
-        const directory_end = std.mem.lastIndexOfScalar(u16, path[0..path_length], '\\') orelse return null;
-        if (directory_end + 1 + dll_name.len >= path.len) return null;
-        @memcpy(path[directory_end + 1 ..][0..dll_name.len], dll_name);
-        path[directory_end + 1 + dll_name.len] = 0;
+        const path = win32.applicationFilePathAlloc(std.heap.page_allocator, dll_name) catch return null;
+        defer std.heap.page_allocator.free(path);
 
         const module = win.LoadLibraryExW(
-            &path,
+            path.ptr,
             null,
             win.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | win.LOAD_LIBRARY_SEARCH_APPLICATION_DIR | win.LOAD_LIBRARY_SEARCH_SYSTEM32,
         ) orelse return null;

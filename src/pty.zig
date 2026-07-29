@@ -17,7 +17,7 @@ const Conpty = struct {
     release: ConptyRelease,
     close: ConptyClose,
 
-    fn load() !Conpty {
+    fn load(allocator: std.mem.Allocator) !Conpty {
         const host_architecture = switch (builtin.cpu.arch) {
             .x86_64 => "x64",
             .aarch64 => "arm64",
@@ -29,19 +29,19 @@ const Conpty = struct {
             else => unreachable,
         };
 
-        var host_path_buffer: [win.MAX_PATH]u16 = undefined;
-        const host_path = try applicationFilePath(&host_path_buffer, host_relative_path);
+        const host_path = try win32.applicationFilePathAlloc(allocator, host_relative_path);
+        defer allocator.free(host_path);
         const host_attributes = win.GetFileAttributesW(host_path.ptr);
         if (host_attributes == win.INVALID_FILE_ATTRIBUTES or host_attributes & win.FILE_ATTRIBUTE_DIRECTORY != 0) {
             log.err("bundled ConPTY host is missing ({s}\\OpenConsole.exe beside zigonaut.exe)", .{host_architecture});
             return error.ConptyHostNotFound;
         }
 
-        var dll_path_buffer: [win.MAX_PATH]u16 = undefined;
-        const dll_path = try applicationFilePath(
-            &dll_path_buffer,
+        const dll_path = try win32.applicationFilePathAlloc(
+            allocator,
             std.unicode.utf8ToUtf16LeStringLiteral("conpty.dll"),
         );
+        defer allocator.free(dll_path);
         const module = win.LoadLibraryExW(
             dll_path.ptr,
             null,
@@ -72,7 +72,7 @@ pub const Pty = struct {
     process: win.HANDLE,
 
     pub fn spawn(allocator: std.mem.Allocator, command: []const u8, working_directory: []const u8, columns: u16, rows: u16) !Pty {
-        const conpty = try Conpty.load();
+        const conpty = try Conpty.load(allocator);
         errdefer conpty.unload();
 
         var input_read: win.HANDLE = null;
@@ -226,18 +226,6 @@ pub const Pty = struct {
         self.conpty.unload();
     }
 };
-
-fn applicationFilePath(buffer: []u16, relative_path: []const u16) ![:0]u16 {
-    const path_length = win.GetModuleFileNameW(null, buffer.ptr, @intCast(buffer.len));
-    if (path_length == 0 or path_length >= buffer.len) return error.ApplicationPathUnavailable;
-    const directory_end = std.mem.lastIndexOfScalar(u16, buffer[0..path_length], '\\') orelse
-        return error.ApplicationPathUnavailable;
-    const result_length = directory_end + 1 + relative_path.len;
-    if (result_length >= buffer.len) return error.ApplicationPathTooLong;
-    @memcpy(buffer[directory_end + 1 .. result_length], relative_path);
-    buffer[result_length] = 0;
-    return buffer[0..result_length :0];
-}
 
 fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
     const address = win.GetProcAddress(module, name) orelse return null;
