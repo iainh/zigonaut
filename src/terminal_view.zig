@@ -15,6 +15,12 @@ const SearchMatch = search.Match;
 const win32 = @import("win32.zig");
 const win = win32.c;
 const log = std.log.scoped(.terminal_view);
+const encodeUtf16 = GdiRenderer.encodeUtf16;
+const paddedRect = GdiRenderer.paddedRect;
+const colorRef = GdiRenderer.colorRef;
+const rgb = GdiRenderer.rgb;
+const translucentColorRef = GdiRenderer.translucentColorRef;
+const blendColorRef = GdiRenderer.blendColorRef;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("ZigonautTerminalView");
 const render_message = win.WM_APP + 2;
@@ -1774,59 +1780,6 @@ fn drawDirectWriteMessage(
         false,
         0,
         @intFromEnum(Terminal.Cell.Occupancy.narrow),
-    );
-}
-
-fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
-    var length: usize = 0;
-    for (codepoints) |codepoint| {
-        if (codepoint <= 0xffff) {
-            if (codepoint >= 0xd800 and codepoint <= 0xdfff) continue;
-            output[length] = @intCast(codepoint);
-            length += 1;
-        } else if (codepoint <= 0x10ffff and length + 1 < output.len) {
-            const value = codepoint - 0x10000;
-            output[length] = @intCast(0xd800 + (value >> 10));
-            output[length + 1] = @intCast(0xdc00 + (value & 0x3ff));
-            length += 2;
-        }
-    }
-    return length;
-}
-
-fn paddedRect(rect: win.RECT, padding_x: i32, padding_y: i32) win.RECT {
-    return .{
-        .left = rect.left + padding_x,
-        .top = rect.top + padding_y,
-        .right = rect.right - padding_x,
-        .bottom = rect.bottom - padding_y,
-    };
-}
-
-fn colorRef(color: theme.Color) win.COLORREF {
-    return rgb(color.red, color.green, color.blue);
-}
-
-fn rgb(red: u8, green: u8, blue: u8) win.COLORREF {
-    return @as(win.COLORREF, red) | (@as(win.COLORREF, green) << 8) | (@as(win.COLORREF, blue) << 16);
-}
-
-fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.COLORREF {
-    if (opacity_percent == 100) return colorRef(color);
-    const backdrop = if (dark) theme.Color{ .red = 0x20, .green = 0x20, .blue = 0x20 } else theme.Color{ .red = 0xf3, .green = 0xf3, .blue = 0xf3 };
-    const opacity: u16 = opacity_percent;
-    return rgb(
-        @intCast((@as(u16, color.red) * opacity + @as(u16, backdrop.red) * (100 - opacity)) / 100),
-        @intCast((@as(u16, color.green) * opacity + @as(u16, backdrop.green) * (100 - opacity)) / 100),
-        @intCast((@as(u16, color.blue) * opacity + @as(u16, backdrop.blue) * (100 - opacity)) / 100),
-    );
-}
-
-fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {
-    return rgb(
-        @intCast(((foreground & 0xff) + (background & 0xff)) / 2),
-        @intCast((((foreground >> 8) & 0xff) + ((background >> 8) & 0xff)) / 2),
-        @intCast((((foreground >> 16) & 0xff) + ((background >> 16) & 0xff)) / 2),
     );
 }
 

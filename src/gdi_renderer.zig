@@ -164,9 +164,9 @@ const CellRenderer = struct {
             (if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
         else
             normal_background;
-        const text_foreground = if (cell.faint and !self.context.high_contrast) blend(foreground, background) else foreground;
+        const text_foreground = if (cell.faint and !self.context.high_contrast) blendColorRef(foreground, background) else foreground;
         const underline = if (self.context.high_contrast) foreground else colorRef(cell.underline_color);
-        const decoration = if (cell.faint and !self.context.high_contrast) blend(underline, background) else underline;
+        const decoration = if (cell.faint and !self.context.high_contrast) blendColorRef(underline, background) else underline;
         _ = win.SetTextColor(self.dc, text_foreground);
         _ = win.SetBkColor(self.dc, background);
         var wide: [32]u16 = undefined;
@@ -216,7 +216,7 @@ const CellRenderer = struct {
     }
 };
 
-fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
+pub fn encodeUtf16(codepoints: []const u32, output: *[32]u16) usize {
     var length: usize = 0;
     for (codepoints) |codepoint| if (codepoint <= 0xffff) {
         if (codepoint >= 0xd800 and codepoint <= 0xdfff) continue;
@@ -235,7 +235,7 @@ fn drawText(dc: win.HDC, text: []const u8, rect: *win.RECT) void {
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
     _ = win.DrawTextW(dc, &wide, @intCast(length), rect, win.DT_LEFT | win.DT_TOP);
 }
-fn paddedRect(rect: win.RECT, x: i32, y: i32) win.RECT {
+pub fn paddedRect(rect: win.RECT, x: i32, y: i32) win.RECT {
     return .{ .left = rect.left + x, .top = rect.top + y, .right = rect.right - x, .bottom = rect.bottom - y };
 }
 fn fill(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
@@ -250,13 +250,13 @@ fn frameRect(dc: win.HDC, rect: win.RECT, color: win.COLORREF) void {
     var mutable = rect;
     _ = win.FrameRect(dc, &mutable, brush);
 }
-fn colorRef(color: theme.Color) win.COLORREF {
+pub fn colorRef(color: theme.Color) win.COLORREF {
     return rgb(color.red, color.green, color.blue);
 }
-fn rgb(r: u8, g: u8, b: u8) win.COLORREF {
+pub fn rgb(r: u8, g: u8, b: u8) win.COLORREF {
     return @as(win.COLORREF, r) | (@as(win.COLORREF, g) << 8) | (@as(win.COLORREF, b) << 16);
 }
-fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.COLORREF {
+pub fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.COLORREF {
     if (opacity_percent == 100) return colorRef(color);
     const backdrop = if (dark) theme.Color{ .red = 0x20, .green = 0x20, .blue = 0x20 } else theme.Color{ .red = 0xf3, .green = 0xf3, .blue = 0xf3 };
     const opacity: u16 = opacity_percent;
@@ -266,6 +266,6 @@ fn translucentColorRef(color: theme.Color, opacity_percent: u8, dark: bool) win.
         @intCast((@as(u16, color.blue) * opacity + @as(u16, backdrop.blue) * (100 - opacity)) / 100),
     );
 }
-fn blend(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {
+pub fn blendColorRef(foreground: win.COLORREF, background: win.COLORREF) win.COLORREF {
     return rgb(@intCast(((foreground & 0xff) + (background & 0xff)) / 2), @intCast((((foreground >> 8) & 0xff) + ((background >> 8) & 0xff)) / 2), @intCast((((foreground >> 16) & 0xff) + ((background >> 16) & 0xff)) / 2));
 }
