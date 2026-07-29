@@ -214,8 +214,8 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
     var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => create: {
             var created = try std.Io.Dir.createFileAbsolute(io, path, .{});
+            defer created.close(io);
             try created.writeStreamingAll(io, default_contents);
-            created.close(io);
             break :create try std.Io.Dir.openFileAbsolute(io, path, .{});
         },
         else => return err,
