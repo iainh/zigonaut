@@ -122,11 +122,11 @@ jobs:
       matrix:
         include:
           - runner: windows-2025
-            target: x86_64-windows
+            target: x86_64-windows-gnu
             runtime_arch: x64
             package_arch: x64
           - runner: windows-11-arm
-            target: aarch64-windows
+            target: aarch64-windows-gnu
             runtime_arch: arm64
             package_arch: arm64
 
@@ -142,6 +142,8 @@ jobs:
       - name: Fetch Zig dependencies
         shell: pwsh
         run: |
+          # Zig 0.16.0 does not create this directory before fetching a zip.
+          New-Item -ItemType Directory -Force (Join-Path $env:ZIG_GLOBAL_CACHE_DIR 'tmp') | Out-Null
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             zig build --fetch -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
             if ($LASTEXITCODE -eq 0) { break }
