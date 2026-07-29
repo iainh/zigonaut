@@ -949,7 +949,7 @@ struct Bridge {
         if (closed || layout_pending) return;
         layout_pending = true;
         auto const state = layout_dispatch;
-        if (!notification_activation->queue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Low, [state] {
+        if (!notification_activation->queue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Normal, [state] {
                 if (!state->active.load(std::memory_order_acquire)) return;
                 auto* bridge = state->bridge;
                 if (!bridge->layout_pending) return;
