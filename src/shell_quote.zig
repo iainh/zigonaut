@@ -1,6 +1,5 @@
 const std = @import("std");
-
-pub const Shell = enum { powershell, windows, wsl };
+const Shell = @import("config.zig").Shell;
 
 pub fn pathAlloc(allocator: std.mem.Allocator, path: []const u8, shell: Shell) ![]u8 {
     var normalized = std.ArrayList(u8).empty;

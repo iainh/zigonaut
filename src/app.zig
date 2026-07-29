@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const directwrite_renderer = @import("directwrite_renderer.zig");
 const pane_tree = @import("pane_tree.zig");
 const SessionRuntime = @import("session.zig").SessionRuntime;
@@ -7,10 +8,9 @@ const theme = @import("theme.zig");
 test {
     _ = directwrite_renderer;
     _ = @import("win32.zig");
-    _ = @import("config.zig");
 }
 
-pub const Shell = enum { powershell, windows, wsl };
+pub const Shell = config.Shell;
 
 const LaunchMetadata = struct {
     allocator: std.mem.Allocator,

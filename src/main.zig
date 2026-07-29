@@ -870,11 +870,6 @@ fn addDefaultSessionImpl(self: *Application) !void {
 
 fn addProfileImpl(self: *Application, profile: config.Profile) !void {
     if (self.activeView()) |view| view.resetInteraction();
-    const shell: app_model.Shell = switch (profile.shell) {
-        .powershell => .powershell,
-        .windows => .windows,
-        .wsl => .wsl,
-    };
     const columns: u16 = if (self.activeView()) |view| view.columns else 80;
     const rows: u16 = if (self.activeView()) |view| view.rows else 24;
     const reported_directory = if (self.model.activeSession()) |session|
@@ -883,7 +878,7 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
         null;
     defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
     const working_directory = reported_directory orelse self.initial_working_directory orelse self.settings.working_directory;
-    _ = try self.model.addSession(shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
+    _ = try self.model.addSession(profile.shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
     if (self.initial_working_directory) |directory| {
         std.heap.page_allocator.free(directory);
         self.initial_working_directory = null;

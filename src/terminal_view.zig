@@ -1200,11 +1200,6 @@ pub const View = struct {
     fn pasteDroppedFiles(self: *View, drop: win.HDROP) !void {
         const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
-        const shell: shell_quote.Shell = switch (session.shell) {
-            .powershell => .powershell,
-            .windows => .windows,
-            .wsl => .wsl,
-        };
         const count = win.DragQueryFileW(drop, 0xffffffff, null, 0);
         var command = std.ArrayList(u8).empty;
         defer command.deinit(std.heap.page_allocator);
@@ -1216,7 +1211,7 @@ pub const View = struct {
             if (win.DragQueryFileW(drop, index, wide.ptr, length + 1) != length) continue;
             const path = try std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, wide[0..length]);
             defer std.heap.page_allocator.free(path);
-            const quoted = try shell_quote.pathAlloc(std.heap.page_allocator, path, shell);
+            const quoted = try shell_quote.pathAlloc(std.heap.page_allocator, path, session.shell);
             defer std.heap.page_allocator.free(quoted);
             if (command.items.len != 0) try command.append(std.heap.page_allocator, ' ');
             try command.appendSlice(std.heap.page_allocator, quoted);
