@@ -65,6 +65,7 @@ pub const Session = struct {
     shell: Shell,
     runtime: ?*SessionRuntime,
     background: theme.Color,
+    background_seed: u16,
     metadata: *LaunchMetadata,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
@@ -165,19 +166,20 @@ pub const App = struct {
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
         const random_source: std.Random.IoSource = .{ .io = self.io };
-        const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, random_source.interface().int(u16)) else self.terminal_theme;
+        const background_seed = random_source.interface().int(u16);
+        const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
-        const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background);
+        const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background, background_seed);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
         return index;
     }
 
-    fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color) !usize {
+    fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !usize {
         var unowned_runtime = runtime;
         errdefer if (unowned_runtime) |value| value.destroy();
         const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
-        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .metadata = metadata };
+        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata };
         unowned_runtime = null;
         errdefer self.deinitSession(&session);
         const tab_id = self.takeObjectId();
@@ -246,15 +248,16 @@ pub const App = struct {
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const random_source: std.Random.IoSource = .{ .io = self.io };
-        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, random_source.interface().int(u16)) else self.terminal_theme;
+        const background_seed = random_source.interface().int(u16);
+        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
         const working_directory = reported_directory orelse source.session.workingDirectory();
         const runtime = try SessionRuntime.create(self.allocator, source.session.command(), working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
-        return self.splitFocusedRecord(axis, runtime, session_theme.background, reported_directory);
+        return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
 
-    fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color, working_directory: ?[]const u8) !pane_tree.PaneId {
+    fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16, working_directory: ?[]const u8) !pane_tree.PaneId {
         var unowned_runtime = runtime;
         errdefer if (unowned_runtime) |value| value.destroy();
         const tab = self.activeTab() orelse return error.NoFocusedPane;
@@ -263,7 +266,7 @@ pub const App = struct {
             try LaunchMetadata.create(self.allocator, source.session.metadata.profileTitle(), source.session.command(), directory)
         else
             source.session.metadata.retain();
-        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = unowned_runtime, .background = background, .metadata = metadata, .hold_on_exit = source.session.hold_on_exit };
+        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata, .hold_on_exit = source.session.hold_on_exit };
         unowned_runtime = null;
         errdefer self.deinitSession(&session);
         const source_id = source.id;
@@ -378,9 +381,8 @@ pub const App = struct {
     pub fn applySettings(self: *App, terminal_theme: theme.Theme, randomize_tab_background: bool) void {
         self.terminal_theme = terminal_theme;
         self.randomize_tab_background = randomize_tab_background;
-        const random_source: std.Random.IoSource = .{ .io = self.io };
         for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
-            const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, random_source.interface().int(u16)) else terminal_theme;
+            const session_theme = if (randomize_tab_background) theme.randomizedBackground(terminal_theme, pane.session.background_seed) else terminal_theme;
             pane.session.background = session_theme.background;
             if (pane.session.runtime) |runtime| runtime.setTheme(session_theme);
         };
@@ -446,8 +448,8 @@ pub const App = struct {
 test "tabs are added selected and titled by focused pane" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
-    _ = try app.addSessionRecord(.powershell, "PowerShell", "pwsh", "one", null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, "Linux", "wsl", "two", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "pwsh", "one", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.wsl, "Linux", "wsl", "two", null, theme.rasmus.background, 2);
     try std.testing.expectEqual(@as(usize, 2), app.tabCount());
     try std.testing.expectEqualStrings("Linux", app.activeTab().?.displayTitle());
     try std.testing.expectEqualStrings("wsl", app.activeSession().?.command());
@@ -458,8 +460,8 @@ test "tabs are added selected and titled by focused pane" {
 test "notification identity selects its tab and pane" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
-    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, "Linux", "", "", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.wsl, "Linux", "", "", null, theme.rasmus.background, 2);
     const id = app.tabs.items[0].panes.items[0].session.id;
     try std.testing.expect(app.activateSessionId(id));
     try std.testing.expectEqual(@as(?usize, 0), app.activeTabIndex());
@@ -469,8 +471,8 @@ test "notification identity selects its tab and pane" {
 test "settings traverse panes and closing tabs preserves selection" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
-    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background);
-    _ = try app.addSessionRecord(.wsl, "WSL", "", "", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.wsl, "WSL", "", "", null, theme.rasmus.background, 2);
     var replacement = theme.rasmus;
     replacement.background = .{ .red = 12, .green = 12, .blue = 12 };
     app.applySettings(replacement, false);
@@ -482,14 +484,30 @@ test "settings traverse panes and closing tabs preserves selection" {
     try std.testing.expect(app.activeSession() == null);
 }
 
+test "theme reload preserves each session background seed" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "PowerShell", "", "", null, theme.rasmus.background, 1234);
+    _ = try app.addSessionRecord(.wsl, "WSL", "", "", null, theme.rasmus.background, 4321);
+
+    app.applySettings(theme.rasmus, true);
+    const first = app.tabs.items[0].panes.items[0].session.background;
+    const second = app.tabs.items[1].panes.items[0].session.background;
+    try std.testing.expect(!std.meta.eql(first, second));
+
+    app.applySettings(theme.rasmus, true);
+    try std.testing.expectEqual(first, app.tabs.items[0].panes.items[0].session.background);
+    try std.testing.expectEqual(second, app.tabs.items[1].panes.items[0].session.background);
+}
+
 test "split clones launch metadata, focuses new pane, and snapshots structure" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
     defer app.deinit();
-    _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.wsl, "Linux", "wsl -d Debian", "C:\\work", null, theme.rasmus.background, 1);
     app.activeSession().?.hold_on_exit = true;
     const original = app.activePane().?.id;
     const metadata = app.activeSession().?.metadata;
-    const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, "D:\\reported");
+    const created = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 2, "D:\\reported");
     try std.testing.expect(created != original);
     try std.testing.expectEqual(created, app.activePane().?.id);
     try std.testing.expect(metadata != app.activeSession().?.metadata);
@@ -509,9 +527,9 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
 test "focus title close extraction and stale identities" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
     defer app.deinit();
-    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background);
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background, 1);
     const first = app.activePane().?.id;
-    const second = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background, null);
+    const second = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background, 2, null);
     try app.activeSession().?.title.appendSlice(std.testing.allocator, "second");
     try std.testing.expectEqualStrings("second", app.activeTab().?.displayTitle());
     try std.testing.expect(app.focusDirection(.up));
