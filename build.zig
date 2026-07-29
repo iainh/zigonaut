@@ -1,6 +1,6 @@
 const std = @import("std");
-
-const app_version = "0.3.0";
+const package = @import("build.zig.zon");
+const app_version = package.version;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zigonaut",
         .root_module = app_module,
-        .win32_manifest = b.path("zigonaut.manifest"),
+        .win32_manifest = generatedManifest(b, app_version),
     });
     const debug_build = optimize == .Debug;
     const icon_path = if (debug_build)
@@ -190,6 +190,24 @@ fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) v
     module.addIncludePath(ghostty.path("include"));
     module.addCMacro("GHOSTTY_STATIC", "1");
     module.linkLibrary(ghostty.artifact("ghostty-vt-static"));
+}
+
+fn generatedManifest(b: *std.Build, version: []const u8) std.Build.LazyPath {
+    const source = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "zigonaut.manifest",
+        b.allocator,
+        .limited(64 * 1024),
+    ) catch @panic("unable to read application manifest");
+    const placeholder = "0.0.0.0";
+    if (std.mem.count(u8, source, placeholder) != 1) @panic("application manifest must contain one version placeholder");
+    const semantic_version = std.SemanticVersion.parse(version) catch @panic("package version must be valid semantic versioning");
+    if (semantic_version.major > std.math.maxInt(u16) or semantic_version.minor > std.math.maxInt(u16) or semantic_version.patch > std.math.maxInt(u16)) {
+        @panic("package version components must fit the Windows manifest version format");
+    }
+    const manifest_version = b.fmt("{d}.{d}.{d}.0", .{ semantic_version.major, semantic_version.minor, semantic_version.patch });
+    const contents = std.mem.replaceOwned(u8, b.allocator, source, placeholder, manifest_version) catch @panic("out of memory");
+    return b.addWriteFiles().add("zigonaut.manifest", contents);
 }
 
 fn gitHash(b: *std.Build) []const u8 {

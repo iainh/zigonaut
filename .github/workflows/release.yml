@@ -35,7 +35,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
 
-      - name: Match tag, package, and manifest versions
+      - name: Match tag and package versions
         id: version
         shell: pwsh
         env:
@@ -58,14 +58,6 @@ jobs:
           $zonMatch = [regex]::Match($zon, '(?m)^\s*\.version\s*=\s*"([^"]+)"')
           if (-not $zonMatch.Success -or $zonMatch.Groups[1].Value -ne $version) {
             throw "build.zig.zon version must be '$version'."
-          }
-
-          $manifest = [xml](Get-Content zigonaut.manifest -Raw)
-          $manifestVersion = $manifest.assembly.assemblyIdentity.version
-          $numericVersion = $version.Split('-')[0]
-          $expectedManifestVersion = "$numericVersion.0"
-          if ($manifestVersion -ne $expectedManifestVersion) {
-            throw "zigonaut.manifest version must be '$expectedManifestVersion'."
           }
 
           "version=$version" >> $env:GITHUB_OUTPUT
