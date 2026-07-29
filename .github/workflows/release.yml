@@ -139,6 +139,24 @@ jobs:
           version: 0.16.0
           use-cache: false
 
+      - name: Use x64 Zig under ARM64 emulation
+        if: matrix.package_arch == 'arm64'
+        shell: pwsh
+        env:
+          ZIG_X64_URL: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
+          ZIG_X64_SHA256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+        run: |
+          # The Zig 0.16.0 ARM64 compiler crashes during compilation on Windows.
+          $archive = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0.zip'
+          $sdk = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0'
+          Invoke-WebRequest -Uri $env:ZIG_X64_URL -OutFile $archive
+          if ((Get-FileHash -Algorithm SHA256 $archive).Hash -ne $env:ZIG_X64_SHA256) {
+            throw 'Zig x64 archive checksum mismatch.'
+          }
+          Expand-Archive -Path $archive -DestinationPath $env:RUNNER_TEMP
+          $sdk >> $env:GITHUB_PATH
+          & (Join-Path $sdk 'zig.exe') version
+
       - name: Fetch Zig dependencies
         shell: pwsh
         run: |
