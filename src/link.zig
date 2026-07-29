@@ -6,8 +6,8 @@ pub const Match = struct {
 };
 
 const schemes = [_][]const u8{
-    "http:", "https:", "mailto:", "ftp:", "file:", "ssh:", "git:",
-    "tel:", "magnet:", "ipfs:", "ipns:", "gemini:", "gopher:", "news:",
+    "http:", "https:",  "mailto:", "ftp:",  "file:",   "ssh:",    "git:",
+    "tel:",  "magnet:", "ipfs:",   "ipns:", "gemini:", "gopher:", "news:",
 };
 
 pub fn detectAt(text: []const u8, offset: usize) ?Match {
