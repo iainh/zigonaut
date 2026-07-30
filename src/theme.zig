@@ -98,7 +98,7 @@ pub const Catalog = struct {
         defer allocator.free(executable_directory);
         const path = std.fs.path.join(allocator, &.{ executable_directory, "themes" }) catch return result;
         defer allocator.free(path);
-        var directory = std.Io.Dir.openDirAbsolute(io, path, .{}) catch return result;
+        var directory = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return result;
         defer directory.close(io);
         result.loadDirectory(allocator, io, directory) catch |err| log.warn("unable to load themes: {}", .{err});
         return result;

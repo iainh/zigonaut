@@ -633,6 +633,7 @@ pub const SessionRuntime = struct {
             log.warn("unable to apply terminal theme: {}", .{err});
             return;
         };
+        self.render_snapshot.frame = null;
         _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
@@ -829,6 +830,28 @@ test "session watchdog and resize release synchronized output" {
     runtime.resize(100, 40, 9, 18);
     try std.testing.expectEqual(@as(?u32, null), runtime.synchronizedOutputDelay(2001));
     try std.testing.expect(try runtime.prepareRender());
+}
+
+test "theme changes rebuild the prepared render snapshot" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(4, 2, theme.rasmus),
+        .refresh = .{},
+        .columns = 4,
+        .rows = 2,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    runtime.terminal.feed("\x1b[31mX");
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(theme.rasmus.ansi[1], runtime.render_snapshot.cells.items[0].foreground);
+
+    var replacement = theme.rasmus;
+    replacement.ansi[1] = .{ .red = 1, .green = 2, .blue = 3 };
+    runtime.setTheme(replacement);
+    try std.testing.expectEqual(@as(?Terminal.Frame, null), runtime.render_snapshot.frame);
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(replacement.ansi[1], runtime.render_snapshot.cells.items[0].foreground);
 }
 
 test "session applies clipboard write policy and decoded size limit" {

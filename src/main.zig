@@ -371,7 +371,7 @@ fn initializeWindowImpl(self: *Application) !void {
     self.terminal_ready = true;
     try self.syncProfiles(&self.settings);
     try self.addDefaultSession();
-    self.updateTheme();
+    self.updateTheme(false);
 }
 
 fn setWindowIcons(hwnd: win.HWND) void {
@@ -707,7 +707,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         },
         win.WM_SETTINGCHANGE => {
             for (self.views.items) |entry| entry.view.refreshTextRenderingSettings();
-            self.updateTheme();
+            self.updateTheme(false);
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_DROPFILES => {
@@ -715,7 +715,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_THEMECHANGED, win.WM_SYSCOLORCHANGE => {
-            self.updateTheme();
+            self.updateTheme(false);
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         else => return win.DefSubclassProc(hwnd, message, wparam, lparam),
@@ -1212,14 +1212,11 @@ fn reloadSettingsImpl(self: *Application) !void {
     profiles_committed = true;
     previous.deinit();
 
-    if (changed.theme) {
-        self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
-        self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
-    }
+    if (changed.theme) self.themes = theme.Catalog.load(std.heap.page_allocator, self.io);
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
-    self.updateTheme();
+    self.updateTheme(changed.theme);
     if (new_font != null) _ = win.DeleteObject(old_font);
     for (self.views.items) |entry| entry.view.invalidate();
     if (changed.font or padding_changed) self.publishReloadedViews("views after settings reload");
@@ -1229,12 +1226,12 @@ fn scaled(value: anytype, dpi: u32) i32 {
     return win.MulDiv(@intCast(value), @intCast(dpi), 96);
 }
 
-fn updateThemeImpl(self: *Application) void {
+fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
     const hwnd = self.hwnd orelse return;
     const previous_dark_theme = self.dark_theme;
     self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
     self.high_contrast = highContrastEnabled();
-    if (self.terminal_ready and previous_dark_theme != self.dark_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
+    if (self.terminal_ready and (terminal_theme_changed or previous_dark_theme != self.dark_theme)) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
