@@ -670,7 +670,9 @@ struct Dialog {
 
         struct ProfileValue { std::string name, shell, command; };
         std::vector<ProfileValue> profile_values;
-        std::istringstream lines{to_string(profiles.Text())};
+        auto profile_text = to_string(profiles.Text());
+        std::replace(profile_text.begin(), profile_text.end(), '\r', '\n');
+        std::istringstream lines{profile_text};
         for (std::string line; std::getline(lines, line);) {
             line = trim(std::move(line));
             if (line.empty()) continue;
@@ -684,7 +686,7 @@ struct Dialog {
             auto command = trim(line.substr(second + 1));
             if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
                 throw std::runtime_error("Profile names must be between 1 and 127 UTF-8 bytes and cannot contain | or line breaks.");
-            if (command.empty() || command.find_first_of("\r\n\0", 0, 3) != std::string::npos)
+            if (command.empty() || command.find('\r') != std::string::npos || command.find('\n') != std::string::npos || command.find('\0') != std::string::npos)
                 throw std::runtime_error("Profile commands cannot be empty or contain line breaks or NUL characters.");
             if (std::any_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), name.c_str()) == 0; }))
                 throw std::runtime_error("Profile names must be unique.");
