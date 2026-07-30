@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+amp_orbs_revision="fcb5e318e59d6374081a45bc7769acf01cee0dd2"
+common_setup_url="https://raw.githubusercontent.com/iainh/amp-orbs/${amp_orbs_revision}/orb-setup"
+zig_version="0.16.0"
+zig_archive="zig-x86_64-linux-${zig_version}.tar.xz"
+zig_url="https://ziglang.org/download/${zig_version}/${zig_archive}"
+zig_sha256="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+zig_install_dir="$HOME/.local/share/zig/${zig_version}"
+
+temporary_directory="$(mktemp -d)"
+trap 'rm -rf "$temporary_directory"' EXIT
+
+echo "Applying shared Amp orb setup..."
+curl --fail --silent --show-error --location \
+  "$common_setup_url" \
+  --output "$temporary_directory/orb-setup"
+bash "$temporary_directory/orb-setup"
+
+if ! command -v zig >/dev/null 2>&1 || [[ "$(zig version)" != "$zig_version" ]]; then
+  echo "Installing Zig ${zig_version}..."
+  curl --fail --silent --show-error --location \
+    "$zig_url" \
+    --output "$temporary_directory/$zig_archive"
+  echo "$zig_sha256  $temporary_directory/$zig_archive" | sha256sum --check --status
+
+  rm -rf "$zig_install_dir"
+  mkdir -p "$(dirname "$zig_install_dir")"
+  tar -xJf "$temporary_directory/$zig_archive" -C "$(dirname "$zig_install_dir")"
+  mv "$(dirname "$zig_install_dir")/zig-x86_64-linux-${zig_version}" "$zig_install_dir"
+
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$zig_install_dir/zig" "$HOME/.local/bin/zig"
+fi
+
+# Zig 0.16.0 rejects resolv.conf files without a trailing newline. Amp orbs can
+# generate the file in that form, even though other DNS clients accept it.
+if [[ -s /etc/resolv.conf && -n "$(tail -c 1 /etc/resolv.conf)" ]]; then
+  echo "Repairing /etc/resolv.conf for Zig..."
+  printf '\n' | sudo tee -a /etc/resolv.conf >/dev/null
+fi
+
+echo "Fetching Zig dependencies..."
+mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
+for attempt in 1 2 3; do
+  if zig build --fetch -Dtarget=x86_64-windows-gnu; then
+    break
+  fi
+  if [[ "$attempt" == 3 ]]; then
+    echo "Unable to fetch Zig dependencies after ${attempt} attempts." >&2
+    exit 1
+  fi
+  sleep "$((10 * attempt))"
+done
+
+echo "Orb setup complete."

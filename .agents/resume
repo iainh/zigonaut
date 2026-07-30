@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Zig 0.16.0 rejects resolv.conf files without a trailing newline. Repair the
+# orb-generated file in case it was refreshed while the orb was paused.
+if [[ -s /etc/resolv.conf && -n "$(tail -c 1 /etc/resolv.conf)" ]]; then
+  echo "Repairing /etc/resolv.conf for Zig..."
+  printf '\n' | sudo tee -a /etc/resolv.conf >/dev/null
+fi
