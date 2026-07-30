@@ -213,12 +213,6 @@ jobs:
             throw "Release build did not produce $env:PACKAGE_ARCH\OpenConsole.exe."
           }
           Copy-Item (Split-Path $conptyHost -Parent) $staging -Recurse
-          if ($env:PACKAGE_ARCH -eq 'x64') {
-            $arm64Host = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\arm64'
-            if (Test-Path $arm64Host -PathType Container) {
-              Copy-Item $arm64Host $staging -Recurse
-            }
-          }
           $themes = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\themes'
           if (-not (Test-Path $themes -PathType Container)) {
             throw 'Release build did not produce the themes directory.'
