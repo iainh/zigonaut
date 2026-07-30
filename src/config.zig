@@ -20,11 +20,10 @@ pub const default_contents =
     \\  "profiles": {
     \\    "default": "PowerShell",
     \\    "items": [
-    \\      { "name": "PowerShell", "shell": "powershell", "command": "powershell.exe" },
-    \\      { "name": "WSL", "shell": "wsl", "command": "wsl.exe" },
-    \\      { "name": "Command Prompt", "shell": "windows", "command": "cmd.exe" }
+    \\      { "name": "PowerShell", "shell": "powershell", "command": "powershell.exe", "workingDirectory": "" },
+    \\      { "name": "WSL", "shell": "wsl", "command": "wsl.exe", "workingDirectory": "" },
+    \\      { "name": "Command Prompt", "shell": "windows", "command": "cmd.exe", "workingDirectory": "" }
     \\    ],
-    \\    "workingDirectory": "",
     \\    "holdOnExit": false
     \\  },
     \\  "advanced": {
@@ -47,13 +46,14 @@ pub const Profile = struct {
     name: []const u8,
     shell: Shell,
     command: []const u8,
+    working_directory: []const u8,
 };
 
 const default_profiles = [3]Profile{
-    .{ .name = "PowerShell", .shell = .powershell, .command = "powershell.exe" },
-    .{ .name = "WSL", .shell = .wsl, .command = "wsl.exe" },
-    .{ .name = "Command Prompt", .shell = .windows, .command = "cmd.exe" },
-} ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "" }} ** (max_profiles - 3);
+    .{ .name = "PowerShell", .shell = .powershell, .command = "powershell.exe", .working_directory = "" },
+    .{ .name = "WSL", .shell = .wsl, .command = "wsl.exe", .working_directory = "" },
+    .{ .name = "Command Prompt", .shell = .windows, .command = "cmd.exe", .working_directory = "" },
+} ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "", .working_directory = "" }} ** (max_profiles - 3);
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
@@ -62,6 +62,7 @@ const JsonProfile = struct {
     name: []const u8,
     shell: Shell,
     command: []const u8,
+    workingDirectory: ?[]const u8 = null,
 };
 
 const JsonConfig = struct {
@@ -102,7 +103,7 @@ const JsonConfig = struct {
     profiles: struct {
         default: []const u8,
         items: []const JsonProfile,
-        workingDirectory: []const u8,
+        workingDirectory: []const u8 = "",
         holdOnExit: bool,
     },
     advanced: struct {
@@ -131,7 +132,6 @@ pub const Config = struct {
     default_profile: []const u8 = "PowerShell",
     profiles: [max_profiles]Profile = default_profiles,
     profile_count: usize = 3,
-    working_directory: []const u8 = "",
     hold_on_exit: bool = false,
     randomize_tab_background: bool = true,
     osc52_clipboard_write: bool = false,
@@ -274,8 +274,9 @@ fn configFromJson(json: JsonConfig) !Config {
     result.default_profile = json.profiles.default;
     result.profile_count = 0;
     for (json.profiles.items) |profile| {
+        const working_directory = profile.workingDirectory orelse json.profiles.workingDirectory;
         if (profile.name.len == 0 or profile.name.len >= 128 or profile.command.len == 0 or
-            !validWindowsText(profile.name) or !validWindowsText(profile.command) or
+            !validWindowsText(profile.name) or !validWindowsText(profile.command) or !validWindowsText(working_directory) or
             std.mem.indexOfScalar(u8, profile.name, '|') != null or
             std.mem.indexOfScalar(u8, profile.name, '\r') != null or
             std.mem.indexOfScalar(u8, profile.name, '\n') != null or
@@ -286,7 +287,12 @@ fn configFromJson(json: JsonConfig) !Config {
         for (result.profiles[0..result.profile_count]) |existing| {
             if (std.ascii.eqlIgnoreCase(existing.name, profile.name)) return error.DuplicateProfile;
         }
-        result.profiles[result.profile_count] = .{ .name = profile.name, .shell = profile.shell, .command = profile.command };
+        result.profiles[result.profile_count] = .{
+            .name = profile.name,
+            .shell = profile.shell,
+            .command = profile.command,
+            .working_directory = working_directory,
+        };
         result.profile_count += 1;
     }
     var found_default = false;
@@ -294,7 +300,6 @@ fn configFromJson(json: JsonConfig) !Config {
         if (std.ascii.eqlIgnoreCase(profile.name, result.default_profile)) found_default = true;
     }
     if (!found_default) return error.InvalidDefaultProfile;
-    result.working_directory = json.profiles.workingDirectory;
     result.hold_on_exit = json.profiles.holdOnExit;
     result.osc52_clipboard_write = json.advanced.clipboard.terminalWrites;
     result.osc52_clipboard_max_bytes = json.advanced.clipboard.maximumBytes;
@@ -326,7 +331,7 @@ test "configuration parses structured JSON" {
         \\  "profiles": {
         \\    "default": "Dev Shell",
         \\    "items": [
-        \\      { "name": "Dev Shell", "shell": "windows", "command": "tool.exe --flag" },
+        \\      { "name": "Dev Shell", "shell": "windows", "command": "tool.exe --flag", "workingDirectory": "D:\\dev" },
         \\      { "name": "Linux", "shell": "wsl", "command": "ubuntu.exe" }
         \\    ],
         \\    "workingDirectory": "C:\\work",
@@ -347,7 +352,8 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, value.palette.ansi[15].?);
     try std.testing.expectEqualStrings("Dev Shell", value.defaultProfile().name);
     try std.testing.expectEqual(@as(usize, 2), value.profile_count);
-    try std.testing.expectEqualStrings("C:\\work", value.working_directory);
+    try std.testing.expectEqualStrings("D:\\dev", value.profiles[0].working_directory);
+    try std.testing.expectEqualStrings("C:\\work", value.profiles[1].working_directory);
     try std.testing.expect(value.hold_on_exit);
     try std.testing.expect(!value.randomize_tab_background);
     try std.testing.expect(value.osc52_clipboard_write);
@@ -386,6 +392,10 @@ test "configuration rejects strings Windows cannot represent" {
     parsed.value.profiles.items = &profiles;
     try std.testing.expectError(error.InvalidProfile, configFromJson(parsed.value));
     profiles[0].name = "PowerShell";
+
+    profiles[0].workingDirectory = "C:\\bad\x00path";
+    try std.testing.expectError(error.InvalidProfile, configFromJson(parsed.value));
+    profiles[0].workingDirectory = "";
 
     profiles[0].command = "cmd.exe\x00 /c exit";
     try std.testing.expectError(error.InvalidProfile, configFromJson(parsed.value));

@@ -5,6 +5,7 @@
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Windowing.h>
+#include <winrt/Microsoft.Windows.Storage.Pickers.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.Text.h>
@@ -62,7 +63,6 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["backdrop"] = to_string(background.GetNamedString(L"backdrop"));
     values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
     values["default_profile"] = to_string(profiles.GetNamedString(L"default"));
-    values["working_directory"] = to_string(profiles.GetNamedString(L"workingDirectory"));
     values["hold_on_exit"] = profiles.GetNamedBoolean(L"holdOnExit") ? "true" : "false";
     values["osc52_clipboard_write"] = clipboard.GetNamedBoolean(L"terminalWrites") ? "true" : "false";
     values["osc52_clipboard_max_bytes"] = number(clipboard.GetNamedNumber(L"maximumBytes"));
@@ -88,11 +88,14 @@ struct ProfileValue {
     std::string name;
     std::string shell;
     std::string command;
+    std::string working_directory;
 };
 
 std::vector<ProfileValue> profileValues(std::string_view contents) {
-    auto const profiles = Windows::Data::Json::JsonObject::Parse(to_hstring(contents))
-                              .GetNamedObject(L"profiles").GetNamedArray(L"items");
+    auto const profile_settings = Windows::Data::Json::JsonObject::Parse(to_hstring(contents)).GetNamedObject(L"profiles");
+    auto const legacy_working_directory = profile_settings.HasKey(L"workingDirectory")
+        ? profile_settings.GetNamedString(L"workingDirectory") : hstring{};
+    auto const profiles = profile_settings.GetNamedArray(L"items");
     std::vector<ProfileValue> result;
     for (auto const& item : profiles) {
         auto const profile = item.GetObject();
@@ -100,6 +103,8 @@ std::vector<ProfileValue> profileValues(std::string_view contents) {
             to_string(profile.GetNamedString(L"name")),
             to_string(profile.GetNamedString(L"shell")),
             to_string(profile.GetNamedString(L"command")),
+            to_string(profile.HasKey(L"workingDirectory")
+                ? profile.GetNamedString(L"workingDirectory") : legacy_working_directory),
         });
     }
     return result;
@@ -118,10 +123,37 @@ TextBlock label(std::wstring_view text, std::wstring_view description = {}) {
     return panel;
 }
 
+void appendLabeled(StackPanel const& panel, std::wstring_view text, UIElement const& control, std::wstring_view description = {}) {
+    auto heading = label(text, description);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetLabeledBy(control, heading);
+    if (!description.empty()) Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(control, description);
+    panel.Children().Append(heading);
+    panel.Children().Append(control);
+}
+
+StackPanel actionContent(Symbol symbol, std::wstring_view text) {
+    auto content = StackPanel{};
+    content.Orientation(Orientation::Horizontal);
+    content.Spacing(8);
+    auto icon = SymbolIcon{};
+    icon.Symbol(symbol);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+        icon, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+    content.Children().Append(icon);
+    auto caption = TextBlock{};
+    caption.Text(text);
+    content.Children().Append(caption);
+    return content;
+}
+
 Border card(std::wstring_view title, std::wstring_view description, UIElement const& control, bool expanded = false) {
     auto text = StackPanel{};
     text.Spacing(4);
     auto heading = label(title, description);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetHeadingLevel(
+        heading, Microsoft::UI::Xaml::Automation::Peers::AutomationHeadingLevel::Level2);
+    Microsoft::UI::Xaml::Automation::AutomationProperties::SetLabeledBy(control, heading);
+    if (!description.empty()) Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(control, description);
     text.Children().Append(heading);
     if (!description.empty()) {
         auto detail = TextBlock{};
@@ -392,7 +424,7 @@ bool validColor(std::string const& color) {
 
 } // namespace
 
-struct Dialog {
+struct Dialog : std::enable_shared_from_this<Dialog> {
     Window window{nullptr};
     Grid root{nullptr};
     NavigationView navigation{nullptr};
@@ -414,18 +446,22 @@ struct Dialog {
         TextBox name{nullptr};
         ComboBox shell{nullptr};
         TextBox command{nullptr};
+        TextBox working_directory{nullptr};
         Button remove{nullptr};
+        Expander expander{nullptr};
         Border container{nullptr};
     };
 
-    TextBox default_profile{nullptr}, working_directory{nullptr};
+    ComboBox default_profile{nullptr};
     StackPanel profile_list{nullptr};
     Button add_profile{nullptr};
     std::vector<ProfileEditor> profile_editors;
     uint64_t next_profile_id{};
+    bool updating_profiles{};
     ToggleSwitch hold_on_exit{nullptr};
     ToggleSwitch clipboard_write{nullptr};
     NumberBox clipboard_limit{nullptr};
+    Border clipboard_limit_card{nullptr};
     TextBox pipe_command{nullptr};
 
     Window::Closed_revoker closed_revoker{};
@@ -525,6 +561,8 @@ struct Dialog {
         auto heading = TextBlock{};
         heading.Text(title);
         heading.Style(Application::Current().Resources().Lookup(box_value(L"TitleTextBlockStyle")).as<Style>());
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHeadingLevel(
+            heading, Microsoft::UI::Xaml::Automation::Peers::AutomationHeadingLevel::Level1);
         panel.Children().Append(heading);
         auto detail = TextBlock{};
         detail.Text(description);
@@ -566,8 +604,8 @@ struct Dialog {
 
         auto theme_grid = StackPanel{};
         theme_grid.Spacing(8);
-        theme_grid.Children().Append(label(L"Dark theme")); theme_grid.Children().Append(dark_theme);
-        theme_grid.Children().Append(label(L"Light theme")); theme_grid.Children().Append(light_theme);
+        appendLabeled(theme_grid, L"Dark theme", dark_theme);
+        appendLabeled(theme_grid, L"Light theme", light_theme);
         return page(L"Appearance", L"Choose how Zigonaut and terminal sessions look.", {
             card(L"Application theme", L"Follow Windows or always use a light or dark color scheme.", color_scheme),
             card(L"Window material", L"Choose the Fluent backdrop used behind the terminal.", backdrop),
@@ -601,14 +639,14 @@ struct Dialog {
         padding_horizontal = numberBox(value(values, "padding_horizontal", "8"), 8, 0, 128);
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
         auto font = StackPanel{}; font.Spacing(8);
-        font.Children().Append(label(L"Font family")); font.Children().Append(font_family);
-        font.Children().Append(label(L"Size (points)")); font.Children().Append(font_size);
+        appendLabeled(font, L"Font family", font_family);
+        appendLabeled(font, L"Size (points)", font_size);
         auto padding = StackPanel{}; padding.Spacing(8);
-        padding.Children().Append(label(L"Horizontal (pixels)")); padding.Children().Append(padding_horizontal);
-        padding.Children().Append(label(L"Vertical (pixels)")); padding.Children().Append(padding_vertical);
+        appendLabeled(padding, L"Horizontal (pixels)", padding_horizontal);
+        appendLabeled(padding, L"Vertical (pixels)", padding_vertical);
         auto initial_size = StackPanel{}; initial_size.Spacing(8);
-        initial_size.Children().Append(label(L"Columns")); initial_size.Children().Append(initial_columns);
-        initial_size.Children().Append(label(L"Rows")); initial_size.Children().Append(initial_rows);
+        appendLabeled(initial_size, L"Columns", initial_columns);
+        appendLabeled(initial_size, L"Rows", initial_rows);
 
         colors.reserve(19);
         auto palette = StackPanel{}; palette.Spacing(8);
@@ -616,16 +654,19 @@ struct Dialog {
         for (size_t index = 0; index < 19; ++index) {
             auto const key = index == 0 ? "foreground" : index == 1 ? "background" : index == 2 ? "cursor" : "ansi" + std::to_string(index - 3);
             auto editor = textBox(colorOrEmpty(values, key), L"Use theme default (#RRGGBB)");
-            palette.Children().Append(label(names[index]));
-            palette.Children().Append(editor);
+            appendLabeled(palette, names[index], editor);
             colors.push_back(editor);
         }
+        auto palette_expander = Expander{};
+        palette_expander.Header(box_value(L"Edit palette overrides"));
+        palette_expander.Content(palette);
+        palette_expander.IsExpanded(false);
         return page(L"Terminal", L"Configure text rendering, spacing, and optional palette overrides.", {
             card(L"Font", L"Use an installed monospace font family.", font, true),
             card(L"Scrollback size", L"Maximum number of history lines kept for new terminal sessions.", scrollback_size),
             card(L"Initial window size", L"Terminal columns and rows used when opening a new window.", initial_size, true),
             card(L"Padding", L"Space between terminal cells and the pane edge.", padding, true),
-            card(L"Palette overrides", L"Leave a field empty to use the selected theme. Colors use #RRGGBB.", palette, true),
+            card(L"Palette overrides", L"Leave a field empty to use the selected theme. Colors use #RRGGBB.", palette_expander, true),
         });
     }
 
@@ -635,12 +676,28 @@ struct Dialog {
         add_profile.IsEnabled(count < 32);
     }
 
+    void refreshDefaultProfiles(std::string preferred = {}) {
+        updating_profiles = true;
+        if (preferred.empty() && default_profile.SelectedItem())
+            preferred = trim(to_string(unbox_value<hstring>(default_profile.SelectedItem())));
+        default_profile.Items().Clear();
+        int32_t selected = -1;
+        for (size_t index = 0; index < profile_editors.size(); ++index) {
+            auto const name = trim(to_string(profile_editors[index].name.Text()));
+            default_profile.Items().Append(box_value(to_hstring(name)));
+            if (_stricmp(name.c_str(), preferred.c_str()) == 0) selected = static_cast<int32_t>(index);
+        }
+        default_profile.SelectedIndex(selected >= 0 ? selected : profile_editors.empty() ? -1 : 0);
+        updating_profiles = false;
+    }
+
     void appendProfile(ProfileValue const& profile) {
         auto const id = next_profile_id++;
         auto name = textBox(profile.name, L"Profile name");
         auto shell = combo("", {L"PowerShell", L"Command Prompt", L"WSL"});
         shell.SelectedIndex(profile.shell == "powershell" ? 0 : profile.shell == "wsl" ? 2 : 1);
         auto command = textBox(profile.command, L"Executable or command line");
+        auto working_directory = textBox(profile.working_directory, L"User home directory");
 
         auto identity = Grid{};
         identity.ColumnSpacing(12);
@@ -652,35 +709,65 @@ struct Dialog {
         identity.ColumnDefinitions().Append(shell_column);
         auto name_field = StackPanel{};
         name_field.Spacing(4);
-        name_field.Children().Append(label(L"Name"));
-        name_field.Children().Append(name);
+        appendLabeled(name_field, L"Name", name);
         identity.Children().Append(name_field);
         auto shell_field = StackPanel{};
         shell_field.Spacing(4);
-        shell_field.Children().Append(label(L"Shell type"));
-        shell_field.Children().Append(shell);
+        appendLabeled(shell_field, L"Shell type", shell);
         Grid::SetColumn(shell_field, 1);
         identity.Children().Append(shell_field);
 
         auto fields = StackPanel{};
         fields.Spacing(10);
         fields.Children().Append(identity);
-        fields.Children().Append(label(L"Command"));
-        fields.Children().Append(command);
+        appendLabeled(fields, L"Command", command);
+        auto working_directory_panel = Grid{};
+        working_directory_panel.ColumnSpacing(8);
+        auto path_column = ColumnDefinition{};
+        path_column.Width(GridLength{1, GridUnitType::Star});
+        working_directory_panel.ColumnDefinitions().Append(path_column);
+        auto browse_column = ColumnDefinition{};
+        browse_column.Width(GridLength{1, GridUnitType::Auto});
+        working_directory_panel.ColumnDefinitions().Append(browse_column);
+        working_directory_panel.Children().Append(working_directory);
+        auto browse = Button{};
+        browse.Content(actionContent(Symbol::Folder, L"Browse..."));
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(browse, L"Browse for profile working directory");
+        browse.Click([this, id](auto const&, auto const&) { pickWorkingDirectory(shared_from_this(), id); });
+        Grid::SetColumn(browse, 1);
+        working_directory_panel.Children().Append(browse);
+        appendLabeled(fields, L"Working directory", working_directory_panel, L"Leave empty to use your Windows home directory.");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(working_directory, L"Profile working directory");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(working_directory, L"Leave empty to use your Windows home directory.");
         auto remove = Button{};
-        remove.Content(box_value(L"Remove profile"));
+        remove.Content(actionContent(Symbol::Delete, L"Remove profile"));
         remove.HorizontalAlignment(HorizontalAlignment::Right);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(remove, L"Remove profile");
         fields.Children().Append(remove);
 
+        auto expander = Expander{};
+        expander.Header(box_value(to_hstring(profile.name)));
+        expander.Content(fields);
+        expander.IsExpanded(false);
         auto container = Border{};
         container.Style(Application::Current().Resources().Lookup(box_value(L"ZigonautSettingsCardStyle")).as<Style>());
-        container.Child(fields);
+        container.Child(expander);
         profile_list.Children().Append(container);
-        profile_editors.push_back({id, name, shell, command, remove, container});
+        profile_editors.push_back({id, name, shell, command, working_directory, remove, expander, container});
 
+        name.LostFocus([this, id](auto const&, auto const&) {
+            auto const found = std::find_if(profile_editors.begin(), profile_editors.end(),
+                [id](auto const& editor) { return editor.id == id; });
+            if (found != profile_editors.end()) {
+                found->expander.Header(box_value(found->name.Text()));
+                auto const renamed_default = default_profile.SelectedIndex() == std::distance(profile_editors.begin(), found);
+                refreshDefaultProfiles(renamed_default ? trim(to_string(found->name.Text())) : std::string{});
+            }
+            save();
+        });
         auto committed = [this](auto const&, auto const&) { save(); };
-        name.LostFocus(committed);
         command.LostFocus(committed);
+        working_directory.LostFocus(committed);
         shell.SelectionChanged([this](auto const&, auto const&) { save(); });
         remove.Click([this, id](auto const&, auto const&) {
             auto const found = std::find_if(profile_editors.begin(), profile_editors.end(),
@@ -690,26 +777,32 @@ struct Dialog {
             uint32_t index{};
             if (profile_list.Children().IndexOf(found->container, index)) profile_list.Children().RemoveAt(index);
             profile_editors.erase(found);
-            if (_stricmp(trim(to_string(default_profile.Text())).c_str(), removed_name.c_str()) == 0)
-                default_profile.Text(profile_editors.front().name.Text());
+            auto selected_default = default_profile.SelectedItem()
+                ? trim(to_string(unbox_value<hstring>(default_profile.SelectedItem()))) : std::string{};
+            refreshDefaultProfiles(_stricmp(selected_default.c_str(), removed_name.c_str()) == 0
+                ? trim(to_string(profile_editors.front().name.Text())) : selected_default);
             updateProfileButtons();
             save();
         });
     }
 
     ScrollViewer makeProfiles(std::map<std::string, std::string> const& values, std::vector<ProfileValue> profile_values) {
-        default_profile = textBox(value(values, "default_profile", "PowerShell"), L"PowerShell");
+        default_profile = ComboBox{};
+        default_profile.HorizontalAlignment(HorizontalAlignment::Stretch);
+        auto const selected_default = value(values, "default_profile", "PowerShell");
         if (profile_values.empty()) profile_values = {
-            {"PowerShell", "powershell", "powershell.exe"},
-            {"WSL", "wsl", "wsl.exe"},
-            {"Command Prompt", "windows", "cmd.exe"},
+            {"PowerShell", "powershell", "powershell.exe", ""},
+            {"WSL", "wsl", "wsl.exe", ""},
+            {"Command Prompt", "windows", "cmd.exe", ""},
         };
         profile_list = StackPanel{};
         profile_list.Spacing(8);
         for (auto const& profile : profile_values) appendProfile(profile);
+        refreshDefaultProfiles(selected_default);
         add_profile = Button{};
-        add_profile.Content(box_value(L"Add profile"));
+        add_profile.Content(actionContent(Symbol::Add, L"Add profile"));
         add_profile.HorizontalAlignment(HorizontalAlignment::Left);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(add_profile, L"Add profile");
         add_profile.Click([this](auto const&, auto const&) {
             auto suffix = profile_editors.size() + 1;
             std::string name;
@@ -718,7 +811,8 @@ struct Dialog {
             } while (std::any_of(profile_editors.begin(), profile_editors.end(), [&](auto const& editor) {
                 return _stricmp(trim(to_string(editor.name.Text())).c_str(), name.c_str()) == 0;
             }));
-            appendProfile({name, "windows", "cmd.exe"});
+            appendProfile({name, "windows", "cmd.exe", ""});
+            refreshDefaultProfiles();
             updateProfileButtons();
             save();
         });
@@ -727,23 +821,48 @@ struct Dialog {
         profile_panel.Children().Append(profile_list);
         profile_panel.Children().Append(add_profile);
         updateProfileButtons();
-        working_directory = textBox(value(values, "working_directory"), L"User home directory");
         hold_on_exit = toggle(value(values, "hold_on_exit", "false"));
         return page(L"Profiles", L"Manage the shells available from the new-tab menu.", {
             card(L"Default profile", L"The profile opened at startup and by Ctrl+Shift+T.", default_profile),
-            card(L"Launch profiles", L"Choose a name, shell type, and command for each new-tab option.", profile_panel, true),
-            card(L"Working directory", L"Leave empty to use your Windows home directory.", working_directory),
+            card(L"Launch profiles", L"Choose a name, shell type, command, and working directory for each new-tab option.", profile_panel, true),
             card(L"Keep tabs open", L"Keep a new tab open after its process exits cleanly.", hold_on_exit),
         });
     }
 
+    fire_and_forget pickWorkingDirectory(std::shared_ptr<Dialog> lifetime, uint64_t profile_id) {
+        (void)lifetime;
+        try {
+            Microsoft::Windows::Storage::Pickers::FolderPicker picker{window.AppWindow().Id()};
+            picker.CommitButtonText(L"Select folder");
+            auto const result = co_await picker.PickSingleFolderAsync();
+            if (result && open) {
+                auto const editor = std::find_if(profile_editors.begin(), profile_editors.end(),
+                    [profile_id](auto const& item) { return item.id == profile_id; });
+                if (editor != profile_editors.end()) {
+                    editor->working_directory.Text(result.Path());
+                    save();
+                }
+            }
+        } catch (hresult_error const& exception) {
+            if (open) {
+                error.Message(L"Unable to open the folder picker: " + exception.message());
+                error.IsOpen(true);
+            }
+        }
+    }
+
     ScrollViewer makeAdvanced(std::map<std::string, std::string> const& values) {
         clipboard_write = toggle(value(values, "osc52_clipboard_write", "false"));
-        clipboard_limit = numberBox(value(values, "osc52_clipboard_max_bytes", "1048576"), 1048576, 1, 16777216, 1024);
+        double clipboard_kib = 1024;
+        try { clipboard_kib = std::stod(value(values, "osc52_clipboard_max_bytes", "1048576")) / 1024; } catch (...) {}
+        clipboard_limit = numberBox(std::to_string(clipboard_kib), 1024, 1.0 / 1024, 16384);
         pipe_command = textBox(value(values, "pipe_command_output"), L"Copy output to the clipboard");
+        clipboard_limit_card = card(L"Clipboard payload limit (KiB)", L"Maximum decoded terminal clipboard payload, in kibibytes.", clipboard_limit);
+        clipboard_limit.IsEnabled(clipboard_write.IsOn());
+        clipboard_limit_card.Opacity(clipboard_write.IsOn() ? 1 : 0.55);
         return page(L"Advanced", L"Security-sensitive terminal integration settings.", {
             card(L"Terminal clipboard writes", L"Allow OSC 52 and OSC 1337 Copy sequences to write to the Windows clipboard.", clipboard_write),
-            card(L"Clipboard payload limit", L"Maximum decoded terminal clipboard payload in bytes.", clipboard_limit),
+            clipboard_limit_card,
             card(L"Pipe command output", L"Windows command that receives the latest OSC 133 command output on stdin. Leave empty to copy it.", pipe_command),
         });
     }
@@ -769,7 +888,10 @@ struct Dialog {
         auto const horizontal_padding_value = integer(padding_horizontal, 0, 128);
         auto const vertical_padding_value = integer(padding_vertical, 0, 128);
         auto const opacity_value = integer(opacity, 0, 100);
-        auto const clipboard_limit_value = integer(clipboard_limit, 1, 16777216);
+        auto const clipboard_kib_value = clipboard_limit.Value();
+        if (!std::isfinite(clipboard_kib_value) || clipboard_kib_value < 1.0 / 1024 || clipboard_kib_value > 16384)
+            throw std::runtime_error("Clipboard payload limit must be between 1 byte and 16 MiB.");
+        auto const clipboard_limit_value = std::round(clipboard_kib_value * 1024);
         if (selected_font.empty() || selected_font.size() >= 128) throw std::runtime_error("Font family must be between 1 and 127 UTF-8 bytes.");
         if (selected_dark_theme.empty() || selected_dark_theme.size() >= 64 || selected_light_theme.empty() || selected_light_theme.size() >= 64)
             throw std::runtime_error("Theme names must be between 1 and 63 UTF-8 bytes.");
@@ -779,17 +901,21 @@ struct Dialog {
         for (auto const& editor : profile_editors) {
             auto name = string(editor.name);
             auto command = string(editor.command);
+            auto working_directory = string(editor.working_directory);
             auto kind = editor.shell.SelectedIndex() == 0 ? "powershell" : editor.shell.SelectedIndex() == 2 ? "wsl" : "windows";
             if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
                 throw std::runtime_error("Profile names must be between 1 and 127 UTF-8 bytes and cannot contain | or line breaks.");
             if (command.empty() || command.find('\r') != std::string::npos || command.find('\n') != std::string::npos || command.find('\0') != std::string::npos)
                 throw std::runtime_error("Profile commands cannot be empty or contain line breaks or NUL characters.");
+            if (working_directory.find('\0') != std::string::npos)
+                throw std::runtime_error("Profile working directories cannot contain NUL characters.");
             if (std::any_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), name.c_str()) == 0; }))
                 throw std::runtime_error("Profile names must be unique.");
-            profile_values.push_back({std::move(name), kind, std::move(command)});
+            profile_values.push_back({std::move(name), kind, std::move(command), std::move(working_directory)});
         }
         if (profile_values.empty() || profile_values.size() > 32) throw std::runtime_error("Add between 1 and 32 profiles.");
-        auto const selected_default = string(default_profile);
+        auto const selected_default = default_profile.SelectedItem()
+            ? trim(to_string(unbox_value<hstring>(default_profile.SelectedItem()))) : std::string{};
         if (selected_default.empty() || selected_default.size() >= 128) throw std::runtime_error("Default profile must be between 1 and 127 UTF-8 bytes.");
         if (std::none_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), selected_default.c_str()) == 0; }))
             throw std::runtime_error("The default profile must match a launch profile name.");
@@ -854,10 +980,10 @@ struct Dialog {
             profile.Insert(L"name", text(profile_value.name));
             profile.Insert(L"shell", text(profile_value.shell));
             profile.Insert(L"command", text(profile_value.command));
+            profile.Insert(L"workingDirectory", text(profile_value.working_directory));
             profile_items.Append(profile);
         }
         profile_settings.Insert(L"items", profile_items);
-        profile_settings.Insert(L"workingDirectory", text(string(working_directory)));
         profile_settings.Insert(L"holdOnExit", boolean(hold_on_exit.IsOn()));
         root.Insert(L"profiles", profile_settings);
 
@@ -896,8 +1022,7 @@ struct Dialog {
 
     void registerAutoSave() {
         auto text_committed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {default_profile, working_directory, pipe_command})
-            editor.LostFocus(text_committed);
+        pipe_command.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
         for (auto const& editor : {font_size, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
@@ -908,8 +1033,16 @@ struct Dialog {
         dark_theme.SelectionChanged(selection_changed);
         light_theme.SelectionChanged(selection_changed);
         font_family.SelectionChanged(selection_changed);
+        default_profile.SelectionChanged([this](auto const&, auto const&) {
+            if (!updating_profiles) save();
+        });
         auto toggled = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {random_background, hold_on_exit, clipboard_write}) editor.Toggled(toggled);
+        for (auto const& editor : {random_background, hold_on_exit}) editor.Toggled(toggled);
+        clipboard_write.Toggled([this](auto const&, auto const&) {
+            clipboard_limit.IsEnabled(clipboard_write.IsOn());
+            clipboard_limit_card.Opacity(clipboard_write.IsOn() ? 1 : 0.55);
+            save();
+        });
     }
 
     void applyTheme(bool high_contrast, bool dark_theme) {

@@ -877,7 +877,8 @@ fn addProfileImpl(self: *Application, profile: config.Profile) !void {
     else
         null;
     defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
-    const working_directory = reported_directory orelse self.initial_working_directory orelse self.settings.working_directory;
+    const working_directory = self.initial_working_directory orelse
+        (if (profile.working_directory.len > 0) profile.working_directory else reported_directory orelse "");
     _ = try self.model.addSession(profile.shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
     if (self.initial_working_directory) |directory| {
         std.heap.page_allocator.free(directory);

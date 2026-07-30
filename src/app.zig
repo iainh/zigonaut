@@ -12,6 +12,36 @@ test {
 
 pub const Shell = config.Shell;
 
+fn appendWindowsArgument(allocator: std.mem.Allocator, output: *std.ArrayList(u8), argument: []const u8) !void {
+    try output.append(allocator, '"');
+    var backslashes: usize = 0;
+    for (argument) |byte| {
+        if (byte == '\\') {
+            backslashes += 1;
+            continue;
+        }
+        const count = if (byte == '"') backslashes * 2 + 1 else backslashes;
+        for (0..count) |_| try output.append(allocator, '\\');
+        backslashes = 0;
+        try output.append(allocator, byte);
+    }
+    for (0..backslashes * 2) |_| try output.append(allocator, '\\');
+    try output.append(allocator, '"');
+}
+
+fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []const u8, working_directory: []const u8) !?[]u8 {
+    if (shell != .wsl or !(std.mem.eql(u8, working_directory, "~") or
+        std.mem.startsWith(u8, working_directory, "~/") or
+        std.mem.startsWith(u8, working_directory, "/"))) return null;
+
+    var result = std.ArrayList(u8).empty;
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, command);
+    try result.appendSlice(allocator, " --cd ");
+    try appendWindowsArgument(allocator, &result, working_directory);
+    return try result.toOwnedSlice(allocator);
+}
+
 const LaunchMetadata = struct {
     allocator: std.mem.Allocator,
     references: usize = 1,
@@ -168,7 +198,9 @@ pub const App = struct {
         const random_source: std.Random.IoSource = .{ .io = self.io };
         const background_seed = random_source.interface().int(u16);
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
-        const runtime = try SessionRuntime.create(self.allocator, command, working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
+        defer if (wsl_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background, background_seed);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
@@ -253,7 +285,9 @@ pub const App = struct {
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
         const working_directory = reported_directory orelse source.session.workingDirectory();
-        const runtime = try SessionRuntime.create(self.allocator, source.session.command(), working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, source.session.shell, source.session.command(), working_directory);
+        defer if (wsl_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse source.session.command(), if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
 
@@ -522,6 +556,19 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
     try std.testing.expectEqual(pane_tree.Axis.left_right, layout[0].split.axis);
     try std.testing.expectEqual(original, layout[1].leaf.id);
     try std.testing.expectEqual(created, layout[2].leaf.id);
+}
+
+test "WSL launch directories become --cd arguments" {
+    const home = (try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "~")).?;
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings("wsl.exe --cd \"~\"", home);
+
+    const path = (try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe -d Debian", "/home/Iain's work")).?;
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("wsl.exe -d Debian --cd \"/home/Iain's work\"", path);
+
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "C:\\work")) == null);
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .powershell, "pwsh.exe", "~")) == null);
 }
 
 test "focus title close extraction and stale identities" {
