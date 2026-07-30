@@ -7,7 +7,7 @@ pub const default_contents =
     \\  "version": 1,
     \\  "appearance": {
     \\    "font": { "family": "Cascadia Mono", "size": 18 },
-    \\    "themes": { "dark": "rasmus", "light": "campbell-light", "colorScheme": "system" },
+    \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8 },
     \\    "background": { "opacity": 100, "backdrop": "mica" },
     \\    "palette": {},
@@ -121,8 +121,8 @@ pub const Config = struct {
     scrollback_size: u32 = 10_000,
     initial_columns: u16 = 80,
     initial_rows: u16 = 24,
-    dark_theme: []const u8 = "rasmus",
-    light_theme: []const u8 = "campbell-light",
+    dark_theme: []const u8 = "fluent-dark",
+    light_theme: []const u8 = "fluent-light",
     color_scheme: ColorScheme = .system,
     padding_horizontal: u16 = 8,
     padding_vertical: u16 = 8,
@@ -365,6 +365,8 @@ test "default JSON configuration parses" {
     var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, default_contents, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     const value = try configFromJson(parsed.value);
+    try std.testing.expectEqualStrings("fluent-dark", value.dark_theme);
+    try std.testing.expectEqualStrings("fluent-light", value.light_theme);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
 }

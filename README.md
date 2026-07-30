@@ -47,7 +47,7 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 - Light, dark, and system color modes
 - Mica, acrylic, or opaque window backdrops
 - Configurable fonts, padding, opacity, palettes, and working directory
-- Bundled Campbell, Campbell Light, Solarized Dark, and Rasmus themes
+- Bundled Campbell, Campbell Light, Fluent Light, Fluent Dark, Solarized Dark, and Rasmus themes
 - Full-window Fluent settings page with automatic saving
 
 Zigonaut creates its configuration file on first launch at:

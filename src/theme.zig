@@ -207,6 +207,37 @@ test "JSON themes parse complete color palettes" {
     try std.testing.expectEqual(Color{ .red = 0, .green = 0, .blue = 15 }, value.ansi[15]);
 }
 
+test "Fluent themes meet WCAG AA contrast against their backgrounds" {
+    inline for (.{
+        "themes/fluent-light.json",
+        "themes/fluent-dark.json",
+    }) |path| {
+        const contents = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(64 * 1024));
+        defer std.testing.allocator.free(contents);
+        const value = try parseJson(std.testing.allocator, contents);
+        try expectAaContrast(value.foreground, value.background);
+        try expectAaContrast(value.cursor, value.background);
+        for (value.ansi) |color| try expectAaContrast(color, value.background);
+    }
+}
+
+fn expectAaContrast(foreground: Color, background: Color) !void {
+    const lighter = @max(relativeLuminance(foreground), relativeLuminance(background));
+    const darker = @min(relativeLuminance(foreground), relativeLuminance(background));
+    try std.testing.expect((lighter + 0.05) / (darker + 0.05) >= 4.5);
+}
+
+fn relativeLuminance(color: Color) f64 {
+    return 0.2126 * linearChannel(color.red) +
+        0.7152 * linearChannel(color.green) +
+        0.0722 * linearChannel(color.blue);
+}
+
+fn linearChannel(channel: u8) f64 {
+    const value: f64 = @as(f64, @floatFromInt(channel)) / 255.0;
+    return if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4);
+}
+
 test "random backgrounds retain the theme background darkness" {
     const first = randomizedBackground(rasmus, 0);
     const second = randomizedBackground(rasmus, 900);

@@ -597,8 +597,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto const material = value(values, "backdrop", "mica");
         backdrop = combo("", {L"None", L"Mica", L"MicaAlt", L"Acrylic"});
         backdrop.SelectedIndex(material == "none" ? 0 : material == "mica_alt" ? 2 : material == "acrylic" ? 3 : 1);
-        dark_theme = themeCombo(value(values, "dark_theme", value(values, "theme", "rasmus")));
-        light_theme = themeCombo(value(values, "light_theme", "campbell-light"));
+        dark_theme = themeCombo(value(values, "dark_theme", value(values, "theme", "fluent-dark")));
+        light_theme = themeCombo(value(values, "light_theme", "fluent-light"));
         opacity = numberBox(value(values, "background_opacity", "100"), 100, 0, 100);
         random_background = toggle(value(values, "randomize_tab_background", "true"));
 
