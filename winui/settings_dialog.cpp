@@ -16,7 +16,6 @@
 #include <fstream>
 #include <map>
 #include <optional>
-#include <sstream>
 #include <vector>
 
 using namespace winrt;
@@ -85,16 +84,23 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     return values;
 }
 
-std::string profileText(std::string_view contents) {
+struct ProfileValue {
+    std::string name;
+    std::string shell;
+    std::string command;
+};
+
+std::vector<ProfileValue> profileValues(std::string_view contents) {
     auto const profiles = Windows::Data::Json::JsonObject::Parse(to_hstring(contents))
                               .GetNamedObject(L"profiles").GetNamedArray(L"items");
-    std::string result;
+    std::vector<ProfileValue> result;
     for (auto const& item : profiles) {
         auto const profile = item.GetObject();
-        if (!result.empty()) result += "\r\n";
-        result += to_string(profile.GetNamedString(L"name")) + "|";
-        result += to_string(profile.GetNamedString(L"shell")) + "|";
-        result += to_string(profile.GetNamedString(L"command"));
+        result.push_back({
+            to_string(profile.GetNamedString(L"name")),
+            to_string(profile.GetNamedString(L"shell")),
+            to_string(profile.GetNamedString(L"command")),
+        });
     }
     return result;
 }
@@ -403,7 +409,20 @@ struct Dialog {
     std::vector<TextBox> colors;
     std::vector<ThemeChoice> themes;
 
-    TextBox default_profile{nullptr}, profiles{nullptr}, working_directory{nullptr};
+    struct ProfileEditor {
+        uint64_t id;
+        TextBox name{nullptr};
+        ComboBox shell{nullptr};
+        TextBox command{nullptr};
+        Button remove{nullptr};
+        Border container{nullptr};
+    };
+
+    TextBox default_profile{nullptr}, working_directory{nullptr};
+    StackPanel profile_list{nullptr};
+    Button add_profile{nullptr};
+    std::vector<ProfileEditor> profile_editors;
+    uint64_t next_profile_id{};
     ToggleSwitch hold_on_exit{nullptr};
     ToggleSwitch clipboard_write{nullptr};
     NumberBox clipboard_limit{nullptr};
@@ -482,7 +501,7 @@ struct Dialog {
 
         pages.push_back(makeAppearance(values));
         pages.push_back(makeTerminal(values));
-        pages.push_back(makeProfiles(values, profileText(contents)));
+        pages.push_back(makeProfiles(values, profileValues(contents)));
         pages.push_back(makeAdvanced(values));
         navigation.Content(pages[0]);
         navigation.SelectedItem(appearance_item);
@@ -610,21 +629,109 @@ struct Dialog {
         });
     }
 
-    ScrollViewer makeProfiles(std::map<std::string, std::string> const& values, std::string profile_text) {
+    void updateProfileButtons() {
+        auto const count = profile_editors.size();
+        for (auto const& editor : profile_editors) editor.remove.IsEnabled(count > 1);
+        add_profile.IsEnabled(count < 32);
+    }
+
+    void appendProfile(ProfileValue const& profile) {
+        auto const id = next_profile_id++;
+        auto name = textBox(profile.name, L"Profile name");
+        auto shell = combo("", {L"PowerShell", L"Command Prompt", L"WSL"});
+        shell.SelectedIndex(profile.shell == "powershell" ? 0 : profile.shell == "wsl" ? 2 : 1);
+        auto command = textBox(profile.command, L"Executable or command line");
+
+        auto identity = Grid{};
+        identity.ColumnSpacing(12);
+        auto name_column = ColumnDefinition{};
+        name_column.Width(GridLength{1, GridUnitType::Star});
+        identity.ColumnDefinitions().Append(name_column);
+        auto shell_column = ColumnDefinition{};
+        shell_column.Width(GridLength{180, GridUnitType::Pixel});
+        identity.ColumnDefinitions().Append(shell_column);
+        auto name_field = StackPanel{};
+        name_field.Spacing(4);
+        name_field.Children().Append(label(L"Name"));
+        name_field.Children().Append(name);
+        identity.Children().Append(name_field);
+        auto shell_field = StackPanel{};
+        shell_field.Spacing(4);
+        shell_field.Children().Append(label(L"Shell type"));
+        shell_field.Children().Append(shell);
+        Grid::SetColumn(shell_field, 1);
+        identity.Children().Append(shell_field);
+
+        auto fields = StackPanel{};
+        fields.Spacing(10);
+        fields.Children().Append(identity);
+        fields.Children().Append(label(L"Command"));
+        fields.Children().Append(command);
+        auto remove = Button{};
+        remove.Content(box_value(L"Remove profile"));
+        remove.HorizontalAlignment(HorizontalAlignment::Right);
+        fields.Children().Append(remove);
+
+        auto container = Border{};
+        container.Style(Application::Current().Resources().Lookup(box_value(L"ZigonautSettingsCardStyle")).as<Style>());
+        container.Child(fields);
+        profile_list.Children().Append(container);
+        profile_editors.push_back({id, name, shell, command, remove, container});
+
+        auto committed = [this](auto const&, auto const&) { save(); };
+        name.LostFocus(committed);
+        command.LostFocus(committed);
+        shell.SelectionChanged([this](auto const&, auto const&) { save(); });
+        remove.Click([this, id](auto const&, auto const&) {
+            auto const found = std::find_if(profile_editors.begin(), profile_editors.end(),
+                [id](auto const& editor) { return editor.id == id; });
+            if (found == profile_editors.end() || profile_editors.size() == 1) return;
+            auto const removed_name = trim(to_string(found->name.Text()));
+            uint32_t index{};
+            if (profile_list.Children().IndexOf(found->container, index)) profile_list.Children().RemoveAt(index);
+            profile_editors.erase(found);
+            if (_stricmp(trim(to_string(default_profile.Text())).c_str(), removed_name.c_str()) == 0)
+                default_profile.Text(profile_editors.front().name.Text());
+            updateProfileButtons();
+            save();
+        });
+    }
+
+    ScrollViewer makeProfiles(std::map<std::string, std::string> const& values, std::vector<ProfileValue> profile_values) {
         default_profile = textBox(value(values, "default_profile", "PowerShell"), L"PowerShell");
-        if (profile_text.empty()) profile_text = "PowerShell|powershell|powershell.exe\r\nWSL|wsl|wsl.exe\r\nCommand Prompt|windows|cmd.exe";
-        profiles = TextBox{};
-        profiles.AcceptsReturn(true);
-        profiles.Text(to_hstring(profile_text));
-        profiles.HorizontalAlignment(HorizontalAlignment::Stretch);
-        profiles.TextWrapping(TextWrapping::NoWrap);
-        profiles.MinHeight(180);
-        profiles.FontFamily(Media::FontFamily{L"Cascadia Mono"});
+        if (profile_values.empty()) profile_values = {
+            {"PowerShell", "powershell", "powershell.exe"},
+            {"WSL", "wsl", "wsl.exe"},
+            {"Command Prompt", "windows", "cmd.exe"},
+        };
+        profile_list = StackPanel{};
+        profile_list.Spacing(8);
+        for (auto const& profile : profile_values) appendProfile(profile);
+        add_profile = Button{};
+        add_profile.Content(box_value(L"Add profile"));
+        add_profile.HorizontalAlignment(HorizontalAlignment::Left);
+        add_profile.Click([this](auto const&, auto const&) {
+            auto suffix = profile_editors.size() + 1;
+            std::string name;
+            do {
+                name = "Profile " + std::to_string(suffix++);
+            } while (std::any_of(profile_editors.begin(), profile_editors.end(), [&](auto const& editor) {
+                return _stricmp(trim(to_string(editor.name.Text())).c_str(), name.c_str()) == 0;
+            }));
+            appendProfile({name, "windows", "cmd.exe"});
+            updateProfileButtons();
+            save();
+        });
+        auto profile_panel = StackPanel{};
+        profile_panel.Spacing(10);
+        profile_panel.Children().Append(profile_list);
+        profile_panel.Children().Append(add_profile);
+        updateProfileButtons();
         working_directory = textBox(value(values, "working_directory"), L"User home directory");
         hold_on_exit = toggle(value(values, "hold_on_exit", "false"));
         return page(L"Profiles", L"Manage the shells available from the new-tab menu.", {
             card(L"Default profile", L"The profile opened at startup and by Ctrl+Shift+T.", default_profile),
-            card(L"Launch profiles", L"One per line: name|shell type|command. Shell type must be powershell, windows, or wsl.", profiles, true),
+            card(L"Launch profiles", L"Choose a name, shell type, and command for each new-tab option.", profile_panel, true),
             card(L"Working directory", L"Leave empty to use your Windows home directory.", working_directory),
             card(L"Keep tabs open", L"Keep a new tab open after its process exits cleanly.", hold_on_exit),
         });
@@ -668,29 +775,18 @@ struct Dialog {
             throw std::runtime_error("Theme names must be between 1 and 63 UTF-8 bytes.");
         for (auto const& editor : colors) if (!validColor(string(editor))) throw std::runtime_error("Palette colors must be empty or use #RRGGBB.");
 
-        struct ProfileValue { std::string name, shell, command; };
         std::vector<ProfileValue> profile_values;
-        auto profile_text = to_string(profiles.Text());
-        std::replace(profile_text.begin(), profile_text.end(), '\r', '\n');
-        std::istringstream lines{profile_text};
-        for (std::string line; std::getline(lines, line);) {
-            line = trim(std::move(line));
-            if (line.empty()) continue;
-            auto first = line.find('|');
-            auto second = first == std::string::npos ? first : line.find('|', first + 1);
-            if (first == std::string::npos || second == std::string::npos || first == 0 || second == first + 1 || second + 1 == line.size())
-                throw std::runtime_error("Every profile must use name|shell type|command.");
-            auto kind = trim(line.substr(first + 1, second - first - 1));
-            if (kind != "powershell" && kind != "windows" && kind != "wsl") throw std::runtime_error("Profile shell types must be powershell, windows, or wsl.");
-            auto name = trim(line.substr(0, first));
-            auto command = trim(line.substr(second + 1));
+        for (auto const& editor : profile_editors) {
+            auto name = string(editor.name);
+            auto command = string(editor.command);
+            auto kind = editor.shell.SelectedIndex() == 0 ? "powershell" : editor.shell.SelectedIndex() == 2 ? "wsl" : "windows";
             if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
                 throw std::runtime_error("Profile names must be between 1 and 127 UTF-8 bytes and cannot contain | or line breaks.");
             if (command.empty() || command.find('\r') != std::string::npos || command.find('\n') != std::string::npos || command.find('\0') != std::string::npos)
                 throw std::runtime_error("Profile commands cannot be empty or contain line breaks or NUL characters.");
             if (std::any_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), name.c_str()) == 0; }))
                 throw std::runtime_error("Profile names must be unique.");
-            profile_values.push_back({std::move(name), std::move(kind), std::move(command)});
+            profile_values.push_back({std::move(name), kind, std::move(command)});
         }
         if (profile_values.empty() || profile_values.size() > 32) throw std::runtime_error("Add between 1 and 32 profiles.");
         auto const selected_default = string(default_profile);
@@ -800,7 +896,7 @@ struct Dialog {
 
     void registerAutoSave() {
         auto text_committed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {default_profile, profiles, working_directory, pipe_command})
+        for (auto const& editor : {default_profile, working_directory, pipe_command})
             editor.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
