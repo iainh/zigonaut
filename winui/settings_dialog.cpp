@@ -17,6 +17,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 using namespace winrt;
@@ -25,6 +26,77 @@ using namespace winrt::Microsoft::UI::Xaml::Controls;
 
 namespace ZigonautSettings {
 namespace {
+
+std::wstring executablePath() {
+    std::wstring path(32768, L'\0');
+    auto const length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) throw hresult_error(HRESULT_FROM_WIN32(GetLastError()));
+    path.resize(length);
+    return path;
+}
+
+void setRegistryString(HKEY key, wchar_t const* name, std::wstring const& value) {
+    auto const status = RegSetValueExW(key, name, 0, REG_SZ,
+        reinterpret_cast<BYTE const*>(value.c_str()), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    if (status != ERROR_SUCCESS) throw hresult_error(HRESULT_FROM_WIN32(status));
+}
+
+void registerExplorerVerb(std::wstring const& key_path, std::wstring const& directory_argument) {
+    auto const executable = executablePath();
+    HKEY key{};
+    auto status = RegCreateKeyExW(HKEY_CURRENT_USER, key_path.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr);
+    if (status != ERROR_SUCCESS) throw hresult_error(HRESULT_FROM_WIN32(status));
+    try {
+        setRegistryString(key, L"MUIVerb", L"Open in Zigonaut");
+        setRegistryString(key, L"Icon", executable);
+        HKEY command_key{};
+        status = RegCreateKeyExW(key, L"command", 0, nullptr, 0, KEY_WRITE, nullptr, &command_key, nullptr);
+        if (status != ERROR_SUCCESS) throw hresult_error(HRESULT_FROM_WIN32(status));
+        try {
+            setRegistryString(command_key, nullptr, L"\"" + executable + L"\" -d \"" + directory_argument + L"\"");
+        } catch (...) {
+            RegCloseKey(command_key);
+            throw;
+        }
+        RegCloseKey(command_key);
+    } catch (...) {
+        RegCloseKey(key);
+        throw;
+    }
+    RegCloseKey(key);
+}
+
+void removeExplorerIntegration() {
+    for (auto const* path : {
+             L"Software\\Classes\\Directory\\shell\\Zigonaut",
+             L"Software\\Classes\\Directory\\Background\\shell\\Zigonaut"}) {
+        auto const status = RegDeleteTreeW(HKEY_CURRENT_USER, path);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            throw hresult_error(HRESULT_FROM_WIN32(status));
+    }
+}
+
+void installExplorerIntegration() {
+    try {
+        registerExplorerVerb(L"Software\\Classes\\Directory\\shell\\Zigonaut", L"%1");
+        registerExplorerVerb(L"Software\\Classes\\Directory\\Background\\shell\\Zigonaut", L"%V");
+    } catch (...) {
+        try { removeExplorerIntegration(); } catch (...) {}
+        throw;
+    }
+}
+
+bool explorerIntegrationInstalled() {
+    for (auto const* path : {
+             L"Software\\Classes\\Directory\\shell\\Zigonaut\\command",
+             L"Software\\Classes\\Directory\\Background\\shell\\Zigonaut\\command"}) {
+        HKEY key{};
+        auto const status = RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key);
+        if (status != ERROR_SUCCESS) return false;
+        RegCloseKey(key);
+    }
+    return true;
+}
 
 std::string trim(std::string value) {
     auto const first = value.find_first_not_of(" \t\r");
@@ -458,6 +530,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     std::vector<ProfileEditor> profile_editors;
     uint64_t next_profile_id{};
     bool updating_profiles{};
+    bool updating_explorer{};
     ToggleSwitch hold_on_exit{nullptr};
     ToggleSwitch clipboard_write{nullptr};
     NumberBox clipboard_limit{nullptr};
@@ -822,10 +895,36 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         profile_panel.Children().Append(add_profile);
         updateProfileButtons();
         hold_on_exit = toggle(value(values, "hold_on_exit", "false"));
+        auto default_terminal = HyperlinkButton{};
+        default_terminal.Content(box_value(L"Open Windows default terminal settings"));
+        default_terminal.NavigateUri(Windows::Foundation::Uri{L"ms-settings:developers"});
+        default_terminal.HorizontalAlignment(HorizontalAlignment::Left);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(default_terminal, L"Open Windows default terminal settings");
+        auto explorer = ToggleSwitch{};
+        explorer.IsOn(explorerIntegrationInstalled());
+        explorer.OnContent(box_value(L"On"));
+        explorer.OffContent(box_value(L"Off"));
+        explorer.Toggled([this](auto const& sender, auto const&) {
+            if (updating_explorer) return;
+            auto const toggle = sender.as<ToggleSwitch>();
+            try {
+                if (toggle.IsOn()) installExplorerIntegration(); else removeExplorerIntegration();
+                error.IsOpen(false);
+            } catch (hresult_error const& exception) {
+                error.Severity(InfoBarSeverity::Error);
+                error.Message(L"Unable to update Explorer context menus: " + exception.message());
+                error.IsOpen(true);
+                updating_explorer = true;
+                toggle.IsOn(explorerIntegrationInstalled());
+                updating_explorer = false;
+            }
+        });
         return page(L"Profiles", L"Manage the shells available from the new-tab menu.", {
             card(L"Default profile", L"The profile opened at startup and by Ctrl+Shift+T.", default_profile),
             card(L"Launch profiles", L"Choose a name, shell type, command, and working directory for each new-tab option.", profile_panel, true),
             card(L"Keep tabs open", L"Keep a new tab open after its process exits cleanly.", hold_on_exit),
+            card(L"Windows default terminal", L"Open the Windows selector for apps that implement the native terminal-host handoff.", default_terminal),
+            card(L"File Explorer", L"Add or remove “Open in Zigonaut” for folders and folder backgrounds for this executable location.", explorer),
         });
     }
 

@@ -31,13 +31,36 @@ const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
 var process_spawn_mutex: @import("win32.zig").Mutex = .{};
 
+const LaunchKind = enum { new_tab, split_right, split_down };
+
+const LaunchAction = struct {
+    kind: LaunchKind = .new_tab,
+    profile: ?[]u8 = null,
+    working_directory: ?[]u8 = null,
+
+    fn deinit(self: *LaunchAction, allocator: std.mem.Allocator) void {
+        if (self.profile) |value| allocator.free(value);
+        if (self.working_directory) |value| allocator.free(value);
+    }
+};
+
+const LaunchPlan = struct {
+    allocator: std.mem.Allocator,
+    actions: std.ArrayList(LaunchAction) = .empty,
+
+    fn deinit(self: *LaunchPlan) void {
+        for (self.actions.items) |*action| action.deinit(self.allocator);
+        self.actions.deinit(self.allocator);
+    }
+};
+
 const Application = struct {
     const ViewEntry = struct { pane_id: u64, view: *TerminalView };
     io: std.Io,
     loaded: config.Loaded,
     themes: theme.Catalog,
     settings: config.Config,
-    initial_working_directory: ?[]u8 = null,
+    launch_plan: LaunchPlan,
     hwnd: ?win.HWND = null,
     model: app_model.App,
     font: win.HFONT = null,
@@ -60,14 +83,14 @@ const Application = struct {
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
 
-    fn init(io: std.Io, loaded: config.Loaded, themes: theme.Catalog, initial_working_directory: ?[]u8) Application {
+    fn init(io: std.Io, loaded: config.Loaded, themes: theme.Catalog, launch_plan: LaunchPlan) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
         var result = Application{
             .io = io,
             .settings = loaded.value,
             .loaded = loaded,
             .themes = themes,
-            .initial_working_directory = initial_working_directory,
+            .launch_plan = launch_plan,
             .model = app_model.App.init(std.heap.page_allocator, io, config.terminalTheme(loaded.value, &themes, dark_theme), loaded.value.randomize_tab_background),
             .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
@@ -85,7 +108,7 @@ const Application = struct {
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.pane_events.deinit(std.heap.page_allocator);
-        if (self.initial_working_directory) |directory| std.heap.page_allocator.free(directory);
+        self.launch_plan.deinit();
         if (self.font != null) _ = win.DeleteObject(self.font);
         self.loaded.deinit();
     }
@@ -97,8 +120,11 @@ const Application = struct {
     const syncScrollbar = syncScrollbarImpl;
     const syncTaskbarProgress = syncTaskbarProgressImpl;
     const showPendingNotifications = showPendingNotificationsImpl;
+    const applyLaunchPlan = applyLaunchPlanImpl;
     const addDefaultSession = addDefaultSessionImpl;
     const addProfile = addProfileImpl;
+    const addProfileAt = addProfileAtImpl;
+    const profileNamed = profileNamedImpl;
     const spawnNewWindow = spawnNewWindowImpl;
     const pipeCommandOutput = pipeCommandOutputImpl;
     const syncProfiles = syncProfilesImpl;
@@ -301,16 +327,16 @@ const Application = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var initial_working_directory = try launchDirectoryFromArgsAlloc(std.heap.page_allocator, init.minimal.args);
-    errdefer if (initial_working_directory) |directory| std.heap.page_allocator.free(directory);
+    var launch_plan = try launchPlanFromArgsAlloc(std.heap.page_allocator, init.minimal.args);
+    errdefer launch_plan.deinit();
     var loaded = try config.loadOrCreate(std.heap.page_allocator, init.io);
     const themes = theme.Catalog.load(std.heap.page_allocator, init.io);
     const application = std.heap.page_allocator.create(Application) catch |err| {
         loaded.deinit();
         return err;
     };
-    application.* = Application.init(init.io, loaded, themes, initial_working_directory);
-    initial_working_directory = null;
+    application.* = Application.init(init.io, loaded, themes, launch_plan);
+    launch_plan.actions = .empty;
     defer {
         // If synchronous window destruction fails, retain the owner until
         // process exit rather than leave a subclass callback pointing at freed memory.
@@ -370,7 +396,7 @@ fn initializeWindowImpl(self: *Application) !void {
     self.model.setRefresh(.{ .callback = requestRuntimeRefresh, .context = self });
     self.terminal_ready = true;
     try self.syncProfiles(&self.settings);
-    try self.addDefaultSession();
+    try self.applyLaunchPlan();
     self.updateTheme(false);
 }
 
@@ -868,22 +894,51 @@ fn addDefaultSessionImpl(self: *Application) !void {
     self.syncChrome();
 }
 
+fn applyLaunchPlanImpl(self: *Application) !void {
+    for (self.launch_plan.actions.items) |action| {
+        const profile = self.profileNamed(action.profile) orelse return error.UnknownProfile;
+        const directory = action.working_directory orelse profile.working_directory;
+        switch (action.kind) {
+            .new_tab => try self.addProfileAt(profile, directory),
+            .split_right, .split_down => {
+                if (self.activeView()) |view| view.resetInteraction();
+                _ = try self.model.splitFocusedSession(
+                    if (action.kind == .split_right) .left_right else .top_bottom,
+                    profile.shell,
+                    profile.name,
+                    profile.command,
+                    directory,
+                    self.settings.hold_on_exit,
+                );
+                try self.syncPresentation();
+            },
+        }
+    }
+}
+
+fn profileNamedImpl(self: *Application, name: ?[]const u8) ?config.Profile {
+    if (name == null) return self.settings.defaultProfile();
+    for (self.settings.profileSlice()) |profile| {
+        if (std.ascii.eqlIgnoreCase(profile.name, name.?)) return profile;
+    }
+    return null;
+}
+
 fn addProfileImpl(self: *Application, profile: config.Profile) !void {
-    if (self.activeView()) |view| view.resetInteraction();
-    const columns: u16 = if (self.activeView()) |view| view.columns else 80;
-    const rows: u16 = if (self.activeView()) |view| view.rows else 24;
     const reported_directory = if (self.model.activeSession()) |session|
         if (session.runtime) |runtime| runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null else null
     else
         null;
     defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
-    const working_directory = self.initial_working_directory orelse
-        (if (profile.working_directory.len > 0) profile.working_directory else reported_directory orelse "");
+    const working_directory = if (profile.working_directory.len > 0) profile.working_directory else reported_directory orelse "";
+    try self.addProfileAt(profile, working_directory);
+}
+
+fn addProfileAtImpl(self: *Application, profile: config.Profile, working_directory: []const u8) !void {
+    if (self.activeView()) |view| view.resetInteraction();
+    const columns: u16 = if (self.activeView()) |view| view.columns else 80;
+    const rows: u16 = if (self.activeView()) |view| view.rows else 24;
     _ = try self.model.addSession(profile.shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
-    if (self.initial_working_directory) |directory| {
-        std.heap.page_allocator.free(directory);
-        self.initial_working_directory = null;
-    }
     try self.syncPresentation();
 }
 
@@ -1065,64 +1120,132 @@ fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []c
     _ = win.CloseHandle(process.hProcess);
 }
 
-fn launchDirectoryFromArgsAlloc(allocator: std.mem.Allocator, args: std.process.Args) !?[]u8 {
+fn launchPlanFromArgsAlloc(allocator: std.mem.Allocator, args: std.process.Args) !LaunchPlan {
     var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
     defer iterator.deinit();
-    _ = iterator.next();
-    while (iterator.next()) |argument| {
-        if (!std.mem.eql(u8, argument, "--working-directory")) continue;
-        const directory = iterator.next() orelse return error.MissingWorkingDirectory;
-        if (!isLocalWindowsDrivePath(directory)) return error.InvalidWorkingDirectory;
-        return @as(?[]u8, try allocator.dupe(u8, directory));
-    }
-    return null;
+    var arguments: std.ArrayList([]const u8) = .empty;
+    defer arguments.deinit(allocator);
+    while (iterator.next()) |argument| try arguments.append(allocator, argument);
+    return launchPlanFromArgumentsAlloc(allocator, arguments.items);
 }
 
-fn launchDirectoryFromArgumentsAlloc(allocator: std.mem.Allocator, arguments: []const []const u8) !?[]u8 {
+fn launchPlanFromArgumentsAlloc(allocator: std.mem.Allocator, arguments: []const []const u8) !LaunchPlan {
+    var result = LaunchPlan{ .allocator = allocator };
+    errdefer result.deinit();
+    if (arguments.len <= 1) {
+        try result.actions.append(allocator, .{});
+        return result;
+    }
+
     var index: usize = 1;
-    while (index < arguments.len) : (index += 1) {
-        if (!std.mem.eql(u8, arguments[index], "--working-directory")) continue;
-        if (index + 1 >= arguments.len) return error.MissingWorkingDirectory;
-        const directory = arguments[index + 1];
-        if (!isLocalWindowsDrivePath(directory)) return error.InvalidWorkingDirectory;
-        return @as(?[]u8, try allocator.dupe(u8, directory));
+    while (index < arguments.len) {
+        var action = LaunchAction{};
+        errdefer action.deinit(allocator);
+        var split_command = false;
+        if (isNewTabCommand(arguments[index])) {
+            index += 1;
+        } else if (isSplitCommand(arguments[index])) {
+            action.kind = .split_right;
+            split_command = true;
+            index += 1;
+        }
+
+        var direction_set = false;
+        while (index < arguments.len and !std.mem.eql(u8, arguments[index], ";")) {
+            const argument = arguments[index];
+            if (std.mem.eql(u8, argument, "-p") or std.mem.eql(u8, argument, "--profile")) {
+                index += 1;
+                if (index >= arguments.len or std.mem.eql(u8, arguments[index], ";")) return error.MissingProfile;
+                const replacement = try allocator.dupe(u8, arguments[index]);
+                if (action.profile) |value| allocator.free(value);
+                action.profile = replacement;
+            } else if (std.mem.eql(u8, argument, "-d") or std.mem.eql(u8, argument, "--startingDirectory") or std.mem.eql(u8, argument, "--working-directory")) {
+                index += 1;
+                if (index >= arguments.len or std.mem.eql(u8, arguments[index], ";")) return error.MissingWorkingDirectory;
+                if (!isValidLaunchDirectory(arguments[index])) return error.InvalidWorkingDirectory;
+                const replacement = try allocator.dupe(u8, arguments[index]);
+                if (action.working_directory) |value| allocator.free(value);
+                action.working_directory = replacement;
+            } else if (std.mem.eql(u8, argument, "-H") or std.mem.eql(u8, argument, "--horizontal")) {
+                if (!split_command or direction_set) return error.InvalidSplitDirection;
+                action.kind = .split_down;
+                direction_set = true;
+            } else if (std.mem.eql(u8, argument, "-V") or std.mem.eql(u8, argument, "--vertical")) {
+                if (!split_command or direction_set) return error.InvalidSplitDirection;
+                action.kind = .split_right;
+                direction_set = true;
+            } else {
+                return error.UnknownLaunchArgument;
+            }
+            index += 1;
+        }
+        try result.actions.append(allocator, action);
+        action = .{};
+        if (index < arguments.len) {
+            index += 1;
+            if (index == arguments.len) return error.EmptyLaunchCommand;
+        }
     }
-    return null;
+    if (result.actions.items[0].kind != .new_tab) try result.actions.insert(allocator, 0, .{});
+    return result;
 }
 
-fn isLocalWindowsDrivePath(path: []const u8) bool {
-    return path.len >= 3 and
-        std.ascii.isAlphabetic(path[0]) and
-        path[1] == ':' and
-        (path[2] == '\\' or path[2] == '/') and
-        std.mem.indexOfScalar(u8, path, 0) == null and
-        std.unicode.utf8ValidateSlice(path);
+fn isNewTabCommand(argument: []const u8) bool {
+    return std.mem.eql(u8, argument, "new-tab") or std.mem.eql(u8, argument, "nt");
 }
 
-test "new-window working directory accepts only local Windows drive paths" {
-    try std.testing.expect(isLocalWindowsDrivePath("C:\\work"));
-    try std.testing.expect(isLocalWindowsDrivePath("d:/work"));
-    try std.testing.expect(!isLocalWindowsDrivePath("\\\\server\\share"));
-    try std.testing.expect(!isLocalWindowsDrivePath("\\\\?\\C:\\work"));
-    try std.testing.expect(!isLocalWindowsDrivePath("\\work"));
-    try std.testing.expect(!isLocalWindowsDrivePath("/home/alice"));
-    try std.testing.expect(!isLocalWindowsDrivePath("C:work"));
-    try std.testing.expect(!isLocalWindowsDrivePath("C:\\bad\x00path"));
-    try std.testing.expect(!isLocalWindowsDrivePath(&.{ 'C', ':', '\\', 0xff }));
+fn isSplitCommand(argument: []const u8) bool {
+    return std.mem.eql(u8, argument, "split-pane") or std.mem.eql(u8, argument, "sp");
 }
 
-test "new-window working directory argument is validated" {
+fn isValidLaunchDirectory(path: []const u8) bool {
+    return path.len > 0 and std.mem.indexOfScalar(u8, path, 0) == null and std.unicode.utf8ValidateSlice(path);
+}
+
+test "launch arguments create tabs and splits with Windows Terminal aliases" {
     const allocator = std.testing.allocator;
-    const accepted = [_][]const u8{ "zigonaut.exe", "--working-directory", "C:\\work" };
-    const directory = (try launchDirectoryFromArgumentsAlloc(allocator, &accepted)).?;
-    defer allocator.free(directory);
-    try std.testing.expectEqualStrings("C:\\work", directory);
+    const arguments = [_][]const u8{
+        "zigonaut.exe", "new-tab", "-p", "PowerShell", "-d", "C:\\work", ";",
+        "sp", "-H", "--profile", "Command Prompt", ";", "split-pane", "-V", "--startingDirectory", ".",
+    };
+    var plan = try launchPlanFromArgumentsAlloc(allocator, &arguments);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 3), plan.actions.items.len);
+    try std.testing.expectEqual(LaunchKind.new_tab, plan.actions.items[0].kind);
+    try std.testing.expectEqualStrings("PowerShell", plan.actions.items[0].profile.?);
+    try std.testing.expectEqualStrings("C:\\work", plan.actions.items[0].working_directory.?);
+    try std.testing.expectEqual(LaunchKind.split_down, plan.actions.items[1].kind);
+    try std.testing.expectEqualStrings("Command Prompt", plan.actions.items[1].profile.?);
+    try std.testing.expectEqual(LaunchKind.split_right, plan.actions.items[2].kind);
+    try std.testing.expectEqualStrings(".", plan.actions.items[2].working_directory.?);
+}
+
+test "launch arguments validate values and command boundaries" {
+    const allocator = std.testing.allocator;
+    const defaults = [_][]const u8{"zigonaut.exe"};
+    var default_plan = try launchPlanFromArgumentsAlloc(allocator, &defaults);
+    defer default_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), default_plan.actions.items.len);
 
     const missing = [_][]const u8{ "zigonaut.exe", "--working-directory" };
-    try std.testing.expectError(error.MissingWorkingDirectory, launchDirectoryFromArgumentsAlloc(allocator, &missing));
+    try std.testing.expectError(error.MissingWorkingDirectory, launchPlanFromArgumentsAlloc(allocator, &missing));
 
-    const invalid = [_][]const u8{ "zigonaut.exe", "--working-directory", "\\\\server\\share" };
-    try std.testing.expectError(error.InvalidWorkingDirectory, launchDirectoryFromArgumentsAlloc(allocator, &invalid));
+    const invalid = [_][]const u8{ "zigonaut.exe", "--working-directory", "bad\x00path" };
+    try std.testing.expectError(error.InvalidWorkingDirectory, launchPlanFromArgumentsAlloc(allocator, &invalid));
+
+    const unknown = [_][]const u8{ "zigonaut.exe", "--not-an-option" };
+    try std.testing.expectError(error.UnknownLaunchArgument, launchPlanFromArgumentsAlloc(allocator, &unknown));
+
+    const invalid_direction = [_][]const u8{ "zigonaut.exe", "new-tab", "-H" };
+    try std.testing.expectError(error.InvalidSplitDirection, launchPlanFromArgumentsAlloc(allocator, &invalid_direction));
+
+    const initial_split = [_][]const u8{ "zigonaut.exe", "sp", "-p", "WSL" };
+    var split_plan = try launchPlanFromArgumentsAlloc(allocator, &initial_split);
+    defer split_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), split_plan.actions.items.len);
+    try std.testing.expectEqual(LaunchKind.new_tab, split_plan.actions.items[0].kind);
+    try std.testing.expectEqual(LaunchKind.split_right, split_plan.actions.items[1].kind);
+    try std.testing.expectEqualStrings("WSL", split_plan.actions.items[1].profile.?);
 }
 
 fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {

@@ -50,6 +50,20 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 - Bundled Campbell, Campbell Light, Fluent Light, Fluent Dark, Solarized Dark, and Rasmus themes
 - Full-window Fluent settings page with automatic saving
 
+### Windows integration
+
+The Profiles settings page can add or remove **Open in Zigonaut** for Explorer folders and folder backgrounds, and links to Windows' default-terminal selector. Explorer registration is per-user and follows the current `zigonaut.exe` location.
+
+Zigonaut accepts Windows Terminal-style startup actions:
+
+```text
+zigonaut.exe [new-tab|nt] [-p|--profile NAME] [-d|--startingDirectory DIRECTORY]
+             [; split-pane|sp [-H|--horizontal|-V|--vertical]
+                [-p|--profile NAME] [-d|--startingDirectory DIRECTORY]] ...
+```
+
+`--working-directory` remains an alias for `--startingDirectory`. Quote the `;` argument when invoking Zigonaut from PowerShell.
+
 Zigonaut creates its configuration file on first launch at:
 
 ```text

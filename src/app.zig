@@ -291,16 +291,41 @@ pub const App = struct {
         return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
 
+    pub fn splitFocusedSession(self: *App, axis: pane_tree.Axis, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool) !pane_tree.PaneId {
+        if (self.activePane() == null) return error.NoFocusedPane;
+        const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
+        const random_source: std.Random.IoSource = .{ .io = self.io };
+        const background_seed = random_source.interface().int(u16);
+        const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
+        defer if (wsl_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        return self.insertFocusedSessionRecord(axis, shell, profile_title, command, working_directory, hold_on_exit, runtime, session_theme.background, background_seed);
+    }
+
     fn splitFocusedRecord(self: *App, axis: pane_tree.Axis, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16, working_directory: ?[]const u8) !pane_tree.PaneId {
+        const tab = self.activeTab() orelse return error.NoFocusedPane;
+        const source = tab.focusedPane() orelse return error.NoFocusedPane;
+        return self.insertFocusedSessionRecord(
+            axis,
+            source.session.shell,
+            source.session.metadata.profileTitle(),
+            source.session.command(),
+            working_directory orelse source.session.workingDirectory(),
+            source.session.hold_on_exit,
+            runtime,
+            background,
+            background_seed,
+        );
+    }
+
+    fn insertFocusedSessionRecord(self: *App, axis: pane_tree.Axis, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !pane_tree.PaneId {
         var unowned_runtime = runtime;
         errdefer if (unowned_runtime) |value| value.destroy();
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
-        const metadata = if (working_directory) |directory|
-            try LaunchMetadata.create(self.allocator, source.session.metadata.profileTitle(), source.session.command(), directory)
-        else
-            source.session.metadata.retain();
-        var session = Session{ .id = self.next_session_id, .shell = source.session.shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata, .hold_on_exit = source.session.hold_on_exit };
+        const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
+        var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata, .hold_on_exit = hold_on_exit };
         unowned_runtime = null;
         errdefer self.deinitSession(&session);
         const source_id = source.id;

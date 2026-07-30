@@ -40,7 +40,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
-    <Link><AdditionalDependencies>dwrite.lib;%(AdditionalDependencies)</AdditionalDependencies><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs><ProgramDatabaseFile>$(IntDir)Zigonaut.WinUI.Bridge.pdb</ProgramDatabaseFile></Link>
+    <Link><AdditionalDependencies>dwrite.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs><ProgramDatabaseFile>$(IntDir)Zigonaut.WinUI.Bridge.pdb</ProgramDatabaseFile></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
