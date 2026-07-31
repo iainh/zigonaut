@@ -280,19 +280,23 @@ struct Bridge {
         find_border = Border{};
         find_border.HorizontalAlignment(HorizontalAlignment::Right);
         find_border.VerticalAlignment(VerticalAlignment::Top);
-        find_border.Margin(Thickness{0, 8, 20, 0});
+        find_border.Margin(Thickness{0});
         find_border.Padding(Thickness{8});
-        find_border.CornerRadius(CornerRadius{8});
+        // This is an edge-attached command surface, not a floating card. Fluent
+        // leaves corners square where a surface meets the window edge and uses
+        // the large radius only on the exposed corner.
+        find_border.CornerRadius(CornerRadius{0, 0, 0, 8});
         find_border.Background(application.Resources().Lookup(box_value(L"CardBackgroundFillColorDefaultBrush"))
             .as<Microsoft::UI::Xaml::Media::Brush>());
         find_border.BorderBrush(application.Resources().Lookup(box_value(L"CardStrokeColorDefaultBrush"))
             .as<Microsoft::UI::Xaml::Media::Brush>());
-        find_border.BorderThickness(Thickness{1});
+        find_border.BorderThickness(Thickness{1, 0, 0, 1});
+        find_border.BackgroundSizing(BackgroundSizing::InnerBorderEdge);
         find_border.Visibility(Visibility::Collapsed);
         Canvas::SetZIndex(find_border, 100);
 
         auto find_layout = Grid{};
-        find_layout.ColumnSpacing(4);
+        find_layout.ColumnSpacing(8);
         auto find_text_column = ColumnDefinition{};
         find_text_column.Width(GridLength{240, GridUnitType::Pixel});
         find_layout.ColumnDefinitions().Append(find_text_column);
