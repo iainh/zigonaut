@@ -1,3 +1,6 @@
+//! Match slices must stay sorted by row and then by start column. This order
+//! lets row queries use binary search and forward-only cursors.
+
 const std = @import("std");
 
 pub const Match = struct { row: u32, start: u16, end: u16 };

@@ -27,6 +27,8 @@ pub fn environmentVariableAlloc(allocator: std.mem.Allocator, name: []const u8) 
 }
 
 pub fn applicationFilePathAlloc(allocator: std.mem.Allocator, relative_path: []const u16) ![:0]u16 {
+    // Use the Windows extended-path limit. MAX_PATH would reject valid
+    // installation paths before GetModuleFileNameW can return them.
     const buffer = try allocator.alloc(u16, 32_768);
     defer allocator.free(buffer);
     const path_length = c.GetModuleFileNameW(null, buffer.ptr, @intCast(buffer.len));

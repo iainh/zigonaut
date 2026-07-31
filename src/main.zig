@@ -29,6 +29,8 @@ const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
+// Serialize process creation while temporary inheritable handles are open.
+// Without this lock, an unrelated child can inherit a pipe or NUL handle.
 var process_spawn_mutex: @import("win32.zig").Mutex = .{};
 
 const LaunchKind = enum { new_tab, split_right, split_down };

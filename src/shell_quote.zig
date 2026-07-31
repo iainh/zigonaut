@@ -2,6 +2,8 @@ const std = @import("std");
 const Shell = @import("config.zig").Shell;
 
 pub fn pathAlloc(allocator: std.mem.Allocator, path: []const u8, shell: Shell) ![]u8 {
+    // Quote for the target shell because dropped paths can contain shell
+    // syntax. PowerShell, POSIX shells, and cmd use different quote rules.
     var normalized = std.ArrayList(u8).empty;
     defer normalized.deinit(allocator);
     if (shell == .wsl) {
@@ -41,6 +43,8 @@ test "quotes Windows-style paths for cmd and custom profiles" {
 }
 
 fn appendWslPath(allocator: std.mem.Allocator, output: *std.ArrayList(u8), path: []const u8) !void {
+    // Add a /mnt prefix only to drive paths. Other Windows path forms do not
+    // have a portable WSL mapping.
     if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and isSeparator(path[2])) {
         try output.appendSlice(allocator, "/mnt/");
         try output.append(allocator, std.ascii.toLower(path[0]));

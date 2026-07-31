@@ -39,7 +39,7 @@ pub fn main() !void {
         startup_length += try pty.read(startup_output[startup_length..][0..@min(available, startup_output.len - startup_length)]);
     }
 
-    // Consume the marker's trailing newline and any output already in flight.
+    // Drain asynchronous startup output so only a resize can fail the test.
     win.Sleep(250);
     try drainOutput(&pty);
 

@@ -122,7 +122,7 @@ const CellRenderer = struct {
     }
     pub fn endRow(_: *CellRenderer, _: u16) void {}
 
-    // Kitty images are currently supported by the hardware renderer only.
+    // Ignore Kitty images because GDI cannot composite their pixel textures.
     pub fn drawImage(_: *CellRenderer, _: Terminal.Image) void {}
 
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {

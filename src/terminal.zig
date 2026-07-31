@@ -9,6 +9,8 @@ const vt = @cImport({
 });
 const image_native = @import("win32.zig").c;
 
+// Bound both encoded and decoded images. Terminal output is untrusted and can
+// otherwise make the process retain an unbounded amount of image data.
 const kitty_image_limit: usize = 32 * 1024 * 1024;
 var decode_png_mutex: @import("win32.zig").Mutex = .{};
 var decode_png_installed = false;
@@ -317,6 +319,8 @@ pub const Terminal = struct {
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID, &image_id));
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL, &virtual));
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z, &z));
+                // Virtual placements are references only. Negative-z images
+                // must be behind text, but this renderer composites after text.
                 if (virtual or z < 0) continue;
                 _ = vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET, &x_offset);
                 _ = vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET, &y_offset);
@@ -664,6 +668,8 @@ pub const Terminal = struct {
         const disabled = false;
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_APC_MAX_BYTES_KITTY, &image_limit));
+        // Accept inline image data only. External transports can access host
+        // files or shared memory named by untrusted terminal output.
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &disabled));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE, null));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM, &disabled));
@@ -1199,6 +1205,8 @@ pub const Terminal = struct {
                     vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
                     &foreground,
                 ) != vt.GHOSTTY_SUCCESS) foreground = colors.foreground;
+                // Use bright ANSI colours for bold low-palette text. This
+                // preserves the conventional terminal bold-colour behaviour.
                 if (style.bold and style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_PALETTE and style.fg_color.value.palette < 8) {
                     foreground = colors.palette[style.fg_color.value.palette + 8];
                 }
@@ -1223,6 +1231,8 @@ pub const Terminal = struct {
                 ));
                 var codepoints: [16]u32 = undefined;
                 const count: usize = @intCast(@min(codepoint_count, codepoints.len));
+                // Hide an oversized cluster instead of truncating it. A prefix
+                // can form a different grapheme and display incorrect text.
                 if (count > 0 and codepoint_count <= codepoints.len) {
                     try check(vt.ghostty_render_state_row_cells_get(
                         self.row_cells,
@@ -1475,6 +1485,8 @@ pub const Terminal = struct {
                     @ptrCast(&codepoint_count),
                 ));
                 if (codepoint_count == 0) {
+                    // Do not write a space for a wide tail. Its leading cell
+                    // already represents the complete glyph.
                     if (occupancy == .narrow or occupancy == .wrap_spacer) {
                         try writer.writeByte(' ');
                     }
@@ -1575,6 +1587,8 @@ pub const Terminal = struct {
         } else {
             var options = std.mem.zeroes(vt.GhosttyTerminalSelectLineOptions);
             options.size = @sizeOf(vt.GhosttyTerminalSelectLineOptions);
+            // Let line selection cross prompt boundaries so it follows the
+            // visual lines that the user selected.
             options.semantic_prompt_boundary = false;
             options.ref = a;
             try check(vt.ghostty_terminal_select_line(self.terminal, &options, &first));

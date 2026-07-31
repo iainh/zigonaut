@@ -480,6 +480,8 @@ pub const View = struct {
             return false;
         };
         if (win.SetTimer(self.hwnd, synchronized_output_timer, @max(delay, 1), null) == 0) {
+            // End synchronized output if the watchdog cannot run. Otherwise,
+            // one terminal mode can suppress all later rendering.
             log.warn("unable to arm synchronized-output watchdog; releasing suppression", .{});
             runtime.forceEndSynchronizedOutput();
             return false;
@@ -1114,6 +1116,8 @@ pub const View = struct {
         const remainder = if (horizontal) &self.protocol_hwheel_remainder else &self.protocol_wheel_remainder;
         const accumulated = wheelAccumulation(remainder.*, delta);
         if (accumulated.steps == 0) {
+            // Keep partial detents for terminal mouse reports. For viewport
+            // scrolling, pass them to the pixel-based scroll accumulator.
             if (runtime.mouseTracking()) {
                 remainder.* = accumulated.remainder;
             } else {

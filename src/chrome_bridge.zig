@@ -37,6 +37,8 @@ pub fn commandFromInt(value: u32) ?Command {
     return std.enums.fromInt(Command, value);
 }
 
+// Keep these signatures identical to bridge.h. GetProcAddress cannot check the
+// calling convention, integer width, or pointer type at compile time.
 const Callback = *const fn (?*anyopaque, u32, u32) callconv(.c) void;
 pub const PaneEvent = win.zigonaut_pane_event;
 pub const LayoutNode = win.zigonaut_layout_node;
@@ -91,6 +93,8 @@ pub const Bridge = struct {
         const path = win32.applicationFilePathAlloc(std.heap.page_allocator, dll_name) catch return null;
         defer std.heap.page_allocator.free(path);
 
+        // Limit dependency searches to trusted directories. This prevents DLL
+        // preloading from the current directory or PATH.
         const module = win.LoadLibraryExW(
             path.ptr,
             null,
@@ -236,6 +240,7 @@ pub fn succeeded(result: win.HRESULT) bool {
 }
 
 fn stringLength(length: usize) ?u32 {
+    // The WinUI UTF-8 conversion API accepts a signed int length.
     if (length > std.math.maxInt(i32)) return null;
     return @intCast(length);
 }

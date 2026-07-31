@@ -5,6 +5,8 @@ pub const Match = struct {
     end: usize,
 };
 
+// Allow only known schemes because terminal text is untrusted. ShellExecuteW
+// can invoke an arbitrary registered protocol handler.
 const schemes = [_][]const u8{
     "http:", "https:",  "mailto:", "ftp:",  "file:",   "ssh:",    "git:",
     "tel:",  "magnet:", "ipfs:",   "ipns:", "gemini:", "gopher:", "news:",

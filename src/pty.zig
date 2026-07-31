@@ -18,6 +18,8 @@ const Conpty = struct {
     close: ConptyClose,
 
     fn load(allocator: std.mem.Allocator) !Conpty {
+        // Use the matching side-by-side ConPTY files. The system version can
+        // produce corrupt output when a resize changes rows and columns.
         const host_architecture = switch (builtin.cpu.arch) {
             .x86_64 => "x64",
             .aarch64 => "arm64",
@@ -155,6 +157,7 @@ pub const Pty = struct {
         ) == 0) return windowsError();
         _ = win.CloseHandle(process_info.hThread);
         if (conpty.release(pseudo_console) < 0) {
+            // Stop the child because a failed release leaves ownership unknown.
             _ = win.TerminateProcess(process_info.hProcess, 1);
             _ = win.CloseHandle(process_info.hProcess);
             return error.ReleasePseudoConsoleFailed;
@@ -207,6 +210,7 @@ pub const Pty = struct {
     }
 
     pub fn stopIo(self: *Pty, reader_thread: ?std.Thread) void {
+        // Stop I/O first so the reader can exit before console teardown.
         _ = win.CloseHandle(self.input);
         if (reader_thread) |thread| _ = win.CancelSynchronousIo(@ptrCast(thread.getHandle()));
         _ = win.CancelIoEx(self.output, null);
@@ -216,6 +220,7 @@ pub const Pty = struct {
     pub fn closeConsole(self: *Pty) void {
         self.conpty.close(self.pseudo_console);
 
+        // Give the shell two seconds to exit before forced termination.
         if (win.WaitForSingleObject(self.process, 2000) == win.WAIT_TIMEOUT) {
             _ = win.TerminateProcess(self.process, 1);
         }

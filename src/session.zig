@@ -183,6 +183,7 @@ pub const SessionRuntime = struct {
         try self.terminal.setClipboardWrite(clipboardWrite, self);
 
         self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
+            // Keep a terminal-only session so the pane can show the launch error.
             var message: [256]u8 = undefined;
             const text = std.fmt.bufPrint(
                 &message,

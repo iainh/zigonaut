@@ -293,6 +293,8 @@ fn directionScores(from: Rect, candidate: Rect, direction: Direction) ?Scores {
     const b2 = if (horizontal) cy2 else cx2;
     const overlaps = a1 < b2 and b1 < a2;
     const center_distance = if (a1 + a2 > b1 + b2) a1 + a2 - b1 - b2 else b1 + b2 - a1 - a2;
+    // Prefer a pane on the same cross-axis before a diagonally offset pane.
+    // This keeps directional focus movement consistent in an uneven layout.
     return .{ .primary = primary, .secondary = center_distance + (if (overlaps) 0 else @as(u64, 1) << 63) };
 }
 

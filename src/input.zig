@@ -48,6 +48,8 @@ pub const State = struct {
     }
 
     pub fn suppressCharacter(self: *State, code_unit: u16) bool {
+        // Windows sends a character message after its key message. Suppress
+        // that character when the key event already encoded the same input.
         const suppressed = self.suppressed_character == code_unit or self.encoded_character_key != null;
         self.suppressed_character = null;
         self.encoded_character_key = null;
@@ -238,6 +240,8 @@ fn unshiftedCodepoint(virtual_key: usize, lparam: isize) u32 {
     var keyboard_state: [256]u8 = @splat(0);
     var utf16: [4]u16 = undefined;
     const scan_code: win.UINT = @truncate(@as(usize, @bitCast(lparam)) >> 16);
+    // Use neutral modifier state to get the physical key's base character.
+    // Flag 4 prevents this query from changing the keyboard's dead-key state.
     const count = win.ToUnicodeEx(
         @intCast(virtual_key),
         scan_code,

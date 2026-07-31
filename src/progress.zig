@@ -118,6 +118,8 @@ fn parse(payload: []const u8) ?Update {
         const separator = std.mem.indexOfScalar(u8, content, ';') orelse return null;
         return .{ .notification = .{ .title = content[0..separator], .body = content[separator + 1 ..] } };
     }
+    // OSC 9 also contains ConEmu control messages. Exclude them so control
+    // payloads do not appear as user notifications.
     if (std.mem.startsWith(u8, payload, "9;") and !isConEmu(payload[2..])) {
         return .{ .notification = .{ .title = "", .body = payload[2..] } };
     }

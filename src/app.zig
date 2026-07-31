@@ -34,6 +34,8 @@ fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []
         std.mem.startsWith(u8, working_directory, "~/") or
         std.mem.startsWith(u8, working_directory, "/"))) return null;
 
+    // Give Linux paths to WSL with --cd. Win32 cannot use these paths as the
+    // current directory for CreateProcessW.
     var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, command);
