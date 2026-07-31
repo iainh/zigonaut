@@ -64,7 +64,7 @@ const AttachPane = *const fn (?*anyopaque, u64, win.HWND, ?*anyopaque, u32, u32,
 const DetachPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const FocusPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const UpdateLayout = *const fn (?*anyopaque, [*]const LayoutNode, u32, u64) callconv(.c) win.HRESULT;
-const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32, i32) callconv(.c) win.HRESULT;
+const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, [*]const u32, u32, i32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateProfiles = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32) callconv(.c) win.HRESULT;
 const UpdateScrollbar = *const fn (?*anyopaque, u64, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
@@ -191,13 +191,13 @@ pub const Bridge = struct {
         return succeeded(self.update_layout_fn(instance, nodes.ptr, count, focused));
     }
 
-    pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, active: ?usize) bool {
+    pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, colors: []const u32, active: ?usize, show_colors: bool) bool {
         const instance = self.instance orelse return false;
-        if (titles.len != title_lengths.len) return false;
+        if (titles.len != title_lengths.len or titles.len != colors.len) return false;
         const count = std.math.cast(u32, titles.len) orelse return false;
         const active_index = if (active) |index| std.math.cast(i32, index) orelse return false else -1;
         for (title_lengths) |length| if (length > std.math.maxInt(i32)) return false;
-        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, count, active_index));
+        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, colors.ptr, count, active_index, @intFromBool(show_colors)));
     }
 
     pub fn updateProfiles(self: *Bridge, names: []const [*]const u8, name_lengths: []const u32) bool {

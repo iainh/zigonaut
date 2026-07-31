@@ -85,6 +85,7 @@ const Application = struct {
     pane_events_head: usize = 0,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
+    chrome_colors: std.ArrayList(u32) = .empty,
 
     fn init(io: std.Io, loaded: config.Loaded, themes: theme.Catalog, launch_plan: LaunchPlan) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
@@ -110,6 +111,7 @@ const Application = struct {
         self.attached_panes.deinit(std.heap.page_allocator);
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
+        self.chrome_colors.deinit(std.heap.page_allocator);
         self.pane_events.deinit(std.heap.page_allocator);
         self.launch_plan.deinit();
         if (self.font != null) _ = win.DeleteObject(self.font);
@@ -778,8 +780,13 @@ fn syncChromeImpl(self: *Application) void {
         log.err("unable to allocate chrome title lengths: {}", .{err});
         return;
     };
+    self.chrome_colors.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+        log.err("unable to allocate chrome colors: {}", .{err});
+        return;
+    };
     self.chrome_titles.items.len = count;
     self.chrome_title_lengths.items.len = count;
+    self.chrome_colors.items.len = count;
     for (self.model.tabs.items, 0..) |*tab, index| {
         const title = tab.displayTitle();
         if (title.len > std.math.maxInt(i32)) {
@@ -789,8 +796,12 @@ fn syncChromeImpl(self: *Application) void {
         }
         self.chrome_titles.items[index] = title.ptr;
         self.chrome_title_lengths.items[index] = @intCast(title.len);
+        const background = if (tab.focusedPane()) |pane| pane.session.background else self.model.terminal_theme.background;
+        self.chrome_colors.items[index] = @as(u32, background.red) << 16 |
+            @as(u32, background.green) << 8 |
+            background.blue;
     }
-    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.model.activeTabIndex())) {
+    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
         return;
     }
@@ -1376,9 +1387,11 @@ fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
     const previous_dark_theme = self.dark_theme;
     self.dark_theme = config.useDarkTheme(self.settings, appsUseDarkTheme());
     self.high_contrast = highContrastEnabled();
-    if (self.terminal_ready and (terminal_theme_changed or previous_dark_theme != self.dark_theme)) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
+    const update_terminal_theme = self.terminal_ready and (terminal_theme_changed or previous_dark_theme != self.dark_theme);
+    if (update_terminal_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
+    if (update_terminal_theme) self.syncChrome();
     var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
     _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);

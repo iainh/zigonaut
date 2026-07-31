@@ -226,6 +226,7 @@ struct Bridge {
     uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
     bool high_contrast = false;
     bool dark_theme = false;
+    bool show_tab_colors = false;
     double rasterization_scale = 1;
     bool initial_size_applied = false;
     bool closed = false;
@@ -1268,6 +1269,7 @@ struct Bridge {
             std::vector<std::string> storage(tab_count, "terminal");
             std::vector<char const*> titles(tab_count);
             std::vector<uint32_t> lengths(tab_count);
+            std::vector<uint32_t> colors(tab_count, 0x202020);
             for (uint32_t index = 0; index < tab_count; ++index) {
                 storage[index] += std::to_string(index);
                 titles[index] = storage[index].data();
@@ -1275,7 +1277,7 @@ struct Bridge {
             }
             for (uint32_t index = 0; index < iterations; ++index) {
                 storage[0].back() = index % 2 ? 'A' : 'B';
-                update(titles.data(), lengths.data(), tab_count, 0);
+                update(titles.data(), lengths.data(), colors.data(), tab_count, 0, true);
             }
         } else if (operation == L"scrollbar") {
             iterations = 100000;
@@ -1412,6 +1414,20 @@ struct Bridge {
         if (app_title_bar.Padding() != padding) app_title_bar.Padding(padding);
     }
 
+    void updateTabColorVisibility() {
+        auto const visibility = show_tab_colors && !high_contrast ? Visibility::Visible : Visibility::Collapsed;
+        for (auto const& value : tabs.TabItems()) {
+            auto const item = value.try_as<TabViewItem>();
+            if (!item) continue;
+            auto const header = item.Header().try_as<StackPanel>();
+            if (!header || header.Children().Size() < 1) continue;
+            auto const marker = header.Children().GetAt(0).try_as<Border>();
+            if (!marker) continue;
+            marker.Visibility(visibility);
+            header.Spacing(visibility == Visibility::Visible ? 6 : 0);
+        }
+    }
+
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
         if (appearance_initialized && kind == backdrop_kind &&
             high_contrast == this->high_contrast && dark_theme == this->dark_theme) return;
@@ -1419,6 +1435,7 @@ struct Bridge {
         backdrop_kind = kind;
         this->high_contrast = high_contrast;
         this->dark_theme = dark_theme;
+        updateTabColorVisibility();
         auto const requested_theme = high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light;
         root.RequestedTheme(requested_theme);
         ZigonautSettings::setTheme(settings_dialog, high_contrast, dark_theme);
@@ -1535,7 +1552,7 @@ struct Bridge {
         if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
 
-    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t count, int32_t active) {
+    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint32_t count, int32_t active, bool show_colors) {
         updating = true;
         struct ResetUpdating {
             bool& value;
@@ -1543,25 +1560,64 @@ struct Bridge {
         } reset{updating};
         auto items = tabs.TabItems();
         auto changed = false;
+        show_tab_colors = show_colors;
+        auto const marker_visibility = show_colors && !high_contrast ? Visibility::Visible : Visibility::Collapsed;
         while (items.Size() > count) {
             items.RemoveAtEnd();
             changed = true;
         }
         for (uint32_t i = 0; i < count; ++i) {
             auto const title = to_hstring(std::string_view{titles[i] ? titles[i] : "", title_lengths[i]});
+            auto const color = Windows::UI::Color{
+                0xff,
+                static_cast<uint8_t>(colors[i] >> 16),
+                static_cast<uint8_t>(colors[i] >> 8),
+                static_cast<uint8_t>(colors[i]),
+            };
             if (i == items.Size()) {
                 auto item = TabViewItem{};
-                item.Header(box_value(title));
+                auto header = StackPanel{};
+                header.Orientation(Orientation::Horizontal);
+                header.Spacing(marker_visibility == Visibility::Visible ? 6 : 0);
+                auto marker = Border{};
+                marker.Width(9);
+                marker.Height(9);
+                marker.CornerRadius(CornerRadius{4.5});
+                marker.VerticalAlignment(VerticalAlignment::Center);
+                marker.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{color});
+                marker.Visibility(marker_visibility);
+                auto text = TextBlock{};
+                text.Text(title);
+                text.VerticalAlignment(VerticalAlignment::Center);
+                header.Children().Append(marker);
+                header.Children().Append(text);
+                item.Header(header);
                 item.Height(40);
                 item.IsClosable(true);
-                ToolTipService::SetToolTip(item, item.Header());
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
+                ToolTipService::SetToolTip(item, box_value(title));
                 items.Append(item);
                 changed = true;
             } else {
                 auto item = items.GetAt(i).as<TabViewItem>();
-                if (unbox_value<hstring>(item.Header()) != title) {
-                    item.Header(box_value(title));
-                    ToolTipService::SetToolTip(item, item.Header());
+                auto header = item.Header().as<StackPanel>();
+                auto marker = header.Children().GetAt(0).as<Border>();
+                auto text = header.Children().GetAt(1).as<TextBlock>();
+                auto brush = marker.Background().as<Microsoft::UI::Xaml::Media::SolidColorBrush>();
+                auto const previous_color = brush.Color();
+                if (text.Text() != title) {
+                    text.Text(title);
+                    Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
+                    ToolTipService::SetToolTip(item, box_value(title));
+                    changed = true;
+                }
+                if (previous_color.A != color.A || previous_color.R != color.R || previous_color.G != color.G || previous_color.B != color.B) {
+                    brush.Color(color);
+                    changed = true;
+                }
+                if (marker.Visibility() != marker_visibility) {
+                    marker.Visibility(marker_visibility);
+                    header.Spacing(marker_visibility == Visibility::Visible ? 6 : 0);
                     changed = true;
                 }
             }
@@ -1828,14 +1884,14 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_layout(void* value, const zigo
     try { bridge->updateLayout(nodes, count, focused_pane); return S_OK; } catch (...) { return reportCurrentException(L"update layout"); }
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, uint32_t count, int32_t active) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, uint32_t count, int32_t active, BOOL show_colors) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if (count && (!titles || !title_lengths)) return E_INVALIDARG;
+    if (count && (!titles || !title_lengths || !colors)) return E_INVALIDARG;
     for (uint32_t index = 0; index < count; ++index) {
         if (!validString(titles[index], title_lengths[index])) return E_INVALIDARG;
     }
-    try { bridge->update(titles, title_lengths, count, active); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
+    try { bridge->update(titles, title_lengths, colors, count, active, show_colors != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update_profiles(void* value, const char* const* names, const uint32_t* name_lengths, uint32_t count) noexcept {
