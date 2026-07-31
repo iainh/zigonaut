@@ -281,10 +281,7 @@ struct Bridge {
         new_tab_menu = MenuFlyout{};
         new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
         new_tab_button = SplitButton{};
-        new_tab_button.Width(64);
-        new_tab_button.Height(32);
         new_tab_button.Margin(Thickness{0, 0, 4, 0});
-        new_tab_button.Padding(Thickness{0});
         new_tab_button.VerticalAlignment(VerticalAlignment::Center);
         auto const new_tab_icon = FontIcon{};
         new_tab_icon.Glyph(L"\xE710");
