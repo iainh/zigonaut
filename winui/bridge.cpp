@@ -1582,7 +1582,7 @@ struct Bridge {
                 auto marker = Border{};
                 marker.Width(9);
                 marker.Height(9);
-                marker.CornerRadius(CornerRadius{4.5});
+                marker.CornerRadius(CornerRadius{4.5, 4.5, 4.5, 4.5});
                 marker.VerticalAlignment(VerticalAlignment::Center);
                 marker.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{color});
                 marker.Visibility(marker_visibility);

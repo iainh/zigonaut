@@ -796,10 +796,10 @@ fn syncChromeImpl(self: *Application) void {
         }
         self.chrome_titles.items[index] = title.ptr;
         self.chrome_title_lengths.items[index] = @intCast(title.len);
-        const background = if (tab.focusedPane()) |pane| pane.session.background else self.model.terminal_theme.background;
-        self.chrome_colors.items[index] = @as(u32, background.red) << 16 |
-            @as(u32, background.green) << 8 |
-            background.blue;
+        const color = if (tab.focusedPane()) |pane| theme.randomAccent(pane.session.background_seed) else self.model.terminal_theme.background;
+        self.chrome_colors.items[index] = @as(u32, color.red) << 16 |
+            @as(u32, color.green) << 8 |
+            color.blue;
     }
     if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);

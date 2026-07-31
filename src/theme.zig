@@ -7,6 +7,8 @@ pub const Color = struct {
     blue: u8,
 };
 
+pub const random_accent_count: u16 = 6 * 256;
+
 pub const Theme = struct {
     foreground: Color,
     background: Color,
@@ -40,12 +42,22 @@ pub fn parseColor(text: []const u8) ?Color {
 
 pub fn randomizedBackground(value: Theme, random: u16) Theme {
     var result = value;
-    const hue: u16 = random % (6 * 256);
+    const vivid = randomAccent(random);
+    result.background = .{
+        .red = tintChannel(value.background.red, vivid.red),
+        .green = tintChannel(value.background.green, vivid.green),
+        .blue = tintChannel(value.background.blue, vivid.blue),
+    };
+    return result;
+}
+
+pub fn randomAccent(random: u16) Color {
+    const hue: u16 = random % random_accent_count;
     const sector = hue / 256;
     const offset: u8 = @truncate(hue);
     const rising: u8 = 32 + @as(u8, @intCast((@as(u16, offset) * 223) / 255));
     const falling: u8 = 255 - @as(u8, @intCast((@as(u16, offset) * 223) / 255));
-    const vivid = switch (sector) {
+    return switch (sector) {
         0 => Color{ .red = 255, .green = rising, .blue = 32 },
         1 => Color{ .red = falling, .green = 255, .blue = 32 },
         2 => Color{ .red = 32, .green = 255, .blue = rising },
@@ -53,12 +65,6 @@ pub fn randomizedBackground(value: Theme, random: u16) Theme {
         4 => Color{ .red = rising, .green = 32, .blue = 255 },
         else => Color{ .red = 255, .green = 32, .blue = falling },
     };
-    result.background = .{
-        .red = tintChannel(value.background.red, vivid.red),
-        .green = tintChannel(value.background.green, vivid.green),
-        .blue = tintChannel(value.background.blue, vivid.blue),
-    };
-    return result;
 }
 
 fn tintChannel(background: u8, tint: u8) u8 {
@@ -226,6 +232,12 @@ fn relativeLuminance(color: Color) f64 {
 fn linearChannel(channel: u8) f64 {
     const value: f64 = @as(f64, @floatFromInt(channel)) / 255.0;
     return if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4);
+}
+
+test "random accents are vivid primary hues" {
+    try std.testing.expectEqual(hex(0xff2020), randomAccent(0));
+    try std.testing.expectEqual(hex(0x20ff20), randomAccent(512));
+    try std.testing.expectEqual(hex(0x2020ff), randomAccent(1024));
 }
 
 test "random backgrounds remain close to the theme background" {

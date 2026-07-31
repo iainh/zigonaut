@@ -196,9 +196,59 @@ pub const App = struct {
         self.refresh = refresh;
     }
 
-    pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
+    fn takeBackgroundSeed(self: *App) u16 {
         const random_source: std.Random.IoSource = .{ .io = self.io };
-        const background_seed = random_source.interface().int(u16);
+        const random = random_source.interface();
+        const accent_count: usize = theme.random_accent_count;
+        var used: [accent_count]bool = @splat(false);
+        var used_count: usize = 0;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| {
+            const hue = pane.session.background_seed % theme.random_accent_count;
+            if (!used[hue]) {
+                used[hue] = true;
+                used_count += 1;
+            }
+        };
+        if (used_count == 0 or used_count == accent_count) {
+            return random.uintLessThan(u16, theme.random_accent_count);
+        }
+
+        var largest_gap: u16 = 0;
+        var largest_gap_count: u16 = 0;
+        for (used, 0..) |occupied, start| {
+            if (!occupied) continue;
+            var gap: u16 = 1;
+            while (gap < theme.random_accent_count and !used[(start + gap) % accent_count]) gap += 1;
+            if (gap > largest_gap) {
+                largest_gap = gap;
+                largest_gap_count = 1;
+            } else if (gap == largest_gap) {
+                largest_gap_count += 1;
+            }
+        }
+
+        var selected_gap = random.uintLessThan(u16, largest_gap_count);
+        var gap_start: usize = 0;
+        for (used, 0..) |occupied, start| {
+            if (!occupied) continue;
+            var gap: u16 = 1;
+            while (gap < theme.random_accent_count and !used[(start + gap) % accent_count]) gap += 1;
+            if (gap != largest_gap) continue;
+            if (selected_gap == 0) {
+                gap_start = start;
+                break;
+            }
+            selected_gap -= 1;
+        }
+
+        const minimum_offset: u16 = @max(1, (largest_gap + 2) / 3);
+        const maximum_offset: u16 = @min(largest_gap - 1, (largest_gap * 2) / 3);
+        const offset = random.intRangeAtMost(u16, minimum_offset, maximum_offset);
+        return @intCast((gap_start + offset) % accent_count);
+    }
+
+    pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
+        const background_seed = self.takeBackgroundSeed();
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
@@ -281,8 +331,7 @@ pub const App = struct {
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
-        const random_source: std.Random.IoSource = .{ .io = self.io };
-        const background_seed = random_source.interface().int(u16);
+        const background_seed = self.takeBackgroundSeed();
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
@@ -296,8 +345,7 @@ pub const App = struct {
     pub fn splitFocusedSession(self: *App, axis: pane_tree.Axis, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool) !pane_tree.PaneId {
         if (self.activePane() == null) return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
-        const random_source: std.Random.IoSource = .{ .io = self.io };
-        const background_seed = random_source.interface().int(u16);
+        const background_seed = self.takeBackgroundSeed();
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
@@ -559,6 +607,21 @@ test "theme reload preserves each session background seed" {
     app.applySettings(theme.rasmus, true);
     try std.testing.expectEqual(first, app.tabs.items[0].panes.items[0].session.background);
     try std.testing.expectEqual(second, app.tabs.items[1].panes.items[0].session.background);
+}
+
+test "new background seeds use the middle of the largest hue gap" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background, 0);
+    _ = try app.addSessionRecord(.powershell, "second", "", "", null, theme.rasmus.background, theme.random_accent_count / 2);
+
+    const seed = app.takeBackgroundSeed();
+    const first_distance = @min(seed, theme.random_accent_count - seed);
+    const second_hue = theme.random_accent_count / 2;
+    const direct_second_distance = if (seed > second_hue) seed - second_hue else second_hue - seed;
+    const second_distance = @min(direct_second_distance, theme.random_accent_count - direct_second_distance);
+    try std.testing.expect(first_distance >= theme.random_accent_count / 6);
+    try std.testing.expect(second_distance >= theme.random_accent_count / 6);
 }
 
 test "split clones launch metadata, focuses new pane, and snapshots structure" {
