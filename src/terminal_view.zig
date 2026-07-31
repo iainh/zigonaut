@@ -35,6 +35,36 @@ const wheel_rows = 3;
 const minimum_columns = 10;
 const minimum_rows = 4;
 
+fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
+    const self: *View = @ptrCast(@alignCast(context orelse return 0));
+    const session = self.boundSession() orelse return 0;
+    const allocator = std.heap.page_allocator;
+    const utf8 = if (kind == win.ZIGONAUT_ACCESSIBLE_NAME)
+        std.fmt.allocPrint(allocator, "Terminal pane: {s}", .{session.displayTitle()}) catch return 0
+    else value: {
+        const runtime = session.runtime orelse return 0;
+        if (runtime.selectedTextAlloc(allocator) catch null) |selected| {
+            if (selected.len != 0) break :value selected;
+            allocator.free(selected);
+        }
+        const buffer = allocator.alloc(u8, @as(usize, self.columns) * @as(usize, self.rows) * 64 + self.rows) catch return 0;
+        const visible = runtime.writeViewportText(buffer) catch {
+            allocator.free(buffer);
+            return 0;
+        };
+        const copy = allocator.dupe(u8, visible) catch {
+            allocator.free(buffer);
+            return 0;
+        };
+        allocator.free(buffer);
+        break :value copy;
+    };
+    defer allocator.free(utf8);
+    const needed = std.unicode.calcUtf16LeLen(utf8) catch return 0;
+    if (output != null and capacity >= needed) _ = std.unicode.utf8ToUtf16Le(output[0..capacity], utf8) catch return 0;
+    return std.math.cast(u32, needed) orelse 0;
+}
+
 pub const View = struct {
     hwnd: win.HWND = null,
     render_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -325,6 +355,13 @@ pub const View = struct {
         self.ime_caret_x = 0;
         self.ime_caret_y = 0;
         self.ime_target_search = null;
+        self.invalidate();
+    }
+
+    pub fn beginSearch(self: *View) void {
+        const runtime = self.boundRuntime() orelse return;
+        runtime.searchBegin();
+        self.setRefreshInterval(search_refresh_interval_ms);
         self.invalidate();
     }
 
@@ -758,12 +795,8 @@ pub const View = struct {
             return true;
         }
         if (!released and control_shift and wparam == 'F') {
-            if (runtime) |r| {
-                r.searchBegin();
-                self.setRefreshInterval(search_refresh_interval_ms);
-            }
+            self.beginSearch();
             self.suppressed_search_character = 0x06;
-            self.invalidate();
             return true;
         }
         if (runtime) |r| if (r.searchEnabled()) {
@@ -1350,9 +1383,9 @@ const DirectWriteCellRenderer = struct {
         const foreground = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
-            rgb(0, 0, 0)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 1)
-            rgb(255, 255, 255)
+            normal_background
         else if (cell.selected)
             (if (self.view.copy_flash and !self.view.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
         else if (solid_cursor)
@@ -1362,9 +1395,9 @@ const DirectWriteCellRenderer = struct {
         const background = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (search_kind == 2)
-            rgb(255, 140, 0)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (search_kind == 1)
-            rgb(110, 90, 20)
+            normal_foreground
         else if (cell.selected)
             (if (self.view.copy_flash and !self.view.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
         else if (solid_cursor)
@@ -1453,6 +1486,15 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
     const view: ?*View = if (userdata == 0) null else @ptrFromInt(@as(usize, @intCast(userdata)));
 
     switch (message) {
+        win.ZIGONAUT_WM_ACCESSIBILITY_QUERY => {
+            if (view == null or lparam == 0) return 0;
+            const query: *win.zigonaut_accessibility_query = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (query.size != @sizeOf(win.zigonaut_accessibility_query) or
+                (query.kind != win.ZIGONAUT_ACCESSIBLE_NAME and query.kind != win.ZIGONAUT_ACCESSIBLE_VALUE) or
+                (query.output == null and query.capacity != 0)) return 0;
+            query.required = accessibilityText(view, query.kind, query.output, query.capacity);
+            return 1;
+        },
         render_message => {
             if (view) |current| {
                 current.render_pending.store(false, .release);

@@ -505,6 +505,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     self.pipeCommandOutput() catch |err| log.err("unable to process last command output: {}", .{err});
                     return 0;
                 },
+                .find => {
+                    if (self.activeView()) |view| view.beginSearch();
+                    return 0;
+                },
                 .close => {
                     self.detachPresentation() catch |err| {
                         log.err("unable to detach panes before close: {}", .{err});

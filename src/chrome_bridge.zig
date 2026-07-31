@@ -30,6 +30,7 @@ pub const Command = enum(u32) {
     close_pane = win.ZIGONAUT_CHROME_CLOSE_PANE,
     new_window = win.ZIGONAUT_CHROME_NEW_WINDOW,
     pipe_command_output = win.ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT,
+    find = win.ZIGONAUT_CHROME_FIND,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -255,6 +256,7 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.new_default, commandFromInt(win.ZIGONAUT_CHROME_NEW_DEFAULT).?);
     try std.testing.expectEqual(Command.new_window, commandFromInt(win.ZIGONAUT_CHROME_NEW_WINDOW).?);
     try std.testing.expectEqual(Command.pipe_command_output, commandFromInt(win.ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT).?);
+    try std.testing.expectEqual(Command.find, commandFromInt(win.ZIGONAUT_CHROME_FIND).?);
     try std.testing.expectEqual(Command.shutdown, commandFromInt(win.ZIGONAUT_CHROME_SHUTDOWN).?);
     try std.testing.expectEqual(Command.zoom_in, commandFromInt(win.ZIGONAUT_CHROME_ZOOM_IN).?);
     try std.testing.expect(commandFromInt(2) == null);

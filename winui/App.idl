@@ -1,3 +1,15 @@
 namespace ZigonautWinUIBridge
 {
+    runtimeclass TerminalControl : Microsoft.UI.Xaml.Controls.ContentControl
+    {
+        TerminalControl();
+        Boolean IsTerminal { get; };
+    }
+
+    runtimeclass TerminalAutomationPeer : Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer,
+        Microsoft.UI.Xaml.Automation.Provider.IValueProvider
+    {
+        TerminalAutomationPeer(TerminalControl owner);
+        String ProviderClassName { get; };
+    }
 }

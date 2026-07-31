@@ -143,9 +143,9 @@ const CellRenderer = struct {
         const foreground = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
-            rgb(0, 0, 0)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 1)
-            rgb(255, 255, 255)
+            normal_background
         else if (cell.selected)
             (if (self.context.copy_flash and !self.context.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
         else if (solid_cursor)
@@ -155,9 +155,9 @@ const CellRenderer = struct {
         const background = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (search_kind == 2)
-            rgb(255, 140, 0)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
         else if (search_kind == 1)
-            rgb(110, 90, 20)
+            normal_foreground
         else if (cell.selected)
             (if (self.context.copy_flash and !self.context.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
         else if (solid_cursor)

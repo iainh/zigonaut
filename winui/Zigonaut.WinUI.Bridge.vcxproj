@@ -45,6 +45,8 @@
   <ItemGroup>
     <ClInclude Include="App.xaml.h"><DependentUpon>App.xaml</DependentUpon></ClInclude>
     <ClInclude Include="bridge.h" />
+    <ClInclude Include="TerminalControl.h" />
+    <ClInclude Include="TerminalAutomationPeer.h" />
     <ClInclude Include="settings_dialog.h" />
     <ClInclude Include="tsf.h" />
     <ClInclude Include="pch.h" />
@@ -53,6 +55,7 @@
     <ClCompile Include="pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
     <ClCompile Include="App.xaml.cpp"><DependentUpon>App.xaml</DependentUpon></ClCompile>
     <ClCompile Include="bridge.cpp" />
+    <ClCompile Include="TerminalControl.cpp" />
     <ClCompile Include="settings_dialog.cpp" />
     <ClCompile Include="tsf.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />

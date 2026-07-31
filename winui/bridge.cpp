@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "App.xaml.h"
 #include "bridge.h"
+#include "TerminalControl.h"
 #include "settings_dialog.h"
 #include "tsf.h"
 #include <MddBootstrap.h>
@@ -122,7 +123,7 @@ struct Bridge {
     struct PaneHost {
         uint64_t pane_id{}; HWND window{}; com_ptr<IDXGISwapChain> swap_chain;
         uint32_t cell_width{}, cell_height{}, minimum_width{}, minimum_height{};
-        Border frame{nullptr}; Grid grid{nullptr}; SwapChainPanel panel{nullptr}; ContentControl input{nullptr};
+        Border frame{nullptr}; Grid grid{nullptr}; SwapChainPanel panel{nullptr}; ZigonautWinUIBridge::TerminalControl input{nullptr}; Border focus_indicator{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
         Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
         RECT bounds{-1,-1,-1,-1}; std::wstring translated_characters;
@@ -150,7 +151,10 @@ struct Bridge {
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragStarted_revoker started{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragDelta_revoker delta{};
         Microsoft::UI::Xaml::Controls::Primitives::Thumb::DragCompleted_revoker completed{};
-        double drag_origin{}, drag_change{};
+        UIElement::KeyDown_revoker key_down{};
+        UIElement::GotFocus_revoker focus{}; UIElement::LostFocus_revoker blur{};
+        UIElement::PointerEntered_revoker entered{}; UIElement::PointerExited_revoker exited{};
+        double drag_origin{}, drag_change{}; bool dragging{};
     };
     std::unordered_map<uint64_t, std::unique_ptr<PaneHost>> pane_hosts;
     winrt::com_ptr<TsfService> tsf;
@@ -163,8 +167,7 @@ struct Bridge {
     Grid content_root{nullptr};
     TabView tabs{nullptr};
     StackPanel new_tab_controls{nullptr};
-    Button new_tab_button{nullptr};
-    Button profile_button{nullptr};
+    SplitButton new_tab_button{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
@@ -183,6 +186,7 @@ struct Bridge {
     MenuFlyout new_tab_menu{nullptr};
     std::vector<MenuFlyoutItem> profile_items;
     std::vector<MenuFlyoutItem::Click_revoker> profile_revokers;
+    std::vector<MenuFlyoutItem::Click_revoker> app_command_revokers;
     std::vector<Microsoft::UI::Xaml::Input::KeyboardAccelerator> accelerators;
     std::vector<Microsoft::UI::Xaml::Input::KeyboardAccelerator::Invoked_revoker> accelerator_revokers;
     Window::Closed_revoker window_closed_revoker{};
@@ -190,7 +194,7 @@ struct Bridge {
     XamlRoot::Changed_revoker xaml_root_changed_revoker{};
     FrameworkElement::LayoutUpdated_revoker layout_revoker{};
     FrameworkElement::Loaded_revoker terminal_loaded_revoker{};
-    Button::Click_revoker new_tab_revoker{};
+    SplitButton::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
     MenuFlyoutItem::Click_revoker new_tab_item_revoker{};
@@ -274,30 +278,27 @@ struct Bridge {
         new_tab_controls = StackPanel{};
         new_tab_controls.Orientation(Orientation::Horizontal);
         new_tab_controls.VerticalAlignment(VerticalAlignment::Center);
-        new_tab_button = Button{};
-        new_tab_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
+        new_tab_menu = MenuFlyout{};
+        new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+        new_tab_button = SplitButton{};
+        new_tab_button.Width(64);
+        new_tab_button.Height(32);
+        new_tab_button.Margin(Thickness{0, 0, 4, 0});
+        new_tab_button.Padding(Thickness{0});
         new_tab_button.VerticalAlignment(VerticalAlignment::Center);
         auto const new_tab_icon = FontIcon{};
         new_tab_icon.Glyph(L"\xE710");
-        new_tab_icon.FontSize(12);
+        new_tab_icon.FontSize(16);
         new_tab_button.Content(new_tab_icon);
+        new_tab_button.Flyout(new_tab_menu);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(new_tab_button, L"New tab");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(new_tab_button, L"Open the default profile, or choose another profile");
+        ToolTipService::SetToolTip(new_tab_button, box_value(L"New tab (Ctrl+Shift+T)"));
         new_tab_revoker = new_tab_button.Click(auto_revoke, [this](auto&&, auto&&) {
             notify(ZIGONAUT_CHROME_NEW_DEFAULT, 0);
             focusTerminal();
         });
-        profile_button = Button{};
-        profile_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
-        profile_button.VerticalAlignment(VerticalAlignment::Center);
-        auto const profile_icon = FontIcon{};
-        profile_icon.Glyph(L"\xE70D");
-        profile_icon.FontSize(12);
-        profile_button.Content(profile_icon);
-        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(profile_button, L"New tab profile");
-        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(profile_button, L"Choose a profile for the new tab");
-        ToolTipService::SetToolTip(profile_button, box_value(L"Choose a profile for the new tab"));
         new_tab_controls.Children().Append(new_tab_button);
-        new_tab_controls.Children().Append(profile_button);
         tabs.TabStripFooter(new_tab_controls);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
@@ -321,7 +322,7 @@ struct Bridge {
         menu_button.Margin(Thickness{4, 0, 0, 8});
         auto const menu_icon = FontIcon{};
         menu_icon.Glyph(L"\xE700");
-        menu_icon.FontSize(12);
+        menu_icon.FontSize(16);
         menu_button.Content(menu_icon);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(menu_button, L"Application menu");
         ToolTipService::SetToolTip(menu_button, box_value(L"Application menu"));
@@ -342,6 +343,40 @@ struct Bridge {
         new_window_item.AccessKey(L"N");
         new_window_item.KeyboardAcceleratorTextOverride(L"Ctrl+Shift+N");
         new_window_revoker = new_window_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_NEW_WINDOW, 0); });
+        auto pane_item = MenuFlyoutSubItem{};
+        pane_item.Text(L"Terminal");
+        auto add_pane_command = [this, pane_item](std::wstring_view text, std::wstring_view shortcut, zigonaut_chrome_command_id command) {
+            auto item = MenuFlyoutItem{};
+            item.Text(text);
+            item.KeyboardAcceleratorTextOverride(shortcut);
+            app_command_revokers.emplace_back(item.Click(auto_revoke, [this, command](auto&&, auto&&) {
+                notify(command, 0);
+                focusTerminal();
+            }));
+            pane_item.Items().Append(item);
+        };
+        add_pane_command(L"Find", L"Ctrl+Shift+F", ZIGONAUT_CHROME_FIND);
+        pane_item.Items().Append(MenuFlyoutSeparator{});
+        add_pane_command(L"Split right", L"Ctrl+Shift+O", ZIGONAUT_CHROME_SPLIT_RIGHT);
+        add_pane_command(L"Split down", L"Ctrl+Shift+E", ZIGONAUT_CHROME_SPLIT_DOWN);
+        add_pane_command(L"Close pane", L"Ctrl+Shift+W", ZIGONAUT_CHROME_CLOSE_PANE);
+        auto focus_item = MenuFlyoutSubItem{};
+        focus_item.Text(L"Focus pane");
+        auto add_focus_command = [this, focus_item](std::wstring_view text, std::wstring_view shortcut, zigonaut_chrome_command_id command) {
+            auto item = MenuFlyoutItem{};
+            item.Text(text);
+            item.KeyboardAcceleratorTextOverride(shortcut);
+            app_command_revokers.emplace_back(item.Click(auto_revoke, [this, command](auto&&, auto&&) {
+                notify(command, 0);
+                focusTerminal();
+            }));
+            focus_item.Items().Append(item);
+        };
+        add_focus_command(L"Left", L"Ctrl+Alt+Left", ZIGONAUT_CHROME_FOCUS_LEFT);
+        add_focus_command(L"Right", L"Ctrl+Alt+Right", ZIGONAUT_CHROME_FOCUS_RIGHT);
+        add_focus_command(L"Up", L"Ctrl+Alt+Up", ZIGONAUT_CHROME_FOCUS_UP);
+        add_focus_command(L"Down", L"Ctrl+Alt+Down", ZIGONAUT_CHROME_FOCUS_DOWN);
+        pane_item.Items().Append(focus_item);
         view_item = MenuFlyoutSubItem{};
         view_item.Text(L"View");
         view_item.AccessKey(L"V");
@@ -378,6 +413,7 @@ struct Bridge {
         app_menu.Items().Append(new_tab_item);
         app_menu.Items().Append(new_window_item);
         app_menu.Items().Append(MenuFlyoutSeparator{});
+        app_menu.Items().Append(pane_item);
         app_menu.Items().Append(view_item);
         app_menu.Items().Append(MenuFlyoutSeparator{});
         app_menu.Items().Append(open_settings_item);
@@ -385,10 +421,6 @@ struct Bridge {
         app_menu.Items().Append(about_item);
         app_menu.Items().Append(quit_item);
         menu_button.Flyout(app_menu);
-
-        new_tab_menu = MenuFlyout{};
-        new_tab_menu.Placement(Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-        profile_button.Flyout(new_tab_menu);
 
         tabs.HorizontalAlignment(HorizontalAlignment::Left);
         tabs.Margin(Thickness{40, 0, 0, 0});
@@ -424,6 +456,7 @@ struct Bridge {
         });
         addAccelerator(Windows::System::VirtualKey::T, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_DEFAULT);
         addAccelerator(Windows::System::VirtualKey::N, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_NEW_WINDOW);
+        addAccelerator(Windows::System::VirtualKey::F, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_FIND);
         addAccelerator(Windows::System::VirtualKey::W, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_CLOSE_PANE);
         addAccelerator(Windows::System::VirtualKey::O, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_RIGHT);
         addAccelerator(Windows::System::VirtualKey::E, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SPLIT_DOWN);
@@ -560,15 +593,31 @@ struct Bridge {
     void setFocusedPane(uint64_t id) {
         if (active_pane == id) return;
         active_pane = id;
+        updatePaneFocusIndicators();
         paneEvent(ZIGONAUT_PANE_EVENT_FOCUS, id, 0);
+    }
+
+    void updatePaneFocusIndicators() {
+        auto const show = pane_hosts.size() > 1;
+        auto const accent = application.Resources().Lookup(box_value(L"AccentFillColorDefaultBrush"))
+            .as<Microsoft::UI::Xaml::Media::Brush>();
+        for (auto& [id, pane] : pane_hosts) {
+            pane->focus_indicator.Background(show && id == active_pane ? accent : nullptr);
+        }
     }
 
     std::unique_ptr<PaneHost> makePane(uint64_t id, Attachment const& attachment) {
         auto owned = std::make_unique<PaneHost>(); auto* p = owned.get(); p->pane_id=id; p->window=attachment.window; p->swap_chain=attachment.swap_chain; p->cell_width=attachment.cell_width; p->cell_height=attachment.cell_height; p->minimum_width=attachment.minimum_width; p->minimum_height=attachment.minimum_height;
         p->frame=Border{}; p->frame.Style(application.Resources().Lookup(box_value(L"ZigonautTerminalFrameStyle")).as<Style>()); p->grid=Grid{};
-        p->panel=SwapChainPanel{}; p->input=ContentControl{}; p->input.Opacity(0); p->input.IsTabStop(true); p->input.IsHitTestVisible(false);
+        p->panel=SwapChainPanel{}; p->input=make<ZigonautWinUIBridge::implementation::TerminalControl>();
+        get_self<ZigonautWinUIBridge::implementation::TerminalControl>(p->input)->Window(p->window);
+        p->input.Opacity(0); p->input.IsTabStop(true); p->input.IsHitTestVisible(false);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+            p->input, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Control);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetAutomationId(p->input, L"ZigonautTerminalPane");
+        p->focus_indicator=Border{}; p->focus_indicator.Height(2); p->focus_indicator.VerticalAlignment(VerticalAlignment::Top); p->focus_indicator.IsHitTestVisible(false);
         p->scrollbar=Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{}; p->scrollbar.Orientation(Orientation::Vertical); p->scrollbar.HorizontalAlignment(HorizontalAlignment::Right); p->scrollbar.Width(12); p->scrollbar.Opacity(0); p->scrollbar.Visibility(Visibility::Collapsed);
-        p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->frame.Child(p->grid);
+        p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->grid.Children().Append(p->focus_indicator); p->frame.Child(p->grid);
         check_hresult(p->panel.as<ISwapChainPanelNative>()->SetSwapChain(p->swap_chain.get()));
         p->tsf_provider.hwnd = p->window;
         p->tsf_provider.commit = [this, id](std::wstring_view value) { imeEvent(ZIGONAUT_PANE_EVENT_IME_COMMIT, id, value); };
@@ -741,6 +790,12 @@ struct Bridge {
                         ? Microsoft::UI::Input::InputSystemCursorShape::SizeWestEast
                         : Microsoft::UI::Input::InputSystemCursorShape::SizeNorthSouth);
                 h->thumb.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+                h->thumb.IsTabStop(true);
+                h->thumb.UseSystemFocusVisuals(true);
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(h->thumb,
+                    n.axis == ZIGONAUT_AXIS_LEFT_RIGHT ? L"Resize panes horizontally" : L"Resize panes vertically");
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(h->thumb,
+                    n.axis == ZIGONAUT_AXIS_LEFT_RIGHT ? L"Use Left and Right arrow keys to resize panes" : L"Use Up and Down arrow keys to resize panes");
                 h->loaded = h->thumb.Loaded(auto_revoke, [h](auto&&, auto&&) {
                     h->thumb.as<IUIElementProtected>().ProtectedCursor(h->cursor);
                     h->loaded.revoke();
@@ -750,7 +805,64 @@ struct Bridge {
                     .Lookup(box_value(L"DividerStrokeColorDefaultBrush"))
                     .as<Microsoft::UI::Xaml::Media::Brush>());
                 if(n.axis==ZIGONAUT_AXIS_LEFT_RIGHT){h->column_a=ColumnDefinition{};auto gap=ColumnDefinition{};gap.Width({5,GridUnitType::Pixel});h->column_b=ColumnDefinition{};h->grid.ColumnDefinitions().Append(h->column_a);h->grid.ColumnDefinitions().Append(gap);h->grid.ColumnDefinitions().Append(h->column_b);h->thumb.Width(16);h->thumb.HorizontalAlignment(HorizontalAlignment::Center);}else{h->row_a=RowDefinition{};auto gap=RowDefinition{};gap.Height({5,GridUnitType::Pixel});h->row_b=RowDefinition{};h->grid.RowDefinitions().Append(h->row_a);h->grid.RowDefinitions().Append(gap);h->grid.RowDefinitions().Append(h->row_b);h->thumb.Height(16);h->thumb.VerticalAlignment(VerticalAlignment::Center);}
-                h->started = h->thumb.DragStarted(auto_revoke, [h](auto&&, auto&&) {
+                auto set_divider_active = [this, h](bool active) {
+                    h->divider.Background(application.Resources().Lookup(box_value(
+                        active ? L"AccentFillColorDefaultBrush" : L"DividerStrokeColorDefaultBrush"))
+                        .as<Microsoft::UI::Xaml::Media::Brush>());
+                };
+                h->entered = h->thumb.PointerEntered(auto_revoke, [set_divider_active](auto&&, auto&&) { set_divider_active(true); });
+                h->exited = h->thumb.PointerExited(auto_revoke, [h, set_divider_active](auto&&, auto&&) {
+                    if (!h->dragging && h->thumb.FocusState() == FocusState::Unfocused) set_divider_active(false);
+                });
+                h->focus = h->thumb.GotFocus(auto_revoke, [set_divider_active](auto&&, auto&&) { set_divider_active(true); });
+                h->blur = h->thumb.LostFocus(auto_revoke, [h, set_divider_active](auto&&, auto&&) {
+                    if (!h->dragging) set_divider_active(false);
+                });
+                h->key_down = h->thumb.KeyDown(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+                    auto const key = args.Key();
+                    auto direction = 0;
+                    if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
+                        if (key == Windows::System::VirtualKey::Left) direction = -1;
+                        if (key == Windows::System::VirtualKey::Right) direction = 1;
+                    } else {
+                        if (key == Windows::System::VirtualKey::Up) direction = -1;
+                        if (key == Windows::System::VirtualKey::Down) direction = 1;
+                    }
+                    if (!direction) return;
+                    args.Handled(true);
+                    auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->grid.ActualWidth() - 5
+                        : h->grid.ActualHeight() - 5;
+                    auto const physical_increment = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT ? h->cell_width : h->cell_height;
+                    auto const increment = physical_increment / rasterization_scale;
+                    if (!std::isfinite(total) || total <= 0 || !std::isfinite(increment) || increment <= 0) return;
+                    auto minimum_first = h->minimum_first;
+                    auto minimum_second = h->minimum_second;
+                    auto const required = minimum_first + minimum_second;
+                    if (required > total) {
+                        auto const scale = total / required;
+                        minimum_first *= scale;
+                        minimum_second *= scale;
+                    }
+                    auto const current = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
+                        ? h->column_a.ActualWidth()
+                        : h->row_a.ActualHeight();
+                    auto const next = std::clamp(current + direction * increment, minimum_first, total - minimum_second);
+                    if (!std::isfinite(current) || std::abs(next - current) < 0.5) return;
+                    h->committed = static_cast<uint16_t>(std::clamp(
+                        std::lround(next / total * 65535), 1l, 65534l));
+                    if (h->axis == ZIGONAUT_AXIS_LEFT_RIGHT) {
+                        h->column_a.Width({next, GridUnitType::Star});
+                        h->column_b.Width({total - next, GridUnitType::Star});
+                    } else {
+                        h->row_a.Height({next, GridUnitType::Star});
+                        h->row_b.Height({total - next, GridUnitType::Star});
+                    }
+                    paneEvent(ZIGONAUT_PANE_EVENT_COMMITTED_RATIO, h->id, h->committed);
+                });
+                h->started = h->thumb.DragStarted(auto_revoke, [h, set_divider_active](auto&&, auto&&) {
+                    h->dragging = true;
+                    set_divider_active(true);
                     h->drag_origin = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                         ? h->column_a.ActualWidth()
                         : h->row_a.ActualHeight();
@@ -796,7 +908,9 @@ struct Bridge {
                         h->row_b.Height({total - next, GridUnitType::Star});
                     }
                 });
-                h->completed = h->thumb.DragCompleted(auto_revoke, [this, h](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
+                h->completed = h->thumb.DragCompleted(auto_revoke, [this, h, set_divider_active](auto&&, Microsoft::UI::Xaml::Controls::Primitives::DragCompletedEventArgs const& args) {
+                    h->dragging = false;
+                    if (h->thumb.FocusState() == FocusState::Unfocused) set_divider_active(false);
                     h->drag_change = 0;
                     auto const total = h->axis == ZIGONAUT_AXIS_LEFT_RIGHT
                         ? h->grid.ActualWidth() - 5
@@ -881,7 +995,7 @@ struct Bridge {
             h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(h->divider);h->grid.Children().Append(h->thumb);
             return h->grid;
         };
-        content_root.Children().Append(build(0)); active_pane=focused; root.UpdateLayout(); layoutTerminal();
+        content_root.Children().Append(build(0)); active_pane=focused; updatePaneFocusIndicators(); root.UpdateLayout(); layoutTerminal();
         if (auto requested=pane_hosts.find(focused); requested!=pane_hosts.end()) requested->second->input.Focus(FocusState::Programmatic);
     }
 
@@ -1047,8 +1161,8 @@ struct Bridge {
             bitmap.UriSource(Windows::Foundation::Uri{hstring{L"file:///" + path}});
             auto image = Image{};
             image.Source(bitmap);
-            image.Width(192);
-            image.Height(192);
+            image.Width(96);
+            image.Height(96);
             image.Stretch(Microsoft::UI::Xaml::Media::Stretch::Uniform);
             image.HorizontalAlignment(HorizontalAlignment::Center);
             content.Children().Append(image);
@@ -1063,11 +1177,13 @@ struct Bridge {
 
         auto version = TextBlock{};
         version.Text(hstring{L"Version " + std::wstring{app_version}});
+        version.Style(application.Resources().Lookup(box_value(L"BodyTextBlockStyle")).as<Style>());
         version.HorizontalAlignment(HorizontalAlignment::Stretch);
         version.TextAlignment(TextAlignment::Center);
         content.Children().Append(version);
 
         auto hash = TextBlock{};
+        hash.Style(application.Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
         hash.HorizontalAlignment(HorizontalAlignment::Stretch);
         hash.TextAlignment(TextAlignment::Center);
         auto hash_label = Microsoft::UI::Xaml::Documents::Run{};
@@ -1346,6 +1462,8 @@ struct Bridge {
         if (about_dialog) cleanup(L"hide About dialog", [&] { about_dialog.Hide(); }, result);
         for (auto& revoker : profile_revokers) revoker.revoke();
         profile_revokers.clear();
+        for (auto& revoker : app_command_revokers) revoker.revoke();
+        app_command_revokers.clear();
         new_tab_item_revoker.revoke();
         new_window_revoker.revoke();
         increase_font_size_revoker.revoke();
@@ -1365,7 +1483,7 @@ struct Bridge {
         window_closed_revoker.revoke();
         window_activated_revoker.revoke();
         handlers_detached = true;
-        cleanup(L"detach new-tab menu", [&] { profile_button.Flyout(nullptr); }, result);
+        cleanup(L"detach new-tab menu", [&] { new_tab_button.Flyout(nullptr); }, result);
         cleanup(L"clear new-tab menu", [&] { if (new_tab_menu) new_tab_menu.Items().Clear(); }, result);
         profile_items.clear();
         new_tab_menu = nullptr;
@@ -1384,7 +1502,6 @@ struct Bridge {
         cleanup(L"detach new-tab controls", [&] { tabs.TabStripFooter(nullptr); }, result);
         cleanup(L"clear new-tab controls", [&] { new_tab_controls.Children().Clear(); }, result);
         new_tab_button = nullptr;
-        profile_button = nullptr;
         new_tab_controls = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);

@@ -35,6 +35,7 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_CLOSE_PANE = 27,
     ZIGONAUT_CHROME_NEW_WINDOW = 28,
     ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT = 29,
+    ZIGONAUT_CHROME_FIND = 30,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);
@@ -63,6 +64,21 @@ typedef struct zigonaut_pane_event {
     uint32_t attributes;
 } zigonaut_pane_event;
 typedef void (__cdecl *zigonaut_pane_event_callback)(void* context, const zigonaut_pane_event* event);
+
+/* Private, synchronous child-window query used by the XAML automation peer.
+   The buffer is borrowed for SendMessageW's duration and is never retained. */
+#define ZIGONAUT_WM_ACCESSIBILITY_QUERY (WM_APP + 31)
+typedef enum zigonaut_accessibility_query_kind {
+    ZIGONAUT_ACCESSIBLE_NAME = 1,
+    ZIGONAUT_ACCESSIBLE_VALUE = 2,
+} zigonaut_accessibility_query_kind;
+typedef struct zigonaut_accessibility_query {
+    uint32_t size;
+    uint32_t kind;
+    uint16_t* output;
+    uint32_t capacity;
+    uint32_t required;
+} zigonaut_accessibility_query;
 
 typedef enum zigonaut_layout_kind { ZIGONAUT_LAYOUT_LEAF = 1, ZIGONAUT_LAYOUT_SPLIT = 2 } zigonaut_layout_kind;
 typedef enum zigonaut_split_axis { ZIGONAUT_AXIS_LEFT_RIGHT = 1, ZIGONAUT_AXIS_TOP_BOTTOM = 2 } zigonaut_split_axis;

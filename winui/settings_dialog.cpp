@@ -4,10 +4,12 @@
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
+#include <winrt/Microsoft.UI.Xaml.Media.Animation.h>
 #include <winrt/Microsoft.UI.Windowing.h>
 #include <winrt/Microsoft.Windows.Storage.Pickers.h>
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Text.h>
 #include <dwrite_1.h>
 #include <algorithm>
@@ -231,8 +233,7 @@ Border card(std::wstring_view title, std::wstring_view description, UIElement co
         auto detail = TextBlock{};
         detail.Text(description);
         detail.TextWrapping(TextWrapping::Wrap);
-        detail.Opacity(0.72);
-        detail.FontSize(12);
+        detail.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
         text.Children().Append(detail);
     }
 
@@ -494,6 +495,12 @@ bool validColor(std::string const& color) {
     return color.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos;
 }
 
+struct FieldValidationError : std::runtime_error {
+    FieldValidationError(char const* message, Control const& responsible)
+        : std::runtime_error(message), control(responsible) {}
+    Control control;
+};
+
 } // namespace
 
 struct Dialog : std::enable_shared_from_this<Dialog> {
@@ -501,6 +508,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     Grid root{nullptr};
     NavigationView navigation{nullptr};
     InfoBar error{nullptr};
+    std::vector<TextBlock> save_status;
     std::vector<ScrollViewer> pages;
     std::filesystem::path path;
     std::function<void()> saved;
@@ -592,6 +600,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         navigation.IsSettingsVisible(false);
         navigation.OpenPaneLength(220);
         navigation.PaneTitle(L"Settings");
+        navigation.ContentTransitions().Append(Microsoft::UI::Xaml::Media::Animation::NavigationThemeTransition{});
         Grid::SetRow(navigation, 1);
 
         auto add_navigation = [this](std::wstring_view title, wchar_t const* glyph) {
@@ -640,13 +649,15 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto detail = TextBlock{};
         detail.Text(description);
         detail.TextWrapping(TextWrapping::Wrap);
-        detail.Opacity(0.72);
+        detail.Style(Application::Current().Resources().Lookup(box_value(L"BodyTextBlockStyle")).as<Style>());
         panel.Children().Append(detail);
         auto automatic = TextBlock{};
-        automatic.Text(L"Changes are saved and applied automatically.");
+        automatic.Text(L"Saved automatically");
         automatic.TextWrapping(TextWrapping::Wrap);
-        automatic.Opacity(0.72);
-        automatic.FontSize(12);
+        automatic.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(automatic, L"Settings save status");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(automatic, L"Changes are saved and applied automatically.");
+        save_status.push_back(automatic);
         panel.Children().Append(automatic);
         auto card_stack = StackPanel{};
         card_stack.Spacing(4);
@@ -668,7 +679,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         color_scheme = combo("", {L"Use system setting", L"Light", L"Dark"});
         color_scheme.SelectedIndex(scheme == "light" ? 1 : scheme == "dark" ? 2 : 0);
         auto const material = value(values, "backdrop", "mica");
-        backdrop = combo("", {L"None", L"Mica", L"MicaAlt", L"Acrylic"});
+        backdrop = combo("", {L"None", L"Mica (recommended)", L"Mica Alt", L"Acrylic"});
         backdrop.SelectedIndex(material == "none" ? 0 : material == "mica_alt" ? 2 : material == "acrylic" ? 3 : 1);
         dark_theme = themeCombo(value(values, "dark_theme", value(values, "theme", "fluent-dark")));
         light_theme = themeCombo(value(values, "light_theme", "fluent-light"));
@@ -727,7 +738,46 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         for (size_t index = 0; index < 19; ++index) {
             auto const key = index == 0 ? "foreground" : index == 1 ? "background" : index == 2 ? "cursor" : "ansi" + std::to_string(index - 3);
             auto editor = textBox(colorOrEmpty(values, key), L"Use theme default (#RRGGBB)");
-            appendLabeled(palette, names[index], editor);
+            auto row = Grid{};
+            auto editor_column = ColumnDefinition{};
+            editor_column.Width(GridLength{1, GridUnitType::Star});
+            row.ColumnDefinitions().Append(editor_column);
+            auto preview_column = ColumnDefinition{};
+            preview_column.Width(GridLength{1, GridUnitType::Auto});
+            row.ColumnDefinitions().Append(preview_column);
+            row.ColumnSpacing(8);
+            row.Children().Append(editor);
+            auto preview = Border{};
+            preview.Width(32);
+            preview.Height(32);
+            preview.CornerRadius(CornerRadius{4});
+            preview.BorderThickness(Thickness{1});
+            preview.BorderBrush(Application::Current().Resources().Lookup(box_value(L"ControlStrokeColorDefaultBrush"))
+                .as<Microsoft::UI::Xaml::Media::Brush>());
+            Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+                preview, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Raw);
+            Grid::SetColumn(preview, 1);
+            row.Children().Append(preview);
+            auto update_preview = [editor, preview] {
+                auto const value = trim(to_string(editor.Text()));
+                if (!validColor(value) || value.empty()) {
+                    preview.Background(nullptr);
+                    ToolTipService::SetToolTip(preview, box_value(value.empty() ? L"Theme default" : L"Invalid color"));
+                    return;
+                }
+                auto component = [&value](size_t offset) {
+                    return static_cast<uint8_t>(std::stoul(value.substr(offset, 2), nullptr, 16));
+                };
+                preview.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{
+                    Windows::UI::Color{255, component(1), component(3), component(5)}});
+                ToolTipService::SetToolTip(preview, box_value(editor.Text()));
+            };
+            editor.TextChanged([update_preview](auto const&, auto const&) { update_preview(); });
+            update_preview();
+            auto heading = label(names[index]);
+            Microsoft::UI::Xaml::Automation::AutomationProperties::SetLabeledBy(editor, heading);
+            palette.Children().Append(heading);
+            palette.Children().Append(row);
             colors.push_back(editor);
         }
         auto palette_expander = Expander{};
@@ -842,10 +892,26 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         command.LostFocus(committed);
         working_directory.LostFocus(committed);
         shell.SelectionChanged([this](auto const&, auto const&) { save(); });
-        remove.Click([this, id](auto const&, auto const&) {
-            auto const found = std::find_if(profile_editors.begin(), profile_editors.end(),
+        remove.Click([this, id](auto const&, auto const&) { confirmRemoveProfile(shared_from_this(), id); });
+    }
+
+    fire_and_forget confirmRemoveProfile(std::shared_ptr<Dialog> lifetime, uint64_t id) {
+        (void)lifetime;
+        try {
+            auto found = std::find_if(profile_editors.begin(), profile_editors.end(),
                 [id](auto const& editor) { return editor.id == id; });
-            if (found == profile_editors.end() || profile_editors.size() == 1) return;
+            if (found == profile_editors.end() || profile_editors.size() == 1) co_return;
+            ContentDialog confirmation{};
+            confirmation.XamlRoot(root.XamlRoot());
+            confirmation.Title(box_value(L"Remove profile?"));
+            confirmation.Content(box_value(L"This profile will be removed from the new-tab menu."));
+            confirmation.PrimaryButtonText(L"Remove");
+            confirmation.CloseButtonText(L"Cancel");
+            confirmation.DefaultButton(ContentDialogButton::Close);
+            if (co_await confirmation.ShowAsync() != ContentDialogResult::Primary || !open) co_return;
+            found = std::find_if(profile_editors.begin(), profile_editors.end(),
+                [id](auto const& editor) { return editor.id == id; });
+            if (found == profile_editors.end() || profile_editors.size() == 1) co_return;
             auto const removed_name = trim(to_string(found->name.Text()));
             uint32_t index{};
             if (profile_list.Children().IndexOf(found->container, index)) profile_list.Children().RemoveAt(index);
@@ -856,7 +922,12 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
                 ? trim(to_string(profile_editors.front().name.Text())) : selected_default);
             updateProfileButtons();
             save();
-        });
+        } catch (hresult_error const& exception) {
+            if (open) {
+                error.Message(L"Unable to confirm profile removal: " + exception.message());
+                error.IsOpen(true);
+            }
+        }
     }
 
     ScrollViewer makeProfiles(std::map<std::string, std::string> const& values, std::vector<ProfileValue> profile_values) {
@@ -870,6 +941,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         };
         profile_list = StackPanel{};
         profile_list.Spacing(8);
+        profile_list.ChildrenTransitions().Append(Microsoft::UI::Xaml::Media::Animation::RepositionThemeTransition{});
         for (auto const& profile : profile_values) appendProfile(profile);
         refreshDefaultProfiles(selected_default);
         add_profile = Button{};
@@ -958,7 +1030,6 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         pipe_command = textBox(value(values, "pipe_command_output"), L"Copy output to the clipboard");
         clipboard_limit_card = card(L"Clipboard payload limit (KiB)", L"Maximum decoded terminal clipboard payload, in kibibytes.", clipboard_limit);
         clipboard_limit.IsEnabled(clipboard_write.IsOn());
-        clipboard_limit_card.Opacity(clipboard_write.IsOn() ? 1 : 0.55);
         return page(L"Advanced", L"Security-sensitive terminal integration settings.", {
             card(L"Terminal clipboard writes", L"Allow OSC 52 and OSC 1337 Copy sequences to write to the Windows clipboard.", clipboard_write),
             clipboard_limit_card,
@@ -977,7 +1048,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto integer = [](NumberBox const& box, double minimum, double maximum) {
             auto const value = box.Value();
             if (!std::isfinite(value) || std::trunc(value) != value || value < minimum || value > maximum)
-                throw std::runtime_error("Numeric settings must be whole numbers within their displayed ranges.");
+                throw FieldValidationError("Enter a whole number within the displayed range.", box);
             return value;
         };
         auto const font_size_value = integer(font_size, 6, 72);
@@ -989,12 +1060,12 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto const opacity_value = integer(opacity, 0, 100);
         auto const clipboard_kib_value = clipboard_limit.Value();
         if (!std::isfinite(clipboard_kib_value) || clipboard_kib_value < 1.0 / 1024 || clipboard_kib_value > 16384)
-            throw std::runtime_error("Clipboard payload limit must be between 1 byte and 16 MiB.");
+            throw FieldValidationError("Enter a clipboard limit between 1 byte and 16 MiB.", clipboard_limit);
         auto const clipboard_limit_value = std::round(clipboard_kib_value * 1024);
-        if (selected_font.empty() || selected_font.size() >= 128) throw std::runtime_error("Font family must be between 1 and 127 UTF-8 bytes.");
+        if (selected_font.empty() || selected_font.size() >= 128) throw FieldValidationError("Choose a valid font family.", font_family);
         if (selected_dark_theme.empty() || selected_dark_theme.size() >= 64 || selected_light_theme.empty() || selected_light_theme.size() >= 64)
             throw std::runtime_error("Theme names must be between 1 and 63 UTF-8 bytes.");
-        for (auto const& editor : colors) if (!validColor(string(editor))) throw std::runtime_error("Palette colors must be empty or use #RRGGBB.");
+        for (auto const& editor : colors) if (!validColor(string(editor))) throw FieldValidationError("Enter a color as #RRGGBB, or leave it empty.", editor);
 
         std::vector<ProfileValue> profile_values;
         for (auto const& editor : profile_editors) {
@@ -1003,13 +1074,13 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             auto working_directory = string(editor.working_directory);
             auto kind = editor.shell.SelectedIndex() == 0 ? "powershell" : editor.shell.SelectedIndex() == 2 ? "wsl" : "windows";
             if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
-                throw std::runtime_error("Profile names must be between 1 and 127 UTF-8 bytes and cannot contain | or line breaks.");
+                throw FieldValidationError("Enter a profile name of 1–127 bytes without | or line breaks.", editor.name);
             if (command.empty() || command.find('\r') != std::string::npos || command.find('\n') != std::string::npos || command.find('\0') != std::string::npos)
-                throw std::runtime_error("Profile commands cannot be empty or contain line breaks or NUL characters.");
+                throw FieldValidationError("Enter a command without line breaks or NUL characters.", editor.command);
             if (working_directory.find('\0') != std::string::npos)
-                throw std::runtime_error("Profile working directories cannot contain NUL characters.");
+                throw FieldValidationError("The working directory cannot contain NUL characters.", editor.working_directory);
             if (std::any_of(profile_values.begin(), profile_values.end(), [&](auto const& profile) { return _stricmp(profile.name.c_str(), name.c_str()) == 0; }))
-                throw std::runtime_error("Profile names must be unique.");
+                throw FieldValidationError("Enter a unique profile name.", editor.name);
             profile_values.push_back({std::move(name), kind, std::move(command), std::move(working_directory)});
         }
         if (profile_values.empty() || profile_values.size() > 32) throw std::runtime_error("Add between 1 and 32 profiles.");
@@ -1020,7 +1091,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             throw std::runtime_error("The default profile must match a launch profile name.");
         auto const selected_pipe_command = string(pipe_command);
         if (selected_pipe_command.size() >= 4096 || selected_pipe_command.find('\0') != std::string::npos)
-            throw std::runtime_error("Pipe command must be shorter than 4096 UTF-8 bytes and cannot contain NUL characters.");
+            throw FieldValidationError("Enter a pipe command shorter than 4096 bytes without NUL characters.", pipe_command);
 
         using Windows::Data::Json::JsonArray;
         using Windows::Data::Json::JsonObject;
@@ -1099,6 +1170,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     void save() noexcept {
+        for (auto const& status : save_status) status.Text(L"Saving…");
         try {
             auto output = serialize();
             auto temporary = path;
@@ -1112,10 +1184,18 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
                 throw std::runtime_error("Unable to replace the configuration file.");
             }
             error.IsOpen(false);
+            for (auto const& status : save_status) status.Text(L"Saved");
             if (saved) saved();
+        } catch (FieldValidationError const& exception) {
+            auto const message = to_hstring(exception.what());
+            error.Message(message);
+            error.IsOpen(true);
+            exception.control.Focus(FocusState::Programmatic);
+            for (auto const& status : save_status) status.Text(L"Couldn't save");
         } catch (std::exception const& exception) {
             error.Message(to_hstring(exception.what()));
             error.IsOpen(true);
+            for (auto const& status : save_status) status.Text(L"Couldn't save");
         }
     }
 
@@ -1139,7 +1219,6 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         for (auto const& editor : {random_background, hold_on_exit}) editor.Toggled(toggled);
         clipboard_write.Toggled([this](auto const&, auto const&) {
             clipboard_limit.IsEnabled(clipboard_write.IsOn());
-            clipboard_limit_card.Opacity(clipboard_write.IsOn() ? 1 : 0.55);
             save();
         });
     }
