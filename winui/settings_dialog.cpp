@@ -695,7 +695,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             card(L"Window material", L"Choose the Fluent backdrop used behind the terminal.", backdrop),
             card(L"Terminal themes", L"Theme names are loaded from the themes folder beside Zigonaut.", theme_grid, true),
             card(L"Background opacity", L"Percentage opacity for the terminal background.", opacity),
-            card(L"Random tab colors", L"Give each new tab a background hue with the same perceived brightness.", random_background),
+            card(L"Random tab colors", L"Gently tint each new tab's background while keeping it close to the selected theme.", random_background),
         });
     }
 
