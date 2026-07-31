@@ -53,26 +53,16 @@ pub fn randomizedBackground(value: Theme, random: u16) Theme {
         4 => Color{ .red = rising, .green = 32, .blue = 255 },
         else => Color{ .red = 255, .green = 32, .blue = falling },
     };
-    const target = luminance(value.background);
-    const source = luminance(vivid);
     result.background = .{
-        .red = scaledChannel(vivid.red, target, source),
-        .green = scaledChannel(vivid.green, target, source),
-        .blue = scaledChannel(vivid.blue, target, source),
+        .red = tintChannel(value.background.red, vivid.red),
+        .green = tintChannel(value.background.green, vivid.green),
+        .blue = tintChannel(value.background.blue, vivid.blue),
     };
     return result;
 }
 
-fn luminance(color: Color) u32 {
-    return 2126 * @as(u32, color.red) + 7152 * @as(u32, color.green) + 722 * @as(u32, color.blue);
-}
-
-fn scaledChannel(channel: u8, target: u32, source: u32) u8 {
-    if (target <= source) {
-        return @intCast((@as(u64, channel) * target + source / 2) / source);
-    }
-    const remaining = 2_550_000 - source;
-    return channel + @as(u8, @intCast((@as(u64, 255 - channel) * (target - source) + remaining / 2) / remaining));
+fn tintChannel(background: u8, tint: u8) u8 {
+    return @intCast((@as(u16, background) * 7 + tint + 4) / 8);
 }
 
 const max_themes = 64;
@@ -238,27 +228,37 @@ fn linearChannel(channel: u8) f64 {
     return if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4);
 }
 
-test "random backgrounds retain the theme background darkness" {
+test "random backgrounds remain close to the theme background" {
     const first = randomizedBackground(rasmus, 0);
     const second = randomizedBackground(rasmus, 900);
 
     try std.testing.expect(!std.meta.eql(first.background, second.background));
-    const target: i64 = luminance(rasmus.background);
-    try std.testing.expect(@abs(@as(i64, luminance(first.background)) - target) < 10_000);
-    try std.testing.expect(@abs(@as(i64, luminance(second.background)) - target) < 10_000);
+    inline for (.{ "red", "green", "blue" }) |field| {
+        const original: i16 = @field(rasmus.background, field);
+        try std.testing.expect(@abs(@as(i16, @field(first.background, field)) - original) <= 32);
+        try std.testing.expect(@abs(@as(i16, @field(second.background, field)) - original) <= 32);
+    }
     try std.testing.expectEqual(rasmus.foreground, first.foreground);
+    try std.testing.expectEqual(rasmus.cursor, first.cursor);
     try std.testing.expectEqual(rasmus.ansi, first.ansi);
 }
 
-test "random backgrounds support light themes" {
-    var light = rasmus;
-    light.background = hex(0xf3f3f3);
+test "random backgrounds tint white and black" {
+    var value = rasmus;
+    value.background = hex(0xffffff);
+    try std.testing.expectEqual(hex(0xffe3e3), randomizedBackground(value, 0).background);
+    try std.testing.expectEqual(hex(0xe3ffe3), randomizedBackground(value, 512).background);
+    try std.testing.expectEqual(hex(0xe3e3ff), randomizedBackground(value, 1024).background);
 
-    const value = randomizedBackground(light, 0);
+    value.background = hex(0x000000);
+    try std.testing.expectEqual(hex(0x200404), randomizedBackground(value, 0).background);
+    try std.testing.expectEqual(hex(0x042004), randomizedBackground(value, 512).background);
+    try std.testing.expectEqual(hex(0x040420), randomizedBackground(value, 1024).background);
+}
 
-    try std.testing.expectEqual(@as(u8, 255), value.background.red);
-    const target: i64 = luminance(light.background);
-    try std.testing.expect(@abs(@as(i64, luminance(value.background)) - target) < 10_000);
-    try std.testing.expectEqual(light.foreground, value.foreground);
-    try std.testing.expectEqual(light.ansi, value.ansi);
+test "random backgrounds gently tint existing colors" {
+    var value = rasmus;
+    value.background = hex(0x336699);
+
+    try std.testing.expectEqual(hex(0x4d5d8a), randomizedBackground(value, 0).background);
 }
