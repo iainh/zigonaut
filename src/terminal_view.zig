@@ -35,6 +35,15 @@ const wheel_rows = 3;
 const minimum_columns = 10;
 const minimum_rows = 4;
 
+const ContextMenuCommand = enum(u32) {
+    copy = 1,
+    paste,
+    find,
+    split_right,
+    split_down,
+    close_pane,
+};
+
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
     const self: *View = @ptrCast(@alignCast(context orelse return 0));
     const session = self.boundSession() orelse return 0;
@@ -1240,6 +1249,49 @@ pub const View = struct {
         if (text.len != 0) self.scrollToBottom();
     }
 
+    fn showContextMenu(self: *View, screen_point: ?win.POINT) void {
+        const menu = win.CreatePopupMenu() orelse return;
+        defer _ = win.DestroyMenu(menu);
+
+        const runtime = if (self.boundSession()) |session| session.runtime else null;
+        const copy_enabled = runtime != null and self.selection != null and self.selection.?.runtime == runtime.?;
+        const paste_enabled = runtime != null and win.IsClipboardFormatAvailable(win.CF_UNICODETEXT) != 0;
+        appendContextMenuItem(menu, .copy, "Copy\tCtrl+Shift+C", copy_enabled);
+        appendContextMenuItem(menu, .paste, "Paste\tCtrl+Shift+V", paste_enabled);
+        _ = win.AppendMenuW(menu, win.MF_SEPARATOR, 0, null);
+        appendContextMenuItem(menu, .find, "Find\tCtrl+Shift+F", runtime != null);
+        _ = win.AppendMenuW(menu, win.MF_SEPARATOR, 0, null);
+        appendContextMenuItem(menu, .split_right, "Split right\tCtrl+Shift+O", runtime != null);
+        appendContextMenuItem(menu, .split_down, "Split down\tCtrl+Shift+E", runtime != null);
+        _ = win.AppendMenuW(menu, win.MF_SEPARATOR, 0, null);
+        appendContextMenuItem(menu, .close_pane, "Close pane\tCtrl+Shift+W", self.pane_id != null);
+
+        const point = screen_point orelse keyboardContextMenuPoint(self.hwnd);
+        const selected = win.TrackPopupMenu(
+            menu,
+            win.TPM_RIGHTBUTTON | win.TPM_RETURNCMD,
+            point.x,
+            point.y,
+            0,
+            self.hwnd,
+            null,
+        );
+        if (selected == 0) return;
+        const command: ContextMenuCommand = @enumFromInt(selected);
+        switch (command) {
+            .copy => self.copySelection() catch |err| log.debug("unable to copy terminal selection: {}", .{err}),
+            .paste => self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err}),
+            .find => self.postChromeCommand(win.ZIGONAUT_CHROME_FIND),
+            .split_right => self.postChromeCommand(win.ZIGONAUT_CHROME_SPLIT_RIGHT),
+            .split_down => self.postChromeCommand(win.ZIGONAUT_CHROME_SPLIT_DOWN),
+            .close_pane => self.postChromeCommand(win.ZIGONAUT_CHROME_CLOSE_PANE),
+        }
+    }
+
+    fn postChromeCommand(self: *View, command: u32) void {
+        _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, command, 0);
+    }
+
     fn pasteDroppedFiles(self: *View, drop: win.HDROP) !void {
         const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
@@ -1526,6 +1578,17 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             };
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
+        win.WM_CONTEXTMENU => {
+            if (view) |current| {
+                const keyboard = lparam == -1;
+                const point = if (keyboard) null else win.POINT{
+                    .x = mouseCoordinate(lparam, 0),
+                    .y = mouseCoordinate(lparam, 16),
+                };
+                current.showContextMenu(point);
+            }
+            return 0;
+        },
         win.WM_DROPFILES => {
             const drop = win32.handleFromInt(win.HDROP, wparam);
             defer win.DragFinish(drop);
@@ -1538,13 +1601,20 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| current.updateSelection(lparam);
             return 0;
         },
-        win.WM_LBUTTONUP, win.WM_MBUTTONUP, win.WM_RBUTTONUP => {
+        win.WM_LBUTTONUP, win.WM_MBUTTONUP => {
             if (view) |current| current.finishSelection(switch (message) {
                 win.WM_LBUTTONUP => .left,
-                win.WM_MBUTTONUP => .middle,
-                else => .right,
+                else => .middle,
             }, lparam);
             return 0;
+        },
+        win.WM_RBUTTONUP => {
+            if (view) |current| {
+                const protocol = current.protocol_button == .right;
+                current.finishSelection(.right, lparam);
+                if (protocol) return 0;
+            }
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_CAPTURECHANGED, win.WM_CANCELMODE => {
             if (view) |current| current.cancelSelectionDrag();
@@ -1571,12 +1641,17 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_GETDLGCODE => return win.DLGC_WANTTAB,
         win.WM_KEYDOWN, win.WM_SYSKEYDOWN => {
+            if (isContextMenuShortcut(wparam)) return 0;
             if (view) |current| {
                 if (current.handleKey(wparam, lparam, false)) return 0;
             }
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
         },
         win.WM_KEYUP, win.WM_SYSKEYUP => {
+            if (isContextMenuShortcut(wparam)) {
+                if (view) |current| current.showContextMenu(null);
+                return 0;
+            }
             if (view) |current| {
                 if (current.handleKey(wparam, lparam, true)) return 0;
             }
@@ -1687,6 +1762,23 @@ fn screenLparamToClient(hwnd: win.HWND, lparam: win.LPARAM) Terminal.PixelPoint 
     var point = win.POINT{ .x = mouseCoordinate(lparam, 0), .y = mouseCoordinate(lparam, 16) };
     _ = win.ScreenToClient(hwnd, &point);
     return .{ .x = point.x, .y = point.y };
+}
+
+fn appendContextMenuItem(menu: win.HMENU, command: ContextMenuCommand, comptime label: []const u8, enabled: bool) void {
+    const flags: win.UINT = @intCast(win.MF_STRING | if (enabled) 0 else win.MF_GRAYED);
+    _ = win.AppendMenuW(menu, flags, @intFromEnum(command), std.unicode.utf8ToUtf16LeStringLiteral(label));
+}
+
+fn keyboardContextMenuPoint(hwnd: win.HWND) win.POINT {
+    var client: win.RECT = undefined;
+    if (win.GetClientRect(hwnd, &client) == 0) return .{ .x = 0, .y = 0 };
+    var point = win.POINT{ .x = client.left + 16, .y = client.top + 16 };
+    _ = win.ClientToScreen(hwnd, &point);
+    return point;
+}
+
+fn isContextMenuShortcut(key: win.WPARAM) bool {
+    return key == win.VK_APPS or key == win.VK_F10 and win.GetKeyState(win.VK_SHIFT) < 0;
 }
 
 fn saturatingClick(value: u2) u2 {
