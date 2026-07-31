@@ -49,6 +49,10 @@ pub const pane_scroll_wheel: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_SCROLL_WHEEL
 pub const pane_ime_preedit: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_PREEDIT);
 pub const pane_ime_commit: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_COMMIT);
 pub const pane_ime_clear: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_IME_CLEAR);
+pub const pane_find_query: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_QUERY);
+pub const pane_find_next: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_NEXT);
+pub const pane_find_previous: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_PREVIOUS);
+pub const pane_find_close: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_CLOSE);
 pub const layout_leaf: u32 = @intCast(win.ZIGONAUT_LAYOUT_LEAF);
 pub const layout_split: u32 = @intCast(win.ZIGONAUT_LAYOUT_SPLIT);
 pub const axis_left_right: u32 = @intCast(win.ZIGONAUT_AXIS_LEFT_RIGHT);
@@ -67,6 +71,8 @@ const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win
 const ShowNotification = *const fn (?*anyopaque, u32, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
 const UpdateAppearance = *const fn (?*anyopaque, u32, win.BOOL, win.BOOL) callconv(.c) win.HRESULT;
 const ShowSettings = *const fn (?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;
+const ShowFind = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
+const UpdateFind = *const fn (?*anyopaque, u64, u32, i32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateImeBounds = *const fn (?*anyopaque, u64, *const win.zigonaut_ime_bounds) callconv(.c) win.HRESULT;
 
 /// UI-thread-owned full WinUI window. `run` owns the WinUI application pump and
@@ -87,6 +93,8 @@ pub const Bridge = struct {
     show_notification_fn: ShowNotification,
     update_appearance_fn: UpdateAppearance,
     show_settings_fn: ShowSettings,
+    show_find_fn: ShowFind,
+    update_find_fn: UpdateFind,
     update_ime_bounds_fn: UpdateImeBounds,
 
     pub fn load() ?Bridge {
@@ -116,6 +124,8 @@ pub const Bridge = struct {
         const show_notification_fn = symbol(ShowNotification, module, "zigonaut_chrome_show_notification") orelse return null;
         const update_appearance_fn = symbol(UpdateAppearance, module, "zigonaut_chrome_update_appearance") orelse return null;
         const show_settings_fn = symbol(ShowSettings, module, "zigonaut_chrome_show_settings") orelse return null;
+        const show_find_fn = symbol(ShowFind, module, "zigonaut_chrome_show_find") orelse return null;
+        const update_find_fn = symbol(UpdateFind, module, "zigonaut_chrome_update_find") orelse return null;
         const update_ime_bounds_fn = symbol(UpdateImeBounds, module, "zigonaut_chrome_update_ime_bounds") orelse return null;
         loaded = true;
         return .{
@@ -132,6 +142,8 @@ pub const Bridge = struct {
             .show_notification_fn = show_notification_fn,
             .update_appearance_fn = update_appearance_fn,
             .show_settings_fn = show_settings_fn,
+            .show_find_fn = show_find_fn,
+            .update_find_fn = update_find_fn,
             .update_ime_bounds_fn = update_ime_bounds_fn,
         };
     }
@@ -223,6 +235,18 @@ pub const Bridge = struct {
         const path_length = stringLength(path.len) orelse return false;
         const contents_length = stringLength(contents.len) orelse return false;
         return succeeded(self.show_settings_fn(instance, path.ptr, path_length, contents.ptr, contents_length));
+    }
+
+    pub fn showFind(self: *Bridge, pane_id: u64) bool {
+        const instance = self.instance orelse return false;
+        return succeeded(self.show_find_fn(instance, pane_id));
+    }
+
+    pub fn updateFind(self: *Bridge, pane_id: u64, match_count: usize, active_match: ?usize, scanning: bool) bool {
+        const instance = self.instance orelse return false;
+        const count = std.math.cast(u32, match_count) orelse std.math.maxInt(u32);
+        const active = if (active_match) |index| std.math.cast(i32, index) orelse std.math.maxInt(i32) else -1;
+        return succeeded(self.update_find_fn(instance, pane_id, count, active, @intFromBool(scanning)));
     }
 
     pub fn updateImeBounds(self: *Bridge, pane_id: u64, bounds: win.zigonaut_ime_bounds) bool {

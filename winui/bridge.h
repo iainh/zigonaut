@@ -49,6 +49,10 @@ typedef enum zigonaut_pane_event_kind {
     ZIGONAUT_PANE_EVENT_IME_PREEDIT = 5,
     ZIGONAUT_PANE_EVENT_IME_COMMIT = 6,
     ZIGONAUT_PANE_EVENT_IME_CLEAR = 7,
+    ZIGONAUT_PANE_EVENT_FIND_QUERY = 8,
+    ZIGONAUT_PANE_EVENT_FIND_NEXT = 9,
+    ZIGONAUT_PANE_EVENT_FIND_PREVIOUS = 10,
+    ZIGONAUT_PANE_EVENT_FIND_CLOSE = 11,
 } zigonaut_pane_event_kind;
 typedef struct zigonaut_pane_event {
     uint32_t size;
@@ -119,6 +123,8 @@ __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(vo
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_notification(void* bridge, uint32_t session_id, const char* title, uint32_t title_length, const char* body, uint32_t body_length) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_appearance(void* bridge, uint32_t backdrop, BOOL high_contrast, BOOL dark_theme) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_settings(void* bridge, const char* path, uint32_t path_length, const char* contents, uint32_t contents_length) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_show_find(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_find(void* bridge, uint64_t pane_id, uint32_t match_count, int32_t active_match, BOOL scanning) ZIGONAUT_NOEXCEPT;
 typedef struct zigonaut_ime_bounds { uint32_t size; int32_t left, top, right, bottom; int32_t pane_left, pane_top, pane_right, pane_bottom; } zigonaut_ime_bounds;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_ime_bounds(void* bridge, uint64_t pane_id, const zigonaut_ime_bounds* bounds) ZIGONAUT_NOEXCEPT;
 

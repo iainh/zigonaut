@@ -98,6 +98,7 @@ pub const View = struct {
     notification_changed_message: win.UINT,
     renderer_failed_message: win.UINT,
     ime_bounds_changed_message: win.UINT,
+    search_status_changed_message: win.UINT,
     chrome_message: win.UINT,
     wheel_remainder: i32 = 0,
     protocol_wheel_remainder: i32 = 0,
@@ -159,6 +160,7 @@ pub const View = struct {
         notification_changed_message: win.UINT,
         renderer_failed_message: win.UINT,
         ime_bounds_changed_message: win.UINT,
+        search_status_changed_message: win.UINT,
         chrome_message: win.UINT,
     ) View {
         const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
@@ -182,6 +184,7 @@ pub const View = struct {
             .notification_changed_message = notification_changed_message,
             .renderer_failed_message = renderer_failed_message,
             .ime_bounds_changed_message = ime_bounds_changed_message,
+            .search_status_changed_message = search_status_changed_message,
             .chrome_message = chrome_message,
         };
     }
@@ -336,7 +339,7 @@ pub const View = struct {
     }
 
     pub fn setImePreedit(self: *View, text: []const u16, selection_start: u32, selection_length: u32) void {
-        if (self.ime_target_search == null) self.ime_target_search = if (self.boundRuntime()) |runtime| runtime.searchEnabled() else false;
+        if (self.ime_target_search == null) self.ime_target_search = false;
         self.ime_caret_x = 0;
         self.ime_caret_y = 0;
         self.ime_preedit.clearRetainingCapacity();
@@ -362,25 +365,58 @@ pub const View = struct {
         const runtime = self.boundRuntime() orelse return;
         runtime.searchBegin();
         self.setRefreshInterval(search_refresh_interval_ms);
+        self.notifySearchStatus();
         self.invalidate();
+    }
+
+    pub fn setSearchQuery(self: *View, text: []const u16) void {
+        const runtime = self.boundRuntime() orelse return;
+        const utf8 = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, text) catch return;
+        defer std.heap.page_allocator.free(utf8);
+        runtime.searchSet(utf8) catch return;
+        self.setRefreshInterval(search_refresh_interval_ms);
+        self.notifySearchStatus();
+        self.invalidate();
+    }
+
+    pub fn cancelSearch(self: *View) void {
+        const runtime = self.boundRuntime() orelse return;
+        runtime.searchCancel();
+        self.setRefreshInterval(0);
+        self.notifyScrollbar(true);
+        self.invalidate();
+    }
+
+    pub fn navigateSearch(self: *View, forward: bool) void {
+        const runtime = self.boundRuntime() orelse return;
+        _ = runtime.searchNavigate(forward);
+        self.notifySearchStatus();
+        self.notifyScrollbar(true);
+        self.invalidate();
+    }
+
+    pub fn searchStatus(self: *View) ?SessionRuntime.SearchStatus {
+        const runtime = self.boundRuntime() orelse return null;
+        if (!runtime.searchEnabled()) return null;
+        return runtime.searchStatus();
+    }
+
+    fn notifySearchStatus(self: *View) void {
+        const pane_id = self.pane_id orelse return;
+        if (self.hwnd != null) _ = win.PostMessageW(win.GetParent(self.hwnd), self.search_status_changed_message, @intCast(pane_id), 0);
     }
 
     pub fn commitIme(self: *View, text: []const u16) void {
         if (text.len == 0) return;
         const runtime = self.boundRuntime() orelse return;
-        const target_search = imeCommitDestination(self.ime_target_search, runtime.searchEnabled()) orelse return;
+        if (self.ime_target_search == null) return;
         const utf8 = std.unicode.utf16LeToUtf8Alloc(std.heap.page_allocator, text) catch |err| {
             log.warn("dropping malformed TSF UTF-16 commit: {}", .{err});
             return;
         };
         defer std.heap.page_allocator.free(utf8);
-        if (target_search) {
-            runtime.searchAppend(utf8) catch {};
-            self.setRefreshInterval(search_refresh_interval_ms);
-        } else {
-            runtime.write(utf8) catch |err| log.debug("unable to write TSF commit: {}", .{err});
-            self.scrollToBottom();
-        }
+        runtime.write(utf8) catch |err| log.debug("unable to write TSF commit: {}", .{err});
+        self.scrollToBottom();
         self.invalidate();
     }
 
@@ -542,7 +578,10 @@ pub const View = struct {
         }
         const search_tick = runtime.searchTick(search_time_budget_ns);
         self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else 0);
-        if (search_tick.changed) self.invalidate();
+        if (search_tick.changed) {
+            self.notifySearchStatus();
+            self.invalidate();
+        }
         if (self.deferSynchronizedOutput()) return;
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) return;
@@ -797,34 +836,10 @@ pub const View = struct {
             return true;
         }
         if (!released and control_shift and wparam == 'F') {
-            self.beginSearch();
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, @intFromEnum(@import("chrome_bridge.zig").Command.find), 0);
             self.suppressed_search_character = 0x06;
             return true;
         }
-        if (runtime) |r| if (r.searchEnabled()) {
-            if (released) return true;
-            const control = win.GetKeyState(win.VK_CONTROL) < 0;
-            if (wparam == win.VK_ESCAPE or control and (wparam == 'C' or wparam == 'G')) {
-                r.searchCancel();
-                self.setRefreshInterval(0);
-            } else if (wparam == win.VK_BACK) {
-                r.searchBackspace();
-                self.setRefreshInterval(search_refresh_interval_ms);
-            } else if (control and wparam == 'U') {
-                r.searchClear();
-                self.setRefreshInterval(search_refresh_interval_ms);
-            } else if (wparam == win.VK_RETURN or control and wparam == 'N') {
-                _ = r.searchNavigate(!(wparam == win.VK_RETURN and win.GetKeyState(win.VK_SHIFT) < 0));
-            } else if (control and wparam == 'P') {
-                _ = r.searchNavigate(false);
-            } else {
-                return true;
-            }
-            self.suppressed_search_character = searchControlCharacter(wparam, control);
-            self.notifyScrollbar(true);
-            self.invalidate();
-            return true;
-        };
         if (input.keyFromMessage(wparam, lparam) == null) return false;
         if (!released) self.clearSelection();
         const active_runtime = if (self.boundSession()) |session| session.runtime else null;
@@ -953,12 +968,6 @@ pub const View = struct {
         const session = self.boundSession() orelse return;
         var utf8: [4]u8 = undefined;
         const encoded = self.input_state.encodeUnsuppressedCharacter(code_unit, &utf8) orelse return;
-        if (session.runtime.?.searchEnabled()) {
-            session.runtime.?.searchAppend(encoded) catch {};
-            self.setRefreshInterval(search_refresh_interval_ms);
-            self.invalidate();
-            return;
-        }
         session.runtime.?.write(encoded) catch |err| {
             log.debug("unable to write terminal input: {}", .{err});
             return;
@@ -1346,17 +1355,11 @@ const DirectWriteCellRenderer = struct {
     search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
-    search_enabled: bool = false,
-    search_query: []const u8 = "",
-    search_scanning: bool = false,
 
-    pub fn searchState(self: *DirectWriteCellRenderer, enabled: bool, query: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, scanning: bool) void {
-        self.search_enabled = enabled;
-        self.search_query = query;
+    pub fn searchState(self: *DirectWriteCellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
         self.search_matches = matches;
         self.search_active = active;
         self.search_offset = offset;
-        self.search_scanning = scanning;
     }
 
     pub fn beginFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
@@ -1452,11 +1455,6 @@ const DirectWriteCellRenderer = struct {
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
         self.view.ime_anchor_x = frame.cursor_x;
         self.view.ime_anchor_y = frame.cursor_y;
-        if (self.search_enabled) {
-            var status: [512]u8 = undefined;
-            const text = std.fmt.bufPrint(&status, " Find: {s}  {d} match{s}{s} ", .{ self.search_query, self.search_matches.len, if (self.search_matches.len == 1) "" else "es", if (self.search_scanning) " (scanning)" else "" }) catch " Find ";
-            drawDirectWriteMessage(self.engine, text, .{ .left = self.origin_x, .top = self.client.bottom - self.origin_y - @as(i32, @intCast(self.view.cell_height)), .right = self.client.right - self.origin_x, .bottom = self.client.bottom - self.origin_y }, win.GetSysColor(win.COLOR_HIGHLIGHTTEXT), win.GetSysColor(win.COLOR_HIGHLIGHT));
-        }
         if (!frame.cursor_visible) return;
         if (self.view.focused and frame.cursor_style == .block) return;
         const left = self.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.view.cell_width));
@@ -1711,15 +1709,6 @@ fn clipboardShortcut(key: win.WPARAM, control: bool, shift: bool, alt: bool) ?Cl
     return null;
 }
 
-fn searchControlCharacter(key: win.WPARAM, control: bool) ?u16 {
-    return switch (key) {
-        win.VK_ESCAPE => 0x1b,
-        win.VK_BACK => 0x08,
-        win.VK_RETURN => 0x0d,
-        else => if (control and key >= 'A' and key <= 'Z') @intCast(key - 'A' + 1) else null,
-    };
-}
-
 fn clipboardTextAlloc(hwnd: win.HWND, allocator: std.mem.Allocator) ![]u8 {
     if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
     defer _ = win.CloseClipboard();
@@ -1829,11 +1818,6 @@ fn drawDirectWriteMessage(
     );
 }
 
-fn imeCommitDestination(snapshot: ?bool, search_enabled: bool) ?bool {
-    const destination = snapshot orelse search_enabled;
-    return if (destination == search_enabled) destination else null;
-}
-
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
@@ -1852,15 +1836,6 @@ test "standard terminal clipboard shortcuts are recognized" {
     try std.testing.expectEqual(ClipboardShortcut.paste, clipboardShortcut(win.VK_INSERT, false, true, false).?);
     try std.testing.expect(clipboardShortcut('C', true, false, false) == null);
     try std.testing.expect(clipboardShortcut('V', true, true, true) == null);
-}
-
-test "IME commits never move between terminal and search" {
-    try std.testing.expectEqual(false, imeCommitDestination(null, false).?);
-    try std.testing.expectEqual(true, imeCommitDestination(null, true).?);
-    try std.testing.expectEqual(false, imeCommitDestination(false, false).?);
-    try std.testing.expectEqual(true, imeCommitDestination(true, true).?);
-    try std.testing.expectEqual(@as(?bool, null), imeCommitDestination(false, true));
-    try std.testing.expectEqual(@as(?bool, null), imeCommitDestination(true, false));
 }
 
 test "click count saturates" {

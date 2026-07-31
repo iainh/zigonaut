@@ -165,6 +165,14 @@ struct Bridge {
     Grid root{nullptr};
     Grid app_title_bar{nullptr};
     Grid content_root{nullptr};
+    Border find_border{nullptr};
+    TextBox find_box{nullptr};
+    TextBlock find_status{nullptr};
+    Button find_previous{nullptr};
+    Button find_next{nullptr};
+    Button find_close{nullptr};
+    uint64_t find_pane{};
+    bool updating_find = false;
     TabView tabs{nullptr};
     StackPanel new_tab_controls{nullptr};
     SplitButton new_tab_button{nullptr};
@@ -205,6 +213,11 @@ struct Bridge {
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
     MenuFlyoutItem::Click_revoker about_revoker{};
     MenuFlyoutItem::Click_revoker quit_revoker{};
+    TextBox::TextChanged_revoker find_text_changed_revoker{};
+    UIElement::KeyDown_revoker find_key_down_revoker{};
+    Button::Click_revoker find_previous_revoker{};
+    Button::Click_revoker find_next_revoker{};
+    Button::Click_revoker find_close_revoker{};
     ContentDialog::Closed_revoker about_closed_revoker{};
     bool handlers_detached = false;
     bool updating = false;
@@ -263,6 +276,103 @@ struct Bridge {
         Grid::SetRow(app_title_bar, 0);
         content_root = Grid{};
         Grid::SetRow(content_root, 1);
+
+        find_border = Border{};
+        find_border.HorizontalAlignment(HorizontalAlignment::Right);
+        find_border.VerticalAlignment(VerticalAlignment::Top);
+        find_border.Margin(Thickness{0, 8, 20, 0});
+        find_border.Padding(Thickness{8});
+        find_border.CornerRadius(CornerRadius{8});
+        find_border.Background(application.Resources().Lookup(box_value(L"CardBackgroundFillColorDefaultBrush"))
+            .as<Microsoft::UI::Xaml::Media::Brush>());
+        find_border.BorderBrush(application.Resources().Lookup(box_value(L"CardStrokeColorDefaultBrush"))
+            .as<Microsoft::UI::Xaml::Media::Brush>());
+        find_border.BorderThickness(Thickness{1});
+        find_border.Visibility(Visibility::Collapsed);
+        Canvas::SetZIndex(find_border, 100);
+
+        auto find_layout = Grid{};
+        find_layout.ColumnSpacing(4);
+        auto find_text_column = ColumnDefinition{};
+        find_text_column.Width(GridLength{240, GridUnitType::Pixel});
+        find_layout.ColumnDefinitions().Append(find_text_column);
+        auto find_status_column = ColumnDefinition{};
+        find_status_column.Width(GridLength{1, GridUnitType::Auto});
+        find_layout.ColumnDefinitions().Append(find_status_column);
+        for (auto index = 0; index < 3; ++index) {
+            auto column = ColumnDefinition{};
+            column.Width(GridLength{1, GridUnitType::Auto});
+            find_layout.ColumnDefinitions().Append(column);
+        }
+
+        find_box = TextBox{};
+        find_box.PlaceholderText(L"Find in terminal");
+        find_box.MinWidth(200);
+        find_box.VerticalAlignment(VerticalAlignment::Center);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(find_box, L"Find in terminal");
+        Grid::SetColumn(find_box, 0);
+        find_layout.Children().Append(find_box);
+
+        find_status = TextBlock{};
+        find_status.Text(L"0 matches");
+        find_status.MinWidth(72);
+        find_status.VerticalAlignment(VerticalAlignment::Center);
+        find_status.TextAlignment(TextAlignment::Center);
+        Grid::SetColumn(find_status, 1);
+        find_layout.Children().Append(find_status);
+
+        auto make_find_button = [this, find_layout](wchar_t const* glyph, wchar_t const* name, int column) {
+            auto button = Button{};
+            button.Style(application.Resources().Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
+            auto icon = FontIcon{};
+            icon.Glyph(glyph);
+            icon.FontSize(12);
+            button.Content(icon);
+            Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(button, name);
+            ToolTipService::SetToolTip(button, box_value(name));
+            Grid::SetColumn(button, column);
+            find_layout.Children().Append(button);
+            return button;
+        };
+        find_previous = make_find_button(L"\xE70E", L"Previous match (Shift+Enter)", 2);
+        find_next = make_find_button(L"\xE70D", L"Next match (Enter)", 3);
+        find_close = make_find_button(L"\xE711", L"Close find (Esc)", 4);
+        find_previous.IsEnabled(false);
+        find_next.IsEnabled(false);
+        find_border.Child(find_layout);
+
+        find_text_changed_revoker = find_box.TextChanged(auto_revoke, [this](auto&&, auto&&) {
+            if (updating_find || !find_pane) return;
+            auto const text = find_box.Text();
+            imeEvent(ZIGONAUT_PANE_EVENT_FIND_QUERY, find_pane, std::wstring_view{text.c_str(), text.size()});
+        });
+        find_key_down_revoker = find_box.KeyDown(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
+            auto const control = GetKeyState(VK_CONTROL) < 0;
+            if (args.Key() == Windows::System::VirtualKey::Escape ||
+                (control && args.Key() == Windows::System::VirtualKey::G)) {
+                closeFind(true);
+                args.Handled(true);
+            } else if (control && args.Key() == Windows::System::VirtualKey::U) {
+                find_box.Text(L"");
+                args.Handled(true);
+            } else if (args.Key() == Windows::System::VirtualKey::Enter ||
+                       (control && (args.Key() == Windows::System::VirtualKey::N ||
+                                    args.Key() == Windows::System::VirtualKey::P))) {
+                auto const previous = args.Key() == Windows::System::VirtualKey::P ||
+                    (args.Key() == Windows::System::VirtualKey::Enter && GetKeyState(VK_SHIFT) < 0);
+                paneEvent(previous ? ZIGONAUT_PANE_EVENT_FIND_PREVIOUS : ZIGONAUT_PANE_EVENT_FIND_NEXT, find_pane, 0);
+                args.Handled(true);
+            }
+        });
+        find_previous_revoker = find_previous.Click(auto_revoke, [this](auto&&, auto&&) {
+            paneEvent(ZIGONAUT_PANE_EVENT_FIND_PREVIOUS, find_pane, 0);
+            find_box.Focus(FocusState::Programmatic);
+        });
+        find_next_revoker = find_next.Click(auto_revoke, [this](auto&&, auto&&) {
+            paneEvent(ZIGONAUT_PANE_EVENT_FIND_NEXT, find_pane, 0);
+            find_box.Focus(FocusState::Programmatic);
+        });
+        find_close_revoker = find_close.Click(auto_revoke, [this](auto&&, auto&&) { closeFind(true); });
 
         tabs = TabView{};
 
@@ -578,7 +688,13 @@ struct Bridge {
 
     void focusPane(uint64_t id) {
         auto it = pane_hosts.find(id); if (it == pane_hosts.end()) throw hresult_invalid_argument();
-        setFocusedPane(id); it->second->input.Focus(FocusState::Programmatic);
+        if (find_pane && find_pane != id) closeFind(true);
+        setFocusedPane(id);
+        if (find_pane == id && find_border.Visibility() == Visibility::Visible) {
+            find_box.Focus(FocusState::Programmatic);
+        } else {
+            it->second->input.Focus(FocusState::Programmatic);
+        }
     }
 
     void paneEvent(uint32_t kind, uint64_t id, uint32_t value) {
@@ -589,6 +705,7 @@ struct Bridge {
     }
     void setFocusedPane(uint64_t id) {
         if (active_pane == id) return;
+        if (find_pane && find_pane != id) closeFind(true);
         active_pane = id;
         updatePaneFocusIndicators();
         paneEvent(ZIGONAUT_PANE_EVENT_FOCUS, id, 0);
@@ -735,6 +852,7 @@ struct Bridge {
         for (uint32_t i = 0; i < count; ++i) if (nodes[i].kind == ZIGONAUT_LAYOUT_LEAF && nodes[i].id == focused) found = true;
         if (!found) throw hresult_invalid_argument();
         for(uint32_t i=0;i<count;++i) if(nodes[i].kind==ZIGONAUT_LAYOUT_LEAF && !attachments.count(nodes[i].id)) throw hresult_invalid_argument();
+        if (find_pane && !ids.count(find_pane)) closeFind(true);
         if (active_pane != focused) {
             auto const previous = pane_hosts.find(active_pane);
             if (previous != pane_hosts.end() &&
@@ -992,8 +1110,12 @@ struct Bridge {
             h->grid.Children().Append(first);h->grid.Children().Append(second);h->grid.Children().Append(h->divider);h->grid.Children().Append(h->thumb);
             return h->grid;
         };
-        content_root.Children().Append(build(0)); active_pane=focused; updatePaneFocusIndicators(); root.UpdateLayout(); layoutTerminal();
-        if (auto requested=pane_hosts.find(focused); requested!=pane_hosts.end()) requested->second->input.Focus(FocusState::Programmatic);
+        content_root.Children().Append(build(0)); content_root.Children().Append(find_border); active_pane=focused; updatePaneFocusIndicators(); root.UpdateLayout(); layoutTerminal();
+        if (find_pane == focused && find_border.Visibility() == Visibility::Visible) {
+            find_box.Focus(FocusState::Programmatic);
+        } else if (auto requested=pane_hosts.find(focused); requested!=pane_hosts.end()) {
+            requested->second->input.Focus(FocusState::Programmatic);
+        }
     }
 
     static LPARAM keyLparam(Windows::UI::Core::CorePhysicalKeyStatus const& status) {
@@ -1054,6 +1176,50 @@ struct Bridge {
     void focusTerminal() {
         auto const active = pane_hosts.find(active_pane);
         if (active != pane_hosts.end()) active->second->input.Focus(FocusState::Programmatic);
+    }
+
+    void showFind(uint64_t pane_id) {
+        if (!pane_id || !pane_hosts.count(pane_id)) throw hresult_invalid_argument();
+        if (find_pane == pane_id && find_border.Visibility() == Visibility::Visible) {
+            find_box.Focus(FocusState::Programmatic);
+            find_box.SelectAll();
+            return;
+        }
+        if (find_pane) closeFind(true);
+        find_pane = pane_id;
+        updating_find = true;
+        find_box.Text(L"");
+        updating_find = false;
+        find_status.Text(L"0 matches");
+        find_previous.IsEnabled(false);
+        find_next.IsEnabled(false);
+        find_border.Visibility(Visibility::Visible);
+        uint32_t index{};
+        if (!content_root.Children().IndexOf(find_border, index)) content_root.Children().Append(find_border);
+        find_box.Focus(FocusState::Programmatic);
+    }
+
+    void closeFind(bool notify_cancel) {
+        if (!find_pane) return;
+        auto const pane_id = find_pane;
+        find_pane = 0;
+        find_border.Visibility(Visibility::Collapsed);
+        if (notify_cancel) paneEvent(ZIGONAUT_PANE_EVENT_FIND_CLOSE, pane_id, 0);
+        focusTerminal();
+    }
+
+    void updateFind(uint64_t pane_id, uint32_t match_count, int32_t active_match, bool scanning) {
+        if (!pane_id || pane_id != find_pane) return;
+        std::wstring status;
+        if (active_match >= 0 && static_cast<uint32_t>(active_match) < match_count) {
+            status = std::to_wstring(static_cast<uint32_t>(active_match) + 1) + L" / " + std::to_wstring(match_count);
+        } else {
+            status = std::to_wstring(match_count) + (match_count == 1 ? L" match" : L" matches");
+        }
+        if (scanning) status += L"…";
+        find_status.Text(status);
+        find_previous.IsEnabled(match_count != 0);
+        find_next.IsEnabled(match_count != 0);
     }
 
     void scheduleLayoutTerminal() {
@@ -1469,6 +1635,11 @@ struct Bridge {
         open_settings_revoker.revoke();
         about_revoker.revoke();
         quit_revoker.revoke();
+        find_text_changed_revoker.revoke();
+        find_key_down_revoker.revoke();
+        find_previous_revoker.revoke();
+        find_next_revoker.revoke();
+        find_close_revoker.revoke();
         new_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
@@ -1513,6 +1684,12 @@ struct Bridge {
         cleanup(L"clear system backdrop", [&] { window.SystemBackdrop(nullptr); }, result);
         cleanup(L"detach window content", [&] { window.Content(nullptr); }, result);
         content_root = nullptr;
+        find_border = nullptr;
+        find_box = nullptr;
+        find_status = nullptr;
+        find_previous = nullptr;
+        find_next = nullptr;
+        find_close = nullptr;
         app_title_bar = nullptr;
         bottom_border = nullptr;
         menu_button = nullptr;
@@ -1703,6 +1880,20 @@ extern "C" HRESULT __cdecl zigonaut_chrome_show_settings(void* value, const char
         bridge->showSettings(std::string_view{path, path_length}, std::string_view{contents ? contents : "", contents_length});
         return S_OK;
     } catch (...) { return reportCurrentException(L"show settings"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_show_find(void* value, uint64_t pane_id) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (!pane_id) return E_INVALIDARG;
+    try { bridge->showFind(pane_id); return S_OK; } catch (...) { return reportCurrentException(L"show find"); }
+}
+
+extern "C" HRESULT __cdecl zigonaut_chrome_update_find(void* value, uint64_t pane_id, uint32_t match_count, int32_t active_match, BOOL scanning) noexcept {
+    auto bridge = static_cast<Bridge*>(value);
+    auto const validation = validate(bridge); if (FAILED(validation)) return validation;
+    if (!pane_id || active_match < -1) return E_INVALIDARG;
+    try { bridge->updateFind(pane_id, match_count, active_match, scanning != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update find"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update_ime_bounds(void* value, uint64_t pane_id, const zigonaut_ime_bounds* bounds) noexcept {

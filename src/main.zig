@@ -25,6 +25,7 @@ const renderer_failed_message = win.WM_APP + 7;
 const pane_event_message = win.WM_APP + 8;
 const runtime_refresh_message = win.WM_APP + 9;
 const ime_bounds_changed_message = win.WM_APP + 10;
+const search_status_changed_message = win.WM_APP + 11;
 const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
@@ -171,7 +172,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -461,6 +462,13 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             if (self.chrome) |*bridge| _ = bridge.updateImeBounds(pane_id, bounds);
             return 0;
         },
+        search_status_changed_message => {
+            const pane_id = std.math.cast(u64, wparam) orelse return 0;
+            const view = self.viewFor(pane_id) orelse return 0;
+            const status = view.searchStatus() orelse return 0;
+            if (self.chrome) |*bridge| _ = bridge.updateFind(pane_id, status.matches, status.active, status.scanning);
+            return 0;
+        },
         pane_event_message => {
             while (self.takePaneEvent()) |current| {
                 if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
@@ -481,6 +489,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                         if (current.value == 0 or current.value >= 65535) continue;
                         _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
                     },
+                    chrome.pane_find_next => if (self.viewFor(current.target_id)) |view| view.navigateSearch(true),
+                    chrome.pane_find_previous => if (self.viewFor(current.target_id)) |view| view.navigateSearch(false),
+                    chrome.pane_find_close => if (self.viewFor(current.target_id)) |view| view.cancelSearch(),
                     else => {},
                 }
             }
@@ -508,7 +519,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .find => {
-                    if (self.activeView()) |view| view.beginSearch();
+                    const pane = self.model.activePane() orelse return 0;
+                    const view = self.viewFor(pane.id) orelse return 0;
+                    if (self.chrome) |*bridge| if (bridge.showFind(pane.id)) view.beginSearch();
                     return 0;
                 },
                 .close => {
@@ -859,7 +872,8 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
     const self: *Application = @ptrCast(@alignCast(context orelse return));
     const hwnd = self.hwnd orelse return;
     if (source.size >= @sizeOf(chrome.PaneEvent) and
-        (source.kind == chrome.pane_ime_preedit or source.kind == chrome.pane_ime_commit or source.kind == chrome.pane_ime_clear))
+        (source.kind == chrome.pane_ime_preedit or source.kind == chrome.pane_ime_commit or
+            source.kind == chrome.pane_ime_clear or source.kind == chrome.pane_find_query))
     {
         const view = self.viewFor(source.target_id) orelse return;
         const text: []const u16 = if (source.text_length == 0) &.{} else if (source.text) |ptr| ptr[0..source.text_length] else return;
@@ -867,11 +881,12 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
             chrome.pane_ime_preedit => view.setImePreedit(text, source.selection_start, source.selection_length),
             chrome.pane_ime_commit => view.commitIme(text),
             chrome.pane_ime_clear => view.clearImePreedit(),
+            chrome.pane_find_query => view.setSearchQuery(text),
             else => unreachable,
         }
-        if (view.imeBounds()) |bounds| {
+        if (source.kind != chrome.pane_find_query) if (view.imeBounds()) |bounds| {
             if (self.chrome) |*bridge| _ = bridge.updateImeBounds(source.target_id, bounds);
-        }
+        };
         return;
     }
     self.pane_events_mutex.lock();

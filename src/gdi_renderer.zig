@@ -97,17 +97,11 @@ const CellRenderer = struct {
     search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
-    search_enabled: bool = false,
-    search_query: []const u8 = "",
-    search_scanning: bool = false,
 
-    pub fn searchState(self: *CellRenderer, enabled: bool, query: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, scanning: bool) void {
-        self.search_enabled = enabled;
-        self.search_query = query;
+    pub fn searchState(self: *CellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
         self.search_matches = matches;
         self.search_active = active;
         self.search_offset = offset;
-        self.search_scanning = scanning;
     }
 
     pub fn beginFrame(self: *CellRenderer, frame: Terminal.Frame) void {
@@ -185,17 +179,6 @@ const CellRenderer = struct {
     }
 
     pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
-        if (self.search_enabled) {
-            var status: [512]u8 = undefined;
-            const text = std.fmt.bufPrint(&status, " Find: {s}  {d} match{s}{s} ", .{ self.search_query, self.search_matches.len, if (self.search_matches.len == 1) "" else "es", if (self.search_scanning) " (scanning)" else "" }) catch " Find ";
-            var rect = self.client;
-            rect.left = self.context.origin_x;
-            rect.top = rect.bottom - self.context.origin_y - @as(i32, @intCast(self.context.cell_height));
-            fill(self.dc, rect, win.GetSysColor(win.COLOR_HIGHLIGHT));
-            _ = win.SetTextColor(self.dc, win.GetSysColor(win.COLOR_HIGHLIGHTTEXT));
-            _ = win.SetBkMode(self.dc, win.TRANSPARENT);
-            drawText(self.dc, text, &rect);
-        }
         if (!frame.cursor_visible) return;
         const left = self.context.origin_x + @as(i32, frame.cursor_x) * @as(i32, @intCast(self.context.cell_width));
         const top = self.context.origin_y + @as(i32, frame.cursor_y) * @as(i32, @intCast(self.context.cell_height));

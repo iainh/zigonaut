@@ -69,6 +69,12 @@ pub const SessionRuntime = struct {
         scanning: bool,
     };
 
+    pub const SearchStatus = struct {
+        matches: usize,
+        active: ?usize,
+        scanning: bool,
+    };
+
     const SynchronizedOutput = struct {
         deadline_tick: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
@@ -441,28 +447,23 @@ pub const SessionRuntime = struct {
         self.search.reset();
     }
 
-    pub fn searchAppend(self: *SessionRuntime, bytes: []const u8) !void {
+    pub fn searchSet(self: *SessionRuntime, bytes: []const u8) !void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        try self.search.query.appendSlice(self.allocator, bytes);
+        try self.search.query.ensureTotalCapacity(self.allocator, bytes.len);
+        self.search.query.clearRetainingCapacity();
+        self.search.query.appendSliceAssumeCapacity(bytes);
         self.search.reset();
-    }
-    pub fn searchBackspace(self: *SessionRuntime) void {
-        self.terminal_mutex.lock();
-        defer self.terminal_mutex.unlock();
-        if (self.search.query.items.len > 0) {
-            var end = self.search.query.items.len - 1;
-            while (end > 0 and self.search.query.items[end] & 0xc0 == 0x80) end -= 1;
-            self.search.query.shrinkRetainingCapacity(end);
-            self.search.reset();
-        }
     }
 
-    pub fn searchClear(self: *SessionRuntime) void {
+    pub fn searchStatus(self: *SessionRuntime) SearchStatus {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        self.search.query.clearRetainingCapacity();
-        self.search.reset();
+        return .{
+            .matches = self.search.matches.items.len,
+            .active = self.search.active,
+            .scanning = self.search.scanning,
+        };
     }
 
     pub fn searchEnabled(self: *SessionRuntime) bool {
