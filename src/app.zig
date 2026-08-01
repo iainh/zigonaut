@@ -101,6 +101,7 @@ pub const Session = struct {
     metadata: *LaunchMetadata,
     title: std.ArrayList(u8) = .empty,
     title_generation: u64 = 0,
+    observed_output_generation: u64 = 0,
     hold_on_exit: bool = false,
 
     pub fn displayTitle(self: *const Session) []const u8 {
@@ -132,6 +133,7 @@ pub const Tab = struct {
     id: u64,
     tree: pane_tree.Tree,
     panes: std.ArrayList(Pane) = .empty,
+    has_unread_output: bool = false,
 
     pub fn pane(self: *Tab, id: pane_tree.PaneId) ?*Pane {
         for (self.panes.items) |*value| if (value.id == id) return value;
@@ -276,7 +278,7 @@ pub const App = struct {
         try self.tabs.append(self.allocator, tab);
         self.next_session_id +%= 1;
         if (self.next_session_id == 0) self.next_session_id = 1;
-        self.active_tab = self.tabs.items.len - 1;
+        self.setActiveTab(self.tabs.items.len - 1);
         return self.active_tab.?;
     }
 
@@ -307,7 +309,7 @@ pub const App = struct {
 
     pub fn focusPane(self: *App, id: pane_tree.PaneId) bool {
         for (self.tabs.items, 0..) |*tab, index| if (tab.tree.focus(id)) {
-            self.active_tab = index;
+            self.setActiveTab(index);
             return true;
         };
         return false;
@@ -407,7 +409,7 @@ pub const App = struct {
                 var empty_tab = self.tabs.orderedRemove(tab_index);
                 empty_tab.panes.deinit(self.allocator);
                 empty_tab.tree.deinit();
-                if (self.tabs.items.len == 0) self.active_tab = null else self.active_tab = @min(tab_index, self.tabs.items.len - 1);
+                if (self.tabs.items.len == 0) self.active_tab = null else self.setActiveTab(@min(tab_index, self.tabs.items.len - 1));
             }
             return .{ .pane_id = pane_id, .session = removed.session, .removed_tab = final };
         };
@@ -430,9 +432,49 @@ pub const App = struct {
 
     pub fn activateTab(self: *App, index: usize) void {
         if (index < self.tabs.items.len) {
-            self.active_tab = index;
+            self.setActiveTab(index);
             self.resizeActiveSession();
         }
+    }
+
+    fn observeTabOutput(tab: *Tab) void {
+        for (tab.panes.items) |*pane| if (pane.session.runtime) |runtime| {
+            pane.session.observed_output_generation = runtime.outputGeneration();
+        };
+    }
+
+    fn setActiveTab(self: *App, index: usize) void {
+        if (self.active_tab) |active| if (active < self.tabs.items.len) observeTabOutput(&self.tabs.items[active]);
+        self.active_tab = index;
+        const tab = &self.tabs.items[index];
+        observeTabOutput(tab);
+        tab.has_unread_output = false;
+    }
+
+    /// Consume runtime output generations on the UI thread and update sticky
+    /// activity state for tabs that are not currently visible.
+    pub fn refreshTabActivity(self: *App) bool {
+        var changed = false;
+        for (self.tabs.items, 0..) |*tab, tab_index| {
+            var has_new_output = false;
+            for (tab.panes.items) |*pane| if (pane.session.runtime) |runtime| {
+                const generation = runtime.outputGeneration();
+                if (generation != pane.session.observed_output_generation) {
+                    pane.session.observed_output_generation = generation;
+                    has_new_output = true;
+                }
+            };
+            if (self.active_tab == tab_index) {
+                if (tab.has_unread_output) {
+                    tab.has_unread_output = false;
+                    changed = true;
+                }
+            } else if (has_new_output and !tab.has_unread_output) {
+                tab.has_unread_output = true;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     pub fn closeTab(self: *App, index: usize) void {
@@ -440,7 +482,11 @@ pub const App = struct {
         const active = self.active_tab;
         var removed = self.tabs.orderedRemove(index);
         self.deinitTab(&removed);
-        if (self.tabs.items.len == 0) self.active_tab = null else if (active) |a| self.active_tab = if (a > index) a - 1 else @min(a, self.tabs.items.len - 1);
+        if (self.tabs.items.len == 0) {
+            self.active_tab = null;
+        } else if (active) |a| {
+            self.setActiveTab(if (a > index) a - 1 else @min(a, self.tabs.items.len - 1));
+        }
         self.resizeActiveSession();
     }
 
@@ -458,7 +504,7 @@ pub const App = struct {
 
     pub fn activateSessionId(self: *App, id: u32) bool {
         for (self.tabs.items, 0..) |*tab, tab_index| for (tab.panes.items) |pane| if (pane.session.id == id) {
-            self.active_tab = tab_index;
+            self.setActiveTab(tab_index);
             _ = tab.tree.focus(pane.id);
             self.resizeActiveSession();
             return true;
@@ -562,7 +608,9 @@ test "tabs are added selected and titled by focused pane" {
     try std.testing.expectEqual(@as(usize, 2), app.tabCount());
     try std.testing.expectEqualStrings("Linux", app.activeTab().?.displayTitle());
     try std.testing.expectEqualStrings("wsl", app.activeSession().?.command());
+    app.tabs.items[0].has_unread_output = true;
     app.activateTab(0);
+    try std.testing.expect(!app.tabs.items[0].has_unread_output);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
 }
 

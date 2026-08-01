@@ -86,6 +86,7 @@ const Application = struct {
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
     chrome_colors: std.ArrayList(u32) = .empty,
+    chrome_activity: std.ArrayList(u8) = .empty,
 
     fn init(io: std.Io, loaded: config.Loaded, themes: theme.Catalog, launch_plan: LaunchPlan) Application {
         const dark_theme = config.useDarkTheme(loaded.value, appsUseDarkTheme());
@@ -112,6 +113,7 @@ const Application = struct {
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.chrome_colors.deinit(std.heap.page_allocator);
+        self.chrome_activity.deinit(std.heap.page_allocator);
         self.pane_events.deinit(std.heap.page_allocator);
         self.launch_plan.deinit();
         if (self.font != null) _ = win.DeleteObject(self.font);
@@ -454,7 +456,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
     switch (message) {
         runtime_refresh_message => {
             self.refresh_pending.store(false, .release);
+            const activity_changed = self.model.refreshTabActivity();
             for (self.views.items) |entry| entry.view.refresh();
+            if (activity_changed) self.syncChrome();
             return 0;
         },
         ime_bounds_changed_message => {
@@ -784,9 +788,14 @@ fn syncChromeImpl(self: *Application) void {
         log.err("unable to allocate chrome colors: {}", .{err});
         return;
     };
+    self.chrome_activity.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+        log.err("unable to allocate chrome activity states: {}", .{err});
+        return;
+    };
     self.chrome_titles.items.len = count;
     self.chrome_title_lengths.items.len = count;
     self.chrome_colors.items.len = count;
+    self.chrome_activity.items.len = count;
     for (self.model.tabs.items, 0..) |*tab, index| {
         const title = tab.displayTitle();
         if (title.len > std.math.maxInt(i32)) {
@@ -800,8 +809,9 @@ fn syncChromeImpl(self: *Application) void {
         self.chrome_colors.items[index] = @as(u32, color.red) << 16 |
             @as(u32, color.green) << 8 |
             color.blue;
+        self.chrome_activity.items[index] = @intFromBool(tab.has_unread_output);
     }
-    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
+    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.chrome_activity.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
         return;
     }

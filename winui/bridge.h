@@ -147,7 +147,7 @@ __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_attach_pane(void* bridge, 
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_detach_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_focus_pane(void* bridge, uint64_t pane_id) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_layout(void* bridge, const zigonaut_layout_node* nodes, uint32_t count, uint64_t focused_pane) ZIGONAUT_NOEXCEPT;
-__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update(void* bridge, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, uint32_t count, int32_t active_index, BOOL show_colors) ZIGONAUT_NOEXCEPT;
+__declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update(void* bridge, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, const uint8_t* activity, uint32_t count, int32_t active_index, BOOL show_colors) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_profiles(void* bridge, const char* const* names, const uint32_t* name_lengths, uint32_t count) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_pane_scrollbar(void* bridge, uint64_t pane_id, uint32_t total, uint32_t page, uint32_t position, BOOL show) ZIGONAUT_NOEXCEPT;
 __declspec(dllexport) HRESULT __cdecl zigonaut_chrome_update_taskbar_progress(void* bridge, uint32_t state, uint32_t value) ZIGONAUT_NOEXCEPT;

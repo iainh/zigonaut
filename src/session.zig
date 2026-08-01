@@ -23,6 +23,7 @@ pub const SessionRuntime = struct {
     pty_mutex: @import("win32.zig").Mutex = .{},
     closing: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
     search_content_generation: u64 = 0,
     title: std.ArrayList(u8) = .empty,
@@ -527,6 +528,10 @@ pub const SessionRuntime = struct {
         return self.content_generation.load(.monotonic);
     }
 
+    pub fn outputGeneration(self: *const SessionRuntime) u64 {
+        return self.output_generation.load(.monotonic);
+    }
+
     pub fn titleGeneration(self: *const SessionRuntime) u64 {
         return self.title_generation.load(.acquire);
     }
@@ -703,6 +708,7 @@ pub const SessionRuntime = struct {
         const synchronized = self.terminal.synchronizedOutput();
         const mode_changed = self.synchronized_output.update(synchronized, now);
         self.search_content_generation +%= 1;
+        _ = self.output_generation.fetchAdd(1, .monotonic);
         _ = self.content_generation.fetchAdd(1, .monotonic);
         return !synchronized or mode_changed;
     }
@@ -805,10 +811,14 @@ test "session defers synchronized chunks and prepares once mode ends" {
     };
     defer deinitTestRuntime(&runtime);
 
+    try std.testing.expectEqual(@as(u64, 0), runtime.outputGeneration());
     try std.testing.expect(runtime.processOutputChunk("before\x1b[?2026hpartial", 100));
+    try std.testing.expectEqual(@as(u64, 1), runtime.outputGeneration());
     try std.testing.expect(!(try runtime.prepareRender()));
     try std.testing.expect(!runtime.processOutputChunk("more", 200));
+    try std.testing.expectEqual(@as(u64, 2), runtime.outputGeneration());
     try std.testing.expect(runtime.processOutputChunk("final\x1b[?2026l", 300));
+    try std.testing.expectEqual(@as(u64, 3), runtime.outputGeneration());
     try std.testing.expect(try runtime.prepareRender());
 }
 

@@ -1270,6 +1270,7 @@ struct Bridge {
             std::vector<char const*> titles(tab_count);
             std::vector<uint32_t> lengths(tab_count);
             std::vector<uint32_t> colors(tab_count, 0x202020);
+            std::vector<uint8_t> activity(tab_count);
             for (uint32_t index = 0; index < tab_count; ++index) {
                 storage[index] += std::to_string(index);
                 titles[index] = storage[index].data();
@@ -1277,7 +1278,7 @@ struct Bridge {
             }
             for (uint32_t index = 0; index < iterations; ++index) {
                 storage[0].back() = index % 2 ? 'A' : 'B';
-                update(titles.data(), lengths.data(), colors.data(), tab_count, 0, true);
+                update(titles.data(), lengths.data(), colors.data(), activity.data(), tab_count, 0, true);
             }
         } else if (operation == L"scrollbar") {
             iterations = 100000;
@@ -1552,7 +1553,7 @@ struct Bridge {
         if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
 
-    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint32_t count, int32_t active, bool show_colors) {
+    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint8_t const* activity, uint32_t count, int32_t active, bool show_colors) {
         updating = true;
         struct ResetUpdating {
             bool& value;
@@ -1568,6 +1569,8 @@ struct Bridge {
         }
         for (uint32_t i = 0; i < count; ++i) {
             auto const title = to_hstring(std::string_view{titles[i] ? titles[i] : "", title_lengths[i]});
+            auto const has_activity = activity[i] != 0 && static_cast<int32_t>(i) != active;
+            auto const text_decorations = has_activity ? Windows::UI::Text::TextDecorations::Underline : Windows::UI::Text::TextDecorations::None;
             auto const color = Windows::UI::Color{
                 0xff,
                 static_cast<uint8_t>(colors[i] >> 16),
@@ -1588,6 +1591,7 @@ struct Bridge {
                 marker.Visibility(marker_visibility);
                 auto text = TextBlock{};
                 text.Text(title);
+                text.TextDecorations(text_decorations);
                 text.VerticalAlignment(VerticalAlignment::Center);
                 header.Children().Append(marker);
                 header.Children().Append(text);
@@ -1595,6 +1599,7 @@ struct Bridge {
                 item.Height(40);
                 item.IsClosable(true);
                 Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
+                Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(item, has_activity ? L"New terminal output" : L"");
                 ToolTipService::SetToolTip(item, box_value(title));
                 items.Append(item);
                 changed = true;
@@ -1609,6 +1614,11 @@ struct Bridge {
                     text.Text(title);
                     Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
                     ToolTipService::SetToolTip(item, box_value(title));
+                    changed = true;
+                }
+                if (text.TextDecorations() != text_decorations) {
+                    text.TextDecorations(text_decorations);
+                    Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(item, has_activity ? L"New terminal output" : L"");
                     changed = true;
                 }
                 if (previous_color.A != color.A || previous_color.R != color.R || previous_color.G != color.G || previous_color.B != color.B) {
@@ -1884,14 +1894,14 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_layout(void* value, const zigo
     try { bridge->updateLayout(nodes, count, focused_pane); return S_OK; } catch (...) { return reportCurrentException(L"update layout"); }
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, uint32_t count, int32_t active, BOOL show_colors) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, const uint8_t* activity, uint32_t count, int32_t active, BOOL show_colors) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if (count && (!titles || !title_lengths || !colors)) return E_INVALIDARG;
+    if (count && (!titles || !title_lengths || !colors || !activity)) return E_INVALIDARG;
     for (uint32_t index = 0; index < count; ++index) {
         if (!validString(titles[index], title_lengths[index])) return E_INVALIDARG;
     }
-    try { bridge->update(titles, title_lengths, colors, count, active, show_colors != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
+    try { bridge->update(titles, title_lengths, colors, activity, count, active, show_colors != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update_profiles(void* value, const char* const* names, const uint32_t* name_lengths, uint32_t count) noexcept {
