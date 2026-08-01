@@ -31,6 +31,10 @@ pub const Command = enum(u32) {
     new_window = win.ZIGONAUT_CHROME_NEW_WINDOW,
     pipe_command_output = win.ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT,
     find = win.ZIGONAUT_CHROME_FIND,
+    duplicate_tab = win.ZIGONAUT_CHROME_DUPLICATE_TAB,
+    close_other_tabs = win.ZIGONAUT_CHROME_CLOSE_OTHER_TABS,
+    close_tabs_right = win.ZIGONAUT_CHROME_CLOSE_TABS_RIGHT,
+    reorder_tab = win.ZIGONAUT_CHROME_REORDER_TAB,
 };
 
 pub fn commandFromInt(value: u32) ?Command {

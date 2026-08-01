@@ -112,6 +112,10 @@ pub const Session = struct {
         return self.metadata.commandSlice();
     }
 
+    pub fn profileTitle(self: *const Session) []const u8 {
+        return self.metadata.profileTitle();
+    }
+
     pub fn workingDirectory(self: *const Session) []const u8 {
         return self.metadata.workingDirectory();
     }
@@ -437,6 +441,17 @@ pub const App = struct {
         }
     }
 
+    pub fn moveTab(self: *App, from: usize, to: usize) !void {
+        if (from >= self.tabs.items.len or to >= self.tabs.items.len or from == to) return;
+        const active_id = if (self.active_tab) |index| self.tabs.items[index].id else null;
+        const moved = self.tabs.orderedRemove(from);
+        try self.tabs.insert(self.allocator, to, moved);
+        if (active_id) |id| for (self.tabs.items, 0..) |tab, index| if (tab.id == id) {
+            self.active_tab = index;
+            break;
+        };
+    }
+
     fn observeTabOutput(tab: *Tab) void {
         for (tab.panes.items) |*pane| if (pane.session.runtime) |runtime| {
             pane.session.observed_output_generation = runtime.outputGeneration();
@@ -636,6 +651,20 @@ test "tabs are added selected and titled by focused pane" {
     app.activateTab(0);
     try std.testing.expect(!app.tabs.items[0].has_unread_output);
     try std.testing.expectEqual(Shell.powershell, app.activeSession().?.shell);
+}
+
+test "moving tabs preserves the active tab identity" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "One", "", "", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.windows, "Two", "", "", null, theme.rasmus.background, 2);
+    _ = try app.addSessionRecord(.wsl, "Three", "", "", null, theme.rasmus.background, 3);
+    app.activateTab(1);
+
+    try app.moveTab(0, 2);
+    try std.testing.expectEqualStrings("Two", app.activeTab().?.displayTitle());
+    try std.testing.expectEqualStrings("Three", app.tabs.items[1].displayTitle());
+    try std.testing.expectEqualStrings("One", app.tabs.items[2].displayTitle());
 }
 
 test "notification identity selects its tab and pane" {

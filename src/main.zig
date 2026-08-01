@@ -573,6 +573,67 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     }
                     self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
                 },
+                .duplicate_tab => {
+                    if (argument >= self.model.tabs.items.len) return 0;
+                    const pane = self.model.tabs.items[argument].focusedPane() orelse return 0;
+                    const session = &pane.session;
+                    const reported_directory = if (session.runtime) |runtime|
+                        runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null
+                    else
+                        null;
+                    defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
+                    const columns: u16 = if (self.activeView()) |view| view.columns else 80;
+                    const rows: u16 = if (self.activeView()) |view| view.rows else 24;
+                    _ = self.model.addSession(
+                        session.shell,
+                        session.profileTitle(),
+                        session.command(),
+                        reported_directory orelse session.workingDirectory(),
+                        session.hold_on_exit,
+                        columns,
+                        rows,
+                    ) catch |err| {
+                        log.err("unable to duplicate tab: {}", .{err});
+                        return 0;
+                    };
+                    self.syncPresentation() catch |err| log.err("unable to present duplicated tab: {}", .{err});
+                },
+                .close_other_tabs, .close_tabs_right => {
+                    if (argument >= self.model.tabs.items.len) return 0;
+                    var running: usize = 0;
+                    for (self.model.tabs.items, 0..) |_, index| {
+                        const should_close = if (command == .close_other_tabs) index != argument else index > argument;
+                        if (should_close) running += self.model.runningSessionCountInTab(index);
+                    }
+                    if (!confirmClose(hwnd, running)) return 0;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch return 0;
+                    var index = self.model.tabs.items.len;
+                    while (index > 0) {
+                        index -= 1;
+                        const should_close = if (command == .close_other_tabs) index != argument else index > argument;
+                        if (!should_close) continue;
+                        for (self.model.tabs.items[index].panes.items) |pane_to_close| if (!self.destroyView(pane_to_close.id)) {
+                            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                            return 0;
+                        };
+                        self.model.closeTab(index);
+                    }
+                    self.model.activateTab(@min(@as(usize, argument), self.model.tabs.items.len - 1));
+                    self.syncPresentation() catch |err| log.err("unable to present remaining tabs: {}", .{err});
+                },
+                .reorder_tab => {
+                    const from: usize = argument >> 16;
+                    const to: usize = argument & 0xffff;
+                    if (from >= self.model.tabs.items.len or to >= self.model.tabs.items.len or from == to) return 0;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch return 0;
+                    self.model.moveTab(from, to) catch |err| {
+                        log.err("unable to reorder tab: {}", .{err});
+                        return 0;
+                    };
+                    self.syncPresentation() catch |err| log.err("unable to present reordered tabs: {}", .{err});
+                },
                 .split_right, .split_down => {
                     if (self.activeView()) |view| view.resetInteraction();
                     _ = self.model.splitFocused(if (command == .split_right) .left_right else .top_bottom) catch |err| {

@@ -36,6 +36,10 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_NEW_WINDOW = 28,
     ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT = 29,
     ZIGONAUT_CHROME_FIND = 30,
+    ZIGONAUT_CHROME_DUPLICATE_TAB = 31,
+    ZIGONAUT_CHROME_CLOSE_OTHER_TABS = 32,
+    ZIGONAUT_CHROME_CLOSE_TABS_RIGHT = 33,
+    ZIGONAUT_CHROME_REORDER_TAB = 34,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

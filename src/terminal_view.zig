@@ -1066,6 +1066,8 @@ pub const View = struct {
             win.ZIGONAUT_CHROME_ZOOM_OUT
         else if (wparam == '0' or wparam == win.VK_NUMPAD0)
             win.ZIGONAUT_CHROME_ZOOM_RESET
+        else if (!shift and wparam >= '1' and wparam <= '9')
+            win.ZIGONAUT_CHROME_SELECT
         else
             null;
         const value = command orelse return false;
@@ -1073,7 +1075,8 @@ pub const View = struct {
         self.suppress_application_character = true;
         const repeated = (lparam & (@as(win.LPARAM, 1) << 30)) != 0;
         if (!repeated) {
-            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, 0);
+            const argument = if (value == win.ZIGONAUT_CHROME_SELECT) wparam - '1' else 0;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, value, @intCast(argument));
         }
         return true;
     }

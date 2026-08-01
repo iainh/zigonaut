@@ -268,6 +268,8 @@ struct Bridge {
     SplitButton::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
+    TabView::TabDragStarting_revoker tab_drag_starting_revoker{};
+    TabView::TabDragCompleted_revoker tab_drag_completed_revoker{};
     MenuFlyoutItem::Click_revoker new_tab_item_revoker{};
     MenuFlyoutItem::Click_revoker new_window_revoker{};
     MenuFlyoutItem::Click_revoker increase_font_size_revoker{};
@@ -284,6 +286,7 @@ struct Bridge {
     ContentDialog::Closed_revoker about_closed_revoker{};
     bool handlers_detached = false;
     bool updating = false;
+    uint32_t dragged_tab_index = UINT32_MAX;
     bool appearance_initialized = false;
     bool layout_pending = false;
     uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
@@ -454,6 +457,7 @@ struct Bridge {
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::Equal);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
+        tabs.CanReorderTabs(true);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_controls = StackPanel{};
         new_tab_controls.Orientation(Orientation::Horizontal);
@@ -489,6 +493,18 @@ struct Bridge {
                 notify(ZIGONAUT_CHROME_CLOSE, index);
                 focusTerminal();
             }
+        });
+        tab_drag_starting_revoker = tabs.TabDragStarting(auto_revoke, [this](TabView const& sender, TabViewTabDragStartingEventArgs const& args) {
+            dragged_tab_index = UINT32_MAX;
+            uint32_t index{};
+            if (sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) dragged_tab_index = index;
+        });
+        tab_drag_completed_revoker = tabs.TabDragCompleted(auto_revoke, [this](TabView const& sender, TabViewTabDragCompletedEventArgs const& args) {
+            uint32_t index{};
+            if (dragged_tab_index != UINT32_MAX && sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff && index != dragged_tab_index) {
+                notify(ZIGONAUT_CHROME_REORDER_TAB, (dragged_tab_index << 16) | index);
+            }
+            dragged_tab_index = UINT32_MAX;
         });
 
         menu_button = Button{};
@@ -650,6 +666,11 @@ struct Bridge {
         addAccelerator(Windows::System::VirtualKey::Subtract, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
         addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_PLUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_IN);
         addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_MINUS), Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_OUT);
+        for (uint32_t index = 0; index < 9; ++index) {
+            addAccelerator(static_cast<Windows::System::VirtualKey>('1' + index),
+                           Windows::System::VirtualKeyModifiers::Control,
+                           ZIGONAUT_CHROME_SELECT, index);
+        }
         // Initialize last so constructor failure cannot leave TSF's advised
         // sink references holding a partially constructed Bridge alive.
         tsf.attach(new TsfService{});
@@ -701,15 +722,15 @@ struct Bridge {
     }
 
     void addAccelerator(Windows::System::VirtualKey key, Windows::System::VirtualKeyModifiers modifiers,
-                        zigonaut_chrome_command_id command) {
+                        zigonaut_chrome_command_id command, uint32_t fixed_argument = UINT32_MAX) {
         auto accelerator = Microsoft::UI::Xaml::Input::KeyboardAccelerator{};
         accelerator.Key(key);
         accelerator.Modifiers(modifiers);
-        accelerator_revokers.emplace_back(accelerator.Invoked(auto_revoke, [this, command](auto&&, Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& args) {
+        accelerator_revokers.emplace_back(accelerator.Invoked(auto_revoke, [this, command, fixed_argument](auto&&, Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& args) {
             auto const active = pane_hosts.find(active_pane);
             if (active != pane_hosts.end() && active->second->input.FocusState() != FocusState::Unfocused) return;
-            auto argument = uint32_t{};
-            if (command == ZIGONAUT_CHROME_CLOSE && tabs.SelectedIndex() >= 0) {
+            auto argument = fixed_argument == UINT32_MAX ? uint32_t{} : fixed_argument;
+            if (fixed_argument == UINT32_MAX && command == ZIGONAUT_CHROME_CLOSE && tabs.SelectedIndex() >= 0) {
                 argument = static_cast<uint32_t>(tabs.SelectedIndex());
             }
             notify(command, argument);
@@ -1619,6 +1640,40 @@ struct Bridge {
         if (!closed && callback) callback(context, static_cast<uint32_t>(command), argument);
     }
 
+    void notifyForTab(TabViewItem const& item, zigonaut_chrome_command_id command) const {
+        uint32_t index{};
+        if (tabs.TabItems().IndexOf(item, index)) notify(command, index);
+    }
+
+    void configureTabItem(TabViewItem const& item) {
+        auto const weak = make_weak(item);
+        item.PointerPressed([this, weak](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            auto const current = weak.get();
+            if (!current) return;
+            auto const point = args.GetCurrentPoint(current);
+            if (point.Properties().PointerUpdateKind() == Microsoft::UI::Input::PointerUpdateKind::MiddleButtonPressed) {
+                notifyForTab(current, ZIGONAUT_CHROME_CLOSE);
+                args.Handled(true);
+            }
+        });
+
+        auto flyout = MenuFlyout{};
+        auto append = [this, weak, &flyout](wchar_t const* text, zigonaut_chrome_command_id command) {
+            auto menu_item = MenuFlyoutItem{};
+            menu_item.Text(text);
+            menu_item.Click([this, weak, command](auto&&, auto&&) {
+                if (auto const current = weak.get()) notifyForTab(current, command);
+            });
+            flyout.Items().Append(menu_item);
+        };
+        append(L"Duplicate tab", ZIGONAUT_CHROME_DUPLICATE_TAB);
+        flyout.Items().Append(MenuFlyoutSeparator{});
+        append(L"Close tab", ZIGONAUT_CHROME_CLOSE);
+        append(L"Close other tabs", ZIGONAUT_CHROME_CLOSE_OTHER_TABS);
+        append(L"Close tabs to the right", ZIGONAUT_CHROME_CLOSE_TABS_RIGHT);
+        item.ContextFlyout(flyout);
+    }
+
     void update(char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint8_t const* activity, uint32_t count, int32_t active, bool show_colors) {
         updating = true;
         struct ResetUpdating {
@@ -1664,6 +1719,7 @@ struct Bridge {
                 item.Header(header);
                 item.Height(40);
                 item.IsClosable(true);
+                configureTabItem(item);
                 Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
                 Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(item, has_activity ? L"New terminal output" : L"");
                 ToolTipService::SetToolTip(item, box_value(title));
@@ -1779,6 +1835,8 @@ struct Bridge {
         new_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
+        tab_drag_starting_revoker.revoke();
+        tab_drag_completed_revoker.revoke();
         layout_revoker.revoke();
         terminal_loaded_revoker.revoke();
         xaml_root_changed_revoker.revoke();
