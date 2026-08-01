@@ -531,6 +531,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close => {
+                    if (!confirmClose(hwnd, self.model.runningSessionCountInTab(argument))) return 0;
                     self.detachPresentation() catch |err| {
                         log.err("unable to detach panes before close: {}", .{err});
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
@@ -578,6 +579,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close_pane => {
+                    if (!confirmClose(hwnd, @intFromBool(self.model.focusedPaneIsRunning()))) return 0;
                     const pane_id = (self.model.activePane() orelse return 0).id;
                     const bridge = if (self.chrome) |*value| value else return 0;
                     if (!bridge.detachPane(pane_id)) {
@@ -738,6 +740,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             }
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
+        win.WM_CLOSE => {
+            if (!confirmClose(hwnd, self.model.runningSessionCount())) return 0;
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
+        },
         win.WM_DPICHANGED => {
             const new_dpi: u32 = @intCast(wparam & 0xffff);
             const new_font = createFont(self.settings.font_family, self.zoomed_font_size, new_dpi);
@@ -771,6 +777,25 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         },
         else => return win.DefSubclassProc(hwnd, message, wparam, lparam),
     }
+}
+
+fn confirmClose(hwnd: win.HWND, running_sessions: usize) bool {
+    if (running_sessions == 0) return true;
+    var text_bytes: [192]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &text_bytes,
+        "{d} terminal {s} still running. Closing will end {s}.\n\nClose anyway?",
+        .{ running_sessions, if (running_sessions == 1) "session is" else "sessions are", if (running_sessions == 1) "it" else "them" },
+    ) catch return false;
+    var wide: [192:0]u16 = undefined;
+    const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return false;
+    wide[length] = 0;
+    return win.MessageBoxW(
+        hwnd,
+        &wide,
+        std.unicode.utf8ToUtf16LeStringLiteral("Close running terminals?"),
+        win.MB_OKCANCEL | win.MB_ICONWARNING | win.MB_DEFBUTTON2,
+    ) == win.IDOK;
 }
 
 fn syncChromeImpl(self: *Application) void {

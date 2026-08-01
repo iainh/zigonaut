@@ -209,6 +209,10 @@ pub const Pty = struct {
         return win.GetExitCodeProcess(self.process, &exit_code) != 0 and exit_code == 0;
     }
 
+    pub fn isRunning(self: *const Pty) bool {
+        return win.WaitForSingleObject(self.process, 0) == win.WAIT_TIMEOUT;
+    }
+
     pub fn stopIo(self: *Pty, reader_thread: ?std.Thread) void {
         // Stop I/O first so the reader can exit before console teardown.
         _ = win.CloseHandle(self.input);

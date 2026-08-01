@@ -668,6 +668,11 @@ pub const SessionRuntime = struct {
         return pty.exitedCleanly();
     }
 
+    pub fn isRunning(self: *const SessionRuntime) bool {
+        const pty = self.pty orelse return false;
+        return pty.isRunning();
+    }
+
     pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16, unshifted_codepoint: u32) !bool {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();
