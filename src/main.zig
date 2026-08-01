@@ -26,6 +26,7 @@ const pane_event_message = win.WM_APP + 8;
 const runtime_refresh_message = win.WM_APP + 9;
 const ime_bounds_changed_message = win.WM_APP + 10;
 const search_status_changed_message = win.WM_APP + 11;
+const initial_chrome_message = win.WM_APP + 12;
 const pane_event_release_threshold = 1024;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
@@ -425,6 +426,7 @@ fn initializeWindowImpl(self: *Application) !void {
             self.showProfileLaunchError(profile, err);
         }
     };
+    if (win.PostMessageW(hwnd, initial_chrome_message, 0, 0) == 0) return error.PostInitialChromeUpdateFailed;
     self.updateTheme(false);
 }
 
@@ -755,6 +757,10 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         },
         titles_changed_message => {
             if (self.model.syncTitles()) self.syncChrome();
+            return 0;
+        },
+        initial_chrome_message => {
+            self.syncChrome();
             return 0;
         },
         shell_exited_message => {

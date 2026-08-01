@@ -450,7 +450,7 @@ struct Bridge {
         tabs.VerticalAlignment(VerticalAlignment::Bottom);
         tabs.HorizontalContentAlignment(HorizontalAlignment::Stretch);
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        tabs.TabWidthMode(TabViewWidthMode::Equal);
+        tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
         tabs.CanReorderTabs(true);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
