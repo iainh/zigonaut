@@ -5,6 +5,7 @@ pub const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("_FORTIFY_SOURCE", "0");
     @cInclude("windows.h");
+    @cInclude("tlhelp32.h");
     @cInclude("commctrl.h");
     @cInclude("dwmapi.h");
     @cInclude("shellapi.h");

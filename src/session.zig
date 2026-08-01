@@ -668,9 +668,9 @@ pub const SessionRuntime = struct {
         return pty.exitedCleanly();
     }
 
-    pub fn isRunning(self: *const SessionRuntime) bool {
+    pub fn hasRunningApplication(self: *const SessionRuntime) bool {
         const pty = self.pty orelse return false;
-        return pty.isRunning();
+        return pty.hasRunningApplication();
     }
 
     pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16, unshifted_codepoint: u32) !bool {

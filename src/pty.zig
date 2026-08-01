@@ -209,8 +209,22 @@ pub const Pty = struct {
         return win.GetExitCodeProcess(self.process, &exit_code) != 0 and exit_code == 0;
     }
 
-    pub fn isRunning(self: *const Pty) bool {
-        return win.WaitForSingleObject(self.process, 0) == win.WAIT_TIMEOUT;
+    pub fn hasRunningApplication(self: *const Pty) bool {
+        if (win.WaitForSingleObject(self.process, 0) != win.WAIT_TIMEOUT) return false;
+        const shell_id = win.GetProcessId(self.process);
+        if (shell_id == 0) return false;
+
+        const snapshot = win.CreateToolhelp32Snapshot(win.TH32CS_SNAPPROCESS, 0);
+        if (snapshot == win.INVALID_HANDLE_VALUE) return false;
+        defer _ = win.CloseHandle(snapshot);
+
+        var entry = std.mem.zeroes(win.PROCESSENTRY32W);
+        entry.dwSize = @sizeOf(win.PROCESSENTRY32W);
+        if (win.Process32FirstW(snapshot, &entry) == 0) return false;
+        while (true) {
+            if (entry.th32ParentProcessID == shell_id) return true;
+            if (win.Process32NextW(snapshot, &entry) == 0) return false;
+        }
     }
 
     pub fn stopIo(self: *Pty, reader_thread: ?std.Thread) void {

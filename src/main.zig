@@ -663,7 +663,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close_pane => {
-                    if (!confirmClose(hwnd, @intFromBool(self.model.focusedPaneIsRunning()))) return 0;
+                    if (!confirmClose(hwnd, @intFromBool(self.model.focusedPaneHasRunningApplication()))) return 0;
                     const pane_id = (self.model.activePane() orelse return 0).id;
                     const bridge = if (self.chrome) |*value| value else return 0;
                     if (!bridge.detachPane(pane_id)) {
@@ -863,13 +863,17 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
     }
 }
 
-fn confirmClose(hwnd: win.HWND, running_sessions: usize) bool {
-    if (running_sessions == 0) return true;
+fn confirmClose(hwnd: win.HWND, sessions_with_applications: usize) bool {
+    if (sessions_with_applications == 0) return true;
     var text_bytes: [192]u8 = undefined;
     const text = std.fmt.bufPrint(
         &text_bytes,
-        "{d} terminal {s} still running. Closing will end {s}.\n\nClose anyway?",
-        .{ running_sessions, if (running_sessions == 1) "session is" else "sessions are", if (running_sessions == 1) "it" else "them" },
+        "{d} terminal {s} running an application. Closing will end the {s}.\n\nClose anyway?",
+        .{
+            sessions_with_applications,
+            if (sessions_with_applications == 1) "is" else "sessions are",
+            if (sessions_with_applications == 1) "application" else "applications",
+        },
     ) catch return false;
     var wide: [192:0]u16 = undefined;
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return false;
@@ -877,7 +881,7 @@ fn confirmClose(hwnd: win.HWND, running_sessions: usize) bool {
     return win.MessageBoxW(
         hwnd,
         &wide,
-        std.unicode.utf8ToUtf16LeStringLiteral("Close running terminals?"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Close running applications?"),
         win.MB_OKCANCEL | win.MB_ICONWARNING | win.MB_DEFBUTTON2,
     ) == win.IDOK;
 }
