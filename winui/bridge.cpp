@@ -224,6 +224,7 @@ struct Bridge {
     std::unordered_map<uint64_t, std::unique_ptr<SplitHost>> split_hosts;
     Microsoft::UI::Windowing::AppWindow app_window{nullptr};
     Microsoft::UI::Windowing::AppWindowTitleBar title_bar{nullptr};
+    Microsoft::UI::Input::InputNonClientPointerSource non_client_pointer_source{nullptr};
     Microsoft::UI::Xaml::Media::MicaBackdrop backdrop{nullptr};
     Grid root{nullptr};
     Grid app_title_bar{nullptr};
@@ -239,7 +240,6 @@ struct Bridge {
     TabView tabs{nullptr};
     StackPanel new_tab_controls{nullptr};
     SplitButton new_tab_button{nullptr};
-    Border title_bar_drag_region{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
@@ -319,6 +319,7 @@ struct Bridge {
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&parent));
         app_window = window.AppWindow();
         title_bar = app_window.TitleBar();
+        non_client_pointer_source = Microsoft::UI::Input::InputNonClientPointerSource::GetForWindowId(app_window.Id());
         initial_size_applied = restoreWindowPlacement(parent);
 
         GUID nonce{};
@@ -481,11 +482,6 @@ struct Bridge {
             focusTerminal();
         });
         new_tab_controls.Children().Append(new_tab_button);
-        title_bar_drag_region = Border{};
-        title_bar_drag_region.Width(46);
-        title_bar_drag_region.Height(40);
-        title_bar_drag_region.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
-        new_tab_controls.Children().Append(title_bar_drag_region);
         tabs.TabStripFooter(new_tab_controls);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
@@ -630,9 +626,7 @@ struct Bridge {
         root.Children().Append(bottom_border);
         window.Content(root);
         window.ExtendsContentIntoTitleBar(true);
-        // Keep only the footer spacer draggable. Marking the entire title-bar
-        // grid as caption prevents TabViewItem from receiving drag gestures.
-        window.SetTitleBar(title_bar_drag_region);
+        window.SetTitleBar(app_title_bar);
         title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::Base);
@@ -1508,6 +1502,27 @@ struct Bridge {
             0,
         };
         if (app_title_bar.Padding() != padding) app_title_bar.Padding(padding);
+
+        auto const xaml_root = root.XamlRoot();
+        if (!xaml_root || tabs.ActualWidth() <= 0 || tabs.ActualHeight() <= 0 ||
+            menu_button.ActualWidth() <= 0 || menu_button.ActualHeight() <= 0) return;
+        rasterization_scale = xaml_root.RasterizationScale();
+        auto const to_rect = [this](FrameworkElement const& element) {
+            auto const origin = element.TransformToVisual(root).TransformPoint({0, 0});
+            return Windows::Graphics::RectInt32{
+                static_cast<int32_t>(std::lround(origin.X * rasterization_scale)),
+                static_cast<int32_t>(std::lround(origin.Y * rasterization_scale)),
+                static_cast<int32_t>(std::lround(element.ActualWidth() * rasterization_scale)),
+                static_cast<int32_t>(std::lround(element.ActualHeight() * rasterization_scale)),
+            };
+        };
+        std::array<Windows::Graphics::RectInt32, 2> const passthrough{
+            to_rect(tabs),
+            to_rect(menu_button),
+        };
+        non_client_pointer_source.SetRegionRects(
+            Microsoft::UI::Input::NonClientRegionKind::Passthrough,
+            passthrough);
     }
 
     void updateTabColorVisibility() {
@@ -1872,7 +1887,6 @@ struct Bridge {
         cleanup(L"detach new-tab controls", [&] { tabs.TabStripFooter(nullptr); }, result);
         cleanup(L"clear new-tab controls", [&] { new_tab_controls.Children().Clear(); }, result);
         new_tab_button = nullptr;
-        title_bar_drag_region = nullptr;
         new_tab_controls = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
@@ -1883,10 +1897,14 @@ struct Bridge {
         cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
         pane_hosts.clear(); split_hosts.clear(); attachments.clear();
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);
+        cleanup(L"clear title bar passthrough regions", [&] {
+            non_client_pointer_source.ClearRegionRects(Microsoft::UI::Input::NonClientRegionKind::Passthrough);
+        }, result);
         cleanup(L"detach custom title bar", [&] { window.SetTitleBar(nullptr); }, result);
         cleanup(L"clear system backdrop", [&] { window.SystemBackdrop(nullptr); }, result);
         cleanup(L"detach window content", [&] { window.Content(nullptr); }, result);
         content_root = nullptr;
+        non_client_pointer_source = nullptr;
         find_border = nullptr;
         find_box = nullptr;
         find_status = nullptr;
