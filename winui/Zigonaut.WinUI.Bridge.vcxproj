@@ -10,7 +10,7 @@
     <ProjectGuid>{A1B2F7AB-5148-4C5C-A484-9288A186C998}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>ZigonautWinUIBridge</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <WindowsPackageType>None</WindowsPackageType>
     <AppContainerApplication>false</AppContainerApplication>
     <EnableWin32Codegen>true</EnableWin32Codegen>
