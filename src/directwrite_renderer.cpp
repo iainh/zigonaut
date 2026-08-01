@@ -107,6 +107,13 @@ struct OwnedColorLayer {
         release(font_face);
     }
 
+    void reset() {
+        release(font_face);
+        indices.clear();
+        advances.clear();
+        offsets.clear();
+    }
+
     DWRITE_GLYPH_RUN glyphRun() const {
         return {
             font_face,
@@ -843,18 +850,26 @@ public:
         }
         const auto& segment = *segment_;
 
-        std::vector<FLOAT> advances(
-            glyph_run->glyphAdvances,
-            glyph_run->glyphAdvances + glyph_run->glyphCount);
+        try {
+            advances_.assign(
+                glyph_run->glyphAdvances,
+                glyph_run->glyphAdvances + glyph_run->glyphCount);
+        } catch (...) {
+            return E_OUTOFMEMORY;
+        }
         float origin_x = engine_->row_origin_x;
 
         if (description != nullptr && description->clusterMap != nullptr &&
             description->stringLength > 0) {
-            std::vector<ClusterSpan> spans(glyph_run->glyphCount);
-            std::vector<UINT16> glyph_starts;
-            glyph_starts.reserve(std::min<UINT32>(
-                description->stringLength,
-                glyph_run->glyphCount));
+            try {
+                spans_.assign(glyph_run->glyphCount, ClusterSpan{});
+                glyph_starts_.clear();
+                glyph_starts_.reserve(std::min<UINT32>(
+                    description->stringLength,
+                    glyph_run->glyphCount));
+            } catch (...) {
+                return E_OUTOFMEMORY;
+            }
             uint32_t run_start_column = UINT32_MAX;
             uint32_t run_end_column = 0;
             for (UINT32 index = 0; index < description->stringLength; ++index) {
@@ -862,10 +877,10 @@ public:
                 if (text_index >= segment.columns.size()) break;
                 const UINT16 glyph_start = description->clusterMap[index];
                 if (glyph_start >= glyph_run->glyphCount) continue;
-                auto& span = spans[glyph_start];
+                auto& span = spans_[glyph_start];
                 if (!span.used) {
                     span.used = true;
-                    glyph_starts.push_back(glyph_start);
+                    glyph_starts_.push_back(glyph_start);
                 }
                 span.start_column = std::min(
                     span.start_column,
@@ -879,14 +894,14 @@ public:
                 run_end_column = std::max(run_end_column, span.end_column);
             }
 
-            std::sort(glyph_starts.begin(), glyph_starts.end());
-            for (size_t index = 0; index < glyph_starts.size(); ++index) {
-                const UINT32 glyph_start = glyph_starts[index];
-                const UINT32 glyph_end = index + 1 < glyph_starts.size()
-                    ? glyph_starts[index + 1]
+            std::sort(glyph_starts_.begin(), glyph_starts_.end());
+            for (size_t index = 0; index < glyph_starts_.size(); ++index) {
+                const UINT32 glyph_start = glyph_starts_[index];
+                const UINT32 glyph_end = index + 1 < glyph_starts_.size()
+                    ? glyph_starts_[index + 1]
                     : glyph_run->glyphCount;
                 if (glyph_start >= glyph_end) continue;
-                const auto& span = spans[glyph_start];
+                const auto& span = spans_[glyph_start];
                 const uint32_t cluster_left = startColumn(
                     segment.columns[span.first_text_index]);
                 const uint32_t cluster_right =
@@ -896,7 +911,7 @@ public:
                 const float expected = static_cast<float>(
                     cluster_right - cluster_left) * engine_->row_cell_width;
                 zigonaut_fit_cluster_advances(
-                    advances.data() + glyph_start,
+                    advances_.data() + glyph_start,
                     glyph_end - glyph_start,
                     expected);
             }
@@ -910,7 +925,7 @@ public:
         }
 
         DWRITE_GLYPH_RUN adjusted = *glyph_run;
-        adjusted.glyphAdvances = advances.data();
+        adjusted.glyphAdvances = advances_.data();
         const float origin_y = engine_->row_top +
             static_cast<float>(engine_->metrics.baseline);
         bool rendered_color = false;
@@ -927,7 +942,8 @@ public:
                 0,
                 &layers);
             if (SUCCEEDED(color_result)) {
-                std::vector<std::unique_ptr<OwnedColorLayer>> owned_layers;
+                for (auto& layer : color_layers_) layer->reset();
+                size_t color_layer_count = 0;
                 bool enumeration_complete = false;
                 BOOL has_layer = FALSE;
                 for (;;) {
@@ -940,7 +956,10 @@ public:
                     const DWRITE_COLOR_GLYPH_RUN* layer = nullptr;
                     if (FAILED(layers->GetCurrentRun(&layer)) || layer == nullptr) break;
                     try {
-                        auto owned = std::make_unique<OwnedColorLayer>();
+                        if (color_layer_count == color_layers_.size()) {
+                            color_layers_.push_back(std::make_unique<OwnedColorLayer>());
+                        }
+                        auto& owned = color_layers_[color_layer_count++];
                         owned->font_face = layer->glyphRun.fontFace;
                         if (owned->font_face != nullptr) owned->font_face->AddRef();
                         owned->em_size = layer->glyphRun.fontEmSize;
@@ -963,14 +982,14 @@ public:
                                 layer->glyphRun.glyphOffsets,
                                 layer->glyphRun.glyphOffsets + layer->glyphRun.glyphCount);
                         }
-                        owned_layers.push_back(std::move(owned));
                     } catch (...) {
                         enumeration_complete = false;
                         break;
                     }
                 }
                 if (enumeration_complete) {
-                    for (const auto& layer : owned_layers) {
+                    for (size_t index = 0; index < color_layer_count; ++index) {
+                        const auto& layer = color_layers_[index];
                         if (layer->palette_index == 0xffff) {
                             engine_->brush->SetColor(color(segment.foreground));
                         } else {
@@ -987,7 +1006,7 @@ public:
                             engine_->brush,
                             measuring_mode);
                     }
-                    rendered_color = !owned_layers.empty();
+                    rendered_color = color_layer_count != 0;
                 }
                 release(layers);
             }
@@ -1022,6 +1041,10 @@ private:
     std::atomic<ULONG> references_{1};
     ZigonautTextEngine* engine_;
     const RowSegment* segment_ = nullptr;
+    std::vector<FLOAT> advances_;
+    std::vector<ClusterSpan> spans_;
+    std::vector<UINT16> glyph_starts_;
+    std::vector<std::unique_ptr<OwnedColorLayer>> color_layers_;
 };
 
 ZigonautTextEngine::~ZigonautTextEngine() {
