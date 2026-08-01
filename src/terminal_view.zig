@@ -35,6 +35,13 @@ const wheel_rows = 3;
 const minimum_columns = 10;
 const minimum_rows = 4;
 
+fn notifyAutomation(hwnd: win.HWND, changes: u32) void {
+    const module = win.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("Zigonaut.WinUI.Bridge.dll")) orelse return;
+    const address = win.GetProcAddress(module, "zigonaut_terminal_automation_notify") orelse return;
+    const notify: *const fn (win.HWND, u32) callconv(.c) void = @ptrCast(address);
+    notify(hwnd, changes);
+}
+
 const ContextMenuCommand = enum(u32) {
     copy = 1,
     paste,
@@ -72,6 +79,151 @@ fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity:
     const needed = std.unicode.calcUtf16LeLen(utf8) catch return 0;
     if (output != null and capacity >= needed) _ = std.unicode.utf8ToUtf16Le(output[0..capacity], utf8) catch return 0;
     return std.math.cast(u32, needed) orelse 0;
+}
+
+const AccessibilitySnapshotWriter = struct {
+    query: *win.zigonaut_accessibility_snapshot,
+    offset: u32 = 0,
+    run_count: u32 = 0,
+    selection_start: ?u32 = null,
+    selection_end: u32 = 0,
+    current_row: u16 = 0,
+    fingerprint: u64 = 14695981039346656037,
+    cursor_has_position: bool = false,
+    cursor_x: u16 = 0,
+    cursor_y: u16 = 0,
+
+    fn hash(self: *@This(), bytes: []const u8) void {
+        for (bytes) |byte| {
+            self.fingerprint = (self.fingerprint ^ byte) *% 1099511628211;
+        }
+    }
+    fn hashValue(self: *@This(), value: anytype) void {
+        self.hash(std.mem.asBytes(&value));
+    }
+
+    pub fn searchState(_: *@This(), _: bool, _: []const u8, _: []const SearchMatch, _: ?usize, _: usize, _: bool) void {}
+    pub fn beginFrame(self: *@This(), frame: Terminal.Frame) void {
+        self.cursor_has_position = frame.cursor_has_position;
+        self.cursor_x = frame.cursor_x;
+        self.cursor_y = frame.cursor_y;
+        self.hashValue(frame.cursor_has_position);
+        self.hashValue(frame.cursor_x);
+        self.hashValue(frame.cursor_y);
+    }
+    pub fn beginRow(self: *@This(), y: u16) void {
+        self.current_row = y;
+        if (y != 0) self.scalar('\n');
+    }
+    fn scalar(self: *@This(), cp: u32) void {
+        if (cp <= 0xffff and !(cp >= 0xd800 and cp <= 0xdfff)) {
+            if (self.offset < self.query.text_capacity and self.query.text != null) self.query.text[self.offset] = @intCast(cp);
+            self.offset += 1;
+            self.hashValue(@as(u16, @intCast(cp)));
+        } else if (cp <= 0x10ffff) {
+            const v = cp - 0x10000;
+            if (self.offset + 1 < self.query.text_capacity and self.query.text != null) {
+                self.query.text[self.offset] = @intCast(0xd800 + (v >> 10));
+                self.query.text[self.offset + 1] = @intCast(0xdc00 + (v & 0x3ff));
+            }
+            self.offset += 2;
+            self.hashValue(@as(u16, @intCast(0xd800 + (v >> 10))));
+            self.hashValue(@as(u16, @intCast(0xdc00 + (v & 0x3ff))));
+        }
+    }
+    pub fn drawCell(self: *@This(), cell: Terminal.Cell) void {
+        if (cell.occupancy == .wide_tail) return;
+        const start = self.offset;
+        if (cell.codepoints.len == 0) self.scalar(' ') else for (cell.codepoints) |cp| self.scalar(cp);
+        if (self.cursor_has_position and cell.x == self.cursor_x and self.current_row == self.cursor_y) self.query.caret = start;
+        if (self.run_count < self.query.run_capacity and self.query.runs != null) self.query.runs[self.run_count] = .{
+            .start = start, .end = self.offset, .row = self.current_row, .column = cell.x,
+            .columns = if (cell.occupancy == .wide) 2 else 1, .reserved = 0,
+        };
+        self.run_count += 1;
+        self.hashValue(start);
+        self.hashValue(self.offset);
+        self.hashValue(cell.x);
+        self.hashValue(self.current_row);
+        if (cell.selected) {
+            if (self.selection_start == null) self.selection_start = start;
+            self.selection_end = self.offset;
+        }
+    }
+    pub fn endRow(_: *@This(), _: u16) void {}
+    pub fn drawImage(_: *@This(), _: Terminal.Image) void {}
+    pub fn endFrame(self: *@This(), frame: Terminal.Frame) void {
+        self.query.caret_valid = @intFromBool(self.cursor_has_position);
+        _ = frame;
+        self.query.selection_active = @intFromBool(self.selection_start != null);
+        self.query.selection_start = self.selection_start orelse 0;
+        self.query.selection_end = if (self.selection_start != null) self.selection_end else 0;
+        self.query.text_required = self.offset;
+        self.query.run_required = self.run_count;
+        self.hashValue(self.query.caret);
+        self.hashValue(self.query.caret_valid);
+        self.hashValue(self.query.selection_start);
+        self.hashValue(self.query.selection_end);
+        self.hashValue(self.query.selection_active);
+        self.hashValue(self.query.grid_left);
+        self.hashValue(self.query.grid_top);
+        self.hashValue(self.query.cell_width);
+        self.hashValue(self.query.cell_height);
+        self.hashValue(self.query.rows);
+        self.hashValue(self.query.columns);
+        self.query.fingerprint = self.fingerprint;
+    }
+};
+
+fn accessibilitySnapshot(view: *View, query: *win.zigonaut_accessibility_snapshot) bool {
+    if (query.size != @sizeOf(win.zigonaut_accessibility_snapshot) or (query.text == null and query.text_capacity != 0) or (query.runs == null and query.run_capacity != 0)) return false;
+    const session = view.boundSession() orelse return false;
+    const runtime = session.runtime orelse return false;
+    var origin = win.POINT{ .x = scaled(@intCast(view.padding_horizontal), win.GetDpiForWindow(view.hwnd)), .y = scaled(@intCast(view.padding_vertical), win.GetDpiForWindow(view.hwnd)) };
+    _ = win.ClientToScreen(view.hwnd, &origin);
+    query.grid_left = origin.x; query.grid_top = origin.y;
+    query.cell_width = view.cell_width; query.cell_height = view.cell_height;
+    query.rows = view.rows; query.columns = view.columns;
+    query.owner = @intFromPtr(view);
+    var writer = AccessibilitySnapshotWriter{ .query = query };
+    runtime.replayPreparedViewport(&writer);
+    return true;
+}
+
+fn accessibilitySelect(view: *View, action: *const win.zigonaut_accessibility_action) bool {
+    if (action.size != @sizeOf(win.zigonaut_accessibility_action) or action.kind != win.ZIGONAUT_ACCESSIBILITY_SELECT or action.owner != @intFromPtr(view)) return false;
+    var snapshot = std.mem.zeroes(win.zigonaut_accessibility_snapshot);
+    snapshot.size = @sizeOf(win.zigonaut_accessibility_snapshot);
+    snapshot.kind = win.ZIGONAUT_ACCESSIBLE_TEXT_SNAPSHOT;
+    if (!accessibilitySnapshot(view, &snapshot) or snapshot.fingerprint != action.expected_fingerprint) return false;
+    if (action.start > action.end or action.end > snapshot.text_required) return false;
+    const runtime = (view.boundSession() orelse return false).runtime orelse return false;
+    if (action.start == action.end) {
+        runtime.setSelection(null) catch return false;
+        view.selection = null;
+        view.invalidate();
+        return true;
+    }
+    const runs = std.heap.page_allocator.alloc(win.zigonaut_accessibility_run, snapshot.run_required) catch return false;
+    defer std.heap.page_allocator.free(runs);
+    snapshot.runs = runs.ptr;
+    snapshot.run_capacity = @intCast(runs.len);
+    if (!accessibilitySnapshot(view, &snapshot) or snapshot.fingerprint != action.expected_fingerprint) return false;
+    var first: ?win.zigonaut_accessibility_run = null;
+    var last: ?win.zigonaut_accessibility_run = null;
+    for (runs) |run| {
+        if (run.end > action.start and run.start < action.end) {
+            if (first == null) first = run;
+            last = run;
+        }
+    }
+    const begin = first orelse return false;
+    const finish = last.?;
+    const selection = Terminal.Selection{ .anchor = .{ .x = begin.column, .y = begin.row }, .focus = .{ .x = finish.column, .y = finish.row } };
+    runtime.setSelection(selection) catch return false;
+    view.selection = .{ .runtime = runtime, .dragging = false, .moved = true, .unit = .cell, .focus = selection.focus };
+    view.invalidate();
+    return true;
 }
 
 pub const View = struct {
@@ -708,6 +860,7 @@ pub const View = struct {
             return;
         }
         if (!self.prepareBoundRender()) return;
+        notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
 
         const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
         const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
@@ -756,6 +909,7 @@ pub const View = struct {
         const height = client.bottom - client.top;
         if (width <= 0 or height <= 0) return;
         if (!self.prepareBoundRender()) return;
+        notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
         self.paintDirect2D(client, width, height) catch |err| {
             log.warn("terminal renderer failed: {}", .{err});
             self.renderer_failed = true;
@@ -1543,11 +1697,18 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.ZIGONAUT_WM_ACCESSIBILITY_QUERY => {
             if (view == null or lparam == 0) return 0;
             const query: *win.zigonaut_accessibility_query = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            if (query.kind == win.ZIGONAUT_ACCESSIBLE_TEXT_SNAPSHOT)
+                return @intFromBool(accessibilitySnapshot(view.?, @ptrCast(@alignCast(query))));
             if (query.size != @sizeOf(win.zigonaut_accessibility_query) or
                 (query.kind != win.ZIGONAUT_ACCESSIBLE_NAME and query.kind != win.ZIGONAUT_ACCESSIBLE_VALUE) or
                 (query.output == null and query.capacity != 0)) return 0;
             query.required = accessibilityText(view, query.kind, query.output, query.capacity);
             return 1;
+        },
+        win.ZIGONAUT_WM_ACCESSIBILITY_ACTION => {
+            if (view == null or lparam == 0) return 0;
+            const action: *const win.zigonaut_accessibility_action = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            return @intFromBool(accessibilitySelect(view.?, action));
         },
         render_message => {
             if (view) |current| {

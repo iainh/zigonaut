@@ -72,9 +72,11 @@ typedef void (__cdecl *zigonaut_pane_event_callback)(void* context, const zigona
 /* Private, synchronous child-window query used by the XAML automation peer.
    The buffer is borrowed for SendMessageW's duration and is never retained. */
 #define ZIGONAUT_WM_ACCESSIBILITY_QUERY (WM_APP + 31)
+#define ZIGONAUT_WM_ACCESSIBILITY_ACTION (WM_APP + 32)
 typedef enum zigonaut_accessibility_query_kind {
     ZIGONAUT_ACCESSIBLE_NAME = 1,
     ZIGONAUT_ACCESSIBLE_VALUE = 2,
+    ZIGONAUT_ACCESSIBLE_TEXT_SNAPSHOT = 3,
 } zigonaut_accessibility_query_kind;
 typedef struct zigonaut_accessibility_query {
     uint32_t size;
@@ -83,6 +85,35 @@ typedef struct zigonaut_accessibility_query {
     uint32_t capacity;
     uint32_t required;
 } zigonaut_accessibility_query;
+
+typedef struct zigonaut_accessibility_run {
+    uint32_t start, end;
+    uint16_t row, column, columns;
+    uint16_t reserved;
+} zigonaut_accessibility_run;
+typedef struct zigonaut_accessibility_snapshot {
+    uint32_t size, kind;
+    uint64_t owner, fingerprint;
+    uint16_t* text;
+    uint32_t text_capacity, text_required;
+    zigonaut_accessibility_run* runs;
+    uint32_t run_capacity, run_required;
+    uint32_t caret, selection_start, selection_end;
+    uint32_t caret_valid, selection_active;
+    int32_t grid_left, grid_top;
+    uint32_t cell_width, cell_height, rows, columns;
+} zigonaut_accessibility_snapshot;
+
+typedef struct zigonaut_accessibility_action {
+    uint32_t size, kind;
+    uint64_t owner, expected_fingerprint;
+    uint32_t start, end;
+} zigonaut_accessibility_action;
+
+enum { ZIGONAUT_ACCESSIBILITY_SELECT = 1 };
+
+enum { ZIGONAUT_AUTOMATION_TEXT_CHANGED = 1, ZIGONAUT_AUTOMATION_SELECTION_CHANGED = 2 };
+__declspec(dllexport) void __cdecl zigonaut_terminal_automation_notify(HWND terminal, uint32_t changes) ZIGONAUT_NOEXCEPT;
 
 typedef enum zigonaut_layout_kind { ZIGONAUT_LAYOUT_LEAF = 1, ZIGONAUT_LAYOUT_SPLIT = 2 } zigonaut_layout_kind;
 typedef enum zigonaut_split_axis { ZIGONAUT_AXIS_LEFT_RIGHT = 1, ZIGONAUT_AXIS_TOP_BOTTOM = 2 } zigonaut_split_axis;

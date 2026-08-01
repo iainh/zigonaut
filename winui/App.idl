@@ -7,7 +7,8 @@ namespace ZigonautWinUIBridge
     }
 
     runtimeclass TerminalAutomationPeer : Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer,
-        Microsoft.UI.Xaml.Automation.Provider.IValueProvider
+        Microsoft.UI.Xaml.Automation.Provider.IValueProvider,
+        Microsoft.UI.Xaml.Automation.Provider.ITextProvider
     {
         TerminalAutomationPeer(TerminalControl owner);
         String ProviderClassName { get; };
