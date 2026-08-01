@@ -215,7 +215,9 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
         error.FileNotFound => create: {
             var created = try std.Io.Dir.createFileAbsolute(io, path, .{});
             defer created.close(io);
-            try created.writeStreamingAll(io, default_contents);
+            const initial = try firstRunContentsAlloc(allocator, commandAvailable("pwsh.exe"));
+            defer allocator.free(initial);
+            try created.writeStreamingAll(io, initial);
             break :create try std.Io.Dir.openFileAbsolute(io, path, .{});
         },
         else => return err,
@@ -232,6 +234,33 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
         .value = try configFromJson(parsed.value),
         .parsed = parsed,
     };
+}
+
+fn commandAvailable(name: []const u8) bool {
+    const wide = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, name) catch return false;
+    defer std.heap.page_allocator.free(wide);
+    var path: [32_768]u16 = undefined;
+    const length = win32.c.SearchPathW(null, wide.ptr, null, path.len, &path, null);
+    return length > 0 and length < path.len;
+}
+
+fn firstRunContentsAlloc(allocator: std.mem.Allocator, pwsh_available: bool) ![]u8 {
+    if (!pwsh_available) return allocator.dupe(u8, default_contents);
+    const default_replaced = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        default_contents,
+        "\"default\": \"PowerShell\"",
+        "\"default\": \"PowerShell 7\"",
+    );
+    defer allocator.free(default_replaced);
+    return std.mem.replaceOwned(
+        u8,
+        allocator,
+        default_replaced,
+        "{ \"name\": \"PowerShell\", \"shell\": \"powershell\", \"command\": \"powershell.exe\", \"workingDirectory\": \"\" }",
+        "{ \"name\": \"PowerShell 7\", \"shell\": \"powershell\", \"command\": \"pwsh.exe\", \"workingDirectory\": \"\" }",
+    );
 }
 
 fn validWindowsText(value: []const u8) bool {
@@ -369,6 +398,16 @@ test "default JSON configuration parses" {
     try std.testing.expectEqualStrings("fluent-light", value.light_theme);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
+}
+
+test "first-run configuration prefers installed PowerShell 7" {
+    const contents = try firstRunContentsAlloc(std.testing.allocator, true);
+    defer std.testing.allocator.free(contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqualStrings("PowerShell 7", value.defaultProfile().name);
+    try std.testing.expectEqualStrings("pwsh.exe", value.defaultProfile().command);
 }
 
 test "configuration rejects strings Windows cannot represent" {

@@ -142,6 +142,22 @@ const Application = struct {
     const attachTerminalRenderer = attachTerminalRendererImpl;
     const detachTerminalRenderer = detachTerminalRendererImpl;
     const recoverTerminalRenderer = recoverTerminalRendererImpl;
+    const openFallbackProfile = openFallbackProfileImpl;
+    const showProfileFallback = showProfileFallbackImpl;
+    const showProfileLaunchError = showProfileLaunchErrorImpl;
+
+    fn implicitDefaultLaunch(self: *const Application) bool {
+        if (self.launch_plan.actions.items.len != 1) return false;
+        const action = self.launch_plan.actions.items[0];
+        return action.kind == .new_tab and action.profile == null and action.working_directory == null;
+    }
+
+    fn launchFailureProfile(self: *Application) config.Profile {
+        for (self.launch_plan.actions.items) |action| {
+            if (self.profileNamed(action.profile)) |profile| return profile;
+        }
+        return self.settings.defaultProfile();
+    }
 
     fn takePaneEvent(self: *Application) ?chrome.PaneEvent {
         self.pane_events_mutex.lock();
@@ -403,7 +419,12 @@ fn initializeWindowImpl(self: *Application) !void {
     self.model.setRefresh(.{ .callback = requestRuntimeRefresh, .context = self });
     self.terminal_ready = true;
     try self.syncProfiles(&self.settings);
-    try self.applyLaunchPlan();
+    self.applyLaunchPlan() catch |err| {
+        const profile = self.launchFailureProfile();
+        if (!self.implicitDefaultLaunch() or !self.openFallbackProfile(profile, err)) {
+            self.showProfileLaunchError(profile, err);
+        }
+    };
     self.updateTheme(false);
 }
 
@@ -510,10 +531,12 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             switch (command) {
                 .new_profile => {
                     if (argument >= @as(u32, @intCast(self.settings.profile_count))) return 0;
-                    self.addProfile(self.settings.profiles[argument]) catch |err| log.err("unable to open profile: {}", .{err});
+                    const profile = self.settings.profiles[argument];
+                    self.addProfile(profile) catch |err| self.showProfileLaunchError(profile, err);
                 },
                 .new_default => {
-                    self.addDefaultSession() catch |err| log.err("unable to open default shell session: {}", .{err});
+                    const profile = self.settings.defaultProfile();
+                    self.addDefaultSession() catch |err| self.showProfileLaunchError(profile, err);
                     return 0;
                 },
                 .new_window => {
@@ -1007,6 +1030,52 @@ fn addProfileAtImpl(self: *Application, profile: config.Profile, working_directo
     const rows: u16 = if (self.activeView()) |view| view.rows else 24;
     _ = try self.model.addSession(profile.shell, profile.name, profile.command, working_directory, self.settings.hold_on_exit, columns, rows);
     try self.syncPresentation();
+}
+
+fn openFallbackProfileImpl(self: *Application, failed: config.Profile, launch_error: anyerror) bool {
+    for (self.settings.profileSlice()) |profile| {
+        if (std.ascii.eqlIgnoreCase(profile.command, failed.command) or
+            !std.ascii.eqlIgnoreCase(profile.command, "cmd.exe")) continue;
+        self.addProfile(profile) catch return false;
+        self.showProfileFallback(failed, profile, launch_error);
+        return true;
+    }
+    return false;
+}
+
+fn showProfileFallbackImpl(self: *Application, failed: config.Profile, fallback: config.Profile, launch_error: anyerror) void {
+    const hwnd = self.hwnd orelse return;
+    var bytes: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &bytes,
+        "Zigonaut couldn't start the default profile \"{s}\" ({s}).\n\n{s} was opened instead. Review the command in Settings.\n\nDetails: {}",
+        .{ failed.name, failed.command, fallback.name, launch_error },
+    ) catch return;
+    _ = showUtf8Message(hwnd, text, "Default profile unavailable", win.MB_OK | win.MB_ICONWARNING);
+}
+
+fn showProfileLaunchErrorImpl(self: *Application, profile: config.Profile, launch_error: anyerror) void {
+    log.err("unable to open profile {s}: {}", .{ profile.name, launch_error });
+    const hwnd = self.hwnd orelse return;
+    var bytes: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &bytes,
+        "Zigonaut couldn't start \"{s}\".\n\nCommand: {s}\nDetails: {}\n\nOpen profile settings?",
+        .{ profile.name, profile.command, launch_error },
+    ) catch return;
+    if (showUtf8Message(hwnd, text, "Profile unavailable", win.MB_YESNO | win.MB_ICONERROR | win.MB_DEFBUTTON2) == win.IDYES) {
+        self.openSettingsPage() catch |err| log.err("unable to open settings after profile failure: {}", .{err});
+    }
+}
+
+fn showUtf8Message(hwnd: win.HWND, text: []const u8, title: []const u8, style: win.UINT) c_int {
+    var wide_text: [512:0]u16 = undefined;
+    const text_length = std.unicode.utf8ToUtf16Le(&wide_text, text) catch return 0;
+    wide_text[text_length] = 0;
+    var wide_title: [128:0]u16 = undefined;
+    const title_length = std.unicode.utf8ToUtf16Le(&wide_title, title) catch return 0;
+    wide_title[title_length] = 0;
+    return win.MessageBoxW(hwnd, &wide_text, &wide_title, style);
 }
 
 fn spawnNewWindowImpl(self: *Application) !void {
