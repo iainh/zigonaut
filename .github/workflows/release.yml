@@ -54,6 +54,11 @@ jobs:
             }
           }
 
+          $msiVersion = [version]($version.Split('-')[0])
+          if ($msiVersion.Major -gt 255 -or $msiVersion.Minor -gt 255 -or $msiVersion.Build -gt 65535) {
+            throw "Version '$version' exceeds Windows Installer's 255.255.65535 version limits."
+          }
+
           $zon = Get-Content build.zig.zon -Raw
           $zonMatch = [regex]::Match($zon, '(?m)^\s*\.version\s*=\s*"([^"]+)"')
           if (-not $zonMatch.Success -or $zonMatch.Groups[1].Value -ne $version) {
@@ -177,7 +182,13 @@ jobs:
       - name: Build complete release application
         run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
 
-      - name: Create portable archive and checksum
+      - name: Install WiX Toolset 7.0.0
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 7.0.0
+          wix --version
+
+      - name: Create release packages and checksums
         id: package
         shell: pwsh
         env:
@@ -218,11 +229,32 @@ jobs:
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'LICENSE') $staging
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'licenses') $staging -Recurse
 
+          # Future signing order: sign staged EXE/DLL payloads here, then sign
+          # the MSI immediately after wix build and before its checksum.
           $archive = Join-Path $dist "$name.zip"
           Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash *$name.zip" | Set-Content -Encoding ascii "$archive.sha256"
+
+          $msi = Join-Path $dist "$name.msi"
+          $msiVersion = $env:VERSION.Split('-')[0]
+          $upgradeCodes = @{
+            x64 = '103430D3-6D2E-45D6-A865-FAED8BCE75A2'
+            arm64 = '7CD97D0C-F6E2-468B-A863-2D34ED6E443A'
+          }
+          wix build installer\Package.wxs `
+            -acceptEula wix7 `
+            -arch $env:PACKAGE_ARCH `
+            -d "Version=$msiVersion" `
+            -d "StagingDir=$staging" `
+            -d "UpgradeCode=$($upgradeCodes[$env:PACKAGE_ARCH])" `
+            -out $msi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
+          "$hash *$name.msi" | Set-Content -Encoding ascii "$msi.sha256"
+
           "archive=$archive" >> $env:GITHUB_OUTPUT
+          "msi=$msi" >> $env:GITHUB_OUTPUT
 
       - name: Smoke-test packaged application
         shell: pwsh
@@ -241,6 +273,39 @@ jobs:
             throw "Packaged Zigonaut exited during startup with code $($process.ExitCode)."
           }
           taskkill /PID $process.Id /T /F | Out-Null
+
+      - name: Smoke-test MSI install and uninstall
+        shell: pwsh
+        env:
+          MSI: ${{ steps.package.outputs.msi }}
+        run: |
+          $installLog = Join-Path $env:RUNNER_TEMP 'zigonaut-msi-install.log'
+          $install = Start-Process msiexec.exe `
+            -ArgumentList @('/i', "`"$env:MSI`"", '/qn', '/norestart', '/l*v', "`"$installLog`"") `
+            -Wait `
+            -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) {
+            Get-Content $installLog
+            throw "MSI installation failed with exit code $($install.ExitCode)."
+          }
+
+          $installedExecutable = Join-Path $env:LOCALAPPDATA 'Spiralpoint\Zigonaut\zigonaut.exe'
+          if (-not (Test-Path $installedExecutable -PathType Leaf)) {
+            throw "MSI did not install $installedExecutable."
+          }
+
+          $uninstallLog = Join-Path $env:RUNNER_TEMP 'zigonaut-msi-uninstall.log'
+          $uninstall = Start-Process msiexec.exe `
+            -ArgumentList @('/x', "`"$env:MSI`"", '/qn', '/norestart', '/l*v', "`"$uninstallLog`"") `
+            -Wait `
+            -PassThru
+          if ($uninstall.ExitCode -notin @(0, 3010)) {
+            Get-Content $uninstallLog
+            throw "MSI uninstallation failed with exit code $($uninstall.ExitCode)."
+          }
+          if (Test-Path $installedExecutable) {
+            throw "MSI uninstall left $installedExecutable behind."
+          }
 
       - name: Upload tested package to draft release
         if: github.event_name == 'push' || inputs.create_release
