@@ -685,13 +685,7 @@ pub const SessionRuntime = struct {
         while (true) {
             const count = self.pty.?.read(&buffer) catch break;
             if (count == 0) break;
-
-            var offset: usize = 0;
-            while (offset < count) {
-                const end = @min(offset + feed_chunk_bytes, count);
-                if (self.processOutputChunk(buffer[offset..end], win.GetTickCount64())) self.refresh.request();
-                offset = end;
-            }
+            if (self.processOutput(buffer[0..count], win.GetTickCount64())) self.refresh.request();
         }
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
@@ -700,9 +694,28 @@ pub const SessionRuntime = struct {
         self.refresh.request();
     }
 
+    /// Apply one complete PTY read while holding the terminal lock. This keeps
+    /// renderers from observing parser states between feed-sized chunks.
+    fn processOutput(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        var refresh = false;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(offset + feed_chunk_bytes, bytes.len);
+            refresh = self.processOutputChunkLocked(bytes[offset..end], now) or refresh;
+            offset = end;
+        }
+        return refresh;
+    }
+
     fn processOutputChunk(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
+        return self.processOutputChunkLocked(bytes, now);
+    }
+
+    fn processOutputChunkLocked(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
         self.progress_parser.feedEach(bytes, ProgressHandler{ .runtime = self });
         self.terminal.feed(bytes);
         const synchronized = self.terminal.synchronizedOutput();
