@@ -264,6 +264,7 @@ struct Bridge {
         notification_activation->nonce = nonce_text;
 
         root = Grid{};
+        root.KeyboardAcceleratorPlacementMode(Microsoft::UI::Xaml::Input::KeyboardAcceleratorPlacementMode::Hidden);
         root.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         auto title_row = RowDefinition{};
         title_row.Height(GridLength{1, GridUnitType::Auto});
