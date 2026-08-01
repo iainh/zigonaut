@@ -772,15 +772,26 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         light_theme = themeCombo(value(values, "light_theme", "fluent-light"));
         opacity = numberBox(value(values, "background_opacity", "100"), 100, 0, 100);
         random_background = toggle(value(values, "randomize_tab_background", "true"));
+        font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
+        auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
+        font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
+        intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
+        font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
 
         auto theme_grid = StackPanel{};
         theme_grid.Spacing(8);
         appendLabeled(theme_grid, L"Dark theme", dark_theme);
         appendLabeled(theme_grid, L"Light theme", light_theme);
+        auto font = StackPanel{}; font.Spacing(8);
+        appendLabeled(font, L"Font family", font_family);
+        appendLabeled(font, L"Normal weight", font_weight);
+        appendLabeled(font, L"Intense weight", intense_font_weight);
+        appendLabeled(font, L"Size (points)", font_size);
         return page(L"Appearance", L"Choose how Zigonaut and terminal sessions look.", {
             card(L"Application theme", L"Follow Windows or always use a light or dark color scheme.", color_scheme),
             card(L"Window material", L"Choose the Fluent backdrop used behind the terminal.", backdrop),
             card(L"Terminal themes", L"Theme names are loaded from the themes folder beside Zigonaut.", theme_grid, true),
+            card(L"Font", L"Use an installed monospace font family.", font, true),
             card(L"Background opacity", L"Percentage opacity for the terminal background.", opacity),
             card(L"Random tab colors", L"Gently tint each new tab's background while keeping it close to the selected theme.", random_background),
         });
@@ -802,21 +813,11 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     ScrollViewer makeTerminal(std::map<std::string, std::string> const& values) {
-        font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
-        auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
-        font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
-        intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
-        font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
         scrollback_size = numberBox(value(values, "scrollback_size", "10000"), 10000, 0, 1000000, 1000);
         initial_columns = numberBox(value(values, "initial_columns", "80"), 80, 10, 1000);
         initial_rows = numberBox(value(values, "initial_rows", "24"), 24, 4, 1000);
         padding_horizontal = numberBox(value(values, "padding_horizontal", "8"), 8, 0, 128);
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
-        auto font = StackPanel{}; font.Spacing(8);
-        appendLabeled(font, L"Font family", font_family);
-        appendLabeled(font, L"Normal weight", font_weight);
-        appendLabeled(font, L"Intense weight", intense_font_weight);
-        appendLabeled(font, L"Size (points)", font_size);
         auto padding = StackPanel{}; padding.Spacing(8);
         appendLabeled(padding, L"Horizontal (pixels)", padding_horizontal);
         appendLabeled(padding, L"Vertical (pixels)", padding_vertical);
@@ -876,8 +877,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         palette_expander.Header(box_value(L"Edit palette overrides"));
         palette_expander.Content(palette);
         palette_expander.IsExpanded(false);
-        return page(L"Terminal", L"Configure text rendering, spacing, and optional palette overrides.", {
-            card(L"Font", L"Use an installed monospace font family.", font, true),
+        return page(L"Terminal", L"Configure terminal history, dimensions, spacing, and optional palette overrides.", {
             card(L"Scrollback size", L"Maximum number of history lines kept for new terminal sessions.", scrollback_size),
             card(L"Initial window size", L"Terminal columns and rows used when opening a new window.", initial_size, true),
             card(L"Padding", L"Space between terminal cells and the pane edge.", padding, true),
