@@ -10,6 +10,7 @@ const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
 const synchronized_output_timeout_ms = 1000;
+const shell_integration_marker = "\x1b]133;";
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `destroy` only after no caller can submit input or rendering work.
@@ -30,6 +31,8 @@ pub const SessionRuntime = struct {
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     search: Search = .{},
     progress_parser: progress.Parser = .{},
+    shell_integration_match: u8 = 0,
+    integrated_command_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: NotificationQueue = .{},
@@ -668,8 +671,11 @@ pub const SessionRuntime = struct {
         return pty.exitedCleanly();
     }
 
-    pub fn hasRunningApplication(self: *const SessionRuntime) bool {
+    pub fn hasRunningApplication(self: *const SessionRuntime, use_shell_integration: bool) bool {
         const pty = self.pty orelse return false;
+        // WSL's Windows-side helper processes exist even while its Linux shell
+        // is idle, so process ancestry cannot distinguish a foreground command.
+        if (use_shell_integration) return self.integrated_command_running.load(.acquire);
         return pty.hasRunningApplication();
     }
 
@@ -709,6 +715,7 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         self.progress_parser.feedEach(bytes, ProgressHandler{ .runtime = self });
+        self.trackShellIntegration(bytes);
         self.terminal.feed(bytes);
         const synchronized = self.terminal.synchronizedOutput();
         const mode_changed = self.synchronized_output.update(synchronized, now);
@@ -716,6 +723,23 @@ pub const SessionRuntime = struct {
         _ = self.output_generation.fetchAdd(1, .monotonic);
         _ = self.content_generation.fetchAdd(1, .monotonic);
         return !synchronized or mode_changed;
+    }
+
+    fn trackShellIntegration(self: *SessionRuntime, bytes: []const u8) void {
+        for (bytes) |byte| {
+            if (self.shell_integration_match == shell_integration_marker.len) {
+                switch (byte) {
+                    'C' => self.integrated_command_running.store(true, .release),
+                    'A', 'D' => self.integrated_command_running.store(false, .release),
+                    else => {},
+                }
+                self.shell_integration_match = @intFromBool(byte == shell_integration_marker[0]);
+            } else if (byte == shell_integration_marker[self.shell_integration_match]) {
+                self.shell_integration_match += 1;
+            } else {
+                self.shell_integration_match = @intFromBool(byte == shell_integration_marker[0]);
+            }
+        }
     }
 
     const ProgressHandler = struct {
@@ -794,6 +818,24 @@ test "synchronized output arms once and releases when disabled" {
     try std.testing.expect(state.update(false, 600));
     try std.testing.expectEqual(@as(?u32, null), state.remaining(600));
     try std.testing.expect(!state.update(false, 700));
+}
+
+test "shell integration tracks commands across output chunks" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    runtime.trackShellIntegration("\x1b]133;A\x07prompt\x1b]13");
+    try std.testing.expect(!runtime.integrated_command_running.load(.acquire));
+    runtime.trackShellIntegration("3;C\x07sleep 30");
+    try std.testing.expect(runtime.integrated_command_running.load(.acquire));
+    runtime.trackShellIntegration("\x1b]133;D;0\x07\x1b]133;A\x07prompt");
+    try std.testing.expect(!runtime.integrated_command_running.load(.acquire));
 }
 
 test "synchronized output watchdog expires and clear releases rendering" {

@@ -545,7 +545,7 @@ pub const App = struct {
 
     pub fn focusedPaneHasRunningApplication(self: *App) bool {
         const session = (self.activePane() orelse return false).session;
-        return if (session.runtime) |runtime| runtime.hasRunningApplication() else false;
+        return if (session.runtime) |runtime| runtime.hasRunningApplication(session.shell == .wsl) else false;
     }
 
     pub fn hasPendingNotification(self: *App) bool {
@@ -634,7 +634,7 @@ pub const App = struct {
 fn runningSessionCountIn(tab: *const Tab) usize {
     var count: usize = 0;
     for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
-        if (runtime.hasRunningApplication()) count += 1;
+        if (runtime.hasRunningApplication(pane.session.shell == .wsl)) count += 1;
     };
     return count;
 }
