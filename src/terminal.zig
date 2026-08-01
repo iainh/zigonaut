@@ -698,12 +698,13 @@ pub const Terminal = struct {
     pub fn initWithScrollback(columns: u16, rows: u16, terminal_theme: theme.Theme, max_scrollback: u32) !Terminal {
         try installDecodePng();
         var terminal: vt.GhosttyTerminal = null;
-        try check(vt.ghostty_terminal_new(null, &terminal, .{
-            .cols = columns,
-            .rows = rows,
-            .max_scrollback = max_scrollback,
-        }));
+        try check(vt.ghostty_terminal_new(null, &terminal, columns, rows));
         errdefer vt.ghostty_terminal_free(terminal);
+        const scrollback_lines: usize = max_scrollback;
+        // Preserve Zigonaut's line-based setting instead of also inheriting
+        // libghostty's default byte cap, which could truncate history first.
+        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, null));
+        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
         const image_limit: usize = kitty_image_limit;
         const disabled = false;
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit));
