@@ -21,6 +21,7 @@ pub const SessionRuntime = struct {
     refresh: Refresh,
     terminal_mutex: @import("win32.zig").Mutex = .{},
     pty_mutex: @import("win32.zig").Mutex = .{},
+    render_handoff: RenderHandoff = .{},
     closing: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -56,6 +57,39 @@ pub const SessionRuntime = struct {
 
         fn request(self: Refresh) void {
             if (self.callback) |callback| callback(self.context);
+        }
+    };
+
+    const RenderHandoff = struct {
+        demand: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+        generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+        fn lock(self: *RenderHandoff, mutex: *@import("win32.zig").Mutex) void {
+            _ = self.demand.fetchAdd(1, .monotonic);
+            mutex.lock();
+            _ = self.demand.fetchSub(1, .monotonic);
+        }
+
+        fn unlock(self: *RenderHandoff, mutex: *@import("win32.zig").Mutex) void {
+            mutex.unlock();
+            _ = self.generation.fetchAdd(1, .monotonic);
+            std.os.windows.ntdll.RtlWakeAddressSingle(@ptrCast(&self.generation));
+        }
+
+        /// Give a waiting renderer one bounded opportunity to acquire the
+        /// unfair SRW lock before the PTY reader begins its next read.
+        fn yield(self: *RenderHandoff) void {
+            if (self.demand.load(.monotonic) == 0) return;
+            const generation = self.generation.load(.monotonic);
+            if (self.demand.load(.monotonic) == 0) return;
+            var expected = generation;
+            var timeout: std.os.windows.LARGE_INTEGER = -10_000;
+            _ = std.os.windows.ntdll.RtlWaitOnAddress(
+                @ptrCast(&self.generation),
+                @ptrCast(&expected),
+                @sizeOf(u32),
+                &timeout,
+            );
         }
     };
 
@@ -343,9 +377,9 @@ pub const SessionRuntime = struct {
     /// Atomically admits a render and captures its terminal state. A mode 2026
     /// transition after this returns cannot affect the prepared frame.
     pub fn prepareRender(self: *SessionRuntime) !bool {
-        self.terminal_mutex.lock();
+        self.render_handoff.lock(&self.terminal_mutex);
         if (self.synchronized_output.remaining(win.GetTickCount64()) != null) {
-            self.terminal_mutex.unlock();
+            self.render_handoff.unlock(&self.terminal_mutex);
             return false;
         }
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
@@ -354,10 +388,10 @@ pub const SessionRuntime = struct {
         self.render_search_scanning = self.search.scanning;
         self.render_scroll_offset = scroll_state.offset;
         self.render_snapshot.capture(self.allocator, &self.terminal) catch |err| {
-            self.terminal_mutex.unlock();
+            self.render_handoff.unlock(&self.terminal_mutex);
             return err;
         };
-        self.terminal_mutex.unlock();
+        self.render_handoff.unlock(&self.terminal_mutex);
         return true;
     }
 
@@ -707,7 +741,6 @@ pub const SessionRuntime = struct {
     /// renderers from observing parser states between feed-sized chunks.
     fn processOutput(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
         self.terminal_mutex.lock();
-        defer self.terminal_mutex.unlock();
         var refresh = false;
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -715,6 +748,8 @@ pub const SessionRuntime = struct {
             refresh = self.processOutputChunkLocked(bytes[offset..end], now) or refresh;
             offset = end;
         }
+        self.terminal_mutex.unlock();
+        self.render_handoff.yield();
         return refresh;
     }
 
@@ -811,6 +846,48 @@ test "synchronized output arms once and releases when disabled" {
     try std.testing.expect(state.update(false, 600));
     try std.testing.expectEqual(@as(?u32, null), state.remaining(600));
     try std.testing.expect(!state.update(false, 700));
+}
+
+test "render handoff gives a waiting snapshot lock its turn" {
+    var mutex = @import("win32.zig").Mutex{};
+    var handoff = SessionRuntime.RenderHandoff{};
+    var entered = std.atomic.Value(bool).init(false);
+    const Context = struct {
+        const State = struct {
+            handoff: *SessionRuntime.RenderHandoff,
+            mutex: *@import("win32.zig").Mutex,
+            entered: *std.atomic.Value(bool),
+        };
+
+        fn run(state: State) void {
+            state.handoff.lock(state.mutex);
+            state.entered.store(true, .release);
+            state.handoff.unlock(state.mutex);
+        }
+    };
+
+    mutex.lock();
+    const thread = try std.Thread.spawn(.{}, Context.run, .{Context.State{
+        .handoff = &handoff,
+        .mutex = &mutex,
+        .entered = &entered,
+    }});
+    var attempts: usize = 0;
+    while (handoff.demand.load(.monotonic) == 0 and attempts < 100_000) : (attempts += 1)
+        _ = win.SwitchToThread();
+    if (handoff.demand.load(.monotonic) == 0) {
+        mutex.unlock();
+        thread.join();
+        return error.RenderHandoffWaiterDidNotStart;
+    }
+    const generation = handoff.generation.load(.monotonic);
+    mutex.unlock();
+    handoff.yield();
+    thread.join();
+
+    try std.testing.expect(entered.load(.acquire));
+    try std.testing.expect(handoff.generation.load(.monotonic) != generation);
+    try std.testing.expectEqual(@as(u32, 0), handoff.demand.load(.monotonic));
 }
 
 test "synchronized output watchdog expires and clear releases rendering" {
