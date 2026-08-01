@@ -554,7 +554,6 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close => {
-                    if (!confirmClose(hwnd, self.model.runningSessionCountInTab(argument))) return 0;
                     self.detachPresentation() catch |err| {
                         log.err("unable to detach panes before close: {}", .{err});
                         _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
@@ -600,12 +599,6 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 },
                 .close_other_tabs, .close_tabs_right => {
                     if (argument >= self.model.tabs.items.len) return 0;
-                    var running: usize = 0;
-                    for (self.model.tabs.items, 0..) |_, index| {
-                        const should_close = if (command == .close_other_tabs) index != argument else index > argument;
-                        if (should_close) running += self.model.runningSessionCountInTab(index);
-                    }
-                    if (!confirmClose(hwnd, running)) return 0;
                     if (self.activeView()) |view| view.resetInteraction();
                     self.detachPresentation() catch return 0;
                     var index = self.model.tabs.items.len;
@@ -663,7 +656,6 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                     return 0;
                 },
                 .close_pane => {
-                    if (!confirmClose(hwnd, @intFromBool(self.model.focusedPaneHasRunningApplication()))) return 0;
                     const pane_id = (self.model.activePane() orelse return 0).id;
                     const bridge = if (self.chrome) |*value| value else return 0;
                     if (!bridge.detachPane(pane_id)) {
@@ -825,7 +817,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_CLOSE => {
-            if (!confirmClose(hwnd, self.model.runningSessionCount())) return 0;
+            if (!confirmCloseTabs(hwnd, self.model.tabCount())) return 0;
             return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_DPICHANGED => {
@@ -863,17 +855,13 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
     }
 }
 
-fn confirmClose(hwnd: win.HWND, sessions_with_applications: usize) bool {
-    if (sessions_with_applications == 0) return true;
+fn confirmCloseTabs(hwnd: win.HWND, tab_count: usize) bool {
+    if (tab_count <= 1) return true;
     var text_bytes: [192]u8 = undefined;
     const text = std.fmt.bufPrint(
         &text_bytes,
-        "{d} terminal {s} running an application. Closing will end the {s}.\n\nClose anyway?",
-        .{
-            sessions_with_applications,
-            if (sessions_with_applications == 1) "is" else "sessions are",
-            if (sessions_with_applications == 1) "application" else "applications",
-        },
+        "This window has {d} open tabs. Closing the window will close all of them.\n\nClose anyway?",
+        .{tab_count},
     ) catch return false;
     var wide: [192:0]u16 = undefined;
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return false;
@@ -881,7 +869,7 @@ fn confirmClose(hwnd: win.HWND, sessions_with_applications: usize) bool {
     return win.MessageBoxW(
         hwnd,
         &wide,
-        std.unicode.utf8ToUtf16LeStringLiteral("Close running applications?"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Close multiple tabs?"),
         win.MB_OKCANCEL | win.MB_ICONWARNING | win.MB_DEFBUTTON2,
     ) == win.IDOK;
 }

@@ -532,22 +532,6 @@ pub const App = struct {
         return false;
     }
 
-    pub fn runningSessionCount(self: *const App) usize {
-        var count: usize = 0;
-        for (self.tabs.items) |tab| count += runningSessionCountIn(&tab);
-        return count;
-    }
-
-    pub fn runningSessionCountInTab(self: *const App, index: usize) usize {
-        if (index >= self.tabs.items.len) return 0;
-        return runningSessionCountIn(&self.tabs.items[index]);
-    }
-
-    pub fn focusedPaneHasRunningApplication(self: *App) bool {
-        const session = (self.activePane() orelse return false).session;
-        return if (session.runtime) |runtime| runtime.hasRunningApplication(session.shell == .wsl) else false;
-    }
-
     pub fn hasPendingNotification(self: *App) bool {
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.hasPendingNotification()) return true;
         return false;
@@ -630,14 +614,6 @@ pub const App = struct {
         return changed;
     }
 };
-
-fn runningSessionCountIn(tab: *const Tab) usize {
-    var count: usize = 0;
-    for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
-        if (runtime.hasRunningApplication(pane.session.shell == .wsl)) count += 1;
-    };
-    return count;
-}
 
 test "tabs are added selected and titled by focused pane" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
