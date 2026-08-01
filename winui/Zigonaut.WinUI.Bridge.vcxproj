@@ -39,7 +39,7 @@
     <WindowsAppSDKMLVerifyTransitiveDependencies>false</WindowsAppSDKMLVerifyTransitiveDependencies>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <ClCompile><LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile><PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile><RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><AdditionalIncludeDirectories>$(ProjectDir);$(IntDir);$(GeneratedFilesDir);$(GeneratedFilesDir)sources;$(GeneratedFilesDir)winrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><AdditionalOptions>/await:strict %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;ZIGONAUT_BRIDGE_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
     <Link><AdditionalDependencies>dwrite.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies><DelayLoadDLLs>Microsoft.UI.Windowing.Core.dll;%(DelayLoadDLLs)</DelayLoadDLLs><ProgramDatabaseFile>$(IntDir)Zigonaut.WinUI.Bridge.pdb</ProgramDatabaseFile></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -67,7 +67,7 @@
   <ItemGroup><Midl Include="App.idl"><DependentUpon>App.xaml</DependentUpon></Midl></ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.24.260710001" />
-    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240405.15" />
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260715.1" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
