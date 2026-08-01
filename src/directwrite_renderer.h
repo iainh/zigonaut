@@ -45,6 +45,8 @@ typedef enum ZigonautCellOccupancy {
 HRESULT zigonaut_text_engine_create(
     const wchar_t* font_family,
     uint32_t font_size,
+    uint16_t font_weight,
+    uint16_t intense_font_weight,
     uint32_t dpi,
     ZigonautTextEngine** result);
 

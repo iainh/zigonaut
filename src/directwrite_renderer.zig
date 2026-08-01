@@ -39,7 +39,7 @@ pub const Engine = struct {
         baseline: u32,
     };
 
-    pub fn init(font_family: []const u8, font_size: u32, dpi: u32) !Engine {
+    pub fn init(font_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32) !Engine {
         var wide_name = [_]u16{0} ** 128;
         _ = @import("std").unicode.utf8ToUtf16Le(
             wide_name[0 .. wide_name.len - 1],
@@ -49,6 +49,8 @@ pub const Engine = struct {
         const result = native.zigonaut_text_engine_create(
             &wide_name,
             font_size,
+            font_weight,
+            intense_font_weight,
             dpi,
             &handle,
         );

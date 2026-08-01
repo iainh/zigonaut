@@ -249,6 +249,8 @@ struct ZigonautTextEngine {
     std::wstring locale;
     HWND hwnd = nullptr;
     uint32_t font_size = 18;
+    DWRITE_FONT_WEIGHT font_weight = DWRITE_FONT_WEIGHT_NORMAL;
+    DWRITE_FONT_WEIGHT intense_font_weight = DWRITE_FONT_WEIGHT_BOLD;
     uint32_t dpi = 96;
     ZigonautCellMetrics metrics = {9, 18, 14};
     float row_origin_x = 0.0f;
@@ -299,7 +301,7 @@ struct ZigonautTextEngine {
 
         IDWriteFont* normal_font = nullptr;
         hr = font_family->GetFirstMatchingFont(
-            DWRITE_FONT_WEIGHT_NORMAL,
+            font_weight,
             DWRITE_FONT_STRETCH_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             &normal_font);
@@ -428,11 +430,11 @@ struct ZigonautTextEngine {
     HRESULT createFormats() {
         clearLayouts();
         for (auto*& format : formats) release(format);
-        constexpr DWRITE_FONT_WEIGHT weights[] = {
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_WEIGHT_BOLD,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_WEIGHT_BOLD,
+        const DWRITE_FONT_WEIGHT weights[] = {
+            font_weight,
+            intense_font_weight,
+            font_weight,
+            intense_font_weight,
         };
         constexpr DWRITE_FONT_STYLE styles[] = {
             DWRITE_FONT_STYLE_NORMAL,
@@ -1111,9 +1113,13 @@ void ZigonautTextEngine::endRow() {
 extern "C" HRESULT zigonaut_text_engine_create(
     const wchar_t* font_family,
     uint32_t font_size,
+    uint16_t font_weight,
+    uint16_t intense_font_weight,
     uint32_t dpi,
     ZigonautTextEngine** result) {
-    if (font_family == nullptr || result == nullptr || font_size == 0 || dpi == 0) {
+    if (font_family == nullptr || result == nullptr || font_size == 0 ||
+        font_weight < 1 || font_weight > 999 || intense_font_weight < 1 ||
+        intense_font_weight > 999 || dpi == 0) {
         return E_INVALIDARG;
     }
     *result = nullptr;
@@ -1121,6 +1127,8 @@ extern "C" HRESULT zigonaut_text_engine_create(
     auto* engine = new (std::nothrow) ZigonautTextEngine();
     if (engine == nullptr) return E_OUTOFMEMORY;
     engine->font_size = font_size;
+    engine->font_weight = static_cast<DWRITE_FONT_WEIGHT>(font_weight);
+    engine->intense_font_weight = static_cast<DWRITE_FONT_WEIGHT>(intense_font_weight);
     engine->dpi = dpi;
     const HRESULT hr = engine->initialize(font_family);
     if (FAILED(hr)) {
@@ -1141,7 +1149,8 @@ extern "C" HRESULT zigonaut_benchmark_layout_cache(
     if (repetitions == 0 || result == nullptr) return E_INVALIDARG;
     *result = {};
     ZigonautTextEngine* engine = nullptr;
-    HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18, 96, &engine);
+    HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96, &engine);
     if (FAILED(hr)) return hr;
 
     // Fill to capacity, make the final 248 entries hot, cross capacity, then

@@ -6,7 +6,7 @@ pub const default_contents =
     \\{
     \\  "version": 1,
     \\  "appearance": {
-    \\    "font": { "family": "Cascadia Mono", "size": 18 },
+    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8 },
     \\    "background": { "opacity": 100, "backdrop": "mica" },
@@ -57,6 +57,19 @@ const default_profiles = [3]Profile{
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
+pub const FontWeight = enum(u16) {
+    thin = 100,
+    extraLight = 200,
+    light = 300,
+    semiLight = 350,
+    regular = 400,
+    medium = 500,
+    semiBold = 600,
+    bold = 700,
+    extraBold = 800,
+    black = 900,
+    extraBlack = 950,
+};
 
 const JsonProfile = struct {
     name: []const u8,
@@ -71,6 +84,8 @@ const JsonConfig = struct {
         font: struct {
             family: []const u8,
             size: u16,
+            weight: FontWeight = .regular,
+            intenseWeight: FontWeight = .bold,
         },
         themes: struct {
             dark: []const u8,
@@ -118,6 +133,8 @@ const JsonConfig = struct {
 pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
     font_size: u16 = 18,
+    font_weight: FontWeight = .regular,
+    intense_font_weight: FontWeight = .bold,
     scrollback_size: u32 = 10_000,
     initial_columns: u16 = 80,
     initial_rows: u16 = 24,
@@ -158,6 +175,8 @@ pub const Changes = struct {
 pub fn changes(previous: Config, next: Config) Changes {
     return .{
         .font = previous.font_size != next.font_size or
+            previous.font_weight != next.font_weight or
+            previous.intense_font_weight != next.intense_font_weight or
             !std.mem.eql(u8, previous.font_family, next.font_family),
         .theme = !std.mem.eql(u8, previous.dark_theme, next.dark_theme) or
             !std.mem.eql(u8, previous.light_theme, next.light_theme) or
@@ -289,6 +308,8 @@ fn configFromJson(json: JsonConfig) !Config {
     var result = Config{};
     result.font_family = json.appearance.font.family;
     result.font_size = json.appearance.font.size;
+    result.font_weight = json.appearance.font.weight;
+    result.intense_font_weight = json.appearance.font.intenseWeight;
     result.scrollback_size = json.terminal.scrollbackSize;
     result.initial_columns = json.terminal.initialSize.columns;
     result.initial_rows = json.terminal.initialSize.rows;
@@ -349,7 +370,7 @@ test "configuration parses structured JSON" {
         \\{
         \\  "version": 1,
         \\  "appearance": {
-        \\    "font": { "family": "JetBrains Mono", "size": 14 },
+        \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold" },
         \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
         \\    "padding": { "horizontal": 12, "vertical": 4 },
         \\    "background": { "opacity": 82, "backdrop": "acrylic" },
@@ -373,6 +394,8 @@ test "configuration parses structured JSON" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqualStrings("JetBrains Mono", value.font_family);
     try std.testing.expectEqual(@as(u16, 14), value.font_size);
+    try std.testing.expectEqual(FontWeight.light, value.font_weight);
+    try std.testing.expectEqual(FontWeight.semiBold, value.intense_font_weight);
     try std.testing.expectEqual(@as(u32, 50_000), value.scrollback_size);
     try std.testing.expectEqual(@as(u16, 120), value.initial_columns);
     try std.testing.expectEqual(@as(u16, 40), value.initial_rows);
@@ -394,10 +417,28 @@ test "default JSON configuration parses" {
     var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, default_contents, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(FontWeight.regular, value.font_weight);
+    try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
     try std.testing.expectEqualStrings("fluent-dark", value.dark_theme);
     try std.testing.expectEqualStrings("fluent-light", value.light_theme);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
+}
+
+test "font weights default for existing configurations" {
+    const legacy_contents = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        default_contents,
+        ", \"weight\": \"regular\", \"intenseWeight\": \"bold\"",
+        "",
+    );
+    defer std.testing.allocator.free(legacy_contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(FontWeight.regular, value.font_weight);
+    try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
 }
 
 test "first-run configuration prefers installed PowerShell 7" {
@@ -448,6 +489,10 @@ test "configuration changes are classified by subsystem" {
 
     var modified = original;
     modified.font_size = 20;
+    try std.testing.expect(changes(original, modified).font);
+
+    modified = original;
+    modified.intense_font_weight = .extraBold;
     try std.testing.expect(changes(original, modified).font);
 
     modified = original;

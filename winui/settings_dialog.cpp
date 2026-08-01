@@ -127,6 +127,8 @@ std::map<std::string, std::string> parse(std::string_view contents) {
 
     values["font_family"] = to_string(font.GetNamedString(L"family"));
     values["font_size"] = number(font.GetNamedNumber(L"size"));
+    values["font_weight"] = to_string(font.GetNamedString(L"weight", L"regular"));
+    values["intense_font_weight"] = to_string(font.GetNamedString(L"intenseWeight", L"bold"));
     values["scrollback_size"] = number(terminal.GetNamedNumber(L"scrollbackSize"));
     values["initial_columns"] = number(initial_size.GetNamedNumber(L"columns"));
     values["initial_rows"] = number(initial_size.GetNamedNumber(L"rows"));
@@ -478,6 +480,84 @@ ComboBox fontCombo(std::string const& selected) {
     return result;
 }
 
+struct FontWeightChoice {
+    DWRITE_FONT_WEIGHT value;
+    wchar_t const* label;
+    char const* key;
+};
+
+constexpr FontWeightChoice font_weight_choices[] = {
+    {DWRITE_FONT_WEIGHT_THIN, L"Thin", "thin"},
+    {DWRITE_FONT_WEIGHT_EXTRA_LIGHT, L"Extra light", "extraLight"},
+    {DWRITE_FONT_WEIGHT_LIGHT, L"Light", "light"},
+    {DWRITE_FONT_WEIGHT_SEMI_LIGHT, L"Semi-light", "semiLight"},
+    {DWRITE_FONT_WEIGHT_NORMAL, L"Regular", "regular"},
+    {DWRITE_FONT_WEIGHT_MEDIUM, L"Medium", "medium"},
+    {DWRITE_FONT_WEIGHT_SEMI_BOLD, L"Semi-bold", "semiBold"},
+    {DWRITE_FONT_WEIGHT_BOLD, L"Bold", "bold"},
+    {DWRITE_FONT_WEIGHT_EXTRA_BOLD, L"Extra bold", "extraBold"},
+    {DWRITE_FONT_WEIGHT_BLACK, L"Black", "black"},
+    {DWRITE_FONT_WEIGHT_EXTRA_BLACK, L"Extra black", "extraBlack"},
+};
+
+std::vector<FontWeightChoice const*> fontWeights(std::wstring const& family_name) {
+    std::vector<FontWeightChoice const*> result;
+    com_ptr<IDWriteFactory> factory;
+    check_hresult(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown**>(factory.put())));
+    com_ptr<IDWriteFontCollection> collection;
+    check_hresult(factory->GetSystemFontCollection(collection.put()));
+    UINT32 family_index{};
+    BOOL exists{};
+    check_hresult(collection->FindFamilyName(family_name.c_str(), &family_index, &exists));
+    if (!exists) return result;
+    com_ptr<IDWriteFontFamily> family;
+    check_hresult(collection->GetFontFamily(family_index, family.put()));
+    for (UINT32 index = 0; index < family->GetFontCount(); ++index) {
+        com_ptr<IDWriteFont> font;
+        if (FAILED(family->GetFont(index, font.put())) || font->GetStyle() != DWRITE_FONT_STYLE_NORMAL) continue;
+        auto const weight = font->GetWeight();
+        auto const choice = std::find_if(std::begin(font_weight_choices), std::end(font_weight_choices),
+            [weight](auto const& candidate) { return candidate.value == weight; });
+        if (choice != std::end(font_weight_choices) && std::find(result.begin(), result.end(), &*choice) == result.end())
+            result.push_back(&*choice);
+    }
+    std::sort(result.begin(), result.end(), [](auto left, auto right) { return left->value < right->value; });
+    return result;
+}
+
+void refreshWeightCombo(ComboBox const& combo_box, std::wstring const& family, std::string const& selected) {
+    auto choices = fontWeights(family);
+    if (choices.empty()) choices.push_back(&font_weight_choices[4]);
+    auto selected_choice = std::find_if(choices.begin(), choices.end(), [&](auto choice) { return selected == choice->key; });
+    if (selected_choice == choices.end()) {
+        auto const requested = std::find_if(std::begin(font_weight_choices), std::end(font_weight_choices),
+            [&](auto const& choice) { return selected == choice.key; });
+        auto const requested_value = requested == std::end(font_weight_choices)
+            ? DWRITE_FONT_WEIGHT_NORMAL : requested->value;
+        selected_choice = std::min_element(choices.begin(), choices.end(), [requested_value](auto left, auto right) {
+            return std::abs(static_cast<int>(left->value) - static_cast<int>(requested_value)) <
+                std::abs(static_cast<int>(right->value) - static_cast<int>(requested_value));
+        });
+    }
+    auto const selected_index = static_cast<int32_t>(std::distance(choices.begin(), selected_choice));
+    combo_box.Items().Clear();
+    for (auto choice : choices) {
+        auto item = ComboBoxItem{};
+        item.Content(box_value(choice->label));
+        item.Tag(box_value(to_hstring(choice->key)));
+        combo_box.Items().Append(item);
+    }
+    combo_box.SelectedIndex(selected_index);
+}
+
+ComboBox weightCombo(std::wstring const& family, std::string const& selected) {
+    auto result = ComboBox{};
+    result.HorizontalAlignment(HorizontalAlignment::Stretch);
+    refreshWeightCombo(result, family, selected);
+    return result;
+}
+
 ToggleSwitch toggle(std::string const& selected) {
     auto result = ToggleSwitch{};
     result.IsOn(selected == "true");
@@ -517,8 +597,9 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     std::wstring git_hash;
     std::function<void()> saved;
     bool open = true;
+    bool updating_font_weights = false;
 
-    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr};
+    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr};
     ToggleSwitch random_background{nullptr};
@@ -722,6 +803,9 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 
     ScrollViewer makeTerminal(std::map<std::string, std::string> const& values) {
         font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
+        auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
+        font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
+        intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
         scrollback_size = numberBox(value(values, "scrollback_size", "10000"), 10000, 0, 1000000, 1000);
         initial_columns = numberBox(value(values, "initial_columns", "80"), 80, 10, 1000);
@@ -730,6 +814,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
         auto font = StackPanel{}; font.Spacing(8);
         appendLabeled(font, L"Font family", font_family);
+        appendLabeled(font, L"Normal weight", font_weight);
+        appendLabeled(font, L"Intense weight", intense_font_weight);
         appendLabeled(font, L"Size (points)", font_size);
         auto padding = StackPanel{}; padding.Spacing(8);
         appendLabeled(padding, L"Horizontal (pixels)", padding_horizontal);
@@ -1142,7 +1228,12 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto selectedTheme = [](ComboBox const& box) {
             return trim(to_string(box.SelectedItem().as<ComboBoxItem>().Tag().as<hstring>()));
         };
+        auto selectedWeight = [](ComboBox const& box) {
+            return trim(to_string(box.SelectedItem().as<ComboBoxItem>().Tag().as<hstring>()));
+        };
         auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
+        auto const selected_font_weight = selectedWeight(font_weight);
+        auto const selected_intense_font_weight = selectedWeight(intense_font_weight);
         auto const selected_dark_theme = selectedTheme(dark_theme);
         auto const selected_light_theme = selectedTheme(light_theme);
         auto integer = [](NumberBox const& box, double minimum, double maximum) {
@@ -1206,6 +1297,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         JsonObject font;
         font.Insert(L"family", text(selected_font));
         font.Insert(L"size", number(font_size_value));
+        font.Insert(L"weight", text(selected_font_weight));
+        font.Insert(L"intenseWeight", text(selected_intense_font_weight));
         appearance.Insert(L"font", font);
         JsonObject selected_themes;
         selected_themes.Insert(L"dark", text(selected_dark_theme));
@@ -1311,7 +1404,19 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         backdrop.SelectionChanged(selection_changed);
         dark_theme.SelectionChanged(selection_changed);
         light_theme.SelectionChanged(selection_changed);
-        font_family.SelectionChanged(selection_changed);
+        font_family.SelectionChanged([this](auto const&, auto const&) {
+            auto const family = unbox_value<hstring>(font_family.SelectedItem());
+            updating_font_weights = true;
+            refreshWeightCombo(font_weight, family.c_str(), "regular");
+            refreshWeightCombo(intense_font_weight, family.c_str(), "bold");
+            updating_font_weights = false;
+            save();
+        });
+        auto weight_changed = [this](auto const&, auto const&) {
+            if (!updating_font_weights) save();
+        };
+        font_weight.SelectionChanged(weight_changed);
+        intense_font_weight.SelectionChanged(weight_changed);
         default_profile.SelectionChanged([this](auto const&, auto const&) {
             if (!updating_profiles) save();
         });

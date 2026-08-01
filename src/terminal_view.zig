@@ -310,6 +310,8 @@ pub const View = struct {
         font: win.HFONT,
         font_family: []const u8,
         font_size: u16,
+        font_weight: u16,
+        intense_font_weight: u16,
         dpi: u32,
         padding_horizontal: u16,
         padding_vertical: u16,
@@ -324,7 +326,7 @@ pub const View = struct {
         search_status_changed_message: win.UINT,
         chrome_message: win.UINT,
     ) View {
-        const text_engine = TextEngine.init(font_family, font_size, dpi) catch null;
+        const text_engine = TextEngine.init(font_family, font_size, font_weight, intense_font_weight, dpi) catch null;
         const cell_size = if (text_engine) |engine| size: {
             const metrics = engine.metrics();
             break :size CellSize{ .width = metrics.width, .height = metrics.height };
@@ -450,8 +452,16 @@ pub const View = struct {
         }
     };
 
-    pub fn prepareReload(self: *View, font: win.HFONT, font_family: []const u8, font_size: u16, dpi: u32) !PreparedReload {
-        var engine = try TextEngine.init(font_family, font_size, dpi);
+    pub fn prepareReload(
+        self: *View,
+        font: win.HFONT,
+        font_family: []const u8,
+        font_size: u16,
+        font_weight: u16,
+        intense_font_weight: u16,
+        dpi: u32,
+    ) !PreparedReload {
+        var engine = try TextEngine.init(font_family, font_size, font_weight, intense_font_weight, dpi);
         errdefer engine.deinit();
         try engine.setWindow(self.hwnd);
         return .{ .engine = engine, .font = font };

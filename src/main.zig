@@ -192,7 +192,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -328,13 +328,13 @@ const Application = struct {
         }
     }
 
-    fn reloadViews(self: *Application, font: win.HFONT, family: []const u8, size: u16, dpi: u32) !void {
+    fn reloadViews(self: *Application, font: win.HFONT, settings: config.Config, size: u16, dpi: u32) !void {
         const prepared = try std.heap.page_allocator.alloc(TerminalView.PreparedReload, self.views.items.len);
         defer std.heap.page_allocator.free(prepared);
         var count: usize = 0;
         errdefer for (prepared[0..count]) |*value| value.deinit();
         for (self.views.items, 0..) |entry, index| {
-            prepared[index] = try entry.view.prepareReload(font, family, size, dpi);
+            prepared[index] = try entry.view.prepareReload(font, settings.font_family, size, @intFromEnum(settings.font_weight), @intFromEnum(settings.intense_font_weight), dpi);
             count += 1;
         }
         try self.detachPresentation();
@@ -822,9 +822,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         },
         win.WM_DPICHANGED => {
             const new_dpi: u32 = @intCast(wparam & 0xffff);
-            const new_font = createFont(self.settings.font_family, self.zoomed_font_size, new_dpi);
+            const new_font = createFont(self.settings.font_family, self.zoomed_font_size, self.settings.font_weight, new_dpi);
             if (new_font != null) {
-                self.reloadViews(new_font, self.settings.font_family, self.zoomed_font_size, new_dpi) catch |err| {
+                self.reloadViews(new_font, self.settings, self.zoomed_font_size, new_dpi) catch |err| {
                     log.err("unable to reload renderers for DPI change: {}", .{err});
                     _ = win.DeleteObject(new_font);
                     return win.DefSubclassProc(hwnd, message, wparam, lparam);
@@ -1453,10 +1453,10 @@ fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) voi
 }
 
 fn createFontFor(value: config.Config, dpi: u32) win.HFONT {
-    return createFont(value.font_family, value.font_size, dpi);
+    return createFont(value.font_family, value.font_size, value.font_weight, dpi);
 }
 
-fn createFont(font_family: []const u8, font_size: u16, dpi: u32) win.HFONT {
+fn createFont(font_family: []const u8, font_size: u16, font_weight: config.FontWeight, dpi: u32) win.HFONT {
     var wide_name = std.mem.zeroes([128]u16);
     _ = std.unicode.utf8ToUtf16Le(wide_name[0 .. wide_name.len - 1], font_family) catch 0;
     return win.CreateFontW(
@@ -1464,7 +1464,7 @@ fn createFont(font_family: []const u8, font_size: u16, dpi: u32) win.HFONT {
         0,
         0,
         0,
-        win.FW_NORMAL,
+        @intFromEnum(font_weight),
         0,
         0,
         0,
@@ -1507,7 +1507,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     }
     try self.syncProfiles(&next);
     if (new_font != null) {
-        try self.reloadViews(new_font, next.font_family, next.font_size, self.dpi);
+        try self.reloadViews(new_font, next, next.font_size, self.dpi);
     } else if (padding_changed) {
         try self.detachPresentation();
     }
@@ -1556,9 +1556,9 @@ fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
 
 fn setZoomedFontSizeImpl(self: *Application, size: u16) void {
     if (size == self.zoomed_font_size) return;
-    const new_font = createFont(self.settings.font_family, size, self.dpi);
+    const new_font = createFont(self.settings.font_family, size, self.settings.font_weight, self.dpi);
     if (new_font == null) return;
-    self.reloadViews(new_font, self.settings.font_family, size, self.dpi) catch {
+    self.reloadViews(new_font, self.settings, size, self.dpi) catch {
         _ = win.DeleteObject(new_font);
         return;
     };
@@ -1578,12 +1578,12 @@ fn detachTerminalRendererImpl(self: *Application) void {
 }
 
 fn recoverTerminalRendererImpl(self: *Application) void {
-    const new_font = createFont(self.settings.font_family, self.zoomed_font_size, self.dpi);
+    const new_font = createFont(self.settings.font_family, self.zoomed_font_size, self.settings.font_weight, self.dpi);
     if (new_font == null) {
         log.err("unable to recreate the terminal font after a renderer failure", .{});
         return;
     }
-    self.reloadViews(new_font, self.settings.font_family, self.zoomed_font_size, self.dpi) catch |err| {
+    self.reloadViews(new_font, self.settings, self.zoomed_font_size, self.dpi) catch |err| {
         _ = win.DeleteObject(new_font);
         log.err("unable to recover the terminal renderer: {}", .{err});
         return;
