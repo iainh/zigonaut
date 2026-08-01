@@ -175,3 +175,7 @@ Each pane owns an isolated ConPTY process and terminal state. Background readers
 ## Releases
 
 Portable x64 and ARM64 archives are available from [GitHub Releases](https://github.com/iainh/zigonaut/releases). The matching Windows App Runtime 2.3.1 architecture must be installed before running a release build.
+
+## License
+
+Zigonaut is available under the [MIT License](LICENSE). Third-party license notices are in the [licenses](licenses) directory.

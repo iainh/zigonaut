@@ -3,8 +3,10 @@
 
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Composition.SystemBackdrops.h>
+#include <winrt/Microsoft.UI.Xaml.Documents.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Animation.h>
+#include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Windowing.h>
 #include <winrt/Microsoft.Windows.Storage.Pickers.h>
 #include <winrt/Windows.Data.Json.h>
@@ -511,6 +513,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     std::vector<TextBlock> save_status;
     std::vector<ScrollViewer> pages;
     std::filesystem::path path;
+    std::wstring app_version;
+    std::wstring git_hash;
     std::function<void()> saved;
     bool open = true;
 
@@ -548,8 +552,10 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     Window::Closed_revoker closed_revoker{};
     NavigationView::SelectionChanged_revoker navigation_revoker{};
 
-    Dialog(std::string_view config_path, std::string_view contents, bool high_contrast, bool dark_theme, std::function<void()> on_saved)
-        : path(to_hstring(config_path).c_str()), saved(std::move(on_saved)), themes(loadThemes()) {
+    Dialog(std::string_view config_path, std::string_view contents, std::wstring_view version, std::wstring_view hash,
+           bool high_contrast, bool dark_theme, std::function<void()> on_saved)
+        : path(to_hstring(config_path).c_str()), app_version(version), git_hash(hash),
+          saved(std::move(on_saved)), themes(loadThemes()) {
         auto const values = parse(contents);
         window = Window{};
         window.Title(L"Zigonaut Settings");
@@ -1034,7 +1040,101 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             card(L"Terminal clipboard writes", L"Allow OSC 52 and OSC 1337 Copy sequences to write to the Windows clipboard.", clipboard_write),
             clipboard_limit_card,
             card(L"Pipe command output", L"Windows command that receives the latest OSC 133 command output on stdin. Leave empty to copy it.", pipe_command),
+            makeAbout(),
         });
+    }
+
+    Border makeAbout() {
+        auto image_path = executablePath();
+        auto const separator = image_path.find_last_of(L"\\/");
+        image_path.resize(separator == std::wstring::npos ? 0 : separator + 1);
+        image_path += L"zigonaut-about-1024.png";
+        std::replace(image_path.begin(), image_path.end(), L'\\', L'/');
+        auto bitmap = Microsoft::UI::Xaml::Media::Imaging::BitmapImage{};
+        bitmap.UriSource(Windows::Foundation::Uri{hstring{L"file:///" + image_path}});
+        auto image = Image{};
+        image.Source(bitmap);
+        image.Width(40);
+        image.Height(40);
+        image.Stretch(Microsoft::UI::Xaml::Media::Stretch::Uniform);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(image, L"Zigonaut app icon");
+
+        auto name = TextBlock{};
+        name.Text(L"Zigonaut");
+        name.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+
+        auto version = TextBlock{};
+        version.Text(hstring{L"Version " + app_version});
+        version.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
+
+        auto title = StackPanel{};
+        title.Spacing(2);
+        title.Children().Append(name);
+        title.Children().Append(version);
+
+        auto header = Grid{};
+        header.ColumnSpacing(12);
+        auto icon_column = ColumnDefinition{};
+        icon_column.Width(GridLength{1, GridUnitType::Auto});
+        header.ColumnDefinitions().Append(icon_column);
+        auto title_column = ColumnDefinition{};
+        title_column.Width(GridLength{1, GridUnitType::Star});
+        header.ColumnDefinitions().Append(title_column);
+        header.Children().Append(image);
+        Grid::SetColumn(title, 1);
+        header.Children().Append(title);
+
+        auto content = StackPanel{};
+        content.Spacing(2);
+        content.Padding(Thickness{0, 8, 0, 0});
+        auto append_link = [&content](std::wstring_view text, std::wstring_view uri) {
+            auto link = HyperlinkButton{};
+            link.Content(box_value(text));
+            link.NavigateUri(Windows::Foundation::Uri{uri});
+            link.HorizontalAlignment(HorizontalAlignment::Left);
+            Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(link, text);
+            content.Children().Append(link);
+        };
+        append_link(L"Release notes", L"https://github.com/iainh/zigonaut/releases");
+        append_link(L"Source code", L"https://github.com/iainh/zigonaut");
+        append_link(L"Report a bug", L"https://github.com/iainh/zigonaut/issues/new?labels=bug");
+        append_link(L"Request a feature", L"https://github.com/iainh/zigonaut/issues/new?labels=enhancement");
+        append_link(L"MIT License", L"https://github.com/iainh/zigonaut/blob/main/LICENSE");
+        append_link(L"Open-source notices", L"https://github.com/iainh/zigonaut/tree/main/licenses");
+
+        auto hash = TextBlock{};
+        hash.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
+        hash.Margin(Thickness{8, 8, 8, 0});
+        auto hash_label = Microsoft::UI::Xaml::Documents::Run{};
+        hash_label.Text(L"Git commit ");
+        hash.Inlines().Append(hash_label);
+        auto hash_link = Microsoft::UI::Xaml::Documents::Hyperlink{};
+        auto hash_text = Microsoft::UI::Xaml::Documents::Run{};
+        auto const abbreviated_hash = std::wstring_view{git_hash}.substr(0, std::min<size_t>(12, git_hash.size()));
+        hash_text.Text(hstring{abbreviated_hash});
+        hash_link.Inlines().Append(hash_text);
+        hash_link.NavigateUri(Windows::Foundation::Uri{
+            hstring{L"https://github.com/iainh/zigonaut/commit/" + git_hash},
+        });
+        hash.Inlines().Append(hash_link);
+        content.Children().Append(hash);
+
+        auto copyright = TextBlock{};
+        copyright.Text(L"Copyright \u00A9 2026 Iain H");
+        copyright.Margin(Thickness{8, 0, 8, 0});
+        copyright.Style(Application::Current().Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
+        content.Children().Append(copyright);
+
+        auto expander = Expander{};
+        expander.Header(header);
+        expander.Content(content);
+        expander.IsExpanded(false);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(expander, L"About Zigonaut");
+
+        auto information = Border{};
+        information.Style(Application::Current().Resources().Lookup(box_value(L"ZigonautSettingsCardStyle")).as<Style>());
+        information.Child(expander);
+        return information;
     }
 
     std::string serialize() {
@@ -1232,8 +1332,10 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 };
 
-std::shared_ptr<Dialog> show(std::string_view path, std::string_view contents, bool high_contrast, bool dark_theme, std::function<void()> saved) {
-    auto result = std::make_shared<Dialog>(path, contents, high_contrast, dark_theme, std::move(saved));
+std::shared_ptr<Dialog> show(std::string_view path, std::string_view contents, std::wstring_view version,
+                             std::wstring_view git_hash, bool high_contrast, bool dark_theme,
+                             std::function<void()> saved) {
+    auto result = std::make_shared<Dialog>(path, contents, version, git_hash, high_contrast, dark_theme, std::move(saved));
     result->window.Activate();
     return result;
 }

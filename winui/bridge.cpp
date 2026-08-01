@@ -15,10 +15,8 @@
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
-#include <winrt/Microsoft.UI.Xaml.Documents.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
-#include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.System.h>
@@ -250,10 +248,7 @@ struct Bridge {
     MenuFlyoutItem decrease_font_size_item{nullptr};
     MenuFlyoutItem reset_font_size_item{nullptr};
     MenuFlyoutItem open_settings_item{nullptr};
-    MenuFlyoutItem about_item{nullptr};
     MenuFlyoutItem quit_item{nullptr};
-    ContentDialog about_dialog{nullptr};
-    Windows::Foundation::IAsyncOperation<ContentDialogResult> about_operation{nullptr};
     std::shared_ptr<ZigonautSettings::Dialog> settings_dialog;
     MenuFlyout new_tab_menu{nullptr};
     std::vector<MenuFlyoutItem> profile_items;
@@ -277,14 +272,12 @@ struct Bridge {
     MenuFlyoutItem::Click_revoker decrease_font_size_revoker{};
     MenuFlyoutItem::Click_revoker reset_font_size_revoker{};
     MenuFlyoutItem::Click_revoker open_settings_revoker{};
-    MenuFlyoutItem::Click_revoker about_revoker{};
     MenuFlyoutItem::Click_revoker quit_revoker{};
     TextBox::TextChanged_revoker find_text_changed_revoker{};
     UIElement::KeyDown_revoker find_key_down_revoker{};
     Button::Click_revoker find_previous_revoker{};
     Button::Click_revoker find_next_revoker{};
     Button::Click_revoker find_close_revoker{};
-    ContentDialog::Closed_revoker about_closed_revoker{};
     bool handlers_detached = false;
     bool updating = false;
     uint32_t dragged_tab_index = UINT32_MAX;
@@ -597,10 +590,6 @@ struct Bridge {
         open_settings_item.Text(L"Settings");
         open_settings_item.AccessKey(L"S");
         open_settings_revoker = open_settings_item.Click(auto_revoke, [this](auto&&, auto&&) { notify(ZIGONAUT_CHROME_OPEN_SETTINGS, 0); });
-        about_item = MenuFlyoutItem{};
-        about_item.Text(L"About Zigonaut");
-        about_item.AccessKey(L"A");
-        about_revoker = about_item.Click(auto_revoke, [this](auto&&, auto&&) { showAboutDialog(); });
         quit_item = MenuFlyoutItem{};
         quit_item.Text(L"Exit");
         quit_item.AccessKey(L"X");
@@ -612,8 +601,6 @@ struct Bridge {
         app_menu.Items().Append(view_item);
         app_menu.Items().Append(MenuFlyoutSeparator{});
         app_menu.Items().Append(open_settings_item);
-        app_menu.Items().Append(MenuFlyoutSeparator{});
-        app_menu.Items().Append(about_item);
         app_menu.Items().Append(quit_item);
         menu_button.Flyout(app_menu);
 
@@ -1397,93 +1384,6 @@ struct Bridge {
         return true;
     }
 
-    void showAboutDialog() {
-        if (about_dialog) return;
-
-        auto content = StackPanel{};
-        content.MaxWidth(320);
-        content.Spacing(10);
-        content.Padding(Thickness{0, 8, 0, 0});
-        content.HorizontalAlignment(HorizontalAlignment::Stretch);
-
-        std::wstring module_path(32768, L'\0');
-        auto const module_path_length = GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
-        if (module_path_length && module_path_length < module_path.size()) {
-            module_path.resize(module_path_length);
-            std::wstring path(module_path);
-            auto const separator = path.find_last_of(L"\\/");
-            path.resize(separator == std::wstring::npos ? 0 : separator + 1);
-            path += L"zigonaut-about-1024.png";
-            std::replace(path.begin(), path.end(), L'\\', L'/');
-
-            auto bitmap = Microsoft::UI::Xaml::Media::Imaging::BitmapImage{};
-            bitmap.UriSource(Windows::Foundation::Uri{hstring{L"file:///" + path}});
-            auto image = Image{};
-            image.Source(bitmap);
-            image.Width(96);
-            image.Height(96);
-            image.Stretch(Microsoft::UI::Xaml::Media::Stretch::Uniform);
-            image.HorizontalAlignment(HorizontalAlignment::Center);
-            content.Children().Append(image);
-        }
-
-        auto name = TextBlock{};
-        name.Text(L"Zigonaut");
-        name.Style(application.Resources().Lookup(box_value(L"TitleTextBlockStyle")).as<Style>());
-        name.HorizontalAlignment(HorizontalAlignment::Stretch);
-        name.TextAlignment(TextAlignment::Center);
-        content.Children().Append(name);
-
-        auto version = TextBlock{};
-        version.Text(hstring{L"Version " + std::wstring{app_version}});
-        version.Style(application.Resources().Lookup(box_value(L"BodyTextBlockStyle")).as<Style>());
-        version.HorizontalAlignment(HorizontalAlignment::Stretch);
-        version.TextAlignment(TextAlignment::Center);
-        content.Children().Append(version);
-
-        auto hash = TextBlock{};
-        hash.Style(application.Resources().Lookup(box_value(L"CaptionTextBlockStyle")).as<Style>());
-        hash.HorizontalAlignment(HorizontalAlignment::Stretch);
-        hash.TextAlignment(TextAlignment::Center);
-        auto hash_label = Microsoft::UI::Xaml::Documents::Run{};
-        hash_label.Text(L"Git commit ");
-        hash.Inlines().Append(hash_label);
-        auto hash_link = Microsoft::UI::Xaml::Documents::Hyperlink{};
-        auto hash_text = Microsoft::UI::Xaml::Documents::Run{};
-        auto const abbreviated_hash = std::wstring_view{git_hash}.substr(0, std::min<size_t>(12, git_hash.size()));
-        hash_text.Text(hstring{abbreviated_hash});
-        hash_link.Inlines().Append(hash_text);
-        hash_link.NavigateUri(Windows::Foundation::Uri{
-            hstring{L"https://github.com/iainh/zigonaut/commit/" + std::wstring{git_hash}},
-        });
-        hash.Inlines().Append(hash_link);
-        content.Children().Append(hash);
-
-        about_dialog = ContentDialog{};
-        about_dialog.XamlRoot(root.XamlRoot());
-        about_dialog.Title(box_value(L"About Zigonaut"));
-        about_dialog.Content(content);
-        about_dialog.CloseButtonText(L"Close");
-        about_dialog.DefaultButton(ContentDialogButton::Close);
-        about_closed_revoker = about_dialog.Closed(auto_revoke, [this](auto&&, auto&&) {
-            about_operation = nullptr;
-            about_dialog = nullptr;
-            for (auto& [_, pane] : pane_hosts) pane->bounds = {-1, -1, -1, -1};
-            layoutTerminal();
-            focusTerminal();
-        });
-        try {
-            about_operation = about_dialog.ShowAsync();
-        } catch (...) {
-            reportCurrentException(L"show About dialog");
-            about_closed_revoker.revoke();
-            about_operation = nullptr;
-            about_dialog = nullptr;
-            for (auto& [_, pane] : pane_hosts) pane->bounds = {-1, -1, -1, -1};
-            layoutTerminal();
-        }
-    }
-
     void showPaneScrollbar(PaneHost& pane) {
         if (pane.scrollbar.Visibility() != Visibility::Visible) return;
         pane.scrollbar.IndicatorMode(Microsoft::UI::Xaml::Controls::Primitives::ScrollingIndicatorMode::MouseIndicator);
@@ -1811,7 +1711,7 @@ struct Bridge {
             ZigonautSettings::activate(settings_dialog);
             return;
         }
-        settings_dialog = ZigonautSettings::show(path, contents, high_contrast, dark_theme, [this] {
+        settings_dialog = ZigonautSettings::show(path, contents, app_version, git_hash, high_contrast, dark_theme, [this] {
             notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0);
         });
     }
@@ -1836,8 +1736,6 @@ struct Bridge {
         if (app_menu) cleanup(L"hide application menu", [&] { app_menu.Hide(); }, result);
         if (ZigonautSettings::isOpen(settings_dialog)) cleanup(L"close settings window", [&] { ZigonautSettings::close(settings_dialog); }, result);
         settings_dialog.reset();
-        about_closed_revoker.revoke();
-        if (about_dialog) cleanup(L"hide About dialog", [&] { about_dialog.Hide(); }, result);
         for (auto& revoker : profile_revokers) revoker.revoke();
         profile_revokers.clear();
         for (auto& revoker : app_command_revokers) revoker.revoke();
@@ -1848,7 +1746,6 @@ struct Bridge {
         decrease_font_size_revoker.revoke();
         reset_font_size_revoker.revoke();
         open_settings_revoker.revoke();
-        about_revoker.revoke();
         quit_revoker.revoke();
         find_text_changed_revoker.revoke();
         find_key_down_revoker.revoke();
@@ -1881,7 +1778,6 @@ struct Bridge {
         decrease_font_size_item = nullptr;
         reset_font_size_item = nullptr;
         open_settings_item = nullptr;
-        about_item = nullptr;
         quit_item = nullptr;
         app_menu = nullptr;
         cleanup(L"detach new-tab controls", [&] { tabs.TabStripFooter(nullptr); }, result);
@@ -1920,8 +1816,6 @@ struct Bridge {
         title_bar = nullptr;
         app_window = nullptr;
         window = nullptr;
-        about_operation = nullptr;
-        about_dialog = nullptr;
         application = nullptr;
         return result;
     }

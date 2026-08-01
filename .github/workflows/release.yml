@@ -215,6 +215,7 @@ jobs:
           }
           Copy-Item $themes $staging -Recurse
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'README.md') $staging
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'LICENSE') $staging
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'licenses') $staging -Recurse
 
           $archive = Join-Path $dist "$name.zip"
