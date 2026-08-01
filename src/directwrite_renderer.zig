@@ -178,8 +178,10 @@ pub const Engine = struct {
         );
     }
 
-    pub fn endRow(self: *Engine) void {
-        native.zigonaut_text_engine_end_row(self.handle);
+    pub fn endRow(self: *Engine) !void {
+        if (native.zigonaut_text_engine_end_row(self.handle) < 0) {
+            return error.Direct2DEndRowFailed;
+        }
     }
 
     pub fn drawImage(self: *Engine, image: @import("terminal.zig").Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) !void {

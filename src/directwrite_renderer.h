@@ -112,7 +112,7 @@ HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     float source_width, float source_height, float clip_left, float clip_top,
     float clip_right, float clip_bottom);
 
-void zigonaut_text_engine_end_row(ZigonautTextEngine* engine);
+HRESULT zigonaut_text_engine_end_row(ZigonautTextEngine* engine);
 
 void zigonaut_text_engine_draw_cursor(
     ZigonautTextEngine* engine,

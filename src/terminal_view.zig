@@ -1701,8 +1701,13 @@ const DirectWriteCellRenderer = struct {
             @floatFromInt(top + @as(i32, @intCast(self.view.cell_height))),
             self.background,
         );
-        // Keep glyph rendering on the per-cell path. The row batching path can
-        // drop a complete text segment while its cell backgrounds remain.
+        self.engine.beginRow(
+            y,
+            @floatFromInt(self.origin_x),
+            @floatFromInt(top),
+            @floatFromInt(self.view.cell_width),
+            @floatFromInt(self.view.cell_height),
+        );
     }
 
     pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
@@ -1772,7 +1777,11 @@ const DirectWriteCellRenderer = struct {
         };
     }
 
-    pub fn endRow(_: *DirectWriteCellRenderer, _: u16) void {}
+    pub fn endRow(self: *DirectWriteCellRenderer, _: u16) void {
+        self.engine.endRow() catch |err| {
+            if (self.draw_error == null) self.draw_error = err;
+        };
+    }
 
     pub fn drawImage(self: *DirectWriteCellRenderer, image: Terminal.Image) void {
         if (self.draw_error != null) return;

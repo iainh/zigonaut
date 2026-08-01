@@ -771,7 +771,7 @@ struct ZigonautTextEngine {
         row_active = true;
     }
 
-    void endRow();
+    HRESULT endRow();
 
     HRESULT drawSegment(const RowSegment& segment);
 };
@@ -1076,17 +1076,18 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     return layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
 }
 
-void ZigonautTextEngine::endRow() {
-    if (!row_active) return;
+HRESULT ZigonautTextEngine::endRow() {
+    if (!row_active) return E_UNEXPECTED;
     row_active = false;
 
     auto& segment = row_segment;
     segment.clear();
     bool has_segment = false;
-    const auto flush = [&]() {
-        if (has_segment) drawSegment(segment);
+    const auto flush = [&]() -> HRESULT {
+        const HRESULT hr = has_segment ? drawSegment(segment) : S_OK;
         segment.clear();
         has_segment = false;
+        return hr;
     };
 
     for (const auto& cell : row_cells) {
@@ -1098,7 +1099,8 @@ void ZigonautTextEngine::endRow() {
             (segment.foreground != cell.foreground ||
              segment.bold != cell.bold ||
              segment.italic != cell.italic)) {
-            flush();
+            const HRESULT hr = flush();
+            if (FAILED(hr)) return hr;
         }
         if (!has_segment) {
             segment.foreground = cell.foreground;
@@ -1118,7 +1120,8 @@ void ZigonautTextEngine::endRow() {
             }
         }
     }
-    flush();
+    HRESULT hr = flush();
+    if (FAILED(hr)) return hr;
     for (const auto& cell : row_cells) {
         if (!cell.strikethrough) continue;
         const float left = row_origin_x +
@@ -1132,6 +1135,7 @@ void ZigonautTextEngine::endRow() {
             1.0f);
     }
     row_cells.clear();
+    return S_OK;
 }
 
 extern "C" HRESULT zigonaut_text_engine_create(
@@ -1387,8 +1391,8 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     return S_OK;
 }
 
-extern "C" void zigonaut_text_engine_end_row(ZigonautTextEngine* engine) {
-    if (engine != nullptr) engine->endRow();
+extern "C" HRESULT zigonaut_text_engine_end_row(ZigonautTextEngine* engine) {
+    return engine == nullptr ? E_INVALIDARG : engine->endRow();
 }
 
 extern "C" void zigonaut_text_engine_draw_cursor(
