@@ -30,6 +30,7 @@
 #include <winrt/Microsoft.Windows.AppNotifications.h>
 #include <winrt/Microsoft.Windows.AppNotifications.Builder.h>
 #include <shobjidl.h>
+#include <winreg.h>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
@@ -53,6 +54,68 @@ using namespace winrt::Microsoft::Windows::AppNotifications::Builder;
 
 namespace {
 namespace Microsoft = winrt::Microsoft;
+
+constexpr wchar_t placement_key[] = L"Software\\Zigonaut";
+constexpr wchar_t placement_value[] = L"WindowPlacement";
+constexpr uint32_t placement_version = 1;
+
+struct SavedWindowPlacement {
+    uint32_t version{};
+    RECT normal{};
+    uint32_t maximized{};
+};
+
+bool restoreWindowPlacement(HWND window) noexcept {
+    SavedWindowPlacement saved{};
+    DWORD type{};
+    DWORD size = sizeof(saved);
+    if (RegGetValueW(HKEY_CURRENT_USER, placement_key, placement_value,
+                     RRF_RT_REG_BINARY, &type, &saved, &size) != ERROR_SUCCESS ||
+        type != REG_BINARY || size != sizeof(saved) || saved.version != placement_version) {
+        return false;
+    }
+
+    auto width = saved.normal.right - saved.normal.left;
+    auto height = saved.normal.bottom - saved.normal.top;
+    if (width < 480 || height < 320) return false;
+
+    auto const monitor = MonitorFromRect(&saved.normal, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) return false;
+
+    width = std::min(width, info.rcWork.right - info.rcWork.left);
+    height = std::min(height, info.rcWork.bottom - info.rcWork.top);
+    auto const left = std::clamp(saved.normal.left, info.rcWork.left, info.rcWork.right - width);
+    auto const top = std::clamp(saved.normal.top, info.rcWork.top, info.rcWork.bottom - height);
+    if (!SetWindowPos(window, nullptr, left, top, width, height,
+                      SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER)) {
+        return false;
+    }
+    if (saved.maximized) ShowWindow(window, SW_MAXIMIZE);
+    return true;
+}
+
+void saveWindowPlacement(HWND window) noexcept {
+    WINDOWPLACEMENT placement{sizeof(placement)};
+    if (!GetWindowPlacement(window, &placement)) return;
+    auto const width = placement.rcNormalPosition.right - placement.rcNormalPosition.left;
+    auto const height = placement.rcNormalPosition.bottom - placement.rcNormalPosition.top;
+    if (width < 480 || height < 320) return;
+
+    SavedWindowPlacement saved{
+        placement_version,
+        placement.rcNormalPosition,
+        placement.showCmd == SW_SHOWMAXIMIZED ? 1u : 0u,
+    };
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, placement_key, 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+    RegSetValueExW(key, placement_value, 0, REG_BINARY,
+                   reinterpret_cast<BYTE const*>(&saved), sizeof(saved));
+    RegCloseKey(key);
+}
 
 struct NotificationActivationState {
     std::atomic_bool active{true};
@@ -252,6 +315,7 @@ struct Bridge {
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&parent));
         app_window = window.AppWindow();
         title_bar = app_window.TitleBar();
+        initial_size_applied = restoreWindowPlacement(parent);
 
         GUID nonce{};
         check_hresult(CoCreateGuid(&nonce));
@@ -555,6 +619,7 @@ struct Bridge {
             updateTitleBarLayout();
         });
         window_closed_revoker = window.Closed(auto_revoke, [this](auto&&, auto&&) {
+            saveWindowPlacement(parent);
             notify(ZIGONAUT_CHROME_SHUTDOWN, 0);
             close();
         });
