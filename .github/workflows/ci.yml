@@ -26,19 +26,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          use-cache: false
 
-      - name: Use x64 Zig under ARM64 emulation
-        if: matrix.arch == 'arm64'
+      - name: Install Zig 0.16.0
         shell: pwsh
         env:
           ZIG_X64_URL: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
           ZIG_X64_SHA256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
         run: |
-          # The Zig 0.16.0 ARM64 compiler crashes during compilation on Windows.
+          # Use x64 on both runners because the Zig 0.16.0 ARM64 compiler crashes on Windows.
           $archive = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0.zip'
           $sdk = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0'
           Invoke-WebRequest -Uri $env:ZIG_X64_URL -OutFile $archive
@@ -47,6 +42,7 @@ jobs:
           }
           Expand-Archive -Path $archive -DestinationPath $env:RUNNER_TEMP
           $sdk >> $env:GITHUB_PATH
+          "ZIG_GLOBAL_CACHE_DIR=$(Join-Path $env:RUNNER_TEMP 'zig-cache')" >> $env:GITHUB_ENV
           & (Join-Path $sdk 'zig.exe') version
 
       - name: Fetch Zig dependencies
