@@ -96,13 +96,29 @@ pub const Engine = struct {
         return native.zigonaut_text_engine_get_swap_chain(self.handle);
     }
 
-    pub fn beginFrame(self: *Engine, width: u32, height: u32, background: u32) !void {
+    pub fn frameLatencyWaitableObject(self: *const Engine) native.HANDLE {
+        return native.zigonaut_text_engine_get_frame_latency_waitable_object(self.handle);
+    }
+
+    pub fn beginFrame(self: *Engine, width: u32, height: u32, background: u32, full_rebuild: bool) !bool {
+        var required: native.BOOL = 0;
         if (native.zigonaut_text_engine_begin_frame(
             self.handle,
             width,
             height,
             background,
+            @intFromBool(full_rebuild),
+            &required,
         ) < 0) return error.Direct2DBeginFrameFailed;
+        return required != 0;
+    }
+
+    pub fn clearRect(self: *Engine, left: f32, top: f32, right: f32, bottom: f32, color: u32) void {
+        native.zigonaut_text_engine_clear_rect(self.handle, left, top, right, bottom, color);
+    }
+
+    pub fn abortFrame(self: *Engine) void {
+        native.zigonaut_text_engine_abort_frame(self.handle);
     }
 
     pub fn drawCell(
@@ -122,8 +138,8 @@ pub const Engine = struct {
         overline: bool,
         underline: u8,
         occupancy: u8,
-    ) void {
-        _ = native.zigonaut_text_engine_draw_cell(
+    ) !void {
+        if (native.zigonaut_text_engine_draw_cell(
             self.handle,
             if (text.len == 0) null else text.ptr,
             @intCast(text.len),
@@ -141,7 +157,7 @@ pub const Engine = struct {
             @intFromBool(overline),
             underline,
             @intCast(occupancy),
-        );
+        ) < 0) return error.Direct2DDrawCellFailed;
     }
 
     pub fn beginRow(
@@ -166,8 +182,9 @@ pub const Engine = struct {
         native.zigonaut_text_engine_end_row(self.handle);
     }
 
-    pub fn drawImage(self: *Engine, image: @import("terminal.zig").Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) void {
-        _ = native.zigonaut_text_engine_draw_image(self.handle, image.pixels.ptr, image.pixels.len, image.width, image.height, left, top, width, height, @floatFromInt(image.source_x), @floatFromInt(image.source_y), @floatFromInt(image.source_width), @floatFromInt(image.source_height), clip[0], clip[1], clip[2], clip[3]);
+    pub fn drawImage(self: *Engine, image: @import("terminal.zig").Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) !void {
+        if (native.zigonaut_text_engine_draw_image(self.handle, image.pixels.ptr, image.pixels.len, image.width, image.height, left, top, width, height, @floatFromInt(image.source_x), @floatFromInt(image.source_y), @floatFromInt(image.source_width), @floatFromInt(image.source_height), clip[0], clip[1], clip[2], clip[3]) < 0)
+            return error.Direct2DDrawImageFailed;
     }
 
     pub fn drawCursor(
@@ -197,10 +214,20 @@ pub const Engine = struct {
         return caret_x;
     }
 
-    pub fn endFrame(self: *Engine) !void {
-        if (native.zigonaut_text_engine_end_frame(self.handle) < 0) {
+    pub const PresentResult = enum { presented, retry };
+
+    pub fn endFrame(self: *Engine) !PresentResult {
+        const result = native.zigonaut_text_engine_end_frame(self.handle);
+        if (result < 0) {
             return error.Direct2DEndFrameFailed;
         }
+        return if (result == 0) .presented else .retry;
+    }
+
+    pub fn retryPresent(self: *Engine) !PresentResult {
+        const result = native.zigonaut_text_engine_retry_present(self.handle);
+        if (result < 0) return error.Direct2DPresentFailed;
+        return if (result == 0) .presented else .retry;
     }
 };
 

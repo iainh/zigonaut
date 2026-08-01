@@ -63,11 +63,20 @@ HRESULT zigonaut_text_engine_set_window(ZigonautTextEngine* engine, uintptr_t hw
 
 void* zigonaut_text_engine_get_swap_chain(ZigonautTextEngine* engine);
 
+HANDLE zigonaut_text_engine_get_frame_latency_waitable_object(ZigonautTextEngine* engine);
+
 HRESULT zigonaut_text_engine_begin_frame(
     ZigonautTextEngine* engine,
     uint32_t width,
     uint32_t height,
-    uint32_t background);
+    uint32_t background,
+    BOOL full_rebuild,
+    BOOL* full_rebuild_required);
+
+void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
+    float left, float top, float right, float bottom, uint32_t color);
+
+void zigonaut_text_engine_abort_frame(ZigonautTextEngine* engine);
 
 void zigonaut_text_engine_begin_row(
     ZigonautTextEngine* engine,
@@ -119,6 +128,8 @@ HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine, const uint
     float height, uint32_t foreground, uint32_t background, float* caret_x);
 
 HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
+
+HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine);
 
 void zigonaut_fit_cluster_advances(
     float* advances,

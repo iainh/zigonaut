@@ -167,6 +167,7 @@ pub const Terminal = struct {
 
         const Row = struct {
             graphemes: std.ArrayList(u32) = .empty,
+            dirty: bool = false,
         };
 
         const OwnedCell = struct {
@@ -241,6 +242,7 @@ pub const Terminal = struct {
             }
 
             pub fn beginRow(self: *Recorder, y: u16) void {
+                self.snapshot.rows.items[y].dirty = true;
                 self.snapshot.rows.items[y].graphemes.clearRetainingCapacity();
             }
 
@@ -281,11 +283,14 @@ pub const Terminal = struct {
                     try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
                 var recorder = Recorder{ .snapshot = &replacement, .allocator = allocator };
                 try terminal.renderViewportInternal(&recorder, null);
+                for (replacement.rows.items) |*row| row.dirty = true;
                 try replacement.captureImages(allocator, terminal);
                 self.deinit(allocator);
                 self.* = replacement;
                 return;
             }
+            const previous_frame = self.frame;
+            for (self.rows.items) |*row| row.dirty = false;
             var recorder = Recorder{ .snapshot = self, .allocator = allocator };
             terminal.renderViewportInternal(&recorder, self.frame) catch |err| {
                 // A row arena may have been partially rebuilt. Force the next
@@ -293,7 +298,30 @@ pub const Terminal = struct {
                 self.frame = null;
                 return err;
             };
-            try self.captureImages(allocator, terminal);
+            if (previous_frame) |previous| {
+                const current = self.frame.?;
+                if (cursorChanged(previous, current)) {
+                    if (previous.cursor_has_position and previous.cursor_y < self.rows.items.len)
+                        self.rows.items[previous.cursor_y].dirty = true;
+                    if (current.cursor_has_position and current.cursor_y < self.rows.items.len)
+                        self.rows.items[current.cursor_y].dirty = true;
+                }
+            }
+            self.captureImages(allocator, terminal) catch |err| {
+                // Dirty flags were consumed while rebuilding rows. Force the
+                // next capture to replace the complete snapshot.
+                self.frame = null;
+                return err;
+            };
+        }
+
+        fn cursorChanged(previous: Frame, current: Frame) bool {
+            return previous.cursor_has_position != current.cursor_has_position or
+                previous.cursor_x != current.cursor_x or previous.cursor_y != current.cursor_y or
+                previous.cursor_visible != current.cursor_visible or
+                previous.cursor_style != current.cursor_style or
+                !std.meta.eql(previous.cursor, current.cursor) or
+                previous.cursor_columns != current.cursor_columns;
         }
 
         fn clearImages(self: *RenderSnapshot, allocator: std.mem.Allocator) void {
@@ -402,10 +430,21 @@ pub const Terminal = struct {
         }
 
         pub fn replay(self: *const RenderSnapshot, renderer: anytype) void {
+            self.replayRows(renderer, false);
+        }
+
+        /// Replays only rows replaced by the latest incremental capture. Frame
+        /// callbacks are retained so cursor overlays participate in the scene.
+        pub fn replayDirty(self: *const RenderSnapshot, renderer: anytype) void {
+            self.replayRows(renderer, true);
+        }
+
+        fn replayRows(self: *const RenderSnapshot, renderer: anytype, dirty_only: bool) void {
             const frame = self.frame orelse return;
             renderer.beginFrame(frame);
             const column_count = self.columns();
             for (self.rows.items, 0..) |*row, y| {
+                if (dirty_only and !row.dirty) continue;
                 renderer.beginRow(@intCast(y));
                 for (self.cells.items[y * column_count ..][0..column_count], 0..) |*cell, x| {
                     renderer.drawCell(cell.value(row, @intCast(x), @intCast(y)));
@@ -2384,6 +2423,7 @@ test "render snapshots preserve clean rows during incremental capture" {
     terminal.feed("\rC");
     try snapshot.capture(std.testing.allocator, &terminal);
 
+    try std.testing.expect(snapshot.rows.items[1].dirty);
     try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints(&snapshot.rows.items[0])[0]);
     try std.testing.expectEqual(@as(u32, 'C'), snapshot.cells.items[4].codepoints(&snapshot.rows.items[1])[0]);
     try std.testing.expectEqual(@as(usize, 8), snapshot.cells.items.len);
@@ -2499,6 +2539,8 @@ test "incremental snapshots refresh cursor-only frame changes" {
     terminal.feed("\x1b[2;3H\x1b[?25l");
     try snapshot.capture(std.testing.allocator, &terminal);
 
+    try std.testing.expect(snapshot.rows.items[0].dirty);
+    try std.testing.expect(snapshot.rows.items[1].dirty);
     try std.testing.expectEqual(@as(u16, 2), snapshot.frame.?.cursor_x);
     try std.testing.expectEqual(@as(u16, 1), snapshot.frame.?.cursor_y);
     try std.testing.expect(!snapshot.frame.?.cursor_visible);

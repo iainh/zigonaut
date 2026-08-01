@@ -28,6 +28,7 @@ const refresh_timer = 1;
 const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
 const synchronized_output_timer = 4;
+const present_retry_timer = 5;
 const search_refresh_interval_ms = 33;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
@@ -50,6 +51,12 @@ const ContextMenuCommand = enum(u32) {
     split_down,
     close_pane,
 };
+
+fn frameWaitCallback(context: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
+    const view: *View = @ptrCast(@alignCast(context orelse return));
+    const epoch = view.frame_epoch.load(.acquire);
+    _ = win.PostMessageW(view.hwnd, render_message, epoch, 0);
+}
 
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
     const self: *View = @ptrCast(@alignCast(context orelse return 0));
@@ -228,7 +235,13 @@ fn accessibilitySelect(view: *View, action: *const win.zigonaut_accessibility_ac
 
 pub const View = struct {
     hwnd: win.HWND = null,
-    render_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    render_dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    full_rebuild_required: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    frame_wait_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    frame_wait: win.HANDLE = null,
+    frame_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+    present_pending: bool = false,
+    scene_has_images: bool = false,
     renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
     model: *App,
@@ -384,6 +397,7 @@ pub const View = struct {
     }
 
     fn deinitResources(self: *View) void {
+        self.stopFrameScheduling();
         self.ime_preedit.deinit(std.heap.page_allocator);
         self.clearHoveredLink();
         self.gdi_renderer.release();
@@ -468,6 +482,7 @@ pub const View = struct {
     }
 
     pub fn commitReload(self: *View, prepared: PreparedReload) void {
+        self.stopFrameScheduling();
         if (self.text_engine) |*engine| engine.deinit();
         self.text_engine = prepared.engine;
         self.renderer_failed = false;
@@ -657,10 +672,48 @@ pub const View = struct {
     }
 
     pub fn invalidate(self: *View) void {
-        if (self.hwnd == null or self.render_pending.swap(true, .acq_rel)) return;
-        if (win.PostMessageW(self.hwnd, render_message, 0, 0) == 0) {
-            self.render_pending.store(false, .release);
+        if (self.text_engine == null) {
+            if (self.hwnd != null) _ = win.InvalidateRect(self.hwnd, null, 0);
+            return;
         }
+        self.full_rebuild_required.store(true, .release);
+        self.invalidateContent();
+    }
+
+    /// Terminal generation refreshes may update only libghostty's dirty rows.
+    fn invalidateContent(self: *View) void {
+        if (self.text_engine == null) {
+            if (self.hwnd != null) _ = win.InvalidateRect(self.hwnd, null, 0);
+            return;
+        }
+        self.render_dirty.store(true, .release);
+        self.armFrameWait();
+    }
+
+    fn armFrameWait(self: *View) void {
+        if (self.hwnd == null or self.text_engine == null or self.renderer_failed or self.present_pending or
+            self.frame_wait_pending.swap(true, .acq_rel)) return;
+        const epoch = self.frame_epoch.load(.acquire);
+        if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, self, win.INFINITE, win.WT_EXECUTEONLYONCE) == 0) {
+            self.frame_wait_pending.store(false, .release);
+            _ = win.PostMessageW(self.hwnd, render_message, epoch, 0);
+        }
+    }
+
+    fn stopFrameScheduling(self: *View) void {
+        _ = win.KillTimer(self.hwnd, present_retry_timer);
+        self.clearFrameWait();
+        _ = self.frame_epoch.fetchAdd(1, .acq_rel);
+        self.present_pending = false;
+        self.scene_has_images = false;
+    }
+
+    fn clearFrameWait(self: *View) void {
+        if (self.frame_wait != null) {
+            _ = win.UnregisterWaitEx(self.frame_wait, win32.handleFromInt(win.HANDLE, std.math.maxInt(usize)));
+            self.frame_wait = null;
+        }
+        self.frame_wait_pending.store(false, .release);
     }
 
     pub fn refresh(self: *View) void {
@@ -755,12 +808,15 @@ pub const View = struct {
         }
         if (self.deferSynchronizedOutput()) return;
         const generation = runtime.contentGeneration();
-        if (runtime == self.last_runtime and generation == self.last_content_generation) return;
+        if (runtime == self.last_runtime and generation == self.last_content_generation) {
+            if (self.render_dirty.load(.acquire)) self.armFrameWait();
+            return;
+        }
         self.clearHoveredLink();
         self.last_runtime = runtime;
         self.last_content_generation = generation;
         self.notifyScrollbar(false);
-        self.invalidate();
+        self.invalidateContent();
     }
 
     pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool, background_opacity: u8) void {
@@ -866,7 +922,7 @@ pub const View = struct {
         if (width <= 0 or height <= 0) return;
 
         if (self.text_engine != null) {
-            self.paintSwapChain();
+            self.invalidate();
             return;
         }
         if (!self.prepareBoundRender()) return;
@@ -911,23 +967,29 @@ pub const View = struct {
         }
     }
 
-    fn paintSwapChain(self: *View) void {
-        if (self.text_engine == null or self.renderer_failed) return;
+    fn paintSwapChain(self: *View) bool {
+        if (self.text_engine == null or self.renderer_failed or self.present_pending) return false;
         var client: win.RECT = undefined;
         _ = win.GetClientRect(self.hwnd, &client);
         const width = client.right - client.left;
         const height = client.bottom - client.top;
-        if (width <= 0 or height <= 0) return;
-        if (!self.prepareBoundRender()) return;
+        if (width <= 0 or height <= 0) return false;
+        if (!self.prepareBoundRender()) return false;
         notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
-        self.paintDirect2D(client, width, height) catch |err| {
+        const result = self.paintDirect2D(client, width, height) catch |err| {
             log.warn("terminal renderer failed: {}", .{err});
             self.renderer_failed = true;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
+            return true;
         };
+        if (result == .retry) {
+            self.present_pending = true;
+            if (!self.armPresentRetry()) return true;
+        } else if (self.render_dirty.load(.acquire)) self.armFrameWait();
+        return true;
     }
 
-    fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !void {
+    fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !TextEngine.PresentResult {
         const background = if (self.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
         else
@@ -937,8 +999,15 @@ pub const View = struct {
         else
             colorRef(self.model.terminal_theme.foreground);
         const engine = &self.text_engine.?;
-        try engine.beginFrame(@intCast(width), @intCast(height), background);
-        errdefer engine.endFrame() catch {};
+        var full_rebuild = self.full_rebuild_required.swap(false, .acq_rel);
+        const current_has_images = if (self.boundRuntime()) |runtime| runtime.preparedViewportHasImages() else false;
+        full_rebuild = full_rebuild or self.scene_has_images or current_has_images;
+        const native_rebuilt = engine.beginFrame(@intCast(width), @intCast(height), background, full_rebuild) catch |err| {
+            self.full_rebuild_required.store(true, .release);
+            return err;
+        };
+        errdefer engine.abortFrame();
+        full_rebuild = full_rebuild or native_rebuilt;
 
         const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
         const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
@@ -949,8 +1018,13 @@ pub const View = struct {
                 .client = client,
                 .origin_x = padding_x,
                 .origin_y = padding_y,
+                .background = background,
             };
-            session.runtime.?.replayPreparedViewport(&renderer);
+            if (full_rebuild)
+                session.runtime.?.replayPreparedViewport(&renderer)
+            else
+                session.runtime.?.replayPreparedViewportDirty(&renderer);
+            if (renderer.draw_error) |err| return err;
             if (self.ime_preedit.items.len != 0) {
                 const left: f32 = @floatFromInt(padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
                 const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)) else padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));
@@ -958,7 +1032,7 @@ pub const View = struct {
                 self.ime_caret_y = @intFromFloat(top);
             }
         } else {
-            drawDirectWriteMessage(
+            try drawDirectWriteMessage(
                 engine,
                 "Open a PowerShell or WSL session.",
                 paddedRect(client, padding_x, padding_y),
@@ -966,10 +1040,39 @@ pub const View = struct {
                 background,
             );
         }
-        try engine.endFrame();
+        const result = try engine.endFrame();
+        self.scene_has_images = current_has_images;
         if (self.ime_target_search != null) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.ime_bounds_changed_message, @intCast(self.pane_id orelse 0), 0);
         }
+        return result;
+    }
+
+    fn retryPresent(self: *View) void {
+        if (!self.present_pending or self.text_engine == null) return;
+        _ = win.KillTimer(self.hwnd, present_retry_timer);
+        const result = self.text_engine.?.retryPresent() catch |err| {
+            log.warn("terminal renderer present retry failed: {}", .{err});
+            self.renderer_failed = true;
+            self.present_pending = false;
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
+            return;
+        };
+        if (result == .retry) {
+            _ = self.armPresentRetry();
+            return;
+        }
+        self.present_pending = false;
+        if (self.render_dirty.load(.acquire)) self.armFrameWait();
+    }
+
+    fn armPresentRetry(self: *View) bool {
+        if (win.SetTimer(self.hwnd, present_retry_timer, 1, null) != 0) return true;
+        log.warn("unable to schedule terminal presentation retry", .{});
+        self.renderer_failed = true;
+        self.present_pending = false;
+        _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
+        return false;
     }
 
     fn backgroundColorRef(self: *const View, color: theme.Color) win.COLORREF {
@@ -1568,12 +1671,14 @@ const DirectWriteCellRenderer = struct {
     client: win.RECT,
     origin_x: i32,
     origin_y: i32,
+    background: u32,
     frame: ?Terminal.Frame = null,
     search_matches: []const SearchMatch = &.{},
     search_row_matches: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
     search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
+    draw_error: ?anyerror = null,
 
     pub fn searchState(self: *DirectWriteCellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
         self.search_matches = matches;
@@ -1588,11 +1693,20 @@ const DirectWriteCellRenderer = struct {
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
+        const top = self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height));
+        self.engine.clearRect(
+            @floatFromInt(self.origin_x),
+            @floatFromInt(top),
+            @floatFromInt(self.origin_x + @as(i32, self.view.columns) * @as(i32, @intCast(self.view.cell_width))),
+            @floatFromInt(top + @as(i32, @intCast(self.view.cell_height))),
+            self.background,
+        );
         // Keep glyph rendering on the per-cell path. The row batching path can
         // drop a complete text segment while its cell backgrounds remain.
     }
 
     pub fn drawCell(self: *DirectWriteCellRenderer, cell: Terminal.Cell) void {
+        if (self.draw_error != null) return;
         if (cell.occupancy == .wide_tail) return;
         const left = self.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.view.cell_width));
         const top = self.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.view.cell_height));
@@ -1653,12 +1767,15 @@ const DirectWriteCellRenderer = struct {
             cell.overline,
             if (hovered) @max(cell.underline, 1) else cell.underline,
             @intFromEnum(cell.occupancy),
-        );
+        ) catch |err| {
+            self.draw_error = err;
+        };
     }
 
     pub fn endRow(_: *DirectWriteCellRenderer, _: u16) void {}
 
     pub fn drawImage(self: *DirectWriteCellRenderer, image: Terminal.Image) void {
+        if (self.draw_error != null) return;
         const cell_width: f32 = @floatFromInt(self.view.cell_width);
         const cell_height: f32 = @floatFromInt(self.view.cell_height);
         const origin_x: f32 = @floatFromInt(self.origin_x);
@@ -1668,7 +1785,9 @@ const DirectWriteCellRenderer = struct {
         self.engine.drawImage(image, left, top, @floatFromInt(image.pixel_width), @floatFromInt(image.pixel_height), .{
             origin_x,                                                           origin_y,
             origin_x + @as(f32, @floatFromInt(self.view.columns)) * cell_width, origin_y + @as(f32, @floatFromInt(self.view.rows)) * cell_height,
-        });
+        }) catch |err| {
+            self.draw_error = err;
+        };
     }
 
     pub fn endFrame(self: *DirectWriteCellRenderer, frame: Terminal.Frame) void {
@@ -1725,8 +1844,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         render_message => {
             if (view) |current| {
-                current.render_pending.store(false, .release);
-                current.paintSwapChain();
+                if (wparam == current.frame_epoch.load(.acquire)) {
+                    current.clearFrameWait();
+                    if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain())
+                        current.render_dirty.store(true, .release);
+                }
             }
             return 0;
         },
@@ -1871,6 +1993,8 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 if (view) |current| current.selectionAutoscroll();
             } else if (wparam == synchronized_output_timer) {
                 if (view) |current| current.refreshIfNeeded();
+            } else if (wparam == present_retry_timer) {
+                if (view) |current| current.retryPresent();
             }
             return 0;
         },
@@ -1884,6 +2008,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.KillTimer(hwnd, copy_flash_timer);
             _ = win.KillTimer(hwnd, selection_scroll_timer);
             _ = win.KillTimer(hwnd, synchronized_output_timer);
+            _ = win.KillTimer(hwnd, present_retry_timer);
             if (view) |current| current.deinitResources();
             return 0;
         },
@@ -2062,10 +2187,10 @@ fn drawDirectWriteMessage(
     rect: win.RECT,
     foreground: u32,
     background: u32,
-) void {
+) !void {
     var wide: [16 * 1024]u16 = undefined;
-    const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return;
-    engine.drawCell(
+    const length = try std.unicode.utf8ToUtf16Le(&wide, text);
+    try engine.drawCell(
         wide[0..length],
         @floatFromInt(rect.left),
         @floatFromInt(rect.top),

@@ -366,6 +366,15 @@ pub const SessionRuntime = struct {
         self.render_snapshot.replay(renderer);
     }
 
+    pub fn replayPreparedViewportDirty(self: *SessionRuntime, renderer: anytype) void {
+        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        self.render_snapshot.replayDirty(renderer);
+    }
+
+    pub fn preparedViewportHasImages(self: *const SessionRuntime) bool {
+        return self.render_snapshot.images.items.len != 0 or self.render_snapshot.placements.items.len != 0;
+    }
+
     /// Returns the delay before a synchronized-output frame may render. Once
     /// the watchdog expires, clear mode 2026 so subsequent output is visible.
     pub fn synchronizedOutputDelay(self: *SessionRuntime, now: u64) ?u32 {
