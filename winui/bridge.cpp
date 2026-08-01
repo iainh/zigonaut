@@ -239,6 +239,7 @@ struct Bridge {
     TabView tabs{nullptr};
     StackPanel new_tab_controls{nullptr};
     SplitButton new_tab_button{nullptr};
+    Border title_bar_drag_region{nullptr};
     Button menu_button{nullptr};
     Border bottom_border{nullptr};
     MenuFlyout app_menu{nullptr};
@@ -480,6 +481,11 @@ struct Bridge {
             focusTerminal();
         });
         new_tab_controls.Children().Append(new_tab_button);
+        title_bar_drag_region = Border{};
+        title_bar_drag_region.Width(46);
+        title_bar_drag_region.Height(40);
+        title_bar_drag_region.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
+        new_tab_controls.Children().Append(title_bar_drag_region);
         tabs.TabStripFooter(new_tab_controls);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
             if (!updating && tabs.SelectedIndex() >= 0) {
@@ -624,7 +630,9 @@ struct Bridge {
         root.Children().Append(bottom_border);
         window.Content(root);
         window.ExtendsContentIntoTitleBar(true);
-        window.SetTitleBar(app_title_bar);
+        // Keep only the footer spacer draggable. Marking the entire title-bar
+        // grid as caption prevents TabViewItem from receiving drag gestures.
+        window.SetTitleBar(title_bar_drag_region);
         title_bar.PreferredHeightOption(Microsoft::UI::Windowing::TitleBarHeightOption::Tall);
         backdrop = Microsoft::UI::Xaml::Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::Base);
@@ -1864,6 +1872,7 @@ struct Bridge {
         cleanup(L"detach new-tab controls", [&] { tabs.TabStripFooter(nullptr); }, result);
         cleanup(L"clear new-tab controls", [&] { new_tab_controls.Children().Clear(); }, result);
         new_tab_button = nullptr;
+        title_bar_drag_region = nullptr;
         new_tab_controls = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
