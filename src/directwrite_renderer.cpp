@@ -141,6 +141,12 @@ struct RowSegment {
     }
 };
 
+struct ImageCacheEntry {
+    ID2D1Bitmap1* bitmap = nullptr;
+    uint64_t generation = 0;
+    uint64_t last_seen_frame = 0;
+};
+
 uint32_t packedColumns(uint32_t start, uint32_t span) {
     return start | ((span - 1) << 16);
 }
@@ -249,7 +255,9 @@ struct ZigonautTextEngine {
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
     std::list<const LayoutKey*> layout_recency;
+    std::map<uint32_t, ImageCacheEntry> images;
     uint64_t layout_creation_count = 0;
+    uint64_t image_frame = 0;
     std::vector<RowCell> row_cells;
     std::u16string row_text;
     RowSegment row_segment;
@@ -498,6 +506,23 @@ struct ZigonautTextEngine {
         if (target != nullptr) target->SetTarget(nullptr);
         release(target_bitmap);
         release(scene_bitmap);
+        clearImages();
+    }
+
+    void clearImages() {
+        for (auto& entry : images) release(entry.second.bitmap);
+        images.clear();
+    }
+
+    void evictUnusedImages() {
+        for (auto iterator = images.begin(); iterator != images.end();) {
+            if (iterator->second.last_seen_frame == image_frame) {
+                ++iterator;
+                continue;
+            }
+            release(iterator->second.bitmap);
+            iterator = images.erase(iterator);
+        }
     }
 
     void clearLayouts() {
@@ -1302,6 +1327,8 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     if (FAILED(hr)) return hr;
     *full_rebuild_required = recreate ? TRUE : FALSE;
     engine->frame_background = background;
+    ++engine->image_frame;
+    if (engine->image_frame == 0) ++engine->image_frame;
     engine->target->SetTarget(engine->scene_bitmap);
     engine->target->BeginDraw();
     engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -1374,10 +1401,11 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
 }
 
 extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
-    const uint8_t* rgba, size_t rgba_length, uint32_t image_width, uint32_t image_height,
+    uint32_t image_id, uint64_t generation, const uint8_t* rgba, size_t rgba_length,
+    uint32_t image_width, uint32_t image_height,
     float dl, float dt, float dw, float dh, float sl, float st, float sw, float sh,
     float cl, float ct, float cr, float cb) {
-    if (!engine || !engine->target || !rgba || !image_width || !image_height ||
+    if (!engine || !engine->target || !image_id || !generation || !rgba || !image_width || !image_height ||
         image_width > UINT32_MAX / 4 ||
         !std::isfinite(dl) || !std::isfinite(dt) || !std::isfinite(dw) || !std::isfinite(dh) ||
         !std::isfinite(sl) || !std::isfinite(st) || !std::isfinite(sw) || !std::isfinite(sh) ||
@@ -1390,27 +1418,48 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     if (static_cast<size_t>(image_width) > max_image_bytes / 4u / image_height) return E_INVALIDARG;
     const size_t byte_length = static_cast<size_t>(image_width) * image_height * 4;
     if (rgba_length != byte_length) return E_INVALIDARG;
-    std::unique_ptr<uint8_t[]> premultiplied(new (std::nothrow) uint8_t[byte_length]);
-    if (!premultiplied) return E_OUTOFMEMORY;
-    std::copy_n(rgba, byte_length, premultiplied.get());
-    for (size_t index = 0; index < byte_length; index += 4) {
-        const uint32_t alpha = premultiplied[index + 3];
-        premultiplied[index] = static_cast<uint8_t>((premultiplied[index] * alpha + 127) / 255);
-        premultiplied[index + 1] = static_cast<uint8_t>((premultiplied[index + 1] * alpha + 127) / 255);
-        premultiplied[index + 2] = static_cast<uint8_t>((premultiplied[index + 2] * alpha + 127) / 255);
+    decltype(engine->images)::iterator iterator;
+    bool inserted = false;
+    try {
+        const auto result = engine->images.try_emplace(image_id);
+        iterator = result.first;
+        inserted = result.second;
+    } catch (...) {
+        return E_OUTOFMEMORY;
     }
-    D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
-        D2D1_BITMAP_OPTIONS_NONE,
-        D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    ID2D1Bitmap1* bitmap = nullptr;
-    HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(image_width, image_height),
-        premultiplied.get(), image_width * 4, properties, &bitmap);
-    if (FAILED(hr)) return hr;
+    auto& cached = iterator->second;
+    if (cached.generation != generation) {
+        std::unique_ptr<uint8_t[]> premultiplied(new (std::nothrow) uint8_t[byte_length]);
+        if (!premultiplied) {
+            if (inserted) engine->images.erase(iterator);
+            return E_OUTOFMEMORY;
+        }
+        std::copy_n(rgba, byte_length, premultiplied.get());
+        for (size_t index = 0; index < byte_length; index += 4) {
+            const uint32_t alpha = premultiplied[index + 3];
+            premultiplied[index] = static_cast<uint8_t>((premultiplied[index] * alpha + 127) / 255);
+            premultiplied[index + 1] = static_cast<uint8_t>((premultiplied[index + 1] * alpha + 127) / 255);
+            premultiplied[index + 2] = static_cast<uint8_t>((premultiplied[index + 2] * alpha + 127) / 255);
+        }
+        D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        ID2D1Bitmap1* bitmap = nullptr;
+        const HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(image_width, image_height),
+            premultiplied.get(), image_width * 4, properties, &bitmap);
+        if (FAILED(hr)) {
+            if (inserted) engine->images.erase(iterator);
+            return hr;
+        }
+        release(cached.bitmap);
+        cached.bitmap = bitmap;
+        cached.generation = generation;
+    }
+    cached.last_seen_frame = engine->image_frame;
     engine->target->PushAxisAlignedClip(D2D1::RectF(cl, ct, cr, cb), D2D1_ANTIALIAS_MODE_ALIASED);
-    engine->target->DrawBitmap(bitmap, D2D1::RectF(dl, dt, dl + dw, dt + dh), 1.0f,
+    engine->target->DrawBitmap(cached.bitmap, D2D1::RectF(dl, dt, dl + dw, dt + dh), 1.0f,
         D2D1_INTERPOLATION_MODE_LINEAR, D2D1::RectF(sl, st, sl + sw, st + sh));
     engine->target->PopAxisAlignedClip();
-    release(bitmap);
     return S_OK;
 }
 
@@ -1479,6 +1528,7 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     engine->frame_active = false;
     if (hr == D2DERR_RECREATE_TARGET) engine->discardTargetBitmap();
     if (FAILED(hr)) return hr;
+    engine->evictUnusedImages();
     engine->target->SetTarget(engine->target_bitmap);
     engine->target->BeginDraw();
     engine->target->SetTransform(D2D1::Matrix3x2F::Identity());

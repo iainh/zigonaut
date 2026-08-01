@@ -106,7 +106,8 @@ HRESULT zigonaut_text_engine_draw_cell(
     ZigonautCellOccupancy occupancy);
 
 HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
-    const uint8_t* rgba, size_t rgba_length, uint32_t image_width, uint32_t image_height,
+    uint32_t image_id, uint64_t generation, const uint8_t* rgba, size_t rgba_length,
+    uint32_t image_width, uint32_t image_height,
     float destination_left, float destination_top, float destination_width,
     float destination_height, float source_left, float source_top,
     float source_width, float source_height, float clip_left, float clip_top,

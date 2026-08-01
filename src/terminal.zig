@@ -119,6 +119,7 @@ pub const Terminal = struct {
 
     pub const Image = struct {
         image_id: u32,
+        generation: u64,
         pixels: []const u8,
         width: u32,
         height: u32,
@@ -144,6 +145,7 @@ pub const Terminal = struct {
 
         const OwnedImage = struct {
             image_id: u32,
+            generation: u64,
             width: u32,
             height: u32,
             pixels: []u8,
@@ -356,11 +358,13 @@ pub const Terminal = struct {
                 const handle = vt.ghostty_kitty_graphics_image(graphics, image_id) orelse continue;
                 var width: u32 = 0;
                 var height: u32 = 0;
+                var generation: u64 = 0;
                 var format: vt.GhosttyKittyImageFormat = vt.GHOSTTY_KITTY_IMAGE_FORMAT_RGB;
                 var data_ptr: [*c]const u8 = null;
                 var data_len: usize = 0;
                 if (vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &width) != vt.GHOSTTY_SUCCESS or
                     vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &height) != vt.GHOSTTY_SUCCESS or
+                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &generation) != vt.GHOSTTY_SUCCESS or
                     vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &format) != vt.GHOSTTY_SUCCESS or
                     vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, @ptrCast(&data_ptr)) != vt.GHOSTTY_SUCCESS or
                     vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &data_len) != vt.GHOSTTY_SUCCESS) continue;
@@ -381,6 +385,7 @@ pub const Terminal = struct {
                     const pixels = try allocator.dupe(u8, data_ptr[0..data_len]);
                     self.images.append(allocator, .{
                         .image_id = image_id,
+                        .generation = generation,
                         .width = width,
                         .height = height,
                         .pixels = pixels,
@@ -455,6 +460,7 @@ pub const Terminal = struct {
                 const image = self.images.items[placement.image_index];
                 renderer.drawImage(.{
                     .image_id = placement.image_id,
+                    .generation = image.generation,
                     .pixels = image.pixels,
                     .width = image.width,
                     .height = image.height,
@@ -2336,6 +2342,7 @@ test "render snapshots own direct Kitty PNG placements" {
     const placement = snapshot.placements.items[0];
     const image = Terminal.Image{
         .image_id = owned.image_id,
+        .generation = owned.generation,
         .pixels = owned.pixels,
         .width = owned.width,
         .height = owned.height,
@@ -2352,6 +2359,7 @@ test "render snapshots own direct Kitty PNG placements" {
         .z = placement.z,
     };
     try std.testing.expectEqual(@as(u32, 1), image.image_id);
+    try std.testing.expect(image.generation != 0);
     try std.testing.expectEqual(@as(u32, 1), image.width);
     try std.testing.expectEqual(@as(u32, 1), image.height);
     try std.testing.expectEqual(@as(usize, 4), image.pixels.len);
@@ -2363,6 +2371,11 @@ test "render snapshots own direct Kitty PNG placements" {
 
     const saved_pixels = try std.testing.allocator.dupe(u8, image.pixels);
     defer std.testing.allocator.free(saved_pixels);
+    const saved_generation = image.generation;
+    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expect(snapshot.images.items[0].generation != saved_generation);
+    try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
     terminal.feed("\x1b_Ga=d,d=I,i=1\x1b\\");
     try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
     try snapshot.capture(std.testing.allocator, &terminal);
