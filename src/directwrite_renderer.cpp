@@ -257,6 +257,8 @@ struct ZigonautTextEngine {
     std::list<const LayoutKey*> layout_recency;
     std::map<uint32_t, ImageCacheEntry> images;
     uint64_t layout_creation_count = 0;
+    ZigonautDirectWriteBenchmark benchmark{};
+    bool benchmark_active = false;
     uint64_t image_frame = 0;
     std::vector<RowCell> row_cells;
     std::u16string row_text;
@@ -549,11 +551,13 @@ struct ZigonautTextEngine {
         };
         auto existing = layouts.find(key);
         if (existing != layouts.end()) {
+            if (benchmark_active) ++benchmark.layout_hits;
             layout_recency.splice(layout_recency.end(), layout_recency,
                 existing->second.recency);
             *result = existing->second.layout;
             return S_OK;
         }
+        if (benchmark_active) ++benchmark.layout_misses;
         if (layouts.size() >= max_layout_cache_entries) {
             auto oldest = layouts.find(*layout_recency.front());
             release(oldest->second.layout);
@@ -873,6 +877,7 @@ public:
         if (glyph_run == nullptr || segment_ == nullptr || engine_->target == nullptr || engine_->brush == nullptr) {
             return E_INVALIDARG;
         }
+        if (engine_->benchmark_active) ++engine_->benchmark.glyph_callbacks;
         const auto& segment = *segment_;
 
         try {
@@ -955,6 +960,7 @@ public:
             static_cast<float>(engine_->metrics.baseline);
         bool rendered_color = false;
         if (engine_->factory2 != nullptr) {
+            if (engine_->benchmark_active) ++engine_->benchmark.color_translate_attempts;
             const DWRITE_MATRIX transform = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
             IDWriteColorGlyphRunEnumerator* layers = nullptr;
             const HRESULT color_result = engine_->factory2->TranslateColorGlyphRun(
@@ -967,6 +973,7 @@ public:
                 0,
                 &layers);
             if (SUCCEEDED(color_result)) {
+                if (engine_->benchmark_active) ++engine_->benchmark.color_translate_successes;
                 for (auto& layer : color_layers_) layer->reset();
                 size_t color_layer_count = 0;
                 bool enumeration_complete = false;
@@ -1030,6 +1037,7 @@ public:
                             &color_run,
                             engine_->brush,
                             measuring_mode);
+                        if (engine_->benchmark_active) ++engine_->benchmark.glyph_submissions;
                     }
                     rendered_color = color_layer_count != 0;
                 }
@@ -1043,6 +1051,7 @@ public:
                 &adjusted,
                 engine_->brush,
                 measuring_mode);
+            if (engine_->benchmark_active) ++engine_->benchmark.glyph_submissions;
         }
         return S_OK;
     }
@@ -1121,6 +1130,7 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
         if (grid_renderer == nullptr) return E_OUTOFMEMORY;
     }
     grid_renderer->setSegment(&segment);
+    if (benchmark_active) ++benchmark.layout_draws;
     return layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
 }
 
@@ -1265,6 +1275,128 @@ extern "C" HRESULT zigonaut_benchmark_layout_cache(
     result->layout_creations = engine->layout_creation_count;
     result->cache_entries = static_cast<uint32_t>(engine->layouts.size());
     zigonaut_text_engine_destroy(engine);
+    return hr;
+}
+
+extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
+    ZigonautDirectWriteBenchmark* result) {
+    if (result == nullptr) return E_INVALIDARG;
+    *result = {};
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency)) return HRESULT_FROM_WIN32(GetLastError());
+    const auto now = [&]() -> uint64_t {
+        LARGE_INTEGER value{};
+        QueryPerformanceCounter(&value);
+        return static_cast<uint64_t>(value.QuadPart);
+    };
+    const auto nanoseconds = [&](uint64_t ticks) -> uint64_t {
+        return ticks * 1000000000ull / static_cast<uint64_t>(frequency.QuadPart);
+    };
+
+    // A real, private target gives monitor rendering-parameter lookup a valid
+    // window without exposing benchmark UI or depending on the application shell.
+    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        L"STATIC", L"Zigonaut DirectWrite benchmark", WS_POPUP,
+        0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (window == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+    ZigonautTextEngine* engine = nullptr;
+    HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96, &engine);
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(engine,
+        reinterpret_cast<uintptr_t>(window));
+    if (FAILED(hr)) {
+        zigonaut_text_engine_destroy(engine);
+        DestroyWindow(window);
+        return hr;
+    }
+    constexpr uint32_t width = 1920, height = 1080, columns = 120;
+    BOOL rebuild = FALSE;
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height,
+        0x181818, TRUE, &rebuild);
+
+    const auto row = [&](bool fragmented) -> HRESULT {
+        engine->beginRow(0.0f, 0.0f,
+            static_cast<float>(engine->metrics.width),
+            static_cast<float>(engine->metrics.height));
+        for (uint32_t column = 0; column < columns; ++column) {
+            const uint16_t character = static_cast<uint16_t>(u'a' + column % 26);
+            const uint32_t foreground = fragmented
+                ? (0x4040ffu + (column * 0x010701u)) & 0xffffffu
+                : 0xe0e0e0u;
+            const HRESULT draw = engine->drawCell(&character, 1,
+                static_cast<float>(column * engine->metrics.width), 0.0f,
+                static_cast<float>(engine->metrics.width),
+                static_cast<float>(engine->metrics.height), foreground, 0x181818,
+                foreground, false, false, false, false, false, 0,
+                ZIGONAUT_CELL_NARROW);
+            if (FAILED(draw)) return draw;
+        }
+        return engine->endRow();
+    };
+    if (SUCCEEDED(hr)) {
+        // Resolve layouts, glyph shaping, renderer buffers and D2D state first.
+        for (uint32_t index = 0; index < 20 && SUCCEEDED(hr); ++index) hr = row(false);
+        for (uint32_t index = 0; index < 4 && SUCCEEDED(hr); ++index) hr = row(true);
+    }
+    engine->benchmark = {};
+    engine->benchmark_active = SUCCEEDED(hr);
+    const auto measureRows = [&](uint32_t count, bool fragmented, uint64_t* elapsed) {
+        const uint64_t start = now();
+        for (uint32_t index = 0; index < count && SUCCEEDED(hr); ++index) hr = row(fragmented);
+        *elapsed = nanoseconds(now() - start);
+    };
+    if (SUCCEEDED(hr)) measureRows(1500, false, &engine->benchmark.warm_row_nanoseconds);
+    if (SUCCEEDED(hr)) {
+        const uint64_t attempts = engine->benchmark.color_translate_attempts;
+        const uint64_t successes = engine->benchmark.color_translate_successes;
+        measureRows(1500, false, &engine->benchmark.monochrome_row_nanoseconds);
+        engine->benchmark.monochrome_translate_attempts =
+            engine->benchmark.color_translate_attempts - attempts;
+        engine->benchmark.monochrome_translate_successes =
+            engine->benchmark.color_translate_successes - successes;
+    }
+    if (SUCCEEDED(hr)) measureRows(400, false, &engine->benchmark.uniform_row_nanoseconds);
+    if (SUCCEEDED(hr)) measureRows(400, true, &engine->benchmark.fragmented_row_nanoseconds);
+    engine->benchmark.warm_row_iterations = 1500;
+    engine->benchmark.monochrome_row_iterations = 1500;
+    engine->benchmark.uniform_row_iterations = 400;
+    engine->benchmark.fragmented_row_iterations = 400;
+
+    if (engine != nullptr && engine->frame_active) {
+        const HRESULT draw_hr = engine->target->EndDraw();
+        engine->frame_active = false;
+        if (SUCCEEDED(hr)) hr = draw_hr;
+    }
+    constexpr uint32_t copies = 80;
+    if (SUCCEEDED(hr)) {
+        // This is exactly endFrame's retained-scene -> swapchain bitmap stage;
+        // intentionally no frame-latency wait and no Present call are included.
+        for (uint32_t index = 0; index < 10 && SUCCEEDED(hr); ++index) {
+            engine->target->SetTarget(engine->target_bitmap);
+            engine->target->BeginDraw();
+            engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
+            engine->target->Clear(color(engine->frame_background));
+            engine->target->DrawBitmap(engine->scene_bitmap);
+            hr = engine->target->EndDraw();
+        }
+        const uint64_t start = now();
+        for (uint32_t index = 0; index < copies && SUCCEEDED(hr); ++index) {
+            engine->target->SetTarget(engine->target_bitmap);
+            engine->target->BeginDraw();
+            engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
+            engine->target->Clear(color(engine->frame_background));
+            engine->target->DrawBitmap(engine->scene_bitmap);
+            hr = engine->target->EndDraw();
+        }
+        engine->benchmark.scene_copy_nanoseconds = nanoseconds(now() - start);
+    }
+    engine->benchmark.scene_copy_iterations = copies;
+    engine->benchmark.scene_width = width;
+    engine->benchmark.scene_height = height;
+    engine->benchmark_active = false;
+    *result = engine->benchmark;
+    zigonaut_text_engine_destroy(engine);
+    DestroyWindow(window);
     return hr;
 }
 

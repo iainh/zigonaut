@@ -30,6 +30,14 @@ pub fn benchmarkLayoutCache(repetitions: u32) !CacheBenchmark {
     };
 }
 
+pub fn benchmarkPipeline() !native.ZigonautDirectWriteBenchmark {
+    var result: native.ZigonautDirectWriteBenchmark = undefined;
+    if (native.zigonaut_benchmark_directwrite_pipeline(&result) < 0) {
+        return error.DirectWritePipelineBenchmarkFailed;
+    }
+    return result;
+}
+
 pub const Engine = struct {
     handle: *native.ZigonautTextEngine,
 

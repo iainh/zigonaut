@@ -21,6 +21,30 @@ typedef struct ZigonautLayoutCacheBenchmark {
     uint32_t cache_entries;
 } ZigonautLayoutCacheBenchmark;
 
+typedef struct ZigonautDirectWriteBenchmark {
+    uint64_t warm_row_nanoseconds;
+    uint64_t monochrome_row_nanoseconds;
+    uint64_t uniform_row_nanoseconds;
+    uint64_t fragmented_row_nanoseconds;
+    uint64_t scene_copy_nanoseconds;
+    uint64_t layout_hits;
+    uint64_t layout_misses;
+    uint64_t layout_draws;
+    uint64_t glyph_callbacks;
+    uint64_t glyph_submissions;
+    uint64_t color_translate_attempts;
+    uint64_t color_translate_successes;
+    uint64_t monochrome_translate_attempts;
+    uint64_t monochrome_translate_successes;
+    uint32_t warm_row_iterations;
+    uint32_t monochrome_row_iterations;
+    uint32_t uniform_row_iterations;
+    uint32_t fragmented_row_iterations;
+    uint32_t scene_copy_iterations;
+    uint32_t scene_width;
+    uint32_t scene_height;
+} ZigonautDirectWriteBenchmark;
+
 typedef struct ZigonautDecodedImage {
     uint32_t width;
     uint32_t height;
@@ -34,6 +58,8 @@ void zigonaut_free_decoded_image(uint8_t* pixels);
 HRESULT zigonaut_benchmark_layout_cache(
     uint32_t repetitions,
     ZigonautLayoutCacheBenchmark* result);
+
+HRESULT zigonaut_benchmark_directwrite_pipeline(ZigonautDirectWriteBenchmark* result);
 
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,

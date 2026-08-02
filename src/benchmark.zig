@@ -79,6 +79,7 @@ pub fn main() !void {
     const layout_repetitions = 5;
     const layout_result = try directwrite.benchmarkLayoutCache(layout_repetitions);
     const layout_cache_ns = timer.lap();
+    const dwrite = try directwrite.benchmarkPipeline();
     const progress_bytewise_ns = benchmarkProgressParser(false);
     const progress_fast_ns = benchmarkProgressParser(true);
     const search_highlight = try benchmarkSearchHighlight();
@@ -122,6 +123,34 @@ pub fn main() !void {
             milliseconds(progress_bytewise_ns),
             milliseconds(progress_fast_ns),
             improvement(progress_bytewise_ns, progress_fast_ns),
+        },
+    );
+    std.debug.print(
+        "DirectWrite baselines (native retained renderer):\n" ++
+            "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d})\n" ++
+            "  2 monochrome color translation: {d:.2} us/row ({d} rows; attempts={d}, successes={d})\n" ++
+            "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each)\n" ++
+            "  4 final scene transfer: {d:.2} us/frame ({d}x{d}, {d} copies; excludes wait/present)\n",
+        .{
+            perIterationUs(dwrite.warm_row_nanoseconds, dwrite.warm_row_iterations),
+            dwrite.warm_row_iterations,
+            dwrite.layout_hits,
+            dwrite.layout_misses,
+            dwrite.layout_draws,
+            dwrite.glyph_callbacks,
+            dwrite.glyph_submissions,
+            perIterationUs(dwrite.monochrome_row_nanoseconds, dwrite.monochrome_row_iterations),
+            dwrite.monochrome_row_iterations,
+            dwrite.monochrome_translate_attempts,
+            dwrite.monochrome_translate_successes,
+            perIterationUs(dwrite.uniform_row_nanoseconds, dwrite.uniform_row_iterations),
+            perIterationUs(dwrite.fragmented_row_nanoseconds, dwrite.fragmented_row_iterations),
+            @as(f64, @floatFromInt(dwrite.fragmented_row_nanoseconds)) / @as(f64, @floatFromInt(dwrite.uniform_row_nanoseconds)),
+            dwrite.uniform_row_iterations,
+            perIterationUs(dwrite.scene_copy_nanoseconds, dwrite.scene_copy_iterations),
+            dwrite.scene_width,
+            dwrite.scene_height,
+            dwrite.scene_copy_iterations,
         },
     );
     std.debug.print(
@@ -218,6 +247,14 @@ const BenchmarkRenderer = struct {
 
 fn milliseconds(nanoseconds: u64) f64 {
     return @as(f64, @floatFromInt(nanoseconds)) / 1_000_000.0;
+}
+
+fn perIterationUs(nanoseconds: u64, iterations: u32) f64 {
+    return @as(f64, @floatFromInt(nanoseconds)) / @as(f64, @floatFromInt(iterations)) / 1_000.0;
+}
+
+test "per-iteration benchmark normalization uses microseconds" {
+    try std.testing.expectEqual(@as(f64, 2.5), perIterationUs(10_000, 4));
 }
 
 fn improvement(before: u64, after: u64) f64 {
