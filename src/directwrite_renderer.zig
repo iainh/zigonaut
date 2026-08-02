@@ -282,6 +282,17 @@ test "atlas AA policy, lifecycle, and deterministic fault fallbacks" {
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_atlas_policy_and_faults());
 }
 
+test "damage-aware transfer stays coherent across rotating buffers" {
+    const std = @import("std");
+    var result: native.ZigonautDamageTransferTest = undefined;
+    try std.testing.expectEqual(@as(native.HRESULT, 0),
+        native.zigonaut_test_damage_aware_transfer(&result));
+    try std.testing.expectEqual(@as(u32, 10), result.compared_frames);
+    try std.testing.expectEqual(@as(u32, 4), result.full_copies);
+    try std.testing.expectEqual(@as(u32, 8), result.region_copies);
+    try std.testing.expect(result.region_copy_bytes > 0);
+}
+
 test "invalid numeric antialias policy is rejected before enum conversion" {
     const std = @import("std");
     try std.testing.expectError(error.InvalidTextAntialiasing,

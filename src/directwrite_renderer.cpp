@@ -197,6 +197,16 @@ struct ImageCacheEntry {
     uint64_t last_seen_frame = 0;
 };
 
+struct SceneDamage {
+    bool full = false;
+    std::vector<D3D11_BOX> boxes;
+
+    void clear() {
+        full = false;
+        boxes.clear();
+    }
+};
+
 uint32_t packedColumns(uint32_t start, uint32_t span) {
     return start | ((span - 1) << 16);
 }
@@ -386,6 +396,116 @@ struct ZigonautTextEngine {
     bool frame_active = false;
     bool present_pending = false;
     uint64_t d3d_scene_copy_count = 0;
+    uint64_t d3d_scene_full_copy_count = 0;
+    uint64_t d3d_scene_region_copy_count = 0;
+    uint64_t d3d_scene_region_copy_bytes = 0;
+    uint32_t scene_width = 0;
+    uint32_t scene_height = 0;
+    SceneDamage frame_damage;
+    SceneDamage previous_present_damage;
+    bool damage_history_valid = false;
+
+    void resetDamageHistory() {
+        frame_damage.clear();
+        previous_present_damage.clear();
+        damage_history_valid = false;
+    }
+
+    void markFullDamage(SceneDamage& damage) {
+        damage.full = true;
+        damage.boxes.clear();
+    }
+
+    void addDamage(SceneDamage& damage, uint32_t left, uint32_t top,
+        uint32_t right, uint32_t bottom) {
+        if (damage.full || scene_texture == nullptr) return;
+        left = std::min(left, scene_width);
+        top = std::min(top, scene_height);
+        right = std::min(right, scene_width);
+        bottom = std::min(bottom, scene_height);
+        if (left >= right || top >= bottom) return;
+        D3D11_BOX added{left, top, 0, right, bottom, 1};
+        for (size_t index = 0; index < damage.boxes.size();) {
+            const auto& existing = damage.boxes[index];
+            const bool overlaps = added.left < existing.right &&
+                added.right > existing.left && added.top < existing.bottom &&
+                added.bottom > existing.top;
+            const bool vertical_neighbor = added.left == existing.left &&
+                added.right == existing.right &&
+                (added.bottom == existing.top || added.top == existing.bottom);
+            const bool horizontal_neighbor = added.top == existing.top &&
+                added.bottom == existing.bottom &&
+                (added.right == existing.left || added.left == existing.right);
+            if (!overlaps && !vertical_neighbor && !horizontal_neighbor) {
+                ++index;
+                continue;
+            }
+            added.left = std::min(added.left, existing.left);
+            added.top = std::min(added.top, existing.top);
+            added.right = std::max(added.right, existing.right);
+            added.bottom = std::max(added.bottom, existing.bottom);
+            damage.boxes.erase(damage.boxes.begin() + index);
+            index = 0;
+        }
+        try {
+            damage.boxes.push_back(added);
+            // Fragmented damage eventually costs more than one device-local copy.
+            // Falling back to full damage also preserves correctness on allocation pressure.
+            if (damage.boxes.size() > 64) markFullDamage(damage);
+        } catch (...) {
+            markFullDamage(damage);
+        }
+    }
+
+    void addDamage(SceneDamage& damage, float left, float top,
+        float right, float bottom) {
+        if (!std::isfinite(left) || !std::isfinite(top) ||
+                !std::isfinite(right) || !std::isfinite(bottom)) {
+            markFullDamage(damage);
+            return;
+        }
+        if (scene_texture == nullptr) return;
+        left = std::clamp(left, 0.0f, static_cast<float>(scene_width));
+        top = std::clamp(top, 0.0f, static_cast<float>(scene_height));
+        right = std::clamp(right, 0.0f, static_cast<float>(scene_width));
+        bottom = std::clamp(bottom, 0.0f, static_cast<float>(scene_height));
+        addDamage(damage,
+            static_cast<uint32_t>(std::floor(left)),
+            static_cast<uint32_t>(std::floor(top)),
+            static_cast<uint32_t>(std::ceil(right)),
+            static_cast<uint32_t>(std::ceil(bottom)));
+    }
+
+    SceneDamage transferDamage() {
+        SceneDamage result = frame_damage;
+        if (!damage_history_valid) {
+            markFullDamage(result);
+            return result;
+        }
+        if (previous_present_damage.full) {
+            markFullDamage(result);
+            return result;
+        }
+        for (const auto& box : previous_present_damage.boxes)
+            addDamage(result, box.left, box.top, box.right, box.bottom);
+        return result;
+    }
+
+    bool shouldCopyFull(const SceneDamage& damage) const {
+        if (damage.full || scene_texture == nullptr) return true;
+        const uint64_t texture_area = static_cast<uint64_t>(scene_width) * scene_height;
+        uint64_t damaged_area = 0;
+        for (const auto& box : damage.boxes)
+            damaged_area += static_cast<uint64_t>(box.right - box.left) *
+                (box.bottom - box.top);
+        return damage.boxes.size() > 16 || damaged_area * 2 > texture_area;
+    }
+
+    void commitPresentedDamage() {
+        previous_present_damage = std::move(frame_damage);
+        frame_damage.clear();
+        damage_history_valid = true;
+    }
 
     void invalidateAtlas() {
         if (atlas_draw_active) { atlas_context->EndDraw(); atlas_draw_active = false; }
@@ -761,19 +881,45 @@ struct ZigonautTextEngine {
         release(backbuffer_texture);
         release(scene_texture);
         clearImages();
+        scene_width = 0;
+        scene_height = 0;
+        resetDamageHistory();
     }
 
-    HRESULT transferScene() {
+    HRESULT transferSceneTo(ID3D11Texture2D* destination, bool force_full = false) {
         if (target == nullptr || d3d_context == nullptr || scene_texture == nullptr ||
-            backbuffer_texture == nullptr) return E_HANDLE;
+            destination == nullptr) return E_HANDLE;
         // EndDraw has submitted the D2D scene writes on this device. The following
         // immediate-context copy is ordered after them; this does not wait for GPU
         // completion. Drop D2D's retained target association before switching APIs.
         target->SetTarget(nullptr);
-        d3d_context->CopyResource(backbuffer_texture, scene_texture);
-        ++d3d_scene_copy_count;
+        SceneDamage damage;
+        try {
+            damage = transferDamage();
+        } catch (...) {
+            markFullDamage(damage);
+        }
+        if (force_full || shouldCopyFull(damage)) {
+            d3d_context->CopyResource(destination, scene_texture);
+            ++d3d_scene_full_copy_count;
+            ++d3d_scene_copy_count;
+        } else {
+            for (const auto& box : damage.boxes) {
+                d3d_context->CopySubresourceRegion(destination, 0,
+                    box.left, box.top, 0, scene_texture, 0, &box);
+                ++d3d_scene_region_copy_count;
+                ++d3d_scene_copy_count;
+                d3d_scene_region_copy_bytes +=
+                    static_cast<uint64_t>(box.right - box.left) *
+                    (box.bottom - box.top) * 4;
+            }
+        }
         const HRESULT removed = d3d_device->GetDeviceRemovedReason();
         return FAILED(removed) ? removed : S_OK;
+    }
+
+    HRESULT transferScene() {
+        return transferSceneTo(backbuffer_texture);
     }
 
     void clearImages() {
@@ -926,6 +1072,10 @@ struct ZigonautTextEngine {
         }
         release(scene_surface);
         if (FAILED(hr)) discardTargetBitmap();
+        else {
+            scene_width = width;
+            scene_height = height;
+        }
         return hr;
     }
 
@@ -984,6 +1134,10 @@ struct ZigonautTextEngine {
         ZigonautCellOccupancy occupancy) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
+        if (!row_active && frame_active) {
+            addDamage(frame_damage, left - 1.0f, top - 1.0f,
+                left + width + 1.0f, top + height + 1.0f);
+        }
         if (background != frame_background) {
             brush->SetColor(color(background));
             target->FillRectangle(rect, brush);
@@ -1088,6 +1242,10 @@ struct ZigonautTextEngine {
         row_cell_width = cell_width;
         row_cell_height = cell_height;
         row_active = true;
+        if (target != nullptr && scene_texture != nullptr && frame_active) {
+            addDamage(frame_damage, 0.0f, top,
+                static_cast<float>(scene_width), top + cell_height);
+        }
     }
 
     HRESULT endRow();
@@ -1503,6 +1661,31 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
 HRESULT ZigonautTextEngine::endRow() {
     if (!row_active) return E_UNEXPECTED;
     row_active = false;
+    struct RowClipGuard {
+        ZigonautTextEngine* engine;
+        bool active = false;
+        ~RowClipGuard() {
+            if (active && engine->target != nullptr) {
+                engine->target->PopAxisAlignedClip();
+            }
+        }
+        void push() {
+            // Full-rebuild frames transfer every pixel, so preserve the old un-clipped
+            // fast path. Partial frames clip glyph overhang to their recorded row.
+            if (active || engine->frame_damage.full || engine->target == nullptr ||
+                    engine->scene_texture == nullptr) return;
+            engine->target->PushAxisAlignedClip(D2D1::RectF(0.0f, engine->row_top,
+                static_cast<float>(engine->scene_width),
+                engine->row_top + engine->row_cell_height),
+                D2D1_ANTIALIAS_MODE_ALIASED);
+            active = true;
+        }
+        void pop() {
+            if (!active || engine->target == nullptr) return;
+            engine->target->PopAxisAlignedClip();
+            active = false;
+        }
+    } clip_guard{this};
 
     std::vector<RowSegment> segments;
     auto& segment = row_segment; segment.clear();
@@ -1620,10 +1803,17 @@ HRESULT ZigonautTextEngine::endRow() {
             const auto previous_blend = target3->GetPrimitiveBlend();
             target3->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             target3->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+            const bool overhang = std::any_of(destinations.begin(), destinations.end(),
+                [&](const D2D1_RECT_F& destination) {
+                    return destination.top < row_top ||
+                        destination.bottom > row_top + row_cell_height;
+                });
+            if (overhang) clip_guard.push();
             // Draw calls retain the submitted ranges. Keep the batch append-only
             // until EndDraw; beginFrame clears it after the previous draw scope.
             target3->DrawSpriteBatch(sprite_batch, sprite_start, count, atlas_bitmap,
                 D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_SPRITE_OPTIONS_NONE);
+            clip_guard.pop();
             target3->SetPrimitiveBlend(previous_blend);
             target3->SetAntialiasMode(previous_antialias);
             sprite_count += static_cast<uint32_t>(destinations.size());
@@ -1634,7 +1824,9 @@ HRESULT ZigonautTextEngine::endRow() {
 native_fallback:
     if (!batched) {
         if (atlas_eligible && benchmark_active) ++benchmark.atlas_fallback_rows;
+        clip_guard.push();
         for (const auto& item : segments) { hr = drawSegment(item); if (FAILED(hr)) return hr; }
+        clip_guard.pop();
     }
     for (const auto& cell : row_cells) {
         if (!cell.strikethrough) continue;
@@ -1857,9 +2049,91 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
         engine->benchmark.scene_copy_d3d11_copies =
             engine->d3d_scene_copy_count - copy_count;
     }
+    D3D11_BOX row_box{0, 0, 0, width, engine->metrics.height, 1};
+    if (SUCCEEDED(hr)) {
+        engine->damage_history_valid = true;
+        engine->previous_present_damage.clear();
+        engine->frame_damage.clear();
+        engine->addDamage(engine->frame_damage, row_box.left, row_box.top,
+            row_box.right, row_box.bottom);
+        for (uint32_t index = 0; index < 10 && SUCCEEDED(hr); ++index)
+            hr = engine->transferScene();
+        const uint64_t copy_count = engine->d3d_scene_region_copy_count;
+        const uint64_t copy_bytes = engine->d3d_scene_region_copy_bytes;
+        const uint64_t start = now();
+        for (uint32_t index = 0; index < copies && SUCCEEDED(hr); ++index)
+            hr = engine->transferScene();
+        engine->benchmark.scene_region_copy_nanoseconds = nanoseconds(now() - start);
+        engine->benchmark.scene_region_copy_d3d11_copies = static_cast<uint32_t>(
+            engine->d3d_scene_region_copy_count - copy_count);
+        engine->benchmark.scene_region_copy_bytes =
+            engine->d3d_scene_region_copy_bytes - copy_bytes;
+    }
+    const auto measureGpuCopies = [&](bool region, uint64_t* elapsed) -> HRESULT {
+        D3D11_QUERY_DESC description{};
+        ID3D11Query* disjoint = nullptr;
+        ID3D11Query* start_query = nullptr;
+        ID3D11Query* end_query = nullptr;
+        description.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        HRESULT value = engine->d3d_device->CreateQuery(&description, &disjoint);
+        description.Query = D3D11_QUERY_TIMESTAMP;
+        if (SUCCEEDED(value)) value = engine->d3d_device->CreateQuery(&description, &start_query);
+        if (SUCCEEDED(value)) value = engine->d3d_device->CreateQuery(&description, &end_query);
+        if (SUCCEEDED(value)) {
+            engine->d3d_context->Begin(disjoint);
+            engine->d3d_context->End(start_query);
+            for (uint32_t index = 0; index < copies; ++index) {
+                if (region) {
+                    engine->d3d_context->CopySubresourceRegion(engine->backbuffer_texture, 0,
+                        0, 0, 0, engine->scene_texture, 0, &row_box);
+                } else {
+                    engine->d3d_context->CopyResource(engine->backbuffer_texture,
+                        engine->scene_texture);
+                }
+            }
+            engine->d3d_context->End(end_query);
+            engine->d3d_context->End(disjoint);
+            engine->d3d_context->Flush();
+            const uint64_t deadline = now() + static_cast<uint64_t>(frequency.QuadPart) * 5;
+            const auto waitForQuery = [&](ID3D11Query* query, void* data,
+                    UINT size) -> HRESULT {
+                while (true) {
+                    const HRESULT query_result = engine->d3d_context->GetData(
+                        query, data, size, 0);
+                    if (query_result == S_OK) return S_OK;
+                    if (FAILED(query_result)) return query_result;
+                    const HRESULT removed = engine->d3d_device->GetDeviceRemovedReason();
+                    if (FAILED(removed)) return removed;
+                    if (now() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+                    SwitchToThread();
+                }
+            };
+            UINT64 start_ticks = 0, end_ticks = 0;
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing{};
+            value = waitForQuery(end_query, &end_ticks, sizeof(end_ticks));
+            if (SUCCEEDED(value)) value = waitForQuery(start_query,
+                &start_ticks, sizeof(start_ticks));
+            if (SUCCEEDED(value)) value = waitForQuery(disjoint, &timing,
+                sizeof(timing));
+            if (SUCCEEDED(value)) {
+                if (timing.Disjoint || timing.Frequency == 0 || end_ticks < start_ticks) {
+                    value = E_FAIL;
+                } else {
+                    *elapsed = static_cast<uint64_t>(
+                        static_cast<long double>(end_ticks - start_ticks) *
+                        1000000000.0L / timing.Frequency);
+                }
+            }
+        }
+        release(end_query);
+        release(start_query);
+        release(disjoint);
+        return value;
+    };
     engine->benchmark.scene_copy_iterations = copies;
     engine->benchmark.scene_width = width;
     engine->benchmark.scene_height = height;
+    engine->benchmark.scene_region_height = engine->metrics.height;
     engine->benchmark_active = false;
     constexpr uint32_t frame_rows = 40;
     if (SUCCEEDED(hr)) {
@@ -1904,6 +2178,12 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
         engine->benchmark.atlas_cold_resource_allocations = static_cast<uint32_t>(
             engine->atlas_resource_allocations - allocations);
     }
+    // GPU timestamp copies run last so their bandwidth and explicit flush cannot
+    // perturb the existing CPU-submission frame baselines above.
+    if (SUCCEEDED(hr)) hr = measureGpuCopies(false,
+        &engine->benchmark.scene_copy_gpu_nanoseconds);
+    if (SUCCEEDED(hr)) hr = measureGpuCopies(true,
+        &engine->benchmark.scene_region_copy_gpu_nanoseconds);
     engine->benchmark.atlas_extent = engine->atlas_extent;
     engine->benchmark.atlas_reserved_area = engine->atlas_reserved_area;
     engine->benchmark.atlas_rejected_area = engine->atlas_rejected_area;
@@ -1912,6 +2192,184 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     engine->benchmark.atlas_generation = engine->atlas_generation;
     engine->benchmark.atlas_resource_allocations = engine->atlas_resource_allocations;
     *result = engine->benchmark;
+    zigonaut_text_engine_destroy(engine);
+    DestroyWindow(window);
+    return hr;
+}
+
+extern "C" HRESULT zigonaut_test_damage_aware_transfer(
+    ZigonautDamageTransferTest* result) {
+    if (result == nullptr) return E_INVALIDARG;
+    *result = {};
+    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC",
+        L"Zigonaut damage transfer test", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (window == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+    ZigonautTextEngine* engine = nullptr;
+    HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(engine,
+        reinterpret_cast<uintptr_t>(window));
+    constexpr uint32_t width = 192;
+    const uint32_t row_height = SUCCEEDED(hr) ? engine->metrics.height : 1;
+    uint32_t height = row_height * 4;
+    BOOL rebuild = FALSE;
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height,
+        0x181818, TRUE, &rebuild);
+
+    ID3D11Texture2D* buffers[2] = {};
+    const auto createBuffers = [&]() -> HRESULT {
+        D3D11_TEXTURE2D_DESC description{};
+        engine->scene_texture->GetDesc(&description);
+        HRESULT value = engine->d3d_device->CreateTexture2D(
+            &description, nullptr, &buffers[0]);
+        if (SUCCEEDED(value)) value = engine->d3d_device->CreateTexture2D(
+            &description, nullptr, &buffers[1]);
+        return value;
+    };
+    if (SUCCEEDED(hr)) hr = createBuffers();
+
+    const auto equalTextures = [&](ID3D11Texture2D* left,
+            ID3D11Texture2D* right) -> HRESULT {
+        D3D11_TEXTURE2D_DESC description{};
+        left->GetDesc(&description);
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        description.MiscFlags = 0;
+        ID3D11Texture2D* staging_left = nullptr;
+        ID3D11Texture2D* staging_right = nullptr;
+        HRESULT value = engine->d3d_device->CreateTexture2D(
+            &description, nullptr, &staging_left);
+        if (SUCCEEDED(value)) value = engine->d3d_device->CreateTexture2D(
+            &description, nullptr, &staging_right);
+        if (SUCCEEDED(value)) {
+            engine->d3d_context->CopyResource(staging_left, left);
+            engine->d3d_context->CopyResource(staging_right, right);
+            D3D11_MAPPED_SUBRESOURCE mapped_left{}, mapped_right{};
+            value = engine->d3d_context->Map(staging_left, 0, D3D11_MAP_READ,
+                0, &mapped_left);
+            if (SUCCEEDED(value)) value = engine->d3d_context->Map(staging_right,
+                0, D3D11_MAP_READ, 0, &mapped_right);
+            if (SUCCEEDED(value)) {
+                const size_t row_bytes = static_cast<size_t>(description.Width) * 4;
+                for (uint32_t y = 0; y < description.Height; ++y) {
+                    const auto* a = static_cast<const uint8_t*>(mapped_left.pData) +
+                        y * mapped_left.RowPitch;
+                    const auto* b = static_cast<const uint8_t*>(mapped_right.pData) +
+                        y * mapped_right.RowPitch;
+                    if (!std::equal(a, a + row_bytes, b)) {
+                        value = E_FAIL;
+                        break;
+                    }
+                }
+            }
+            if (mapped_right.pData != nullptr)
+                engine->d3d_context->Unmap(staging_right, 0);
+            if (mapped_left.pData != nullptr)
+                engine->d3d_context->Unmap(staging_left, 0);
+        }
+        release(staging_right);
+        release(staging_left);
+        return value;
+    };
+
+    uint32_t buffer_index = 0;
+    const auto finish = [&]() -> HRESULT {
+        HRESULT value = engine->target->EndDraw();
+        engine->frame_active = false;
+        if (SUCCEEDED(value)) value = engine->transferSceneTo(buffers[buffer_index]);
+        if (SUCCEEDED(value)) value = equalTextures(buffers[buffer_index],
+            engine->scene_texture);
+        if (SUCCEEDED(value)) {
+            engine->commitPresentedDamage();
+            ++result->compared_frames;
+            buffer_index ^= 1;
+        }
+        return value;
+    };
+    const auto begin = [&](bool full = false) -> HRESULT {
+        return zigonaut_text_engine_begin_frame(engine, width, height, 0x181818,
+            full ? TRUE : FALSE, &rebuild);
+    };
+    const auto paintRows = [&](uint32_t first, uint32_t count,
+            uint32_t color_value) {
+        zigonaut_text_engine_clear_rect(engine, 0.0f,
+            static_cast<float>(first * row_height), static_cast<float>(width),
+            static_cast<float>((first + count) * row_height), color_value);
+    };
+    const auto paintGlyphRow = [&]() -> HRESULT {
+        engine->beginRow(0.0f, 0.0f, 12.0f, static_cast<float>(row_height));
+        for (uint32_t column = 0; column < 16; ++column) {
+            const uint16_t character = static_cast<uint16_t>(u'A' + column);
+            const HRESULT value = engine->drawCell(&character, 1,
+                static_cast<float>(column * 12), 0.0f, 12.0f,
+                static_cast<float>(row_height),
+                column & 1 ? 0x20e0e0 : 0xe020e0, 0x181818,
+                0xe0e0e0, false, false, false, false, false, 0,
+                ZIGONAUT_CELL_NARROW);
+            if (FAILED(value)) return value;
+        }
+        return engine->endRow();
+    };
+
+    if (SUCCEEDED(hr)) hr = finish();                         // Seed buffer 0.
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) paintRows(0, 1, 0x202080);
+    if (SUCCEEDED(hr)) hr = finish();                         // Seed buffer 1.
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) paintRows(1, 1, 0x208020);
+    if (SUCCEEDED(hr)) hr = finish();                         // Adjacent history.
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) paintRows(3, 1, 0x802020);
+    if (SUCCEEDED(hr)) hr = finish();                         // Disjoint history.
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) hr = finish();                         // Idle current damage.
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) paintRows(2, 1, 0x808020);
+    if (SUCCEEDED(hr)) hr = finish();
+    if (SUCCEEDED(hr)) hr = begin();
+    bool glyph_paths_covered = false;
+    if (SUCCEEDED(hr)) {
+        engine->benchmark = {};
+        engine->benchmark_active = true;
+    }
+    if (SUCCEEDED(hr)) hr = paintGlyphRow();               // Native glyph fallback.
+    if (SUCCEEDED(hr)) hr = finish();
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) hr = paintGlyphRow();               // Atlas glyph path.
+    if (SUCCEEDED(hr)) hr = finish();
+    if (engine != nullptr) {
+        engine->benchmark_active = false;
+        glyph_paths_covered = engine->benchmark.atlas_fallback_rows > 0 &&
+            engine->benchmark.atlas_batched_rows > 0;
+    }
+    if (SUCCEEDED(hr)) hr = begin();
+    if (SUCCEEDED(hr)) paintRows(0, 3, 0x204080);
+    if (SUCCEEDED(hr)) hr = finish();                         // High-area fallback.
+
+    if (SUCCEEDED(hr)) {
+        release(buffers[1]);
+        release(buffers[0]);
+        height += row_height;
+        hr = begin();                                         // Resize resets history.
+        if (SUCCEEDED(hr)) hr = createBuffers();
+        if (SUCCEEDED(hr)) hr = finish();
+    }
+    if (engine != nullptr) {
+        result->full_copies = static_cast<uint32_t>(engine->d3d_scene_full_copy_count);
+        result->region_copies = static_cast<uint32_t>(engine->d3d_scene_region_copy_count);
+        result->region_copy_bytes = engine->d3d_scene_region_copy_bytes;
+    }
+    if (SUCCEEDED(hr) && (result->compared_frames != 10 ||
+            result->full_copies != 4 || result->region_copies != 8 ||
+            !glyph_paths_covered ||
+            result->region_copy_bytes != static_cast<uint64_t>(width) *
+                row_height * 9 * 4)) hr = E_FAIL;
+    if (engine != nullptr && engine->frame_active) engine->target->EndDraw();
+    release(buffers[1]);
+    release(buffers[0]);
     zigonaut_text_engine_destroy(engine);
     DestroyWindow(window);
     return hr;
@@ -2476,6 +2934,8 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     engine->sprite_count = 0;
     engine->atlas_disabled_for_frame = false;
     *full_rebuild_required = recreate ? TRUE : FALSE;
+    engine->frame_damage.clear();
+    if (full_rebuild || recreate) engine->markFullDamage(engine->frame_damage);
     engine->frame_background = background;
     ++engine->image_frame;
     if (engine->image_frame == 0) ++engine->image_frame;
@@ -2490,12 +2950,14 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
 extern "C" void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
     float left, float top, float right, float bottom, uint32_t background) {
     if (engine == nullptr || !engine->frame_active || engine->brush == nullptr) return;
+    engine->addDamage(engine->frame_damage, left, top, right, bottom);
     engine->brush->SetColor(color(background));
     engine->target->FillRectangle(D2D1::RectF(left, top, right, bottom), engine->brush);
 }
 
 extern "C" void zigonaut_text_engine_abort_frame(ZigonautTextEngine* engine) {
     if (engine == nullptr || engine->target == nullptr || !engine->frame_active) return;
+    engine->row_active = false;
     engine->target->EndDraw();
     engine->frame_active = false;
     engine->discardTargetBitmap();
@@ -2606,6 +3068,9 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
         cached.generation = generation;
     }
     cached.last_seen_frame = engine->image_frame;
+    engine->addDamage(engine->frame_damage,
+        std::max(dl, cl), std::max(dt, ct),
+        std::min(dl + dw, cr), std::min(dt + dh, cb));
     engine->target->PushAxisAlignedClip(D2D1::RectF(cl, ct, cr, cb), D2D1_ANTIALIAS_MODE_ALIASED);
     engine->target->DrawBitmap(cached.bitmap, D2D1::RectF(dl, dt, dl + dw, dt + dh), 1.0f,
         D2D1_INTERPOLATION_MODE_LINEAR, D2D1::RectF(sl, st, sl + sw, st + sh));
@@ -2626,6 +3091,8 @@ extern "C" void zigonaut_text_engine_draw_cursor(
     uint32_t cursor_color,
     uint8_t style) {
     if (engine == nullptr || engine->target == nullptr || engine->brush == nullptr) return;
+    engine->addDamage(engine->frame_damage,
+        left - 1.0f, top - 1.0f, left + width + 1.0f, top + height + 1.0f);
     engine->brush->SetColor(color(cursor_color));
     if (style == 1) {
         engine->target->FillRectangle(D2D1::RectF(left, top, left + width, top + height), engine->brush);
@@ -2658,6 +3125,11 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
     DWRITE_TEXT_METRICS text_metrics{};
     hr = layout->GetMetrics(&text_metrics);
     if (FAILED(hr)) { release(layout); return hr; }
+    const auto preedit_rect = D2D1::RectF(left, top, left + max_width,
+        top + std::max(text_metrics.height, height));
+    engine->addDamage(engine->frame_damage, preedit_rect.left, preedit_rect.top,
+        preedit_rect.right, preedit_rect.bottom);
+    engine->target->PushAxisAlignedClip(preedit_rect, D2D1_ANTIALIAS_MODE_ALIASED);
     engine->brush->SetColor(color(background));
     engine->target->FillRectangle(D2D1::RectF(left, top,
         left + std::max(text_metrics.widthIncludingTrailingWhitespace, 1.0f),
@@ -2665,6 +3137,7 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
     engine->brush->SetColor(color(foreground));
     engine->target->DrawTextLayout(D2D1::Point2F(left, top), layout, engine->brush,
         D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    engine->target->PopAxisAlignedClip();
     FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS metrics{};
     hr = layout->HitTestTextPosition(std::min(caret, text_length), FALSE, &x, &y, &metrics);
     *caret_x = left + x;
@@ -2677,8 +3150,10 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     const HRESULT hr = engine->target->EndDraw();
     engine->frame_active = false;
     if (FAILED(hr)) {
-        if (hr == D2DERR_RECREATE_TARGET) engine->discardTargetBitmap();
-        else engine->invalidateAtlas();
+        // EndDraw failures are not transactional: earlier scene commands may have
+        // executed. Recreate the retained target and require a coherent full replay.
+        engine->row_active = false;
+        engine->discardTargetBitmap();
         return hr;
     }
     engine->evictUnusedImages();
@@ -2692,18 +3167,24 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
         engine->present_pending = true;
         return S_FALSE;
     }
-    if (FAILED(present)) engine->discardTargetBitmap();
-    return present;
+    if (present == S_OK) {
+        engine->commitPresentedDamage();
+        return S_OK;
+    }
+    engine->discardTargetBitmap();
+    return FAILED(present) ? present : E_UNEXPECTED;
 }
 
 extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine) {
     if (engine == nullptr || !engine->present_pending) return E_INVALIDARG;
     const HRESULT present = engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
     if (present == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
-    if (SUCCEEDED(present)) engine->present_pending = false;
-    else {
+    if (present == S_OK) {
         engine->present_pending = false;
-        engine->discardTargetBitmap();
+        engine->commitPresentedDamage();
+        return S_OK;
     }
-    return present;
+    engine->present_pending = false;
+    engine->discardTargetBitmap();
+    return FAILED(present) ? present : E_UNEXPECTED;
 }

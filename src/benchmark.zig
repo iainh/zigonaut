@@ -130,7 +130,7 @@ pub fn main() !void {
             "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d}; plan hits={d}, misses={d}, bypasses={d})\n" ++
             "  2 monochrome color translation: {d:.2} us/row ({d} rows; attempts={d}, successes={d})\n" ++
             "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each; plan hits={d}, misses={d})\n" ++
-            "  4 final scene transfer CPU submission: {d:.2} us/call ({d}x{d}, {d} CopyResource calls submitted; counter={d}; no GPU-completion wait or Present)\n",
+            "  4 final scene transfer: full {d:.2} us CPU / {d:.2} us GPU per copy ({d}x{d}); one-row damage {d:.2} us CPU / {d:.2} us GPU per copy ({d}x{d}, {d:.2} KiB copied); {d} calls each; no Present\n",
         .{
             perIterationUs(dwrite.warm_row_nanoseconds, dwrite.warm_row_iterations),
             dwrite.warm_row_iterations,
@@ -153,10 +153,15 @@ pub fn main() !void {
             dwrite.fragmented_plan_hits,
             dwrite.fragmented_plan_misses,
             perIterationUs(dwrite.scene_copy_nanoseconds, dwrite.scene_copy_iterations),
+            perIterationUs(dwrite.scene_copy_gpu_nanoseconds, dwrite.scene_copy_iterations),
             dwrite.scene_width,
             dwrite.scene_height,
+            perIterationUs(dwrite.scene_region_copy_nanoseconds, dwrite.scene_copy_iterations),
+            perIterationUs(dwrite.scene_region_copy_gpu_nanoseconds, dwrite.scene_copy_iterations),
+            dwrite.scene_width,
+            dwrite.scene_region_height,
+            @as(f64, @floatFromInt(dwrite.scene_region_copy_bytes)) / @as(f64, @floatFromInt(dwrite.scene_copy_iterations)) / 1024.0,
             dwrite.scene_copy_iterations,
-            dwrite.scene_copy_d3d11_copies,
         },
     );
     std.debug.print(

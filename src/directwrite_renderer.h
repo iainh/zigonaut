@@ -32,6 +32,9 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t uniform_row_nanoseconds;
     uint64_t fragmented_row_nanoseconds;
     uint64_t scene_copy_nanoseconds;
+    uint64_t scene_region_copy_nanoseconds;
+    uint64_t scene_copy_gpu_nanoseconds;
+    uint64_t scene_region_copy_gpu_nanoseconds;
     uint64_t layout_hits;
     uint64_t layout_misses;
     uint64_t layout_draws;
@@ -65,8 +68,11 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t atlas_cold_resource_allocations;
     uint32_t scene_copy_iterations;
     uint32_t scene_copy_d3d11_copies;
+    uint32_t scene_region_copy_d3d11_copies;
+    uint64_t scene_region_copy_bytes;
     uint32_t scene_width;
     uint32_t scene_height;
+    uint32_t scene_region_height;
 } ZigonautDirectWriteBenchmark;
 
 typedef struct ZigonautGlyphAtlasPixelsTest {
@@ -83,6 +89,13 @@ typedef struct ZigonautGlyphAtlasPixelsTest {
     uint64_t second_sprites;
     uint64_t second_placement_hits;
 } ZigonautGlyphAtlasPixelsTest;
+
+typedef struct ZigonautDamageTransferTest {
+    uint32_t compared_frames;
+    uint32_t full_copies;
+    uint32_t region_copies;
+    uint64_t region_copy_bytes;
+} ZigonautDamageTransferTest;
 
 typedef struct ZigonautDecodedImage {
     uint32_t width;
@@ -102,6 +115,7 @@ HRESULT zigonaut_benchmark_directwrite_pipeline(ZigonautDirectWriteBenchmark* re
 HRESULT zigonaut_test_glyph_atlas_allocator(void);
 HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest* result);
 HRESULT zigonaut_test_atlas_policy_and_faults(void);
+HRESULT zigonaut_test_damage_aware_transfer(ZigonautDamageTransferTest* result);
 
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,
