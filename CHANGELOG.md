@@ -2,6 +2,20 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.4.1] - 2026-08-01
+
+### Changed
+
+- Improved terminal throughput and responsiveness by batching PTY output, pacing
+  rendering with the compositor, and yielding parsing to waiting renders.
+- Reduced rendering overhead with row-batched DirectWrite drawing, reused glyph-run
+  buffers, and cached Kitty image bitmaps.
+- Updated the libghostty dependency.
+
+### Fixed
+
+- Corrected initial tab rendering.
+
 ## [0.4.0] - 2026-08-01
 
 ### Added
@@ -111,6 +125,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.4.1]: https://github.com/iainh/zigonaut/releases/tag/v0.4.1
 [0.4.0]: https://github.com/iainh/zigonaut/releases/tag/v0.4.0
 [0.3.0]: https://github.com/iainh/zigonaut/releases/tag/v0.3.0
 [0.1.0]: https://github.com/iainh/zigonaut/releases/tag/v0.1.0
