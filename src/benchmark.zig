@@ -5,7 +5,9 @@ const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const directwrite = @import("directwrite_renderer.zig");
 const progress = @import("progress.zig");
+const Pty = @import("pty.zig").Pty;
 const win32 = @import("win32.zig");
+const win = win32.c;
 
 const columns = 120;
 const rows = 40;
@@ -17,7 +19,22 @@ const resize_feed_iterations = 2_000;
 const line = "\x1b[38;2;120;180;255mcompile\x1b[0m src/terminal_view.zig:123:45 " ++
     "abcdefghijklmnopqrstuvwxyz 0123456789\r\n";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    var arguments: std.ArrayList([]const u8) = .empty;
+    defer arguments.deinit(std.heap.page_allocator);
+    var iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, std.heap.page_allocator);
+    defer iterator.deinit();
+    while (iterator.next()) |argument| try arguments.append(std.heap.page_allocator, argument);
+    if (arguments.items.len >= 2 and std.mem.eql(u8, arguments.items[1], "--conpty")) {
+        return benchmarkConpty();
+    }
+    if (arguments.items.len == 5 and std.mem.eql(u8, arguments.items[1], "--conpty-producer")) {
+        const mode = std.meta.stringToEnum(ConptyProducerMode, arguments.items[2]) orelse return error.InvalidProducerMode;
+        const chunk_bytes = try std.fmt.parseInt(usize, arguments.items[3], 10);
+        const total_bytes = try std.fmt.parseInt(usize, arguments.items[4], 10);
+        return runConptyProducer(mode, chunk_bytes, total_bytes);
+    }
+
     var terminal = try Terminal.init(columns, rows, theme.rasmus);
     defer terminal.deinit();
 
@@ -197,6 +214,218 @@ pub fn main() !void {
         },
     );
 }
+
+const ConptyProducerMode = enum { native, legacy };
+const conpty_ready_marker = "~ZIGONAUT-CONPTY-READY~";
+const conpty_done_marker = "~ZIGONAUT-CONPTY-DONE~";
+
+fn benchmarkConpty() !void {
+    const total_bytes = 16 * 1024 * 1024;
+    const executable = try executablePathAlloc(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(executable);
+    std.debug.print("ConPTY end-to-end baselines ({d} MiB producer payload; includes Ghostty parsing):\n", .{total_bytes / (1024 * 1024)});
+    for ([_]struct { mode: ConptyProducerMode, chunk_bytes: usize }{
+        .{ .mode = .native, .chunk_bytes = 4 * 1024 },
+        .{ .mode = .native, .chunk_bytes = 128 * 1024 },
+        .{ .mode = .legacy, .chunk_bytes = 4 * 1024 },
+        .{ .mode = .legacy, .chunk_bytes = 32 * 1024 },
+    }) |case| try benchmarkConptyCase(executable, case.mode, case.chunk_bytes, total_bytes);
+}
+
+fn benchmarkConptyCase(executable: []const u8, mode: ConptyProducerMode, chunk_bytes: usize, total_bytes: usize) !void {
+    const command = try std.fmt.allocPrint(
+        std.heap.page_allocator,
+        "\"{s}\" --conpty-producer {s} {d} {d}",
+        .{ executable, @tagName(mode), chunk_bytes, total_bytes },
+    );
+    defer std.heap.page_allocator.free(command);
+
+    var startup_timer = try Timer.start();
+    var pty = try Pty.spawn(std.heap.page_allocator, command, "", columns, rows);
+    defer {
+        _ = win.TerminateProcess(pty.process, 0);
+        pty.closeIo();
+        pty.closeConsole();
+        pty.finishClose();
+    }
+    var watchdog = ConptyWatchdog{ .process = pty.process };
+    const watchdog_thread = try std.Thread.spawn(.{}, ConptyWatchdog.run, .{&watchdog});
+    defer {
+        watchdog.complete.store(true, .release);
+        watchdog_thread.join();
+    }
+    try pty.write("\x1b[?61c");
+
+    var terminal = try Terminal.init(columns, rows, theme.rasmus);
+    defer terminal.deinit();
+    var buffer: [16 * 1024]u8 = undefined;
+    var ready_matcher = MarkerMatcher{ .marker = conpty_ready_marker };
+    while (!ready_matcher.complete()) {
+        const count = try pty.read(&buffer);
+        if (count == 0) return if (watchdog.timed_out.load(.acquire)) error.ConptyBenchmarkTimedOut else error.ConptyProducerExitedBeforeReady;
+        terminal.feed(buffer[0..count]);
+        ready_matcher.feed(buffer[0..count]);
+    }
+    const startup_ns = startup_timer.read();
+
+    var timer = try Timer.start();
+    try pty.write("G");
+    var done_matcher = MarkerMatcher{ .marker = conpty_done_marker };
+    var received_bytes: usize = 0;
+    var reads: usize = 0;
+    var largest_read: usize = 0;
+    while (!done_matcher.complete()) {
+        const count = try pty.read(&buffer);
+        if (count == 0) return if (watchdog.timed_out.load(.acquire)) error.ConptyBenchmarkTimedOut else error.ConptyProducerExitedBeforeDone;
+        received_bytes += count;
+        reads += 1;
+        largest_read = @max(largest_read, count);
+        terminal.feed(buffer[0..count]);
+        done_matcher.feed(buffer[0..count]);
+    }
+    const elapsed_ns = timer.read();
+    std.mem.doNotOptimizeAway(try terminal.totalRows());
+    std.debug.print(
+        "  {s: <6} {d: >3} KiB writes: {d:.2} MiB/s, {d:.2} ms startup, {d} reads ({d:.1} KiB average, {d:.1} KiB max; {d:.2} MiB received)\n",
+        .{
+            @tagName(mode),
+            chunk_bytes / 1024,
+            @as(f64, @floatFromInt(total_bytes)) / @as(f64, @floatFromInt(elapsed_ns)) * std.time.ns_per_s / (1024.0 * 1024.0),
+            milliseconds(startup_ns),
+            reads,
+            @as(f64, @floatFromInt(received_bytes)) / @as(f64, @floatFromInt(reads)) / 1024.0,
+            @as(f64, @floatFromInt(largest_read)) / 1024.0,
+            @as(f64, @floatFromInt(received_bytes)) / (1024.0 * 1024.0),
+        },
+    );
+}
+
+const ConptyWatchdog = struct {
+    process: win.HANDLE,
+    complete: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    timed_out: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *ConptyWatchdog) void {
+        for (0..200) |_| {
+            if (self.complete.load(.acquire)) return;
+            win.Sleep(50);
+        }
+        if (self.complete.load(.acquire)) return;
+        self.timed_out.store(true, .release);
+        _ = win.TerminateProcess(self.process, 1);
+    }
+};
+
+fn runConptyProducer(mode: ConptyProducerMode, chunk_bytes: usize, total_bytes: usize) !void {
+    if (chunk_bytes == 0 or total_bytes == 0) return error.InvalidProducerSize;
+    const output = win.GetStdHandle(win.STD_OUTPUT_HANDLE) orelse return error.ConsoleOutputUnavailable;
+    const input = win.GetStdHandle(win.STD_INPUT_HANDLE) orelse return error.ConsoleInputUnavailable;
+    var console_mode: win.DWORD = 0;
+    if (win.GetConsoleMode(output, &console_mode) == 0) return error.ConsoleModeUnavailable;
+    const output_mode = if (mode == .native)
+        console_mode | win.ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    else
+        console_mode & ~@as(win.DWORD, win.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    if (win.SetConsoleMode(output, output_mode) == 0) {
+        return error.ConsoleModeUnavailable;
+    }
+    var input_mode: win.DWORD = 0;
+    if (win.GetConsoleMode(input, &input_mode) == 0 or
+        win.SetConsoleMode(input, input_mode & ~@as(win.DWORD, win.ENABLE_ECHO_INPUT | win.ENABLE_LINE_INPUT)) == 0)
+    {
+        return error.ConsoleModeUnavailable;
+    }
+
+    const payload = try std.heap.page_allocator.alloc(u8, chunk_bytes);
+    defer std.heap.page_allocator.free(payload);
+    @memset(payload, 'x');
+    if (payload.len >= 2) {
+        payload[payload.len - 2] = '\r';
+        payload[payload.len - 1] = '\n';
+    }
+    const wide_payload = if (mode == .legacy)
+        try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, payload)
+    else
+        null;
+    defer if (wide_payload) |wide| std.heap.page_allocator.free(wide);
+
+    try writeProducerOutput(output, mode, conpty_ready_marker);
+    var gate: [1]u8 = undefined;
+    var gate_read: win.DWORD = 0;
+    if (win.ReadFile(input, &gate, gate.len, &gate_read, null) == 0 or gate_read != 1) return error.ProducerGateFailed;
+
+    var remaining = total_bytes;
+    while (remaining != 0) {
+        const count = @min(remaining, payload.len);
+        if (wide_payload) |wide| {
+            try writeWideProducerOutput(output, wide[0..count]);
+        } else {
+            try writeByteProducerOutput(output, payload[0..count]);
+        }
+        remaining -= count;
+    }
+    try writeProducerOutput(output, mode, conpty_done_marker);
+}
+
+fn writeProducerOutput(handle: win.HANDLE, mode: ConptyProducerMode, bytes: []const u8) !void {
+    switch (mode) {
+        .native => try writeByteProducerOutput(handle, bytes),
+        .legacy => {
+            const wide = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, bytes);
+            defer std.heap.page_allocator.free(wide);
+            try writeWideProducerOutput(handle, wide);
+        },
+    }
+}
+
+fn writeByteProducerOutput(handle: win.HANDLE, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        var written: win.DWORD = 0;
+        if (win.WriteFile(handle, bytes[offset..].ptr, @intCast(bytes.len - offset), &written, null) == 0 or written == 0) {
+            return error.ProducerWriteFailed;
+        }
+        offset += written;
+    }
+}
+
+fn writeWideProducerOutput(handle: win.HANDLE, wide: []const u16) !void {
+    var offset: usize = 0;
+    while (offset < wide.len) {
+        var written: win.DWORD = 0;
+        if (win.WriteConsoleW(handle, wide[offset..].ptr, @intCast(wide.len - offset), &written, null) == 0 or written == 0) {
+            return error.ProducerWriteFailed;
+        }
+        offset += written;
+    }
+}
+
+fn executablePathAlloc(allocator: std.mem.Allocator) ![]u8 {
+    var path: [32_768]u16 = undefined;
+    const length = win.GetModuleFileNameW(null, &path, path.len);
+    if (length == 0 or length == path.len) return error.ExecutablePathUnavailable;
+    return std.unicode.utf16LeToUtf8Alloc(allocator, path[0..length]);
+}
+
+const MarkerMatcher = struct {
+    marker: []const u8,
+    matched: usize = 0,
+
+    fn feed(self: *MarkerMatcher, bytes: []const u8) void {
+        for (bytes) |byte| {
+            if (self.complete()) return;
+            if (byte == self.marker[self.matched]) {
+                self.matched += 1;
+            } else {
+                self.matched = @intFromBool(byte == self.marker[0]);
+            }
+        }
+    }
+
+    fn complete(self: *const MarkerMatcher) bool {
+        return self.matched == self.marker.len;
+    }
+};
 
 fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64, cursor_ns: u64 } {
     const iterations = 1_000;

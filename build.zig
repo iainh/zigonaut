@@ -183,6 +183,12 @@ pub fn build(b: *std.Build) void {
     configureGhostty(benchmark.root_module, ghostty);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);
+    const install_benchmark = b.addInstallArtifact(benchmark, .{});
+    const run_conpty_benchmark = b.addSystemCommand(&.{ b.getInstallPath(.bin, "zigonaut-benchmark.exe"), "--conpty" });
+    run_conpty_benchmark.step.dependOn(&install_benchmark.step);
+    run_conpty_benchmark.step.dependOn(winui_step);
+    const conpty_benchmark_step = b.step("benchmark-conpty", "Benchmark end-to-end ConPTY transport and terminal parsing");
+    conpty_benchmark_step.dependOn(&run_conpty_benchmark.step);
 }
 
 fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) void {
