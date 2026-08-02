@@ -36,6 +36,9 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t color_translate_successes;
     uint64_t monochrome_translate_attempts;
     uint64_t monochrome_translate_successes;
+    uint64_t resolved_plan_hits;
+    uint64_t resolved_plan_misses;
+    uint64_t resolved_plan_bypasses;
     uint32_t warm_row_iterations;
     uint32_t monochrome_row_iterations;
     uint32_t uniform_row_iterations;

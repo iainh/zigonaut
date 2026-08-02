@@ -73,9 +73,48 @@ private:
     }
 };
 
+struct OwnedGlyphRun {
+    IDWriteFontFace* font_face = nullptr;
+    std::vector<UINT16> indices;
+    std::vector<FLOAT> advances;
+    std::vector<DWRITE_GLYPH_OFFSET> offsets;
+    FLOAT em_size = 0.0f;
+    BOOL sideways = FALSE;
+    UINT32 bidi_level = 0;
+    FLOAT origin_x = 0.0f;
+    FLOAT origin_y = 0.0f;
+    DWRITE_MEASURING_MODE measuring_mode = DWRITE_MEASURING_MODE_NATURAL;
+
+    OwnedGlyphRun() = default;
+    OwnedGlyphRun(const OwnedGlyphRun&) = delete;
+    OwnedGlyphRun& operator=(const OwnedGlyphRun&) = delete;
+    OwnedGlyphRun(OwnedGlyphRun&& other) noexcept
+        : font_face(other.font_face), indices(std::move(other.indices)),
+          advances(std::move(other.advances)), offsets(std::move(other.offsets)),
+          em_size(other.em_size), sideways(other.sideways), bidi_level(other.bidi_level),
+          origin_x(other.origin_x), origin_y(other.origin_y), measuring_mode(other.measuring_mode) {
+        other.font_face = nullptr;
+    }
+    ~OwnedGlyphRun() { release(font_face); }
+
+    DWRITE_GLYPH_RUN glyphRun() const {
+        return {font_face, em_size, static_cast<UINT32>(indices.size()), indices.data(),
+            advances.empty() ? nullptr : advances.data(), offsets.empty() ? nullptr : offsets.data(),
+            sideways, bidi_level};
+    }
+};
+
+struct ResolvedDrawPlan {
+    std::vector<uint32_t> columns;
+    float cell_width = 0.0f;
+    float cell_height = 0.0f;
+    std::vector<OwnedGlyphRun> runs;
+};
+
 struct LayoutEntry {
     IDWriteTextLayout* layout;
     std::list<const LayoutKey*>::iterator recency;
+    std::unique_ptr<ResolvedDrawPlan> plan;
 };
 
 struct RowCell {
@@ -581,7 +620,7 @@ struct ZigonautTextEngine {
                 height,
                 static_cast<uint8_t>(format_index),
             },
-            LayoutEntry{layout, {}}).first;
+            LayoutEntry{layout, {}, nullptr}).first;
         layout_recency.push_back(&inserted->first);
         auto recency = std::prev(layout_recency.end());
         inserted->second.recency = recency;
@@ -817,8 +856,10 @@ public:
     explicit GridTextRenderer(ZigonautTextEngine* engine)
         : engine_(engine) {}
 
-    void setSegment(const RowSegment* segment) {
+    void setSegment(const RowSegment* segment, ResolvedDrawPlan* plan, bool* cacheable) {
         segment_ = segment;
+        plan_ = plan;
+        cacheable_ = cacheable;
     }
 
     IFACEMETHOD(QueryInterface)(REFIID iid, void** object) override {
@@ -1042,6 +1083,9 @@ public:
                     rendered_color = color_layer_count != 0;
                 }
                 release(layers);
+                if (cacheable_ != nullptr) *cacheable_ = false;
+            } else if (color_result != DWRITE_E_NOCOLOR) {
+                if (cacheable_ != nullptr) *cacheable_ = false;
             }
         }
         if (!rendered_color) {
@@ -1052,6 +1096,31 @@ public:
                 engine_->brush,
                 measuring_mode);
             if (engine_->benchmark_active) ++engine_->benchmark.glyph_submissions;
+            if (plan_ != nullptr && cacheable_ != nullptr && *cacheable_) {
+                try {
+                    OwnedGlyphRun owned;
+                    owned.font_face = adjusted.fontFace;
+                    if (owned.font_face != nullptr) owned.font_face->AddRef();
+                    owned.em_size = adjusted.fontEmSize;
+                    owned.sideways = adjusted.isSideways;
+                    owned.bidi_level = adjusted.bidiLevel;
+                    owned.origin_x = origin_x - engine_->row_origin_x;
+                    owned.origin_y = origin_y - engine_->row_top;
+                    owned.measuring_mode = measuring_mode;
+                    owned.indices.assign(adjusted.glyphIndices,
+                        adjusted.glyphIndices + adjusted.glyphCount);
+                    owned.advances.assign(adjusted.glyphAdvances,
+                        adjusted.glyphAdvances + adjusted.glyphCount);
+                    if (adjusted.glyphOffsets != nullptr) {
+                        owned.offsets.assign(adjusted.glyphOffsets,
+                            adjusted.glyphOffsets + adjusted.glyphCount);
+                    }
+                    plan_->runs.push_back(std::move(owned));
+                } catch (...) {
+                    *cacheable_ = false;
+                    plan_->runs.clear();
+                }
+            }
         }
         return S_OK;
     }
@@ -1075,6 +1144,8 @@ private:
     std::atomic<ULONG> references_{1};
     ZigonautTextEngine* engine_;
     const RowSegment* segment_ = nullptr;
+    ResolvedDrawPlan* plan_ = nullptr;
+    bool* cacheable_ = nullptr;
     std::vector<FLOAT> advances_;
     std::vector<ClusterSpan> spans_;
     std::vector<UINT16> glyph_starts_;
@@ -1125,13 +1196,49 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
         &layout);
     if (FAILED(hr)) return hr;
 
+    const LayoutKeyView key{segment.text, width, height, static_cast<uint8_t>(format_index)};
+    auto cached_layout = layouts.find(key);
+    if (cached_layout == layouts.end()) return E_UNEXPECTED;
+    auto& cached_plan = cached_layout->second.plan;
+    if (cached_plan != nullptr && cached_plan->columns == segment.columns &&
+        cached_plan->cell_width == row_cell_width && cached_plan->cell_height == row_cell_height) {
+        if (benchmark_active) ++benchmark.resolved_plan_hits;
+        brush->SetColor(color(segment.foreground));
+        for (const auto& owned : cached_plan->runs) {
+            const DWRITE_GLYPH_RUN run = owned.glyphRun();
+            target->DrawGlyphRun(D2D1::Point2F(row_origin_x + owned.origin_x,
+                row_top + owned.origin_y), &run, brush, owned.measuring_mode);
+            if (benchmark_active) ++benchmark.glyph_submissions;
+        }
+        return S_OK;
+    }
+    if (benchmark_active) ++benchmark.resolved_plan_misses;
+
     if (grid_renderer == nullptr) {
         grid_renderer = new (std::nothrow) GridTextRenderer(this);
         if (grid_renderer == nullptr) return E_OUTOFMEMORY;
     }
-    grid_renderer->setSegment(&segment);
+    std::unique_ptr<ResolvedDrawPlan> pending;
+    try {
+        pending = std::make_unique<ResolvedDrawPlan>();
+        pending->columns = segment.columns;
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+    pending->cell_width = row_cell_width;
+    pending->cell_height = row_cell_height;
+    bool cacheable = true;
+    grid_renderer->setSegment(&segment, pending.get(), &cacheable);
     if (benchmark_active) ++benchmark.layout_draws;
-    return layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
+    hr = layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
+    grid_renderer->setSegment(nullptr, nullptr, nullptr);
+    if (FAILED(hr)) return hr;
+    if (cacheable && !pending->runs.empty()) {
+        cached_plan = std::move(pending);
+    } else if (benchmark_active) {
+        ++benchmark.resolved_plan_bypasses;
+    }
+    return S_OK;
 }
 
 HRESULT ZigonautTextEngine::endRow() {

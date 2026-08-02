@@ -260,6 +260,14 @@ test "layout cache retains hot entries when crossing capacity" {
     try std.testing.expectEqual(@as(u32, 2048), result.cache_entries);
 }
 
+test "resolved draw plan is reused by the warm-row benchmark" {
+    const std = @import("std");
+    const result = try benchmarkPipeline();
+    try std.testing.expect(result.resolved_plan_hits >= result.warm_row_iterations);
+    try std.testing.expectEqual(result.resolved_plan_misses, result.layout_draws);
+    try std.testing.expectEqual(@as(u64, 0), result.resolved_plan_bypasses);
+}
+
 fn sum(values: []const f32) f32 {
     var total: f32 = 0;
     for (values) |value| total += value;

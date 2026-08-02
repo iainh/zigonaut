@@ -127,7 +127,7 @@ pub fn main() !void {
     );
     std.debug.print(
         "DirectWrite baselines (native retained renderer):\n" ++
-            "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d})\n" ++
+            "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d}; plan hits={d}, misses={d}, bypasses={d})\n" ++
             "  2 monochrome color translation: {d:.2} us/row ({d} rows; attempts={d}, successes={d})\n" ++
             "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each)\n" ++
             "  4 final scene transfer: {d:.2} us/frame ({d}x{d}, {d} copies; excludes wait/present)\n",
@@ -139,6 +139,9 @@ pub fn main() !void {
             dwrite.layout_draws,
             dwrite.glyph_callbacks,
             dwrite.glyph_submissions,
+            dwrite.resolved_plan_hits,
+            dwrite.resolved_plan_misses,
+            dwrite.resolved_plan_bypasses,
             perIterationUs(dwrite.monochrome_row_nanoseconds, dwrite.monochrome_row_iterations),
             dwrite.monochrome_row_iterations,
             dwrite.monochrome_translate_attempts,
