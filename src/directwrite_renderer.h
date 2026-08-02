@@ -44,6 +44,7 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t uniform_row_iterations;
     uint32_t fragmented_row_iterations;
     uint32_t scene_copy_iterations;
+    uint32_t scene_copy_d3d11_copies;
     uint32_t scene_width;
     uint32_t scene_height;
 } ZigonautDirectWriteBenchmark;

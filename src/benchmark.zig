@@ -130,7 +130,7 @@ pub fn main() !void {
             "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d}; plan hits={d}, misses={d}, bypasses={d})\n" ++
             "  2 monochrome color translation: {d:.2} us/row ({d} rows; attempts={d}, successes={d})\n" ++
             "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each)\n" ++
-            "  4 final scene transfer: {d:.2} us/frame ({d}x{d}, {d} copies; excludes wait/present)\n",
+            "  4 final scene transfer CPU submission: {d:.2} us/call ({d}x{d}, {d} CopyResource calls submitted; counter={d}; no GPU-completion wait or Present)\n",
         .{
             perIterationUs(dwrite.warm_row_nanoseconds, dwrite.warm_row_iterations),
             dwrite.warm_row_iterations,
@@ -154,6 +154,7 @@ pub fn main() !void {
             dwrite.scene_width,
             dwrite.scene_height,
             dwrite.scene_copy_iterations,
+            dwrite.scene_copy_d3d11_copies,
         },
     );
     std.debug.print(

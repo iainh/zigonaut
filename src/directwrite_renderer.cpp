@@ -285,12 +285,15 @@ struct ZigonautTextEngine {
     IDWriteTextFormat* formats[4] = {};
     ID2D1Factory1* d2d_factory = nullptr;
     ID3D11Device* d3d_device = nullptr;
+    ID3D11DeviceContext* d3d_context = nullptr;
     ID2D1Device* d2d_device = nullptr;
     ID2D1DeviceContext* target = nullptr;
     IDXGISwapChain1* swap_chain = nullptr;
     HANDLE frame_latency_waitable_object = nullptr;
     ID2D1Bitmap1* target_bitmap = nullptr;
     ID2D1Bitmap1* scene_bitmap = nullptr;
+    ID3D11Texture2D* backbuffer_texture = nullptr;
+    ID3D11Texture2D* scene_texture = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
     std::list<const LayoutKey*> layout_recency;
@@ -319,6 +322,7 @@ struct ZigonautTextEngine {
     bool row_active = false;
     bool frame_active = false;
     bool present_pending = false;
+    uint64_t d3d_scene_copy_count = 0;
 
     ~ZigonautTextEngine();
 
@@ -431,6 +435,8 @@ struct ZigonautTextEngine {
                 nullptr);
         }
         if (FAILED(hr)) return hr;
+        d3d_device->GetImmediateContext(&d3d_context);
+        if (d3d_context == nullptr) return E_HANDLE;
 
         IDXGIDevice* dxgi_device = nullptr;
         hr = d3d_device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
@@ -547,7 +553,22 @@ struct ZigonautTextEngine {
         if (target != nullptr) target->SetTarget(nullptr);
         release(target_bitmap);
         release(scene_bitmap);
+        release(backbuffer_texture);
+        release(scene_texture);
         clearImages();
+    }
+
+    HRESULT transferScene() {
+        if (target == nullptr || d3d_context == nullptr || scene_texture == nullptr ||
+            backbuffer_texture == nullptr) return E_HANDLE;
+        // EndDraw has submitted the D2D scene writes on this device. The following
+        // immediate-context copy is ordered after them; this does not wait for GPU
+        // completion. Drop D2D's retained target association before switching APIs.
+        target->SetTarget(nullptr);
+        d3d_context->CopyResource(backbuffer_texture, scene_texture);
+        ++d3d_scene_copy_count;
+        const HRESULT removed = d3d_device->GetDeviceRemovedReason();
+        return FAILED(removed) ? removed : S_OK;
     }
 
     void clearImages() {
@@ -658,8 +679,9 @@ struct ZigonautTextEngine {
             DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
         if (FAILED(hr)) return hr;
 
+        hr = swap_chain->GetBuffer(0, IID_PPV_ARGS(&backbuffer_texture));
         IDXGISurface* surface = nullptr;
-        hr = swap_chain->GetBuffer(0, IID_PPV_ARGS(&surface));
+        if (SUCCEEDED(hr)) hr = backbuffer_texture->QueryInterface(IID_PPV_ARGS(&surface));
         if (SUCCEEDED(hr)) {
             auto const properties = D2D1::BitmapProperties1(
                 D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
@@ -675,13 +697,29 @@ struct ZigonautTextEngine {
         }
         release(surface);
         if (SUCCEEDED(hr)) {
+            D3D11_TEXTURE2D_DESC scene_description{};
+            scene_description.Width = width;
+            scene_description.Height = height;
+            scene_description.MipLevels = 1;
+            scene_description.ArraySize = 1;
+            scene_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            scene_description.SampleDesc.Count = 1;
+            scene_description.Usage = D3D11_USAGE_DEFAULT;
+            scene_description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            hr = d3d_device->CreateTexture2D(&scene_description, nullptr, &scene_texture);
+        }
+        IDXGISurface* scene_surface = nullptr;
+        if (SUCCEEDED(hr)) hr = scene_texture->QueryInterface(IID_PPV_ARGS(&scene_surface));
+        if (SUCCEEDED(hr)) {
             auto const scene_properties = D2D1::BitmapProperties1(
                 D2D1_BITMAP_OPTIONS_TARGET,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
                 96.0f, 96.0f);
-            hr = target->CreateBitmap(D2D1::SizeU(width, height), nullptr, 0,
+            hr = target->CreateBitmapFromDxgiSurface(scene_surface,
                 &scene_properties, &scene_bitmap);
         }
+        release(scene_surface);
+        if (FAILED(hr)) discardTargetBitmap();
         return hr;
     }
 
@@ -1160,6 +1198,7 @@ ZigonautTextEngine::~ZigonautTextEngine() {
     release(d2d_device);
     release(swap_chain);
     if (frame_latency_waitable_object != nullptr) CloseHandle(frame_latency_waitable_object);
+    release(d3d_context);
     release(d3d_device);
     release(d2d_factory);
     clearLayouts();
@@ -1476,26 +1515,19 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     }
     constexpr uint32_t copies = 80;
     if (SUCCEEDED(hr)) {
-        // This is exactly endFrame's retained-scene -> swapchain bitmap stage;
-        // intentionally no frame-latency wait and no Present call are included.
+        // Time the caller-thread cost of issuing endFrame's CopyResource path.
+        // No GPU-completion query, frame-latency wait, or Present is included.
         for (uint32_t index = 0; index < 10 && SUCCEEDED(hr); ++index) {
-            engine->target->SetTarget(engine->target_bitmap);
-            engine->target->BeginDraw();
-            engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
-            engine->target->Clear(color(engine->frame_background));
-            engine->target->DrawBitmap(engine->scene_bitmap);
-            hr = engine->target->EndDraw();
+            hr = engine->transferScene();
         }
+        const uint64_t copy_count = engine->d3d_scene_copy_count;
         const uint64_t start = now();
         for (uint32_t index = 0; index < copies && SUCCEEDED(hr); ++index) {
-            engine->target->SetTarget(engine->target_bitmap);
-            engine->target->BeginDraw();
-            engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
-            engine->target->Clear(color(engine->frame_background));
-            engine->target->DrawBitmap(engine->scene_bitmap);
-            hr = engine->target->EndDraw();
+            hr = engine->transferScene();
         }
         engine->benchmark.scene_copy_nanoseconds = nanoseconds(now() - start);
+        engine->benchmark.scene_copy_d3d11_copies =
+            engine->d3d_scene_copy_count - copy_count;
     }
     engine->benchmark.scene_copy_iterations = copies;
     engine->benchmark.scene_width = width;
@@ -1768,19 +1800,17 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     if (hr == D2DERR_RECREATE_TARGET) engine->discardTargetBitmap();
     if (FAILED(hr)) return hr;
     engine->evictUnusedImages();
-    engine->target->SetTarget(engine->target_bitmap);
-    engine->target->BeginDraw();
-    engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
-    engine->target->Clear(color(engine->frame_background));
-    engine->target->DrawBitmap(engine->scene_bitmap);
-    const HRESULT copy_hr = engine->target->EndDraw();
-    if (copy_hr == D2DERR_RECREATE_TARGET) engine->discardTargetBitmap();
-    if (FAILED(copy_hr)) return copy_hr;
+    const HRESULT copy_hr = engine->transferScene();
+    if (FAILED(copy_hr)) {
+        engine->discardTargetBitmap();
+        return copy_hr;
+    }
     const HRESULT present = engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
     if (present == DXGI_ERROR_WAS_STILL_DRAWING) {
         engine->present_pending = true;
         return S_FALSE;
     }
+    if (FAILED(present)) engine->discardTargetBitmap();
     return present;
 }
 
@@ -1789,5 +1819,9 @@ extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine
     const HRESULT present = engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
     if (present == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
     if (SUCCEEDED(present)) engine->present_pending = false;
+    else {
+        engine->present_pending = false;
+        engine->discardTargetBitmap();
+    }
     return present;
 }
