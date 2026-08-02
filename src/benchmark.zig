@@ -129,7 +129,7 @@ pub fn main() !void {
         "DirectWrite baselines (native retained renderer):\n" ++
             "  1 warm resolved row/run: {d:.2} us/row ({d} rows; layout hits={d}, misses={d}, layout->Draw={d}, callbacks={d}, glyph submissions={d}; plan hits={d}, misses={d}, bypasses={d})\n" ++
             "  2 monochrome color translation: {d:.2} us/row ({d} rows; attempts={d}, successes={d})\n" ++
-            "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each)\n" ++
+            "  3 foreground fragmentation: uniform {d:.2} us/row, fragmented {d:.2} us/row, ratio {d:.2}x ({d} rows each; plan hits={d}, misses={d})\n" ++
             "  4 final scene transfer CPU submission: {d:.2} us/call ({d}x{d}, {d} CopyResource calls submitted; counter={d}; no GPU-completion wait or Present)\n",
         .{
             perIterationUs(dwrite.warm_row_nanoseconds, dwrite.warm_row_iterations),
@@ -150,12 +150,25 @@ pub fn main() !void {
             perIterationUs(dwrite.fragmented_row_nanoseconds, dwrite.fragmented_row_iterations),
             @as(f64, @floatFromInt(dwrite.fragmented_row_nanoseconds)) / @as(f64, @floatFromInt(dwrite.uniform_row_nanoseconds)),
             dwrite.uniform_row_iterations,
+            dwrite.fragmented_plan_hits,
+            dwrite.fragmented_plan_misses,
             perIterationUs(dwrite.scene_copy_nanoseconds, dwrite.scene_copy_iterations),
             dwrite.scene_width,
             dwrite.scene_height,
             dwrite.scene_copy_iterations,
             dwrite.scene_copy_d3d11_copies,
         },
+    );
+    std.debug.print(
+        "    atlas: batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; uploads={d}, bytes={d}\n",
+        .{ dwrite.atlas_sprite_batches, dwrite.atlas_sprites,
+            dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits,
+            dwrite.atlas_placement_misses, dwrite.atlas_rasterizations,
+            dwrite.atlas_uploads, dwrite.atlas_upload_bytes },
+    );
+    std.debug.print(
+        "    atlas warm frame: {d:.2} us ({d} fragmented rows; includes BeginDraw, Clear, row submission, and EndDraw; excludes transfer/Present)\n",
+        .{ perIterationUs(dwrite.atlas_warm_frame_nanoseconds, 1), dwrite.atlas_warm_frame_rows },
     );
     std.debug.print(
         "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n" ++

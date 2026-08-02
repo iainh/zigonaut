@@ -252,6 +252,29 @@ test "cluster advances fit exact terminal spans" {
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), sum(&combining), 0.001);
 }
 
+test "fixed glyph atlas allocator is deterministic and transactional" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_allocator());
+}
+
+test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
+    const std = @import("std");
+    var result: native.ZigonautGlyphAtlasPixelsTest = undefined;
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_pixels(&result));
+    try std.testing.expectEqual(@as(u64, 1), result.first_sprite_batches);
+    try std.testing.expect(result.first_sprites >= 8);
+    try std.testing.expect(result.first_changed_pixels > 0);
+    try std.testing.expect(result.first_red_dominant_pixels > 0);
+    try std.testing.expect(result.first_green_dominant_pixels > 0);
+    try std.testing.expectEqual(@as(u64, 0), result.empty_sprite_batches);
+    try std.testing.expectEqual(@as(u64, 0), result.empty_sprites);
+    try std.testing.expectEqual(@as(u64, 0), result.empty_changed_pixels);
+    try std.testing.expectEqual(@as(u64, 1), result.second_sprite_batches);
+    try std.testing.expectEqual(result.first_sprites, result.second_sprites);
+    try std.testing.expectEqual(result.second_sprites, result.second_placement_hits);
+    try std.testing.expect(result.second_changed_pixels > 0);
+}
+
 test "layout cache retains hot entries when crossing capacity" {
     const std = @import("std");
     const result = try benchmarkLayoutCache(1);
@@ -266,6 +289,20 @@ test "resolved draw plan is reused by the warm-row benchmark" {
     try std.testing.expect(result.resolved_plan_hits >= result.warm_row_iterations);
     try std.testing.expectEqual(result.resolved_plan_misses, result.layout_draws);
     try std.testing.expectEqual(@as(u64, 0), result.resolved_plan_bypasses);
+}
+
+test "fragmented rows reuse plans across absolute columns" {
+    const std = @import("std");
+    const result = try benchmarkPipeline();
+    const expected = @as(u64, result.fragmented_row_iterations) * 120;
+    try std.testing.expectEqual(expected, result.fragmented_plan_hits);
+    try std.testing.expectEqual(@as(u64, 0), result.fragmented_plan_misses);
+    try std.testing.expectEqual(@as(u64, result.fragmented_row_iterations), result.atlas_batched_rows);
+    try std.testing.expectEqual(expected, result.atlas_sprites);
+    try std.testing.expectEqual(@as(u64, 0), result.fragmented_native_glyph_submissions);
+    try std.testing.expect(result.atlas_placement_hits >= expected);
+    try std.testing.expectEqual(@as(u64, result.fragmented_row_iterations), result.atlas_sprite_batches);
+    try std.testing.expect(result.uniform_native_glyph_submissions >= result.uniform_row_iterations);
 }
 
 fn sum(values: []const f32) f32 {

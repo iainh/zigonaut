@@ -39,15 +39,39 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t resolved_plan_hits;
     uint64_t resolved_plan_misses;
     uint64_t resolved_plan_bypasses;
+    uint64_t fragmented_plan_hits;
+    uint64_t fragmented_plan_misses;
+    uint64_t atlas_eligible_rows, atlas_batched_rows, atlas_fallback_rows;
+    uint64_t atlas_placement_hits, atlas_placement_misses, atlas_rasterizations;
+    uint64_t atlas_full_misses, atlas_sprites, atlas_sprite_batches;
+    uint64_t atlas_uploads, atlas_upload_bytes;
+    uint64_t fragmented_native_glyph_submissions, uniform_native_glyph_submissions;
+    uint64_t atlas_warm_frame_nanoseconds;
     uint32_t warm_row_iterations;
     uint32_t monochrome_row_iterations;
     uint32_t uniform_row_iterations;
     uint32_t fragmented_row_iterations;
+    uint32_t atlas_warm_frame_rows;
     uint32_t scene_copy_iterations;
     uint32_t scene_copy_d3d11_copies;
     uint32_t scene_width;
     uint32_t scene_height;
 } ZigonautDirectWriteBenchmark;
+
+typedef struct ZigonautGlyphAtlasPixelsTest {
+    uint64_t first_changed_pixels;
+    uint64_t second_changed_pixels;
+    uint64_t first_red_dominant_pixels;
+    uint64_t first_green_dominant_pixels;
+    uint64_t first_sprite_batches;
+    uint64_t first_sprites;
+    uint64_t empty_sprite_batches;
+    uint64_t empty_sprites;
+    uint64_t empty_changed_pixels;
+    uint64_t second_sprite_batches;
+    uint64_t second_sprites;
+    uint64_t second_placement_hits;
+} ZigonautGlyphAtlasPixelsTest;
 
 typedef struct ZigonautDecodedImage {
     uint32_t width;
@@ -64,6 +88,8 @@ HRESULT zigonaut_benchmark_layout_cache(
     ZigonautLayoutCacheBenchmark* result);
 
 HRESULT zigonaut_benchmark_directwrite_pipeline(ZigonautDirectWriteBenchmark* result);
+HRESULT zigonaut_test_glyph_atlas_allocator(void);
+HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest* result);
 
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,
