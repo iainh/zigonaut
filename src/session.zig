@@ -9,6 +9,7 @@ const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
+const pty_write_queue_max_bytes = 8 * 1024 * 1024;
 const synchronized_output_timeout_ms = 1000;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
@@ -18,11 +19,16 @@ pub const SessionRuntime = struct {
     terminal: Terminal,
     pty: ?Pty = null,
     reader_thread: ?std.Thread = null,
+    writer_thread: ?std.Thread = null,
     refresh: Refresh,
     terminal_mutex: @import("win32.zig").Mutex = .{},
-    pty_mutex: @import("win32.zig").Mutex = .{},
+    pty_queue_mutex: @import("win32.zig").Mutex = .{},
+    pty_writer_generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    pty_operations: std.ArrayList(PtyOperation) = .empty,
+    outstanding_input_bytes: usize = 0,
     render_handoff: RenderHandoff = .{},
     closing: bool = false,
+    writer_failed: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
@@ -194,6 +200,23 @@ pub const SessionRuntime = struct {
         text: []u8,
     };
 
+    const PtySize = struct {
+        columns: u16,
+        rows: u16,
+    };
+
+    const PtyOperation = union(enum) {
+        input: std.ArrayList(u8),
+        resize: PtySize,
+
+        fn deinit(self: *PtyOperation, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .input => |*input| input.deinit(allocator),
+                .resize => {},
+            }
+        }
+    };
+
     pub fn create(
         allocator: std.mem.Allocator,
         command: []const u8,
@@ -236,25 +259,37 @@ pub const SessionRuntime = struct {
             return self;
         };
         errdefer {
-            self.pty.?.stopIo(null);
+            self.pty.?.closeIo();
             self.pty.?.closeConsole();
             self.pty.?.finishClose();
         }
 
-        self.reader_thread = try std.Thread.spawn(.{}, readerMain, .{self});
+        self.writer_thread = try std.Thread.spawn(.{}, writerMain, .{self});
+        self.reader_thread = std.Thread.spawn(.{}, readerMain, .{self}) catch |err| {
+            self.requestWriterClose();
+            self.writer_thread.?.join();
+            self.writer_thread = null;
+            return err;
+        };
         return self;
     }
 
     pub fn destroy(self: *SessionRuntime) void {
         if (self.pty) |*pty| {
-            self.pty_mutex.lock();
-            self.closing = true;
-            pty.stopIo(self.reader_thread);
-            self.pty_mutex.unlock();
+            self.requestWriterClose();
+            while (!workersStopped(self.reader_thread, self.writer_thread)) {
+                pty.cancelIo(self.reader_thread, self.writer_thread);
+                win.Sleep(1);
+            }
             if (self.reader_thread) |thread| thread.join();
+            if (self.writer_thread) |thread| thread.join();
+            pty.closeIo();
             pty.closeConsole();
             pty.finishClose();
         }
+        self.clearPtyOperations();
+        self.outstanding_input_bytes = 0;
+        self.pty_operations.deinit(self.allocator);
         self.title.deinit(self.allocator);
         if (self.pending_clipboard_write) |pending| self.freePendingClipboardWrite(pending);
         self.notifications.deinit(self.allocator);
@@ -667,9 +702,7 @@ pub const SessionRuntime = struct {
             self.terminal_mutex.unlock();
             _ = self.content_generation.fetchAdd(1, .monotonic);
         }
-        if (grid_changed) if (self.pty) |*pty| pty.resize(columns, rows) catch |err| {
-            log.warn("unable to resize pseudoconsole: {}", .{err});
-        };
+        if (grid_changed) self.queuePtyResize(columns, rows);
         self.columns = columns;
         self.rows = rows;
         self.cell_width = cell_width;
@@ -687,12 +720,27 @@ pub const SessionRuntime = struct {
         _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
+    /// Admit input to the bounded writer queue. Delivery is asynchronous so a
+    /// terminal protocol response cannot block while `terminal_mutex` is held.
     pub fn write(self: *SessionRuntime, bytes: []const u8) !void {
-        self.pty_mutex.lock();
-        defer self.pty_mutex.unlock();
-        if (self.closing) return error.ShellNotRunning;
-        if (self.pty) |*pty| return pty.write(bytes);
-        return error.ShellNotRunning;
+        if (bytes.len == 0) return;
+        self.pty_queue_mutex.lock();
+        defer self.pty_queue_mutex.unlock();
+        if (self.pty == null or self.closing or self.writer_failed) return error.ShellNotRunning;
+        try self.enqueuePtyInput(bytes);
+        self.wakeWriter();
+    }
+
+    fn enqueuePtyInput(self: *SessionRuntime, bytes: []const u8) !void {
+        if (bytes.len > pty_write_queue_max_bytes -| self.outstanding_input_bytes) return error.PtyWriteQueueFull;
+        if (self.pty_operations.items.len != 0) {
+            const operation = &self.pty_operations.items[self.pty_operations.items.len - 1];
+            switch (operation.*) {
+                .input => |*input| try input.appendSlice(self.allocator, bytes),
+                .resize => try self.appendPtyInput(bytes),
+            }
+        } else try self.appendPtyInput(bytes);
+        self.outstanding_input_bytes += bytes.len;
     }
 
     pub fn paste(self: *SessionRuntime, data: []u8) !void {
@@ -735,6 +783,119 @@ pub const SessionRuntime = struct {
         self.synchronized_output.clear();
         self.terminal_mutex.unlock();
         self.refresh.request();
+    }
+
+    fn writerMain(self: *SessionRuntime) void {
+        var operations: std.ArrayList(PtyOperation) = .empty;
+        defer {
+            for (operations.items) |*operation| operation.deinit(self.allocator);
+            operations.deinit(self.allocator);
+        }
+        while (true) {
+            self.pty_queue_mutex.lock();
+            if (self.closing) {
+                self.pty_queue_mutex.unlock();
+                return;
+            }
+            if (self.pty_operations.items.len != 0) {
+                std.mem.swap(std.ArrayList(PtyOperation), &operations, &self.pty_operations);
+            }
+            const generation = self.pty_writer_generation.load(.acquire);
+            self.pty_queue_mutex.unlock();
+
+            if (operations.items.len == 0) {
+                var expected = generation;
+                _ = std.os.windows.ntdll.RtlWaitOnAddress(
+                    @ptrCast(&self.pty_writer_generation),
+                    @ptrCast(&expected),
+                    @sizeOf(u32),
+                    null,
+                );
+                continue;
+            }
+
+            for (operations.items) |*operation| switch (operation.*) {
+                .resize => |size| self.pty.?.resize(size.columns, size.rows) catch |err| {
+                    log.warn("unable to resize pseudoconsole: {}", .{err});
+                },
+                .input => |*input| {
+                    self.pty.?.write(input.items) catch |err| {
+                        log.debug("unable to write pseudoconsole input: {}", .{err});
+                        self.pty_queue_mutex.lock();
+                        self.writer_failed = true;
+                        self.pty_queue_mutex.unlock();
+                        self.refresh.request();
+                        return;
+                    };
+                    self.pty_queue_mutex.lock();
+                    self.outstanding_input_bytes -= input.items.len;
+                    self.pty_queue_mutex.unlock();
+                },
+            };
+            for (operations.items) |*operation| operation.deinit(self.allocator);
+            operations.clearRetainingCapacity();
+        }
+    }
+
+    fn appendPtyInput(self: *SessionRuntime, bytes: []const u8) !void {
+        var input: std.ArrayList(u8) = .empty;
+        errdefer input.deinit(self.allocator);
+        try input.appendSlice(self.allocator, bytes);
+        try self.pty_operations.append(self.allocator, .{ .input = input });
+    }
+
+    fn clearPtyOperations(self: *SessionRuntime) void {
+        var removed_input_bytes: usize = 0;
+        for (self.pty_operations.items) |*operation| {
+            switch (operation.*) {
+                .input => |input| removed_input_bytes += input.items.len,
+                .resize => {},
+            }
+            operation.deinit(self.allocator);
+        }
+        self.pty_operations.clearRetainingCapacity();
+        self.outstanding_input_bytes -= removed_input_bytes;
+    }
+
+    fn queuePtyResize(self: *SessionRuntime, columns: u16, rows: u16) void {
+        self.pty_queue_mutex.lock();
+        defer self.pty_queue_mutex.unlock();
+        if (self.pty == null or self.closing or self.writer_failed) return;
+        const size = PtySize{ .columns = columns, .rows = rows };
+        self.enqueuePtyResize(size) catch {
+            log.warn("unable to queue pseudoconsole resize", .{});
+            return;
+        };
+        self.wakeWriter();
+    }
+
+    fn enqueuePtyResize(self: *SessionRuntime, size: PtySize) !void {
+        if (self.pty_operations.items.len != 0) {
+            const operation = &self.pty_operations.items[self.pty_operations.items.len - 1];
+            switch (operation.*) {
+                .resize => operation.* = .{ .resize = size },
+                .input => try self.pty_operations.append(self.allocator, .{ .resize = size }),
+            }
+        } else try self.pty_operations.append(self.allocator, .{ .resize = size });
+    }
+
+    fn requestWriterClose(self: *SessionRuntime) void {
+        self.pty_queue_mutex.lock();
+        self.closing = true;
+        self.clearPtyOperations();
+        self.wakeWriter();
+        self.pty_queue_mutex.unlock();
+    }
+
+    fn wakeWriter(self: *SessionRuntime) void {
+        _ = self.pty_writer_generation.fetchAdd(1, .release);
+        std.os.windows.ntdll.RtlWakeAddressSingle(@ptrCast(&self.pty_writer_generation));
+    }
+
+    fn workersStopped(reader_thread: ?std.Thread, writer_thread: ?std.Thread) bool {
+        if (reader_thread) |thread| if (win.WaitForSingleObject(@ptrCast(thread.getHandle()), 0) != win.WAIT_OBJECT_0) return false;
+        if (writer_thread) |thread| if (win.WaitForSingleObject(@ptrCast(thread.getHandle()), 0) != win.WAIT_OBJECT_0) return false;
+        return true;
     }
 
     /// Apply one complete PTY read while holding the terminal lock. This keeps
@@ -835,6 +996,42 @@ pub const SessionRuntime = struct {
         return .success;
     }
 };
+
+test "PTY work queue preserves input ordering and coalesces adjacent resizes" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    try runtime.enqueuePtyInput("A");
+    try runtime.enqueuePtyInput("B");
+    try runtime.enqueuePtyResize(.{ .columns = 90, .rows = 30 });
+    try runtime.enqueuePtyResize(.{ .columns = 100, .rows = 40 });
+    try runtime.enqueuePtyInput("C");
+    try runtime.enqueuePtyResize(.{ .columns = 110, .rows = 50 });
+
+    try std.testing.expectEqual(@as(usize, 4), runtime.pty_operations.items.len);
+    switch (runtime.pty_operations.items[0]) {
+        .input => |input| try std.testing.expectEqualStrings("AB", input.items),
+        .resize => return error.ExpectedInput,
+    }
+    switch (runtime.pty_operations.items[1]) {
+        .resize => |size| {
+            try std.testing.expectEqual(@as(u16, 100), size.columns);
+            try std.testing.expectEqual(@as(u16, 40), size.rows);
+        },
+        .input => return error.ExpectedResize,
+    }
+    switch (runtime.pty_operations.items[2]) {
+        .input => |input| try std.testing.expectEqualStrings("C", input.items),
+        .resize => return error.ExpectedInput,
+    }
+    try std.testing.expectEqual(@as(usize, 3), runtime.outstanding_input_bytes);
+}
 
 test "synchronized output arms once and releases when disabled" {
     var state = SessionRuntime.SynchronizedOutput{};
@@ -1005,6 +1202,8 @@ test "session applies clipboard write policy and decoded size limit" {
 }
 
 fn deinitTestRuntime(runtime: *SessionRuntime) void {
+    runtime.clearPtyOperations();
+    runtime.pty_operations.deinit(runtime.allocator);
     if (runtime.pending_clipboard_write) |pending| runtime.freePendingClipboardWrite(pending);
     runtime.render_snapshot.deinit(runtime.allocator);
     runtime.search_cache.deinit(runtime.allocator);

@@ -4,6 +4,7 @@ const win32 = @import("win32.zig");
 const win = win32.c;
 
 const log = std.log.scoped(.pty);
+const pipe_buffer_bytes = 128 * 1024;
 
 const ConptyCreate = *const fn (win.COORD, win.HANDLE, win.HANDLE, win.DWORD, *win.HPCON) callconv(.winapi) win.HRESULT;
 const ConptyResize = *const fn (win.HPCON, win.COORD) callconv(.winapi) win.HRESULT;
@@ -79,7 +80,7 @@ pub const Pty = struct {
 
         var input_read: win.HANDLE = null;
         var input_write: win.HANDLE = null;
-        if (win.CreatePipe(&input_read, &input_write, null, 0) == 0) return windowsError();
+        if (win.CreatePipe(&input_read, &input_write, null, pipe_buffer_bytes) == 0) return windowsError();
         errdefer {
             _ = win.CloseHandle(input_read);
             _ = win.CloseHandle(input_write);
@@ -87,7 +88,7 @@ pub const Pty = struct {
 
         var output_read: win.HANDLE = null;
         var output_write: win.HANDLE = null;
-        if (win.CreatePipe(&output_read, &output_write, null, 0) == 0) return windowsError();
+        if (win.CreatePipe(&output_read, &output_write, null, pipe_buffer_bytes) == 0) return windowsError();
         errdefer {
             _ = win.CloseHandle(output_read);
             _ = win.CloseHandle(output_write);
@@ -209,11 +210,14 @@ pub const Pty = struct {
         return win.GetExitCodeProcess(self.process, &exit_code) != 0 and exit_code == 0;
     }
 
-    pub fn stopIo(self: *Pty, reader_thread: ?std.Thread) void {
-        // Stop I/O first so the reader can exit before console teardown.
-        _ = win.CloseHandle(self.input);
+    pub fn cancelIo(self: *Pty, reader_thread: ?std.Thread, writer_thread: ?std.Thread) void {
+        _ = self;
         if (reader_thread) |thread| _ = win.CancelSynchronousIo(@ptrCast(thread.getHandle()));
-        _ = win.CancelIoEx(self.output, null);
+        if (writer_thread) |thread| _ = win.CancelSynchronousIo(@ptrCast(thread.getHandle()));
+    }
+
+    pub fn closeIo(self: *Pty) void {
+        _ = win.CloseHandle(self.input);
         _ = win.CloseHandle(self.output);
     }
 

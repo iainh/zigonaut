@@ -12,7 +12,7 @@ pub fn main() !void {
     );
     defer {
         _ = win.TerminateProcess(pty.process, 0);
-        pty.stopIo(null);
+        pty.closeIo();
         pty.closeConsole();
         pty.finishClose();
     }
