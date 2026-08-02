@@ -160,18 +160,24 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; uploads={d}, bytes={d}\n",
+        "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; population batches={d}\n",
         .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation,
             dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area,
             dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets,
             dwrite.atlas_sprite_batches, dwrite.atlas_sprites,
             dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits,
             dwrite.atlas_placement_misses, dwrite.atlas_rasterizations,
-            dwrite.atlas_uploads, dwrite.atlas_upload_bytes },
+            dwrite.atlas_uploads },
     );
     std.debug.print(
         "    atlas warm frame: {d:.2} us ({d} fragmented rows; includes BeginDraw, Clear, row submission, and EndDraw; excludes transfer/Present)\n",
         .{ perIterationUs(dwrite.atlas_warm_frame_nanoseconds, 1), dwrite.atlas_warm_frame_rows },
+    );
+    std.debug.print(
+        "    atlas cold frame CPU submission: {d:.2} us (resources={d}, rasterizations={d}, population batches={d}; includes lazy creation, one fragmented row, and EndDraw; excludes GPU completion)\n",
+        .{ perIterationUs(dwrite.atlas_cold_frame_nanoseconds, 1),
+            dwrite.atlas_cold_resource_allocations, dwrite.atlas_cold_rasterizations,
+            dwrite.atlas_cold_uploads },
     );
     std.debug.print(
         "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n" ++

@@ -55,11 +55,14 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t atlas_extent;
     uint64_t fragmented_native_glyph_submissions, uniform_native_glyph_submissions;
     uint64_t atlas_warm_frame_nanoseconds;
+    uint64_t atlas_cold_frame_nanoseconds;
+    uint64_t atlas_cold_rasterizations, atlas_cold_uploads;
     uint32_t warm_row_iterations;
     uint32_t monochrome_row_iterations;
     uint32_t uniform_row_iterations;
     uint32_t fragmented_row_iterations;
     uint32_t atlas_warm_frame_rows;
+    uint32_t atlas_cold_resource_allocations;
     uint32_t scene_copy_iterations;
     uint32_t scene_copy_d3d11_copies;
     uint32_t scene_width;

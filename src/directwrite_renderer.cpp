@@ -318,7 +318,7 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_allocator() {
 class GridTextRenderer;
 
 struct ZigonautTextEngine {
-    enum class TestFault { none, atlas_resource, atlas_cpu_allocation, rasterize, upload, add_sprites };
+    enum class TestFault { none, atlas_resource, atlas_texture, rasterize, upload, add_sprites };
     IDWriteFactory* factory = nullptr;
     IDWriteFactory2* factory2 = nullptr;
     IDWriteRenderingParams* rendering_params = nullptr;
@@ -333,8 +333,10 @@ struct ZigonautTextEngine {
     ID2D1DeviceContext3* target3 = nullptr;
     ID2D1SpriteBatch* sprite_batch = nullptr;
     ID2D1Bitmap1* atlas_bitmap = nullptr;
+    ID2D1DeviceContext* atlas_context = nullptr;
+    ID2D1SolidColorBrush* atlas_brush = nullptr;
+    ID3D11Texture2D* atlas_texture = nullptr;
     std::unique_ptr<GlyphAtlasAllocator> atlas_allocator;
-    std::vector<uint8_t> atlas_pixels;
     uint64_t atlas_generation = 1;
     uint32_t atlas_extent = 1024;
     uint64_t atlas_reserved_area = 0;
@@ -344,10 +346,10 @@ struct ZigonautTextEngine {
     uint64_t atlas_resource_allocations = 0;
     ZigonautTextAntialiasing text_antialiasing = ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE;
     bool atlas_reset_pending = false;
+    bool atlas_invalidation_pending = false;
     bool atlas_disabled_for_frame = false;
     TestFault test_fault = TestFault::none;
-    D2D1_RECT_U atlas_dirty{};
-    bool atlas_dirty_valid = false;
+    bool atlas_draw_active = false;
     uint32_t sprite_count = 0;
     IDXGISwapChain1* swap_chain = nullptr;
     HANDLE frame_latency_waitable_object = nullptr;
@@ -386,10 +388,36 @@ struct ZigonautTextEngine {
     uint64_t d3d_scene_copy_count = 0;
 
     void invalidateAtlas() {
-        release(sprite_batch); release(atlas_bitmap); release(target3);
-        atlas_allocator.reset(); atlas_pixels.clear(); atlas_dirty_valid = false;
+        if (atlas_draw_active) { atlas_context->EndDraw(); atlas_draw_active = false; }
+        if (atlas_context) atlas_context->SetTarget(nullptr);
+        release(atlas_brush); release(atlas_context); release(atlas_bitmap);
+        release(atlas_texture); release(sprite_batch); release(target3);
+        atlas_allocator.reset();
+        atlas_reset_pending = false; atlas_invalidation_pending = false;
         atlas_reserved_area = 0; sprite_count = 0;
         if (++atlas_generation == 0) ++atlas_generation;
+    }
+
+    HRESULT beginAtlasDraw() {
+        if (atlas_draw_active) return S_OK;
+        if (!atlas_context) return E_HANDLE;
+        atlas_context->BeginDraw();
+        atlas_draw_active = true;
+        return S_OK;
+    }
+
+    HRESULT endAtlasDraw() {
+        if (!atlas_draw_active) return S_OK;
+        const HRESULT hr = atlas_context->EndDraw();
+        atlas_draw_active = false;
+        if (FAILED(hr) || test_fault == TestFault::upload) {
+            // Placements were stamped before submission. Keep this generation alive
+            // for earlier scene commands, then invalidate it at the next frame boundary.
+            atlas_invalidation_pending = true;
+            return FAILED(hr) ? hr : E_FAIL;
+        }
+        if (benchmark_active) ++benchmark.atlas_uploads;
+        return S_OK;
     }
 
     void initializeAtlas() {
@@ -397,17 +425,39 @@ struct ZigonautTextEngine {
         if (test_fault == TestFault::atlas_resource) return;
         if (FAILED(target->QueryInterface(IID_PPV_ARGS(&target3)))) return;
         if (FAILED(target3->CreateSpriteBatch(&sprite_batch))) { invalidateAtlas(); return; }
-        if (test_fault == TestFault::atlas_cpu_allocation) { invalidateAtlas(); return; }
+        if (test_fault == TestFault::atlas_texture) { invalidateAtlas(); return; }
         try {
-            atlas_pixels.assign(static_cast<size_t>(atlas_extent) * atlas_extent * 4, 0);
             atlas_allocator = std::make_unique<GlyphAtlasAllocator>(atlas_extent);
         } catch (...) { invalidateAtlas(); return; }
+        // Direct2D atlas population follows the approach used by Microsoft's
+        // MIT-licensed Windows Terminal BackendD3D; see licenses/Microsoft-Terminal-LICENSE.txt.
+        // D2D owns the staging/upload strategy for this shared render-target texture.
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = atlas_extent; description.Height = atlas_extent;
+        description.MipLevels = 1; description.ArraySize = 1;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.SampleDesc.Count = 1; description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(d3d_device->CreateTexture2D(&description, nullptr, &atlas_texture)) ||
+            FAILED(d2d_device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &atlas_context))) {
+            invalidateAtlas(); return;
+        }
+        IDXGISurface* surface = nullptr;
+        HRESULT hr = atlas_texture->QueryInterface(IID_PPV_ARGS(&surface));
         const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (FAILED(target3->CreateBitmap(D2D1::SizeU(atlas_extent,
-            atlas_extent), atlas_pixels.data(), atlas_extent * 4,
-            properties, &atlas_bitmap))) invalidateAtlas();
-        else ++atlas_resource_allocations;
+        const auto target_properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+            properties.pixelFormat, 96.0f, 96.0f);
+        if (SUCCEEDED(hr)) hr = atlas_context->CreateBitmapFromDxgiSurface(surface, &target_properties, &atlas_bitmap);
+        release(surface);
+        if (SUCCEEDED(hr)) hr = atlas_context->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1), &atlas_brush);
+        if (FAILED(hr)) { invalidateAtlas(); return; }
+        atlas_context->SetTarget(atlas_bitmap); atlas_context->SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+        atlas_context->SetDpi(96,96); atlas_context->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        atlas_context->SetTextRenderingParams(rendering_params); atlas_context->SetTransform(D2D1::Matrix3x2F::Identity());
+        atlas_context->BeginDraw(); atlas_context->Clear(D2D1::ColorF(0,0,0,0));
+        if (FAILED(atlas_context->EndDraw())) { invalidateAtlas(); return; }
+        ++atlas_resource_allocations;
     }
 
     void rejectAtlasReservation(uint32_t width, uint32_t height, bool exhausted) {
@@ -426,38 +476,32 @@ struct ZigonautTextEngine {
         }
         if (benchmark_active) ++benchmark.atlas_placement_misses;
         if (test_fault == TestFault::rasterize) return false;
-        if (!factory2 || !atlas_allocator || owned.sideways || owned.indices.empty()) return false;
+        if (!atlas_context || !atlas_allocator || owned.sideways || owned.indices.empty()) return false;
         DWRITE_GLYPH_RUN run = owned.glyphRun();
-        IDWriteGlyphRunAnalysis* analysis = nullptr;
-        const DWRITE_MATRIX identity{1,0,0,1,0,0};
-        HRESULT hr = factory2->CreateGlyphRunAnalysis(&run, &identity,
-            DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, owned.measuring_mode,
-            DWRITE_GRID_FIT_MODE_ENABLED, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-            0.0f, 0.0f, &analysis);
-        RECT bounds{};
-        if (SUCCEEDED(hr)) hr = analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &bounds);
-        if (FAILED(hr)) { release(analysis); return false; }
-        const int64_t width64 = static_cast<int64_t>(bounds.right) - bounds.left;
-        const int64_t height64 = static_cast<int64_t>(bounds.bottom) - bounds.top;
-        if (width64 < 0 || height64 < 0) { release(analysis); return false; }
+        D2D1_RECT_F world{};
+        HRESULT hr = atlas_context->GetGlyphRunWorldBounds(D2D1::Point2F(0,0), &run, owned.measuring_mode, &world);
+        if (FAILED(hr) || !std::isfinite(world.left) || !std::isfinite(world.top) ||
+            !std::isfinite(world.right) || !std::isfinite(world.bottom)) return false;
+        const double rounded_left = std::floor(static_cast<double>(world.left));
+        const double rounded_top = std::floor(static_cast<double>(world.top));
+        const double rounded_right = std::ceil(static_cast<double>(world.right));
+        const double rounded_bottom = std::ceil(static_cast<double>(world.bottom));
+        if (rounded_left < INT32_MIN || rounded_top < INT32_MIN ||
+            rounded_right > INT32_MAX || rounded_bottom > INT32_MAX) return false;
+        const int32_t left = static_cast<int32_t>(rounded_left), top = static_cast<int32_t>(rounded_top);
+        const int32_t right = static_cast<int32_t>(rounded_right), bottom = static_cast<int32_t>(rounded_bottom);
+        const int64_t width64 = static_cast<int64_t>(right) - left;
+        const int64_t height64 = static_cast<int64_t>(bottom) - top;
+        if (width64 < 0 || height64 < 0) return false;
         if (!width64 || !height64) {
-            owned.placement = {atlas_generation, {}, bounds.left, bounds.top, 0, 0, true, true};
-            release(analysis); return true;
+            owned.placement = {atlas_generation, {}, left, top, 0, 0, true, true}; return true;
         }
-        if (width64 > UINT32_MAX || height64 > UINT32_MAX) { release(analysis); return false; }
+        if (width64 > UINT32_MAX || height64 > UINT32_MAX) return false;
         const uint32_t width = static_cast<uint32_t>(width64), height = static_cast<uint32_t>(height64);
         if (width > atlas_extent - 2 || height > atlas_extent - 2) {
             rejectAtlasReservation(width, height, false);
-            release(analysis);
             return false;
         }
-        if (width > SIZE_MAX / height) { release(analysis); return false; }
-        std::vector<uint8_t> alpha;
-        try { alpha.resize(static_cast<size_t>(width) * height); } catch (...) { release(analysis); return false; }
-        hr = analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &bounds,
-            alpha.data(), static_cast<UINT32>(alpha.size()));
-        release(analysis);
-        if (FAILED(hr)) return false;
         GlyphAtlasAllocator::Rect slot{};
         if (!atlas_allocator->reserve(width, height, slot)) {
             rejectAtlasReservation(width, height, true);
@@ -465,19 +509,16 @@ struct ZigonautTextEngine {
         }
         atlas_reserved_area += (static_cast<uint64_t>(width) + 2) *
             (static_cast<uint64_t>(height) + 2);
-        for (uint32_t y = 0; y < height; ++y) for (uint32_t x = 0; x < width; ++x) {
-            const size_t source = static_cast<size_t>(y) * width + x;
-            const uint8_t a = alpha[source];
-            const size_t destination = (static_cast<size_t>(slot.y + y) * atlas_extent + slot.x + x) * 4;
-            atlas_pixels[destination] = a; atlas_pixels[destination+1] = a;
-            atlas_pixels[destination+2] = a; atlas_pixels[destination+3] = a;
-        }
         const D2D1_RECT_U dirty{slot.x, slot.y, slot.x + width, slot.y + height};
-        if (!atlas_dirty_valid) atlas_dirty = dirty;
-        else { atlas_dirty.left=std::min(atlas_dirty.left,dirty.left); atlas_dirty.top=std::min(atlas_dirty.top,dirty.top);
-            atlas_dirty.right=std::max(atlas_dirty.right,dirty.right); atlas_dirty.bottom=std::max(atlas_dirty.bottom,dirty.bottom); }
-        atlas_dirty_valid = true;
-        owned.placement = {atlas_generation, dirty, bounds.left, bounds.top, width, height, true, false};
+        if (FAILED(beginAtlasDraw())) return false;
+        atlas_context->PushAxisAlignedClip(D2D1::RectF(static_cast<float>(dirty.left), static_cast<float>(dirty.top),
+            static_cast<float>(dirty.right), static_cast<float>(dirty.bottom)), D2D1_ANTIALIAS_MODE_ALIASED);
+        atlas_context->DrawGlyphRun(D2D1::Point2F(
+            static_cast<float>(slot.x) - static_cast<float>(left),
+            static_cast<float>(slot.y) - static_cast<float>(top)),
+            &run, atlas_brush, owned.measuring_mode);
+        atlas_context->PopAxisAlignedClip();
+        owned.placement = {atlas_generation, dirty, left, top, width, height, true, false};
         if (benchmark_active) ++benchmark.atlas_rasterizations;
         return true;
     }
@@ -1547,24 +1588,15 @@ HRESULT ZigonautTextEngine::endRow() {
             if (!batched) break;
         }
     } catch (...) { batched=false; }
+    // Submit all population commands for this row before either context samples
+    // the atlas or native fallback is recorded on the scene context.
+    if (atlas_draw_active && FAILED(endAtlasDraw())) {
+        batched = false;
+        atlas_disabled_for_frame = true;
+    }
     if (batched && destinations.empty()) {
         if (benchmark_active) ++benchmark.atlas_batched_rows;
     } else if (batched) {
-        if (atlas_dirty_valid) {
-            const uint8_t* data = atlas_pixels.data() +
-                (static_cast<size_t>(atlas_dirty.top) * atlas_extent + atlas_dirty.left) * 4;
-            hr = test_fault == TestFault::upload ? E_FAIL :
-                atlas_bitmap->CopyFromMemory(&atlas_dirty, data, atlas_extent * 4);
-            if (FAILED(hr)) {
-                batched = false;
-                atlas_disabled_for_frame = true;
-            } else {
-                if (benchmark_active) { ++benchmark.atlas_uploads; benchmark.atlas_upload_bytes +=
-                    static_cast<uint64_t>(atlas_dirty.right-atlas_dirty.left)*(atlas_dirty.bottom-atlas_dirty.top)*4; }
-                atlas_dirty_valid = false;
-            }
-        }
-        if (!batched) goto native_fallback;
         if (destinations.size() > UINT32_MAX - sprite_count ||
             sprite_batch->GetSpriteCount() != sprite_count) {
             batched = false;
@@ -1844,6 +1876,34 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
         engine->benchmark.atlas_warm_frame_nanoseconds = nanoseconds(now() - start);
     }
     engine->benchmark.atlas_warm_frame_rows = frame_rows;
+    if (SUCCEEDED(hr)) {
+        // Plans stay hot while the atlas generation and resources start cold.
+        // Include BeginDraw, lazy creation, rasterization/population, one fragmented
+        // row submission, and EndDraw so population implementations are comparable.
+        engine->invalidateAtlas();
+        const ZigonautDirectWriteBenchmark measured = engine->benchmark;
+        engine->benchmark = {};
+        const uint64_t allocations = engine->atlas_resource_allocations;
+        engine->benchmark_active = true;
+        const uint64_t start = now();
+        hr = zigonaut_text_engine_begin_frame(engine, width, height, 0x181818, TRUE, &rebuild);
+        if (SUCCEEDED(hr)) hr = row(true);
+        if (SUCCEEDED(hr)) {
+            hr = engine->target->EndDraw();
+            engine->frame_active = false;
+            engine->target->SetTarget(nullptr);
+        }
+        const uint64_t elapsed = nanoseconds(now() - start);
+        engine->benchmark_active = false;
+        const uint64_t rasterizations = engine->benchmark.atlas_rasterizations;
+        const uint64_t uploads = engine->benchmark.atlas_uploads;
+        engine->benchmark = measured;
+        engine->benchmark.atlas_cold_frame_nanoseconds = elapsed;
+        engine->benchmark.atlas_cold_rasterizations = rasterizations;
+        engine->benchmark.atlas_cold_uploads = uploads;
+        engine->benchmark.atlas_cold_resource_allocations = static_cast<uint32_t>(
+            engine->atlas_resource_allocations - allocations);
+    }
     engine->benchmark.atlas_extent = engine->atlas_extent;
     engine->benchmark.atlas_reserved_area = engine->atlas_reserved_area;
     engine->benchmark.atlas_rejected_area = engine->atlas_rejected_area;
@@ -1872,9 +1932,9 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         return value;
     };
     const auto begin = [&](ZigonautTextEngine* engine, uint32_t rows = 3,
-            uint32_t background = 0x181818) -> HRESULT {
+            uint32_t background = 0x181818, uint32_t columns = 16) -> HRESULT {
         BOOL rebuild = FALSE;
-        return zigonaut_text_engine_begin_frame(engine, engine->metrics.width * 16,
+        return zigonaut_text_engine_begin_frame(engine, engine->metrics.width * columns,
             engine->metrics.height * rows, background, TRUE, &rebuild);
     };
     const auto row = [&](ZigonautTextEngine* engine, float top, uint16_t first = u'A',
@@ -1930,28 +1990,57 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         release(staging);
         return value;
     };
+    const auto atlasHasPartialAlpha = [&](ZigonautTextEngine* engine, bool* partial) -> HRESULT {
+        *partial = false;
+        if (!engine->atlas_texture || engine->atlas_draw_active) return E_HANDLE;
+        D3D11_TEXTURE2D_DESC description{}; engine->atlas_texture->GetDesc(&description);
+        description.Usage = D3D11_USAGE_STAGING; description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ; description.MiscFlags = 0;
+        ID3D11Texture2D* staging = nullptr;
+        HRESULT value = engine->d3d_device->CreateTexture2D(&description, nullptr, &staging);
+        if (SUCCEEDED(value)) {
+            engine->d3d_context->CopyResource(staging, engine->atlas_texture);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            value = engine->d3d_context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+            if (SUCCEEDED(value)) {
+                for (uint32_t y=0; y<description.Height && !*partial; ++y) {
+                    const uint8_t* scan=static_cast<const uint8_t*>(mapped.pData)+y*mapped.RowPitch;
+                    for (uint32_t x=0; x<description.Width; ++x)
+                        if (scan[x*4+3] > 0 && scan[x*4+3] < 255) { *partial=true; break; }
+                }
+                engine->d3d_context->Unmap(staging, 0);
+            }
+        }
+        release(staging); return value;
+    };
 
     // Accelerated mode starts lazy, warms native plans, then really allocates,
-    // rasterizes, uploads, and submits the 1024 atlas on the second eligible row.
+    // rasterizes, populates, and submits the 1024 atlas on the second eligible row.
     {
         ZigonautTextEngine* engine = nullptr;
         if (SUCCEEDED(hr)) hr = create(ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
         if (SUCCEEDED(hr)) hr = begin(engine);
-        if (SUCCEEDED(hr) && (!engine->atlas_pixels.empty() || engine->atlas_allocator ||
-                engine->atlas_bitmap || engine->sprite_batch || engine->target3)) hr = E_FAIL;
+        if (SUCCEEDED(hr) && (engine->atlas_allocator || engine->atlas_bitmap || engine->atlas_texture ||
+                engine->atlas_context || engine->atlas_brush || engine->sprite_batch || engine->target3)) hr = E_FAIL;
         if (SUCCEEDED(hr) && engine->target->GetTextAntialiasMode() != D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE) hr = E_FAIL;
         engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
         if (SUCCEEDED(hr)) hr = row(engine, 0);
         if (SUCCEEDED(hr)) hr = row(engine, static_cast<float>(engine->metrics.height));
         engine->benchmark_active = false;
+        if (SUCCEEDED(hr)) hr = finish(engine);
         bool partial = false;
-        for (size_t i = 3; i < engine->atlas_pixels.size(); i += 4)
-            if (engine->atlas_pixels[i] > 0 && engine->atlas_pixels[i] < 255) { partial = true; break; }
+        if (SUCCEEDED(hr)) hr = atlasHasPartialAlpha(engine, &partial);
+        D3D11_TEXTURE2D_DESC atlas_description{};
+        if (engine->atlas_texture) engine->atlas_texture->GetDesc(&atlas_description);
         if (SUCCEEDED(hr) && (!engine->atlas_allocator || !engine->atlas_bitmap ||
+                !engine->atlas_texture || !engine->atlas_context || !engine->atlas_brush ||
                 !engine->sprite_batch || !engine->target3 || engine->atlas_extent != 1024 ||
+                atlas_description.Width != 1024 || atlas_description.Height != 1024 ||
+                atlas_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+                (atlas_description.BindFlags & (D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE)) !=
+                    (D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE) ||
                 engine->atlas_resource_allocations != 1 || engine->benchmark.atlas_sprite_batches == 0 ||
                 engine->benchmark.atlas_sprites == 0 || !partial)) hr = E_FAIL;
-        if (SUCCEEDED(hr)) hr = finish(engine);
         uint64_t changed = 0;
         if (SUCCEEDED(hr)) hr = ink(engine, 0, engine->metrics.height * 2, 0x18, &changed);
         if (SUCCEEDED(hr) && changed == 0) hr = E_FAIL;
@@ -1969,7 +2058,8 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         if (SUCCEEDED(hr)) hr = row(engine, static_cast<float>(engine->metrics.height));
         engine->benchmark_active = false;
         if (SUCCEEDED(hr) && (engine->target->GetTextAntialiasMode() != D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE ||
-                engine->atlas_allocator || engine->atlas_bitmap || engine->sprite_batch || engine->target3 ||
+                engine->atlas_allocator || engine->atlas_bitmap || engine->atlas_texture || engine->atlas_context ||
+                engine->atlas_brush || engine->sprite_batch || engine->target3 ||
                 engine->benchmark.atlas_eligible_rows || engine->benchmark.atlas_fallback_rows ||
                 engine->benchmark.atlas_sprite_batches || engine->benchmark.atlas_sprites)) hr = E_FAIL;
         if (SUCCEEDED(hr)) hr = finish(engine);
@@ -1982,17 +2072,17 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
 
     // Each injected failure is reached by endRow, and must produce a visible native fallback.
     for (const auto fault : {ZigonautTextEngine::TestFault::atlas_resource,
-            ZigonautTextEngine::TestFault::atlas_cpu_allocation,
+            ZigonautTextEngine::TestFault::atlas_texture,
             ZigonautTextEngine::TestFault::rasterize, ZigonautTextEngine::TestFault::upload,
             ZigonautTextEngine::TestFault::add_sprites}) {
         ZigonautTextEngine* engine = nullptr;
         if (SUCCEEDED(hr)) hr = create(ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
         if (SUCCEEDED(hr)) hr = begin(engine);
         if (fault == ZigonautTextEngine::TestFault::atlas_resource ||
-                fault == ZigonautTextEngine::TestFault::atlas_cpu_allocation) engine->test_fault = fault;
+                fault == ZigonautTextEngine::TestFault::atlas_texture) engine->test_fault = fault;
         if (SUCCEEDED(hr)) hr = row(engine, 0); // plan warmup (and resource-fault attempt)
         if (fault != ZigonautTextEngine::TestFault::atlas_resource &&
-                fault != ZigonautTextEngine::TestFault::atlas_cpu_allocation) engine->test_fault = fault;
+                fault != ZigonautTextEngine::TestFault::atlas_texture) engine->test_fault = fault;
         engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
         const uint64_t uploads = engine->benchmark.atlas_uploads;
         if (SUCCEEDED(hr)) hr = row(engine, static_cast<float>(engine->metrics.height));
@@ -2015,6 +2105,19 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         if (SUCCEEDED(hr)) hr = ink(engine, engine->metrics.height,
             engine->metrics.height * 2, 0x18, &changed);
         if (SUCCEEDED(hr) && changed == 0) hr = E_FAIL;
+        if (SUCCEEDED(hr) && fault == ZigonautTextEngine::TestFault::upload) {
+            const uint64_t generation = engine->atlas_generation;
+            if (!engine->atlas_invalidation_pending) hr = E_FAIL;
+            if (SUCCEEDED(hr)) hr = begin(engine);
+            if (SUCCEEDED(hr) && (engine->atlas_generation != generation + 1 ||
+                    engine->atlas_invalidation_pending)) hr = E_FAIL;
+            engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
+            if (SUCCEEDED(hr)) hr = row(engine, 0);
+            engine->benchmark_active = false;
+            if (SUCCEEDED(hr) && (engine->benchmark.atlas_placement_misses == 0 ||
+                    engine->benchmark.atlas_rasterizations == 0)) hr = E_FAIL;
+            if (engine && engine->frame_active) finish(engine);
+        }
         zigonaut_text_engine_destroy(engine);
         if (FAILED(hr)) break;
     }
@@ -2153,7 +2256,7 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         engine->benchmark_active = false;
         if (SUCCEEDED(hr)) hr = finish(engine);
         const uint64_t resets = engine->atlas_pressure_resets;
-        if (SUCCEEDED(hr)) hr = begin(engine, 2);
+        if (SUCCEEDED(hr)) hr = begin(engine, 2, 0x181818, 17);
         if (SUCCEEDED(hr) && (engine->atlas_extent != 2048 || engine->atlas_generation != generation + 1 ||
                 engine->atlas_pressure_resets != resets + 1 || engine->atlas_reset_pending ||
                 engine->atlas_reserved_area != 0)) hr = E_FAIL;
@@ -2176,7 +2279,7 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         engine->benchmark_active = false;
         if (SUCCEEDED(hr)) hr = finish(engine);
         const uint64_t max_resets = engine->atlas_pressure_resets;
-        if (SUCCEEDED(hr)) hr = begin(engine, 2);
+        if (SUCCEEDED(hr)) hr = begin(engine, 2, 0x181818, 17);
         if (SUCCEEDED(hr) && (engine->atlas_extent != 2048 ||
                 engine->atlas_generation != max_generation + 1 ||
                 engine->atlas_pressure_resets != max_resets + 1 || engine->atlas_reset_pending)) hr = E_FAIL;
@@ -2260,9 +2363,10 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     BOOL rebuild = FALSE;
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height, background, TRUE, &rebuild);
     if (SUCCEEDED(hr)) hr = row(false); // Resolve plans through the native fallback.
-    if (SUCCEEDED(hr)) hr = row(false); // Populate and draw the atlas placements.
+    if (SUCCEEDED(hr)) hr = finish();
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height, background, TRUE, &rebuild);
     engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
-    if (SUCCEEDED(hr)) hr = row(false); // Validate append-after-draw and placement reuse.
+    if (SUCCEEDED(hr)) hr = row(false); // Populate and draw an atlas-only frame.
     if (SUCCEEDED(hr)) hr = finish();
     engine->benchmark_active = false;
     result->first_sprite_batches = engine->benchmark.atlas_sprite_batches;
@@ -2349,17 +2453,24 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     BOOL* full_rebuild_required) {
     if (engine == nullptr || width == 0 || height == 0 || full_rebuild_required == nullptr) return E_INVALIDARG;
     if (engine->frame_active || engine->present_pending) return E_UNEXPECTED;
+    const bool pressure_reset = engine->atlas_reset_pending;
+    const bool failure_invalidation = engine->atlas_invalidation_pending;
+    const uint64_t atlas_generation = engine->atlas_generation;
     const bool recreate = engine->scene_bitmap == nullptr ||
         engine->scene_bitmap->GetPixelSize().width != width ||
         engine->scene_bitmap->GetPixelSize().height != height;
     const HRESULT hr = engine->ensureTarget(width, height);
-    if (FAILED(hr)) return hr;
-    if (engine->atlas_reset_pending) {
-        engine->atlas_reset_pending = false;
-        if (engine->atlas_extent < 2048) engine->atlas_extent = 2048;
-        engine->invalidateAtlas();
-        engine->atlas_reserved_area = 0;
-        ++engine->atlas_pressure_resets;
+    if (FAILED(hr)) {
+        engine->atlas_reset_pending = pressure_reset;
+        engine->atlas_invalidation_pending = failure_invalidation;
+        return hr;
+    }
+    if (pressure_reset || failure_invalidation) {
+        if (pressure_reset && engine->atlas_extent < 2048) engine->atlas_extent = 2048;
+        // A target resize already invalidates atlas resources. Otherwise consume
+        // the pending generation now, before the new scene draw scope begins.
+        if (engine->atlas_generation == atlas_generation) engine->invalidateAtlas();
+        if (pressure_reset) ++engine->atlas_pressure_resets;
     }
     if (engine->sprite_batch != nullptr) engine->sprite_batch->Clear();
     engine->sprite_count = 0;
