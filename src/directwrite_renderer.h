@@ -9,6 +9,11 @@ extern "C" {
 
 typedef struct ZigonautTextEngine ZigonautTextEngine;
 
+typedef enum ZigonautTextAntialiasing {
+    ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE = 0,
+    ZIGONAUT_TEXT_AA_NATIVE_CLEARTYPE = 1,
+} ZigonautTextAntialiasing;
+
 typedef struct ZigonautCellMetrics {
     uint32_t width;
     uint32_t height;
@@ -45,6 +50,9 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t atlas_placement_hits, atlas_placement_misses, atlas_rasterizations;
     uint64_t atlas_full_misses, atlas_sprites, atlas_sprite_batches;
     uint64_t atlas_uploads, atlas_upload_bytes;
+    uint64_t atlas_reserved_area, atlas_rejected_area, atlas_rejected_count;
+    uint64_t atlas_pressure_resets, atlas_generation, atlas_resource_allocations;
+    uint32_t atlas_extent;
     uint64_t fragmented_native_glyph_submissions, uniform_native_glyph_submissions;
     uint64_t atlas_warm_frame_nanoseconds;
     uint32_t warm_row_iterations;
@@ -90,6 +98,7 @@ HRESULT zigonaut_benchmark_layout_cache(
 HRESULT zigonaut_benchmark_directwrite_pipeline(ZigonautDirectWriteBenchmark* result);
 HRESULT zigonaut_test_glyph_atlas_allocator(void);
 HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest* result);
+HRESULT zigonaut_test_atlas_policy_and_faults(void);
 
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,
@@ -104,6 +113,7 @@ HRESULT zigonaut_text_engine_create(
     uint16_t font_weight,
     uint16_t intense_font_weight,
     uint32_t dpi,
+    int32_t antialiasing,
     ZigonautTextEngine** result);
 
 void zigonaut_text_engine_destroy(ZigonautTextEngine* engine);

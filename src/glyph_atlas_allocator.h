@@ -14,14 +14,15 @@
 
 class GlyphAtlasAllocator {
 public:
-    static constexpr uint32_t extent = 2048;
     struct Rect { uint32_t x, y, width, height; };
 
-    GlyphAtlasAllocator() { nodes_.push_back({0, 0, extent}); }
+    explicit GlyphAtlasAllocator(uint32_t extent) : extent_(extent) {
+        nodes_.push_back({0, 0, extent_});
+    }
 
     // Monotonic and transactional: failure never changes the skyline.
     bool reserve(uint32_t width, uint32_t height, Rect& result) {
-        if (!width || !height || width > extent - 2 || height > extent - 2 ||
+        if (extent_ < 3 || !width || !height || width > extent_ - 2 || height > extent_ - 2 ||
             width > std::numeric_limits<uint32_t>::max() - 2 ||
             height > std::numeric_limits<uint32_t>::max() - 2) return false;
         const uint32_t w = width + 2, h = height + 2;
@@ -54,17 +55,19 @@ public:
     }
 
     size_t nodeCount() const { return nodes_.size(); }
+    uint32_t extent() const { return extent_; }
 private:
     struct Node { uint32_t x, y, width; };
+    uint32_t extent_;
     std::vector<Node> nodes_;
     bool fit(size_t index, uint32_t width, uint32_t height, uint32_t& y) const {
         const uint32_t x = nodes_[index].x;
-        if (x > extent - width) return false;
+        if (x > extent_ - width) return false;
         uint32_t remaining = width; y = nodes_[index].y;
         for (size_t i = index; remaining; ++i) {
             if (i == nodes_.size()) return false;
             y = std::max(y, nodes_[i].y);
-            if (y > extent - height) return false;
+            if (y > extent_ - height) return false;
             if (nodes_[i].width >= remaining) break;
             remaining -= nodes_[i].width;
         }

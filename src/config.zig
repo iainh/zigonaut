@@ -6,7 +6,7 @@ pub const default_contents =
     \\{
     \\  "version": 1,
     \\  "appearance": {
-    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold" },
+    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8 },
     \\    "background": { "opacity": 100, "backdrop": "mica" },
@@ -57,6 +57,7 @@ const default_profiles = [3]Profile{
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
+pub const TextAntialiasing = enum { acceleratedGrayscale, nativeClearType };
 pub const FontWeight = enum(u16) {
     thin = 100,
     extraLight = 200,
@@ -86,6 +87,7 @@ const JsonConfig = struct {
             size: u16,
             weight: FontWeight = .regular,
             intenseWeight: FontWeight = .bold,
+            antialiasing: TextAntialiasing = .acceleratedGrayscale,
         },
         themes: struct {
             dark: []const u8,
@@ -135,6 +137,7 @@ pub const Config = struct {
     font_size: u16 = 18,
     font_weight: FontWeight = .regular,
     intense_font_weight: FontWeight = .bold,
+    text_antialiasing: TextAntialiasing = .acceleratedGrayscale,
     scrollback_size: u32 = 10_000,
     initial_columns: u16 = 80,
     initial_rows: u16 = 24,
@@ -177,6 +180,7 @@ pub fn changes(previous: Config, next: Config) Changes {
         .font = previous.font_size != next.font_size or
             previous.font_weight != next.font_weight or
             previous.intense_font_weight != next.intense_font_weight or
+            previous.text_antialiasing != next.text_antialiasing or
             !std.mem.eql(u8, previous.font_family, next.font_family),
         .theme = !std.mem.eql(u8, previous.dark_theme, next.dark_theme) or
             !std.mem.eql(u8, previous.light_theme, next.light_theme) or
@@ -310,6 +314,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.font_size = json.appearance.font.size;
     result.font_weight = json.appearance.font.weight;
     result.intense_font_weight = json.appearance.font.intenseWeight;
+    result.text_antialiasing = json.appearance.font.antialiasing;
     result.scrollback_size = json.terminal.scrollbackSize;
     result.initial_columns = json.terminal.initialSize.columns;
     result.initial_rows = json.terminal.initialSize.rows;
@@ -396,6 +401,7 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqual(@as(u16, 14), value.font_size);
     try std.testing.expectEqual(FontWeight.light, value.font_weight);
     try std.testing.expectEqual(FontWeight.semiBold, value.intense_font_weight);
+    try std.testing.expectEqual(TextAntialiasing.acceleratedGrayscale, value.text_antialiasing);
     try std.testing.expectEqual(@as(u32, 50_000), value.scrollback_size);
     try std.testing.expectEqual(@as(u16, 120), value.initial_columns);
     try std.testing.expectEqual(@as(u16, 40), value.initial_rows);
@@ -419,10 +425,22 @@ test "default JSON configuration parses" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(FontWeight.regular, value.font_weight);
     try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
+    try std.testing.expectEqual(TextAntialiasing.acceleratedGrayscale, value.text_antialiasing);
     try std.testing.expectEqualStrings("fluent-dark", value.dark_theme);
     try std.testing.expectEqualStrings("fluent-light", value.light_theme);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
+}
+
+test "native ClearType parses and is a font reload change" {
+    const contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents,
+        "acceleratedGrayscale", "nativeClearType");
+    defer std.testing.allocator.free(contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(TextAntialiasing.nativeClearType, value.text_antialiasing);
+    try std.testing.expect(changes(Config{}, value).font);
 }
 
 test "font weights default for existing configurations" {

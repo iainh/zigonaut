@@ -193,7 +193,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -335,7 +335,7 @@ const Application = struct {
         var count: usize = 0;
         errdefer for (prepared[0..count]) |*value| value.deinit();
         for (self.views.items, 0..) |entry, index| {
-            prepared[index] = try entry.view.prepareReload(font, settings.font_family, size, @intFromEnum(settings.font_weight), @intFromEnum(settings.intense_font_weight), dpi);
+            prepared[index] = try entry.view.prepareReload(font, settings.font_family, size, @intFromEnum(settings.font_weight), @intFromEnum(settings.intense_font_weight), @intFromEnum(settings.text_antialiasing), dpi);
             count += 1;
         }
         try self.detachPresentation();

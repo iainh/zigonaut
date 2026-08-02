@@ -160,8 +160,11 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "    atlas: batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; uploads={d}, bytes={d}\n",
-        .{ dwrite.atlas_sprite_batches, dwrite.atlas_sprites,
+        "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; uploads={d}, bytes={d}\n",
+        .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation,
+            dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area,
+            dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets,
+            dwrite.atlas_sprite_batches, dwrite.atlas_sprites,
             dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits,
             dwrite.atlas_placement_misses, dwrite.atlas_rasterizations,
             dwrite.atlas_uploads, dwrite.atlas_upload_bytes },

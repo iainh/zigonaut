@@ -47,7 +47,8 @@ pub const Engine = struct {
         baseline: u32,
     };
 
-    pub fn init(font_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32) !Engine {
+    pub fn init(font_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32, antialiasing: u32) !Engine {
+        if (antialiasing > 1) return error.InvalidTextAntialiasing;
         var wide_name = [_]u16{0} ** 128;
         _ = @import("std").unicode.utf8ToUtf16Le(
             wide_name[0 .. wide_name.len - 1],
@@ -60,6 +61,7 @@ pub const Engine = struct {
             font_weight,
             intense_font_weight,
             dpi,
+            @intCast(antialiasing),
             &handle,
         );
         if (result < 0 or handle == null) return error.DirectWriteInitializationFailed;
@@ -273,6 +275,19 @@ test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
     try std.testing.expectEqual(result.first_sprites, result.second_sprites);
     try std.testing.expectEqual(result.second_sprites, result.second_placement_hits);
     try std.testing.expect(result.second_changed_pixels > 0);
+}
+
+test "atlas AA policy, lifecycle, and deterministic fault fallbacks" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_atlas_policy_and_faults());
+}
+
+test "invalid numeric antialias policy is rejected before enum conversion" {
+    const std = @import("std");
+    try std.testing.expectError(error.InvalidTextAntialiasing,
+        Engine.init("Consolas", 18, 400, 700, 96, 2));
+    try std.testing.expectError(error.InvalidTextAntialiasing,
+        Engine.init("Consolas", 18, 400, 700, 96, std.math.maxInt(u32)));
 }
 
 test "layout cache retains hot entries when crossing capacity" {

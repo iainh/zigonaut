@@ -129,6 +129,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["font_size"] = number(font.GetNamedNumber(L"size"));
     values["font_weight"] = to_string(font.GetNamedString(L"weight", L"regular"));
     values["intense_font_weight"] = to_string(font.GetNamedString(L"intenseWeight", L"bold"));
+    values["text_antialiasing"] = to_string(font.GetNamedString(L"antialiasing", L"acceleratedGrayscale"));
     values["scrollback_size"] = number(terminal.GetNamedNumber(L"scrollbackSize"));
     values["initial_columns"] = number(initial_size.GetNamedNumber(L"columns"));
     values["initial_rows"] = number(initial_size.GetNamedNumber(L"rows"));
@@ -599,7 +600,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool open = true;
     bool updating_font_weights = false;
 
-    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr};
+    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, text_antialiasing{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr};
     ToggleSwitch random_background{nullptr};
@@ -777,6 +778,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
         intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
+        text_antialiasing = combo("", {L"Accelerated grayscale (recommended)", L"Native ClearType"});
+        text_antialiasing.SelectedIndex(value(values, "text_antialiasing", "acceleratedGrayscale") == "nativeClearType" ? 1 : 0);
 
         auto theme_grid = StackPanel{};
         theme_grid.Spacing(8);
@@ -787,6 +790,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         appendLabeled(font, L"Normal weight", font_weight);
         appendLabeled(font, L"Intense weight", intense_font_weight);
         appendLabeled(font, L"Size (points)", font_size);
+        appendLabeled(font, L"Text antialiasing", text_antialiasing);
         return page(L"Appearance", L"Choose how Zigonaut and terminal sessions look.", {
             card(L"Application theme", L"Follow Windows or always use a light or dark color scheme.", color_scheme),
             card(L"Window material", L"Choose the Fluent backdrop used behind the terminal.", backdrop),
@@ -1299,6 +1303,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         font.Insert(L"size", number(font_size_value));
         font.Insert(L"weight", text(selected_font_weight));
         font.Insert(L"intenseWeight", text(selected_intense_font_weight));
+        font.Insert(L"antialiasing", text(text_antialiasing.SelectedIndex() == 1 ? "nativeClearType" : "acceleratedGrayscale"));
         appearance.Insert(L"font", font);
         JsonObject selected_themes;
         selected_themes.Insert(L"dark", text(selected_dark_theme));
@@ -1404,6 +1409,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         backdrop.SelectionChanged(selection_changed);
         dark_theme.SelectionChanged(selection_changed);
         light_theme.SelectionChanged(selection_changed);
+        text_antialiasing.SelectionChanged(selection_changed);
         font_family.SelectionChanged([this](auto const&, auto const&) {
             auto const family = unbox_value<hstring>(font_family.SelectedItem());
             updating_font_weights = true;
