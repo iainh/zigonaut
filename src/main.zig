@@ -1560,8 +1560,6 @@ fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
     if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
     if (update_terminal_theme) self.syncChrome();
-    var dark_mode: win.BOOL = @intFromBool(self.dark_theme and !self.high_contrast);
-    _ = win.DwmSetWindowAttribute(hwnd, 20, &dark_mode, @sizeOf(win.BOOL));
     _ = win.InvalidateRect(hwnd, null, 0);
 }
 

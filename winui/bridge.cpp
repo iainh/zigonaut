@@ -27,6 +27,7 @@
 #include <winrt/Microsoft.UI.Interop.h>
 #include <winrt/Microsoft.Windows.AppNotifications.h>
 #include <winrt/Microsoft.Windows.AppNotifications.Builder.h>
+#include <dwmapi.h>
 #include <shobjidl.h>
 #include <winreg.h>
 #include <algorithm>
@@ -1439,6 +1440,20 @@ struct Bridge {
         }
     }
 
+    void updateWindowFrameAppearance() noexcept {
+        BOOL const use_dark_frame = dark_theme && !high_contrast;
+        auto const result = DwmSetWindowAttribute(
+            parent,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &use_dark_frame,
+            sizeof(use_dark_frame));
+        // Windows 10 versions without this attribute report E_INVALIDARG. The
+        // AppWindow title bar and XAML theme remain the supported fallback.
+        if (FAILED(result) && result != E_INVALIDARG && result != DWM_E_COMPOSITIONDISABLED) {
+            reportFailure(L"apply DWM frame appearance", result);
+        }
+    }
+
     void updateAppearance(uint32_t kind, bool high_contrast, bool dark_theme) {
         if (appearance_initialized && kind == backdrop_kind &&
             high_contrast == this->high_contrast && dark_theme == this->dark_theme) return;
@@ -1454,6 +1469,7 @@ struct Bridge {
             ? Microsoft::UI::Windowing::TitleBarTheme::UseDefaultAppMode
             : dark_theme ? Microsoft::UI::Windowing::TitleBarTheme::Dark
                          : Microsoft::UI::Windowing::TitleBarTheme::Light);
+        updateWindowFrameAppearance();
         if (high_contrast || kind == ZIGONAUT_BACKDROP_NONE) {
             auto const theme_key = high_contrast ? L"HighContrast" : dark_theme ? L"Dark" : L"Default";
             auto const theme_resources = application.Resources().ThemeDictionaries()

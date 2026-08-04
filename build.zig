@@ -67,7 +67,6 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("d3d11", .{});
     exe.root_module.linkSystemLibrary("dwrite", .{});
     exe.root_module.linkSystemLibrary("dxgi", .{});
-    exe.root_module.linkSystemLibrary("dwmapi", .{});
     exe.root_module.linkSystemLibrary("advapi32", .{});
     exe.root_module.linkSystemLibrary("kernel32", .{});
     exe.root_module.linkSystemLibrary("shell32", .{});
