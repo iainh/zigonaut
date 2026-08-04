@@ -6,6 +6,9 @@ pub const KeyEvent = struct {
     key: Terminal.Key,
     action: Terminal.KeyAction,
     unshifted_codepoint: u32,
+    utf8: [16]u8 = undefined,
+    utf8_length: u5 = 0,
+    consumed_modifiers: u16 = 0,
 };
 
 pub const State = struct {
@@ -19,6 +22,11 @@ pub const State = struct {
         const key = keyFromMessage(virtual_key, lparam) orelse return null;
         const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
         const index = @intFromEnum(key);
+        var event: KeyEvent = .{
+            .key = key,
+            .action = if (released) .release else if (repeated) .repeat else .press,
+            .unshifted_codepoint = self.unshifted_codepoints[index],
+        };
         if (released) {
             if (!self.pressed[index]) return null;
             self.pressed[index] = false;
@@ -27,12 +35,12 @@ pub const State = struct {
             self.pressed[index] = true;
             self.unshifted_codepoints[index] = unshiftedCodepoint(virtual_key, lparam);
             self.suppressed_character = suppressedCodeUnit(virtual_key);
+            event.unshifted_codepoint = self.unshifted_codepoints[index];
+            const translation = translatedUtf8(virtual_key, lparam, &event.utf8);
+            event.utf8_length = @intCast(translation.length);
+            event.consumed_modifiers = translation.consumed_modifiers;
         }
-        return .{
-            .key = key,
-            .action = if (released) .release else if (repeated) .repeat else .press,
-            .unshifted_codepoint = self.unshifted_codepoints[index],
-        };
+        return event;
     }
 
     pub fn takePressed(self: *State, key: Terminal.Key) ?u32 {
@@ -256,6 +264,51 @@ fn unshiftedCodepoint(virtual_key: usize, lparam: isize) u32 {
         return std.unicode.utf16DecodeSurrogatePair(&utf16) catch 0;
     }
     return 0;
+}
+
+fn translatedUtf8(virtual_key: usize, lparam: isize, output: *[16]u8) struct { length: usize, consumed_modifiers: u16 } {
+    var keyboard_state: [256]u8 = undefined;
+    if (win.GetKeyboardState(&keyboard_state) == 0) return .{ .length = 0, .consumed_modifiers = 0 };
+    var text_state = keyboard_state;
+    // libghostty applies control-key encoding itself and expects the logical
+    // text ("c"), not the WM_CHAR control byte (0x03). Preserve Ctrl+Alt,
+    // which Windows keyboard layouts use for AltGr text.
+    if (text_state[win.VK_CONTROL] & 0x80 != 0 and text_state[win.VK_MENU] & 0x80 == 0) {
+        text_state[win.VK_CONTROL] = 0;
+        text_state[win.VK_LCONTROL] = 0;
+        text_state[win.VK_RCONTROL] = 0;
+    }
+    const length = translateWithState(virtual_key, lparam, &text_state, output);
+    if (length == 0 or text_state[win.VK_SHIFT] & 0x80 == 0) {
+        return .{ .length = length, .consumed_modifiers = 0 };
+    }
+
+    var unshifted_state = text_state;
+    unshifted_state[win.VK_SHIFT] = 0;
+    unshifted_state[win.VK_LSHIFT] = 0;
+    unshifted_state[win.VK_RSHIFT] = 0;
+    var unshifted: [16]u8 = undefined;
+    const unshifted_length = translateWithState(virtual_key, lparam, &unshifted_state, &unshifted);
+    return .{
+        .length = length,
+        .consumed_modifiers = if (!std.mem.eql(u8, output[0..length], unshifted[0..unshifted_length])) Terminal.Modifier.shift else 0,
+    };
+}
+
+fn translateWithState(virtual_key: usize, lparam: isize, keyboard_state: *const [256]u8, output: *[16]u8) usize {
+    var utf16: [4]u16 = undefined;
+    const scan_code: win.UINT = @truncate(@as(usize, @bitCast(lparam)) >> 16);
+    const count = win.ToUnicodeEx(
+        @intCast(virtual_key),
+        scan_code,
+        keyboard_state,
+        &utf16,
+        utf16.len,
+        4,
+        win.GetKeyboardLayout(0),
+    );
+    if (count <= 0) return 0;
+    return std.unicode.utf16LeToUtf8(output, utf16[0..@intCast(count)]) catch 0;
 }
 
 pub fn currentModifiers() u16 {

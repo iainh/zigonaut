@@ -1359,7 +1359,7 @@ pub const Terminal = struct {
         }
     }
 
-    pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, unshifted_codepoint: u32, output: []u8) ![]const u8 {
+    pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, consumed_modifiers: u16, utf8: []const u8, unshifted_codepoint: u32, output: []u8) ![]const u8 {
         vt.ghostty_key_encoder_setopt_from_terminal(self.key_encoder, self.terminal);
         vt.ghostty_key_event_set_action(self.key_event, switch (action) {
             .press => vt.GHOSTTY_KEY_ACTION_PRESS,
@@ -1523,9 +1523,9 @@ pub const Terminal = struct {
             .audio_volume_up => vt.GHOSTTY_KEY_AUDIO_VOLUME_UP,
         });
         vt.ghostty_key_event_set_mods(self.key_event, modifiers);
-        vt.ghostty_key_event_set_consumed_mods(self.key_event, 0);
+        vt.ghostty_key_event_set_consumed_mods(self.key_event, consumed_modifiers);
         vt.ghostty_key_event_set_composing(self.key_event, false);
-        vt.ghostty_key_event_set_utf8(self.key_event, null, 0);
+        vt.ghostty_key_event_set_utf8(self.key_event, if (utf8.len == 0) null else utf8.ptr, utf8.len);
         vt.ghostty_key_event_set_unshifted_codepoint(self.key_event, unshifted_codepoint);
 
         var length: usize = 0;
@@ -2654,7 +2654,7 @@ test "libghostty encodes navigation keys" {
     defer terminal.deinit();
 
     var buffer: [64]u8 = undefined;
-    const encoded = try terminal.encodeKey(.arrow_up, .press, 0, 0, &buffer);
+    const encoded = try terminal.encodeKey(.arrow_up, .press, 0, 0, "", 0, &buffer);
     try std.testing.expectEqualStrings("\x1b[A", encoded);
 }
 
@@ -2663,10 +2663,10 @@ test "libghostty encodes physical special and function keys" {
     defer terminal.deinit();
 
     var buffer: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("\x1b", try terminal.encodeKey(.escape, .press, 0, 0, &buffer));
-    try std.testing.expectEqualStrings("\x1b[2~", try terminal.encodeKey(.insert, .press, 0, 0, &buffer));
-    try std.testing.expectEqualStrings("\x1bOP", try terminal.encodeKey(.f1, .press, 0, 0, &buffer));
-    try std.testing.expectEqual(@as(usize, 0), (try terminal.encodeKey(.f1, .release, 0, 0, &buffer)).len);
+    try std.testing.expectEqualStrings("\x1b", try terminal.encodeKey(.escape, .press, 0, 0, "", 0, &buffer));
+    try std.testing.expectEqualStrings("\x1b[2~", try terminal.encodeKey(.insert, .press, 0, 0, "", 0, &buffer));
+    try std.testing.expectEqualStrings("\x1bOP", try terminal.encodeKey(.f1, .press, 0, 0, "", 0, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), (try terminal.encodeKey(.f1, .release, 0, 0, "", 0, &buffer)).len);
 }
 
 test "libghostty emits key releases when the terminal requests them" {
@@ -2675,8 +2675,41 @@ test "libghostty emits key releases when the terminal requests them" {
     terminal.feed("\x1b[>2u");
 
     var buffer: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("\x1b[97u", try terminal.encodeKey(.a, .press, 0, 'a', &buffer));
-    try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(.a, .release, 0, 'a', &buffer));
+    try std.testing.expectEqualStrings("a", try terminal.encodeKey(.a, .press, 0, 0, "a", 'a', &buffer));
+    try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(.a, .release, 0, 0, "", 'a', &buffer));
+}
+
+test "libghostty preserves shifted punctuation with enhanced keyboard reporting" {
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b[>1u");
+
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(":", try terminal.encodeKey(
+        .semicolon,
+        .press,
+        Terminal.Modifier.shift,
+        Terminal.Modifier.shift,
+        ":",
+        ';',
+        &buffer,
+    ));
+}
+
+test "libghostty encodes control from logical text" {
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", try terminal.encodeKey(
+        .c,
+        .press,
+        Terminal.Modifier.control,
+        0,
+        "c",
+        'c',
+        &buffer,
+    ));
 }
 
 const TestRenderer = struct {

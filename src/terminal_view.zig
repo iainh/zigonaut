@@ -1128,7 +1128,14 @@ pub const View = struct {
         const key_runtime = self.key_runtimes[index] orelse return true;
         if (event.action == .release) self.key_runtimes[index] = null;
         if (!self.runtimeIsLive(key_runtime)) return true;
-        const encoded = key_runtime.sendKey(event.key, event.action, input.currentModifiers(), event.unshifted_codepoint) catch |err| {
+        const encoded = key_runtime.sendKey(
+            event.key,
+            event.action,
+            input.currentModifiers(),
+            event.consumed_modifiers,
+            event.utf8[0..event.utf8_length],
+            event.unshifted_codepoint,
+        ) catch |err| {
             log.debug("unable to send terminal key: {}", .{err});
             return true;
         };
@@ -1223,7 +1230,7 @@ pub const View = struct {
             const runtime = self.key_runtimes[index];
             self.key_runtimes[index] = null;
             if (runtime) |current| {
-                if (self.runtimeIsLive(current)) _ = current.sendKey(key, .release, input.currentModifiers(), unshifted_codepoint) catch |err| {
+                if (self.runtimeIsLive(current)) _ = current.sendKey(key, .release, input.currentModifiers(), 0, "", unshifted_codepoint) catch |err| {
                     log.debug("unable to release terminal key: {}", .{err});
                 };
             }
