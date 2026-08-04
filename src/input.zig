@@ -6,15 +6,22 @@ pub const KeyEvent = struct {
     key: Terminal.Key,
     action: Terminal.KeyAction,
     unshifted_codepoint: u32,
+    modifiers: u16,
     utf8: [16]u8 = undefined,
     utf8_length: u5 = 0,
     consumed_modifiers: u16 = 0,
+};
+
+pub const PressedKey = struct {
+    unshifted_codepoint: u32,
+    altgr_text: bool,
 };
 
 pub const State = struct {
     pending_high_surrogate: ?u16 = null,
     suppressed_character: ?u16 = null,
     pressed: [std.enums.values(Terminal.Key).len]bool = @splat(false),
+    altgr_text: [std.enums.values(Terminal.Key).len]bool = @splat(false),
     unshifted_codepoints: [std.enums.values(Terminal.Key).len]u32 = @splat(0),
     encoded_character_key: ?Terminal.Key = null,
 
@@ -26,10 +33,13 @@ pub const State = struct {
             .key = key,
             .action = if (released) .release else if (repeated) .repeat else .press,
             .unshifted_codepoint = self.unshifted_codepoints[index],
+            .modifiers = currentModifiers(),
         };
         if (released) {
             if (!self.pressed[index]) return null;
             self.pressed[index] = false;
+            event.modifiers = normalizeModifiers(event.modifiers, self.altgr_text[index]);
+            self.altgr_text[index] = false;
             if (self.encoded_character_key == key) self.encoded_character_key = null;
         } else {
             self.pressed[index] = true;
@@ -39,16 +49,23 @@ pub const State = struct {
             const translation = translatedUtf8(virtual_key, lparam, &event.utf8);
             event.utf8_length = @intCast(translation.length);
             event.consumed_modifiers = translation.consumed_modifiers;
+            self.altgr_text[index] = translation.altgr_text;
+            event.modifiers = normalizeModifiers(event.modifiers, translation.altgr_text);
         }
         return event;
     }
 
-    pub fn takePressed(self: *State, key: Terminal.Key) ?u32 {
-        const pressed = &self.pressed[@intFromEnum(key)];
+    pub fn takePressed(self: *State, key: Terminal.Key) ?PressedKey {
+        const index = @intFromEnum(key);
+        const pressed = &self.pressed[index];
         if (!pressed.*) return null;
         pressed.* = false;
         if (self.encoded_character_key == key) self.encoded_character_key = null;
-        return self.unshifted_codepoints[@intFromEnum(key)];
+        defer self.altgr_text[index] = false;
+        return .{
+            .unshifted_codepoint = self.unshifted_codepoints[index],
+            .altgr_text = self.altgr_text[index],
+        };
     }
 
     pub fn suppressEncodedCharacter(self: *State, key: Terminal.Key, unshifted_codepoint: u32) void {
@@ -266,21 +283,37 @@ fn unshiftedCodepoint(virtual_key: usize, lparam: isize) u32 {
     return 0;
 }
 
-fn translatedUtf8(virtual_key: usize, lparam: isize, output: *[16]u8) struct { length: usize, consumed_modifiers: u16 } {
+fn translatedUtf8(virtual_key: usize, lparam: isize, output: *[16]u8) struct { length: usize, consumed_modifiers: u16, altgr_text: bool } {
     var keyboard_state: [256]u8 = undefined;
-    if (win.GetKeyboardState(&keyboard_state) == 0) return .{ .length = 0, .consumed_modifiers = 0 };
+    if (win.GetKeyboardState(&keyboard_state) == 0) return .{ .length = 0, .consumed_modifiers = 0, .altgr_text = false };
     var text_state = keyboard_state;
     // libghostty applies control-key encoding itself and expects the logical
-    // text ("c"), not the WM_CHAR control byte (0x03). Preserve Ctrl+Alt,
-    // which Windows keyboard layouts use for AltGr text.
+    // text ("c"), not the WM_CHAR control byte (0x03). Keep Ctrl+Alt while
+    // translating because Windows keyboard layouts use that state for AltGr.
     if (text_state[win.VK_CONTROL] & 0x80 != 0 and text_state[win.VK_MENU] & 0x80 == 0) {
         text_state[win.VK_CONTROL] = 0;
         text_state[win.VK_LCONTROL] = 0;
         text_state[win.VK_RCONTROL] = 0;
     }
     const length = translateWithState(virtual_key, lparam, &text_state, output);
+    const right_alt = keyboard_state[win.VK_RMENU] & 0x80 != 0;
+    const control = keyboard_state[win.VK_CONTROL] & 0x80 != 0;
+    const alt = keyboard_state[win.VK_MENU] & 0x80 != 0;
+    const altgr_candidate = length != 0 and right_alt and control and alt;
+    const altgr_text = if (altgr_candidate) altgr: {
+        var plain_state = text_state;
+        plain_state[win.VK_CONTROL] = 0;
+        plain_state[win.VK_LCONTROL] = 0;
+        plain_state[win.VK_RCONTROL] = 0;
+        plain_state[win.VK_MENU] = 0;
+        plain_state[win.VK_LMENU] = 0;
+        plain_state[win.VK_RMENU] = 0;
+        var plain: [16]u8 = undefined;
+        const plain_length = translateWithState(virtual_key, lparam, &plain_state, &plain);
+        break :altgr isAltGrText(right_alt, control, alt, output[0..length], plain[0..plain_length]);
+    } else false;
     if (length == 0 or text_state[win.VK_SHIFT] & 0x80 == 0) {
-        return .{ .length = length, .consumed_modifiers = 0 };
+        return .{ .length = length, .consumed_modifiers = 0, .altgr_text = altgr_text };
     }
 
     var unshifted_state = text_state;
@@ -292,7 +325,16 @@ fn translatedUtf8(virtual_key: usize, lparam: isize, output: *[16]u8) struct { l
     return .{
         .length = length,
         .consumed_modifiers = if (!std.mem.eql(u8, output[0..length], unshifted[0..unshifted_length])) Terminal.Modifier.shift else 0,
+        .altgr_text = altgr_text,
     };
+}
+
+fn isAltGrText(right_alt: bool, control: bool, alt: bool, translated: []const u8, plain: []const u8) bool {
+    return right_alt and control and alt and translated.len != 0 and !std.mem.eql(u8, translated, plain);
+}
+
+pub fn normalizeModifiers(modifiers: u16, altgr_text: bool) u16 {
+    return if (altgr_text) modifiers & ~(Terminal.Modifier.control | Terminal.Modifier.alt) else modifiers;
 }
 
 fn translateWithState(virtual_key: usize, lparam: isize, keyboard_state: *const [256]u8, output: *[16]u8) usize {
@@ -344,6 +386,16 @@ test "scan codes map writing keys independently of virtual characters" {
     try std.testing.expectEqual(Terminal.Key.intl_backslash, keyFromMessage(win.VK_OEM_102, 0x56 << 16).?);
 }
 
+test "AltGr normalization requires right Alt text that differs from the plain key" {
+    try std.testing.expect(isAltGrText(true, true, true, "@", "q"));
+    try std.testing.expect(!isAltGrText(false, true, true, "@", "q"));
+    try std.testing.expect(!isAltGrText(true, true, true, "q", "q"));
+    try std.testing.expect(!isAltGrText(true, true, true, "", "q"));
+    const ctrl_alt = Terminal.Modifier.control | Terminal.Modifier.alt;
+    try std.testing.expectEqual(@as(u16, 0), normalizeModifiers(ctrl_alt, true));
+    try std.testing.expectEqual(ctrl_alt, normalizeModifiers(ctrl_alt, false));
+}
+
 test "extended bit distinguishes navigation and numpad keys" {
     try std.testing.expectEqual(Terminal.Key.home, keyFromMessage(win.VK_HOME, 1 << 24).?);
     try std.testing.expectEqual(Terminal.Key.numpad_home, keyFromMessage(win.VK_HOME, 0).?);
@@ -372,8 +424,20 @@ test "pressed keys can be drained when focus is lost" {
     _ = state.keyEvent('A', 0x1e << 16, false);
     _ = state.keyEvent('B', 0x30 << 16, false);
     try std.testing.expect(state.takePressed(.a) != null);
-    try std.testing.expectEqual(@as(?u32, null), state.takePressed(.a));
+    try std.testing.expectEqual(@as(?PressedKey, null), state.takePressed(.a));
     try std.testing.expect(state.takePressed(.b) != null);
+}
+
+test "draining a pressed AltGr key retains release normalization" {
+    var state = State{};
+    const index = @intFromEnum(Terminal.Key.q);
+    state.pressed[index] = true;
+    state.unshifted_codepoints[index] = 'q';
+    state.altgr_text[index] = true;
+    const pressed = state.takePressed(.q).?;
+    try std.testing.expectEqual(@as(u32, 'q'), pressed.unshifted_codepoint);
+    try std.testing.expect(pressed.altgr_text);
+    try std.testing.expect(!state.altgr_text[index]);
 }
 
 test "encoded physical input suppresses only its translated character" {

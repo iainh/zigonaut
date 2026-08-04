@@ -7,6 +7,12 @@ const config = @import("config.zig");
 const SearchMatch = search.Match;
 const win = @import("win32.zig").c;
 
+const PaddingExtensionRun = struct {
+    left: i32,
+    right: i32,
+    color: win.COLORREF,
+};
+
 pub const Context = struct {
     font: win.HFONT,
     foreground: theme.Color,
@@ -102,6 +108,7 @@ const CellRenderer = struct {
     search_active: ?usize = null,
     search_offset: u64 = 0,
     row_metadata: Terminal.RowMetadata = .{},
+    vertical_extension: ?PaddingExtensionRun = null,
 
     pub fn searchState(self: *CellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
         self.search_matches = matches;
@@ -120,9 +127,12 @@ const CellRenderer = struct {
         self.row_metadata = metadata;
     }
     pub fn beginRow(self: *CellRenderer, y: u16) void {
+        self.vertical_extension = null;
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
     }
-    pub fn endRow(_: *CellRenderer, _: u16) void {}
+    pub fn endRow(self: *CellRenderer, y: u16) void {
+        self.flushVerticalExtension(y);
+    }
 
     // Ignore Kitty images because GDI cannot composite their pixel textures.
     pub fn drawImage(_: *CellRenderer, _: Terminal.Image) void {}
@@ -142,31 +152,29 @@ const CellRenderer = struct {
         else
             colorRef(cell.background);
         const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
-        const extension_foreground = if (search_kind != 0 and self.context.high_contrast)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
-        else if (search_kind == 2)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
-        else if (search_kind == 1)
-            normal_background
-        else if (cell.selected)
-            (if (self.context.copy_flash and !self.context.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
-        else
-            normal_foreground;
-        const extension_background = if (search_kind != 0 and self.context.high_contrast)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
-        else if (search_kind == 2)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
-        else if (search_kind == 1)
-            normal_foreground
-        else if (cell.selected)
-            (if (self.context.copy_flash and !self.context.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
-        else
-            normal_background;
-        const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
-        self.extendBackground(cell, span, if (full_block)
-            (if (cell.faint and !self.context.high_contrast) blendColorRef(extension_foreground, extension_background) else extension_foreground)
-        else
-            extension_background);
+        if (self.context.padding_color != .background and !self.context.high_contrast) {
+            const extension_foreground = if (search_kind == 2)
+                win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+            else if (search_kind == 1)
+                normal_background
+            else if (cell.selected)
+                (if (self.context.copy_flash) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
+            else
+                normal_foreground;
+            const extension_background = if (search_kind == 2)
+                win.GetSysColor(win.COLOR_HIGHLIGHT)
+            else if (search_kind == 1)
+                normal_foreground
+            else if (cell.selected)
+                (if (self.context.copy_flash) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
+            else
+                normal_background;
+            const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
+            self.extendBackground(cell, span, if (full_block)
+                (if (cell.faint) blendColorRef(extension_foreground, extension_background) else extension_foreground)
+            else
+                extension_background);
+        }
         const foreground = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -219,21 +227,41 @@ const CellRenderer = struct {
         const right = left + span * cell_width;
         const top = self.context.origin_y + @as(i32, cell.y) * cell_height;
         const bottom = top + cell_height;
-        if (cell.x == 0) fill(self.dc, .{ .left = self.client.left, .top = top, .right = self.context.origin_x, .bottom = bottom }, color);
+        if (cell.x == 0 and self.context.origin_x > self.client.left) fill(self.dc, .{ .left = self.client.left, .top = top, .right = self.context.origin_x, .bottom = bottom }, color);
         if (@as(i32, cell.x) + span >= self.context.columns) {
             const grid_right = self.context.origin_x + @as(i32, self.context.columns) * cell_width;
-            fill(self.dc, .{ .left = grid_right, .top = top, .right = self.client.right, .bottom = bottom }, color);
+            if (grid_right < self.client.right) fill(self.dc, .{ .left = grid_right, .top = top, .right = self.client.right, .bottom = bottom }, color);
         }
         const vertical = self.context.padding_color == .extendAlways or
             (!self.row_metadata.semantic_prompt and !self.row_metadata.never_extend_background);
-        if (!vertical) return;
+        if (!vertical or (cell.y != 0 and cell.y + 1 != self.context.rows)) return;
         const strip_left = if (cell.x == 0) self.client.left else left;
         const strip_right = if (@as(i32, cell.x) + span >= self.context.columns) self.client.right else right;
-        if (cell.y == 0) fill(self.dc, .{ .left = strip_left, .top = self.client.top, .right = strip_right, .bottom = self.context.origin_y }, color);
-        if (cell.y + 1 == self.context.rows) {
-            const grid_bottom = self.context.origin_y + @as(i32, self.context.rows) * cell_height;
-            fill(self.dc, .{ .left = strip_left, .top = grid_bottom, .right = strip_right, .bottom = self.client.bottom }, color);
+        if (self.vertical_extension) |*run| {
+            if (run.color == color and run.right == strip_left) {
+                run.right = strip_right;
+                return;
+            }
+            self.flushVerticalExtension(cell.y);
         }
+        self.vertical_extension = .{ .left = strip_left, .right = strip_right, .color = color };
+    }
+
+    fn flushVerticalExtension(self: *CellRenderer, y: u16) void {
+        const run = self.vertical_extension orelse return;
+        self.vertical_extension = null;
+        if (run.right <= run.left) return;
+        if (y == 0 and self.context.origin_y > self.client.top) fill(
+            self.dc,
+            .{ .left = run.left, .top = self.client.top, .right = run.right, .bottom = self.context.origin_y },
+            run.color,
+        );
+        const grid_bottom = self.context.origin_y + @as(i32, self.context.rows) * @as(i32, @intCast(self.context.cell_height));
+        if (y + 1 == self.context.rows and grid_bottom < self.client.bottom) fill(
+            self.dc,
+            .{ .left = run.left, .top = grid_bottom, .right = run.right, .bottom = self.client.bottom },
+            run.color,
+        );
     }
 
     pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {

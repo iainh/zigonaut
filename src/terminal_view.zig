@@ -1164,7 +1164,7 @@ pub const View = struct {
         const encoded = key_runtime.sendKey(
             event.key,
             event.action,
-            input.currentModifiers(),
+            event.modifiers,
             event.consumed_modifiers,
             event.utf8[0..event.utf8_length],
             event.unshifted_codepoint,
@@ -1258,12 +1258,13 @@ pub const View = struct {
 
     fn releasePressedKeys(self: *View) void {
         for (std.enums.values(Terminal.Key)) |key| {
-            const unshifted_codepoint = self.input_state.takePressed(key) orelse continue;
+            const pressed = self.input_state.takePressed(key) orelse continue;
             const index = @intFromEnum(key);
             const runtime = self.key_runtimes[index];
             self.key_runtimes[index] = null;
             if (runtime) |current| {
-                if (self.runtimeIsLive(current)) _ = current.sendKey(key, .release, input.currentModifiers(), 0, "", unshifted_codepoint) catch |err| {
+                const modifiers = input.normalizeModifiers(input.currentModifiers(), pressed.altgr_text);
+                if (self.runtimeIsLive(current)) _ = current.sendKey(key, .release, modifiers, 0, "", pressed.unshifted_codepoint) catch |err| {
                     log.debug("unable to release terminal key: {}", .{err});
                 };
             }
@@ -1707,6 +1708,12 @@ const HoveredLink = struct {
     link: Terminal.Link,
 };
 
+const PaddingExtensionRun = struct {
+    left: i32,
+    right: i32,
+    color: u32,
+};
+
 const DirectWriteCellRenderer = struct {
     engine: *TextEngine,
     view: *View,
@@ -1721,6 +1728,7 @@ const DirectWriteCellRenderer = struct {
     search_active: ?usize = null,
     search_offset: u64 = 0,
     row_metadata: Terminal.RowMetadata = .{},
+    vertical_extension: ?PaddingExtensionRun = null,
     draw_error: ?anyerror = null,
 
     pub fn searchState(self: *DirectWriteCellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
@@ -1739,6 +1747,7 @@ const DirectWriteCellRenderer = struct {
     }
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
+        self.vertical_extension = null;
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
         const top = self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height));
         const extend = self.view.padding_color != .background and !self.view.high_contrast;
@@ -1788,32 +1797,29 @@ const DirectWriteCellRenderer = struct {
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, self.frame.?.background);
         const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
-        const extension_foreground = if (search_kind != 0 and self.view.high_contrast)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
-        else if (search_kind == 2)
-            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
-        else if (search_kind == 1)
-            normal_background
-        else if (cell.selected)
-            (if (self.view.copy_flash and !self.view.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
-        else
-            normal_foreground;
-        const extension_background = if (search_kind != 0 and self.view.high_contrast)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
-        else if (search_kind == 2)
-            win.GetSysColor(win.COLOR_HIGHLIGHT)
-        else if (search_kind == 1)
-            normal_foreground
-        else if (cell.selected)
-            (if (self.view.copy_flash and !self.view.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
-        else
-            normal_background;
-        const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
-        const extension_color = if (full_block)
-            (if (cell.faint and !self.view.high_contrast) blendColorRef(extension_foreground, extension_background) else extension_foreground)
-        else
-            extension_background;
-        self.extendBackground(cell, span, extension_color);
+        if (self.view.padding_color != .background and !self.view.high_contrast) {
+            const extension_foreground = if (search_kind == 2)
+                win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+            else if (search_kind == 1)
+                normal_background
+            else if (cell.selected)
+                (if (self.view.copy_flash) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
+            else
+                normal_foreground;
+            const extension_background = if (search_kind == 2)
+                win.GetSysColor(win.COLOR_HIGHLIGHT)
+            else if (search_kind == 1)
+                normal_foreground
+            else if (cell.selected)
+                (if (self.view.copy_flash) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
+            else
+                normal_background;
+            const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
+            self.extendBackground(cell, span, if (full_block)
+                (if (cell.faint) blendColorRef(extension_foreground, extension_background) else extension_foreground)
+            else
+                extension_background);
+        }
         const foreground = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -1875,29 +1881,60 @@ const DirectWriteCellRenderer = struct {
         const top = self.origin_y + @as(i32, cell.y) * cell_height;
         const bottom = top + cell_height;
         if (cell.x == 0 and self.origin_x > self.client.left) self.engine.clearRect(
-            @floatFromInt(self.client.left), @floatFromInt(top), @floatFromInt(self.origin_x), @floatFromInt(bottom), color,
+            @floatFromInt(self.client.left),
+            @floatFromInt(top),
+            @floatFromInt(self.origin_x),
+            @floatFromInt(bottom),
+            color,
         );
         if (@as(u32, cell.x) + span >= self.view.columns) {
             const grid_right = self.origin_x + @as(i32, self.view.columns) * cell_width;
             if (grid_right < self.client.right) self.engine.clearRect(
-                @floatFromInt(grid_right), @floatFromInt(top), @floatFromInt(self.client.right), @floatFromInt(bottom), color,
+                @floatFromInt(grid_right),
+                @floatFromInt(top),
+                @floatFromInt(self.client.right),
+                @floatFromInt(bottom),
+                color,
             );
         }
         const vertical = self.view.padding_color == .extendAlways or
             (!self.row_metadata.semantic_prompt and !self.row_metadata.never_extend_background);
-        if (!vertical) return;
+        if (!vertical or (cell.y != 0 and cell.y + 1 != self.view.rows)) return;
         const strip_left = if (cell.x == 0) self.client.left else left;
         const strip_right = if (@as(u32, cell.x) + span >= self.view.columns) self.client.right else right;
-        if (cell.y == 0 and self.origin_y > self.client.top) self.engine.clearRect(
-            @floatFromInt(strip_left), @floatFromInt(self.client.top), @floatFromInt(strip_right), @floatFromInt(self.origin_y), color,
+        if (self.vertical_extension) |*run| {
+            if (run.color == color and run.right == strip_left) {
+                run.right = strip_right;
+                return;
+            }
+            self.flushVerticalExtension(cell.y);
+        }
+        self.vertical_extension = .{ .left = strip_left, .right = strip_right, .color = color };
+    }
+
+    fn flushVerticalExtension(self: *DirectWriteCellRenderer, y: u16) void {
+        const run = self.vertical_extension orelse return;
+        self.vertical_extension = null;
+        if (run.right <= run.left) return;
+        if (y == 0 and self.origin_y > self.client.top) self.engine.clearRect(
+            @floatFromInt(run.left),
+            @floatFromInt(self.client.top),
+            @floatFromInt(run.right),
+            @floatFromInt(self.origin_y),
+            run.color,
         );
-        const grid_bottom = self.origin_y + @as(i32, self.view.rows) * cell_height;
-        if (cell.y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
-            @floatFromInt(strip_left), @floatFromInt(grid_bottom), @floatFromInt(strip_right), @floatFromInt(self.client.bottom), color,
+        const grid_bottom = self.origin_y + @as(i32, self.view.rows) * @as(i32, @intCast(self.view.cell_height));
+        if (y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
+            @floatFromInt(run.left),
+            @floatFromInt(grid_bottom),
+            @floatFromInt(run.right),
+            @floatFromInt(self.client.bottom),
+            run.color,
         );
     }
 
-    pub fn endRow(self: *DirectWriteCellRenderer, _: u16) void {
+    pub fn endRow(self: *DirectWriteCellRenderer, y: u16) void {
+        self.flushVerticalExtension(y);
         self.engine.endRow() catch |err| {
             if (self.draw_error == null) self.draw_error = err;
         };

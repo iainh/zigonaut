@@ -284,6 +284,9 @@ struct Bridge {
     uint32_t dragged_tab_index = UINT32_MAX;
     bool appearance_initialized = false;
     bool layout_pending = false;
+    uint8_t layout_retry_count = 0;
+    Microsoft::UI::Dispatching::DispatcherQueueTimer layout_retry_timer{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker layout_retry_tick{};
     uint32_t backdrop_kind = ZIGONAUT_BACKDROP_MICA;
     bool high_contrast = false;
     bool dark_theme = false;
@@ -325,6 +328,13 @@ struct Bridge {
         notification_activation->context = context;
         notification_activation->queue = Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
         notification_activation->nonce = nonce_text;
+        layout_retry_timer = notification_activation->queue.CreateTimer();
+        layout_retry_timer.IsRepeating(false);
+        auto const layout_state = layout_dispatch;
+        layout_retry_tick = layout_retry_timer.Tick(auto_revoke, [layout_state](auto&&, auto&&) {
+            if (!layout_state->active.load(std::memory_order_acquire)) return;
+            layout_state->bridge->attemptLayoutTerminal();
+        });
 
         root = Grid{};
         root.KeyboardAcceleratorPlacementMode(Microsoft::UI::Xaml::Input::KeyboardAcceleratorPlacementMode::Hidden);
@@ -1306,6 +1316,8 @@ struct Bridge {
 
     void scheduleLayoutTerminal() {
         if (closed || layout_pending) return;
+        layout_retry_timer.Stop();
+        layout_retry_count = 0;
         layout_pending = true;
         auto const state = layout_dispatch;
         if (!notification_activation->queue.TryEnqueue(Microsoft::UI::Dispatching::DispatcherQueuePriority::Normal, [state] {
@@ -1320,11 +1332,28 @@ struct Bridge {
     }
 
     void layoutTerminal() {
+        layout_retry_timer.Stop();
+        layout_retry_count = 0;
+        attemptLayoutTerminal();
+    }
+
+    void attemptLayoutTerminal() {
         layout_pending = false;
+        auto failed = false;
         for (auto& [_, owned] : pane_hosts) {
             auto& p=*owned; if(!p.window || !IsWindow(p.window) || !p.panel.XamlRoot()) continue;
             auto o=p.panel.TransformToVisual(root).TransformPoint({0,0}); RECT n{(LONG)std::lround(o.X*rasterization_scale),(LONG)std::lround(o.Y*rasterization_scale),(LONG)std::lround((o.X+p.panel.ActualWidth())*rasterization_scale),(LONG)std::lround((o.Y+p.panel.ActualHeight())*rasterization_scale)};
-            if(n.right>n.left&&n.bottom>n.top&&!EqualRect(&n,&p.bounds)&&SetWindowPos(p.window,nullptr,n.left,n.top,n.right-n.left,n.bottom-n.top,SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER)) p.bounds=n;
+            if(n.right>n.left&&n.bottom>n.top&&!EqualRect(&n,&p.bounds)) {
+                if(SetWindowPos(p.window,nullptr,n.left,n.top,n.right-n.left,n.bottom-n.top,SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER)) p.bounds=n;
+                else failed=true;
+            }
+        }
+        if (failed && layout_retry_count < 3 && !closed) {
+            layout_retry_timer.Interval(std::chrono::milliseconds(16 << layout_retry_count));
+            ++layout_retry_count;
+            layout_retry_timer.Start();
+        } else if (!failed) {
+            layout_retry_count = 0;
         }
     }
 
@@ -1774,6 +1803,8 @@ struct Bridge {
         tab_drag_starting_revoker.revoke();
         tab_drag_completed_revoker.revoke();
         layout_revoker.revoke();
+        layout_retry_timer.Stop();
+        layout_retry_tick.revoke();
         terminal_loaded_revoker.revoke();
         xaml_root_changed_revoker.revoke();
         for (auto& revoker : accelerator_revokers) revoker.revoke();
