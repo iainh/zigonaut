@@ -1324,7 +1324,7 @@ struct Bridge {
         for (auto& [_, owned] : pane_hosts) {
             auto& p=*owned; if(!p.window || !IsWindow(p.window) || !p.panel.XamlRoot()) continue;
             auto o=p.panel.TransformToVisual(root).TransformPoint({0,0}); RECT n{(LONG)std::lround(o.X*rasterization_scale),(LONG)std::lround(o.Y*rasterization_scale),(LONG)std::lround((o.X+p.panel.ActualWidth())*rasterization_scale),(LONG)std::lround((o.Y+p.panel.ActualHeight())*rasterization_scale)};
-            if(n.right>n.left&&n.bottom>n.top&&!EqualRect(&n,&p.bounds)){p.bounds=n;SetWindowPos(p.window,nullptr,n.left,n.top,n.right-n.left,n.bottom-n.top,SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER);}
+            if(n.right>n.left&&n.bottom>n.top&&!EqualRect(&n,&p.bounds)&&SetWindowPos(p.window,nullptr,n.left,n.top,n.right-n.left,n.bottom-n.top,SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER)) p.bounds=n;
         }
     }
 
