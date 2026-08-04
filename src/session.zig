@@ -4,13 +4,13 @@ const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const Search = @import("search.zig").State;
 const SearchMatch = @import("search.zig").Match;
-const progress = @import("progress.zig");
 const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
 const pty_write_queue_max_bytes = 8 * 1024 * 1024;
 const synchronized_output_timeout_ms = 1000;
+const notification_max_bytes = 4096;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `destroy` only after no caller can submit input or rendering work.
@@ -36,7 +36,6 @@ pub const SessionRuntime = struct {
     title: std.ArrayList(u8) = .empty,
     title_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     search: Search = .{},
-    progress_parser: progress.Parser = .{},
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: NotificationQueue = .{},
@@ -100,7 +99,7 @@ pub const SessionRuntime = struct {
     };
 
     pub const TaskbarProgress = struct {
-        state: progress.State,
+        state: Terminal.ProgressState,
         value: u8,
         updated_tick: u64,
     };
@@ -245,6 +244,8 @@ pub const SessionRuntime = struct {
         try self.terminal.setTitleChanged(titleChanged, self);
         try self.terminal.setWritePty(writePty, self);
         try self.terminal.setClipboardWrite(clipboardWrite, self);
+        try self.terminal.setDesktopNotification(desktopNotification, self);
+        try self.terminal.setProgressReport(progressReport, self);
 
         self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
             // Keep a terminal-only session so the pane can show the launch error.
@@ -921,7 +922,6 @@ pub const SessionRuntime = struct {
     }
 
     fn processOutputChunkLocked(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
-        self.progress_parser.feedEach(bytes, ProgressHandler{ .runtime = self });
         self.terminal.feed(bytes);
         const synchronized = self.terminal.synchronizedOutput();
         const mode_changed = self.synchronized_output.update(synchronized, now);
@@ -931,35 +931,38 @@ pub const SessionRuntime = struct {
         return !synchronized or mode_changed;
     }
 
-    const ProgressHandler = struct {
-        runtime: *SessionRuntime,
+    /// Ghostty invokes this synchronously from `Terminal.feed`. Keep the same
+    /// bounded queue and ownership policy previously used by the local parser.
+    fn desktopNotification(context: ?*anyopaque, title: []const u8, body: []const u8) void {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
+        const payload_len = std.math.add(usize, title.len, body.len) catch return;
+        if (payload_len > notification_max_bytes or title.len > std.math.maxInt(u16)) return;
+        const payload = self.allocator.alloc(u8, payload_len) catch return;
+        @memcpy(payload[0..title.len], title);
+        @memcpy(payload[title.len..], body);
+        const notification = Notification{ .payload = payload, .title_len = @intCast(title.len) };
+        self.notifications.push(self.allocator, notification) catch notification.deinit(self.allocator);
+        self.refresh.request();
+    }
 
-        pub fn handle(self: ProgressHandler, update: progress.Update) void {
-            const runtime = self.runtime;
-            if (update == .notification) {
-                const event = update.notification;
-                const payload = runtime.allocator.alloc(u8, event.title.len + event.body.len) catch return;
-                @memcpy(payload[0..event.title.len], event.title);
-                @memcpy(payload[event.title.len..], event.body);
-                const notification = Notification{ .payload = payload, .title_len = @intCast(event.title.len) };
-                runtime.notifications.push(runtime.allocator, notification) catch notification.deinit(runtime.allocator);
-                return;
-            }
-            runtime.taskbar_progress = switch (update) {
-                .remove => null,
-                .report => |report| value: {
-                    const previous = if (runtime.taskbar_progress) |current| current.value else 0;
-                    break :value .{
-                        .state = report.state,
-                        .value = progress.resolvedValue(report, previous),
-                        .updated_tick = win.GetTickCount64(),
-                    };
-                },
-                .notification => unreachable,
-            };
-            _ = runtime.progress_generation.fetchAdd(1, .release);
-        }
-    };
+    /// Ghostty invokes this synchronously from `Terminal.feed` after parsing
+    /// OSC 9;4, including sequences split across separate PTY reads.
+    fn progressReport(context: ?*anyopaque, update: Terminal.ProgressUpdate) void {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
+        self.taskbar_progress = switch (update) {
+            .remove => null,
+            .report => |report| value: {
+                const previous = if (self.taskbar_progress) |current| current.value else 0;
+                break :value .{
+                    .state = report.state,
+                    .value = report.value orelse if (report.state == .normal) 0 else previous,
+                    .updated_tick = win.GetTickCount64(),
+                };
+            },
+        };
+        _ = self.progress_generation.fetchAdd(1, .release);
+        self.refresh.request();
+    }
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
     /// already holds `terminal_mutex`. Readers acquire that mutex in `copyTitle`.
@@ -1118,6 +1121,40 @@ test "session defers synchronized chunks and prepares once mode ends" {
     try std.testing.expect(try runtime.prepareRender());
 }
 
+test "session consumes Ghostty progress and notification effects" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+    try runtime.terminal.setProgressReport(SessionRuntime.progressReport, &runtime);
+    try runtime.terminal.setDesktopNotification(SessionRuntime.desktopNotification, &runtime);
+
+    _ = runtime.processOutputChunk("plain\x1b]9;4;", 100);
+    try std.testing.expectEqual(@as(?SessionRuntime.TaskbarProgress, null), runtime.taskbarProgress());
+    _ = runtime.processOutputChunk("1;47\x07\x1b]777;notify;Build;finished successfully\x1b\\", 200);
+    const determinate = runtime.taskbarProgress().?;
+    try std.testing.expectEqual(Terminal.ProgressState.normal, determinate.state);
+    try std.testing.expectEqual(@as(u8, 47), determinate.value);
+
+    const notification = runtime.takeNotification().?;
+    defer runtime.freeNotification(notification);
+    try std.testing.expectEqualStrings("Build", notification.title());
+    try std.testing.expectEqualStrings("finished successfully", notification.body());
+
+    _ = runtime.processOutputChunk("\x1b]9;4;4\x07", 300);
+    const paused = runtime.taskbarProgress().?;
+    try std.testing.expectEqual(Terminal.ProgressState.paused, paused.state);
+    try std.testing.expectEqual(@as(u8, 47), paused.value);
+    _ = runtime.processOutputChunk("\x1b]9;4;1\x07", 400);
+    try std.testing.expectEqual(@as(u8, 0), runtime.taskbarProgress().?.value);
+    _ = runtime.processOutputChunk("\x1b]9;4;0\x07", 500);
+    try std.testing.expectEqual(@as(?SessionRuntime.TaskbarProgress, null), runtime.taskbarProgress());
+}
+
 test "session watchdog and resize release synchronized output" {
     var runtime = SessionRuntime{
         .allocator = std.testing.allocator,
@@ -1204,7 +1241,10 @@ test "session applies clipboard write policy and decoded size limit" {
 fn deinitTestRuntime(runtime: *SessionRuntime) void {
     runtime.clearPtyOperations();
     runtime.pty_operations.deinit(runtime.allocator);
+    runtime.title.deinit(runtime.allocator);
     if (runtime.pending_clipboard_write) |pending| runtime.freePendingClipboardWrite(pending);
+    runtime.notifications.deinit(runtime.allocator);
+    runtime.search.deinit(runtime.allocator);
     runtime.render_snapshot.deinit(runtime.allocator);
     runtime.search_cache.deinit(runtime.allocator);
     runtime.terminal.deinit();

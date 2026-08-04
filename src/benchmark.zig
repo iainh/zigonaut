@@ -4,7 +4,6 @@ const SearchMatch = search.Match;
 const Terminal = @import("terminal.zig").Terminal;
 const theme = @import("theme.zig");
 const directwrite = @import("directwrite_renderer.zig");
-const progress = @import("progress.zig");
 const Pty = @import("pty.zig").Pty;
 const win32 = @import("win32.zig");
 const win = win32.c;
@@ -97,8 +96,6 @@ pub fn main(init: std.process.Init) !void {
     const layout_result = try directwrite.benchmarkLayoutCache(layout_repetitions);
     const layout_cache_ns = timer.lap();
     const dwrite = try directwrite.benchmarkPipeline();
-    const progress_bytewise_ns = benchmarkProgressParser(false);
-    const progress_fast_ns = benchmarkProgressParser(true);
     const search_highlight = try benchmarkSearchHighlight();
 
     std.debug.print(
@@ -108,8 +105,7 @@ pub fn main(init: std.process.Init) !void {
             "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
             "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n" ++
-            "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n" ++
-            "output metadata scan: bytewise {d:.2} ms; skip plain text {d:.2} ms ({d:.2}% faster)\n",
+            "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n",
         .{
             line.len * feed_iterations,
             milliseconds(feed_ns),
@@ -137,9 +133,6 @@ pub fn main(init: std.process.Init) !void {
             layout_result.layout_creations,
             layout_result.hot_reuse_creations,
             layout_result.cache_entries,
-            milliseconds(progress_bytewise_ns),
-            milliseconds(progress_fast_ns),
-            improvement(progress_bytewise_ns, progress_fast_ns),
         },
     );
     std.debug.print(
@@ -218,6 +211,7 @@ pub fn main(init: std.process.Init) !void {
 const ConptyProducerMode = enum { native, legacy };
 const conpty_ready_marker = "~ZIGONAUT-CONPTY-READY~";
 const conpty_done_marker = "~ZIGONAUT-CONPTY-DONE~";
+const conpty_effects = "\x1b]9;4;1;73\x1b\\\x1b]777;notify;ConPTY;semantic effects\x1b\\";
 
 fn benchmarkConpty() !void {
     const total_bytes = 16 * 1024 * 1024;
@@ -258,6 +252,9 @@ fn benchmarkConptyCase(executable: []const u8, mode: ConptyProducerMode, chunk_b
 
     var terminal = try Terminal.init(columns, rows, theme.rasmus);
     defer terminal.deinit();
+    var effects = ConptyEffects{};
+    try terminal.setProgressReport(ConptyEffects.progressReport, &effects);
+    try terminal.setDesktopNotification(ConptyEffects.desktopNotification, &effects);
     var buffer: [16 * 1024]u8 = undefined;
     var ready_matcher = MarkerMatcher{ .marker = conpty_ready_marker };
     while (!ready_matcher.complete()) {
@@ -284,6 +281,9 @@ fn benchmarkConptyCase(executable: []const u8, mode: ConptyProducerMode, chunk_b
         done_matcher.feed(buffer[0..count]);
     }
     const elapsed_ns = timer.read();
+    if (mode == .native and (!effects.progress_received or !effects.notification_received)) {
+        return error.ConptyDroppedSemanticEffects;
+    }
     std.mem.doNotOptimizeAway(try terminal.totalRows());
     std.debug.print(
         "  {s: <6} {d: >3} KiB writes: {d:.2} MiB/s, {d:.2} ms startup, {d} reads ({d:.1} KiB average, {d:.1} KiB max; {d:.2} MiB received)\n",
@@ -299,6 +299,25 @@ fn benchmarkConptyCase(executable: []const u8, mode: ConptyProducerMode, chunk_b
         },
     );
 }
+
+const ConptyEffects = struct {
+    progress_received: bool = false,
+    notification_received: bool = false,
+
+    fn progressReport(context: ?*anyopaque, update: Terminal.ProgressUpdate) void {
+        const self: *ConptyEffects = @ptrCast(@alignCast(context orelse return));
+        const report = switch (update) {
+            .remove => return,
+            .report => |value| value,
+        };
+        self.progress_received = report.state == .normal and report.value == 73;
+    }
+
+    fn desktopNotification(context: ?*anyopaque, title: []const u8, body: []const u8) void {
+        const self: *ConptyEffects = @ptrCast(@alignCast(context orelse return));
+        self.notification_received = std.mem.eql(u8, title, "ConPTY") and std.mem.eql(u8, body, "semantic effects");
+    }
+};
 
 const ConptyWatchdog = struct {
     process: win.HANDLE,
@@ -364,6 +383,7 @@ fn runConptyProducer(mode: ConptyProducerMode, chunk_bytes: usize, total_bytes: 
         }
         remaining -= count;
     }
+    try writeProducerOutput(output, mode, conpty_effects);
     try writeProducerOutput(output, mode, conpty_done_marker);
 }
 
@@ -452,30 +472,6 @@ fn benchmarkSearchHighlight() !struct { per_cell_ns: u64, per_row_ns: u64, curso
     std.mem.doNotOptimizeAway(checksum);
     return .{ .per_cell_ns = per_cell_ns, .per_row_ns = per_row_ns, .cursor_ns = timer.lap() };
 }
-
-fn benchmarkProgressParser(fast: bool) u64 {
-    const iterations = 100_000;
-    var parser = progress.Parser{};
-    var handler = ProgressBenchmarkHandler{};
-    var timer = Timer.start() catch return 0;
-    for (0..iterations) |_| {
-        if (fast) {
-            parser.feedEach(line, &handler);
-        } else {
-            for (line) |byte| if (parser.feedByte(byte)) |update| handler.handle(update);
-        }
-    }
-    std.mem.doNotOptimizeAway(handler.count);
-    return timer.read();
-}
-
-const ProgressBenchmarkHandler = struct {
-    count: usize = 0,
-
-    pub fn handle(self: *ProgressBenchmarkHandler, _: progress.Update) void {
-        self.count += 1;
-    }
-};
 
 const BenchmarkRenderer = struct {
     checksum: u64 = 0,

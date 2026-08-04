@@ -39,6 +39,10 @@ pub const Terminal = struct {
     title_context: ?*anyopaque = null,
     clipboard_write: ?ClipboardWrite = null,
     clipboard_context: ?*anyopaque = null,
+    desktop_notification: ?DesktopNotification = null,
+    desktop_notification_context: ?*anyopaque = null,
+    progress_report: ?ProgressReport = null,
+    progress_report_context: ?*anyopaque = null,
     columns: u16,
     rows: u16,
 
@@ -47,6 +51,21 @@ pub const Terminal = struct {
     pub const ClipboardWrite = *const fn (?*anyopaque, ClipboardWriteOperation) ClipboardWriteResult;
     pub const ClipboardWriteOperation = union(enum) { clear, text: []const u8 };
     pub const ClipboardWriteResult = enum { success, denied, unsupported, busy, invalid_data, io_error };
+    pub const DesktopNotification = *const fn (?*anyopaque, []const u8, []const u8) void;
+    pub const ProgressReport = *const fn (?*anyopaque, ProgressUpdate) void;
+    pub const ProgressUpdate = union(enum) {
+        remove,
+        report: struct {
+            state: ProgressState,
+            value: ?u8,
+        },
+    };
+    pub const ProgressState = enum {
+        normal,
+        error_state,
+        indeterminate,
+        paused,
+    };
 
     pub const Cell = struct {
         pub const Occupancy = enum(u8) {
@@ -1138,6 +1157,20 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(vt.GhosttyTerminalClipboardWriteFn, clipboardWrite)));
     }
 
+    pub fn setDesktopNotification(self: *Terminal, callback: DesktopNotification, context: ?*anyopaque) !void {
+        self.desktop_notification = callback;
+        self.desktop_notification_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(vt.GhosttyTerminalDesktopNotificationFn, desktopNotification)));
+    }
+
+    pub fn setProgressReport(self: *Terminal, callback: ProgressReport, context: ?*anyopaque) !void {
+        self.progress_report = callback;
+        self.progress_report_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, @as(vt.GhosttyTerminalProgressReportFn, progressReport)));
+    }
+
     pub fn pwdAlloc(self: *Terminal, allocator: std.mem.Allocator) !?[]u8 {
         var pwd = std.mem.zeroes(vt.GhosttyString);
         try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_PWD, &pwd));
@@ -1755,6 +1788,41 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
     var title = std.mem.zeroes(vt.GhosttyString);
     if (vt.ghostty_terminal_get(terminal, vt.GHOSTTY_TERMINAL_DATA_TITLE, &title) != vt.GHOSTTY_SUCCESS) return;
     callback(self.title_context, title.ptr[0..title.len]);
+}
+
+fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notification: [*c]const vt.GhosttyTerminalDesktopNotification) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.desktop_notification orelse return;
+    const minimum_size = @offsetOf(vt.GhosttyTerminalDesktopNotification, "body") + @sizeOf(vt.GhosttyString);
+    if (notification == null or notification[0].size < minimum_size) return;
+    const title = notification[0].title;
+    const body = notification[0].body;
+    if ((title.len != 0 and title.ptr == null) or (body.len != 0 and body.ptr == null)) return;
+    callback(
+        self.desktop_notification_context,
+        if (title.len == 0) "" else title.ptr[0..title.len],
+        if (body.len == 0) "" else body.ptr[0..body.len],
+    );
+}
+
+fn progressReport(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const vt.GhosttyTerminalProgressReport) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.progress_report orelse return;
+    const minimum_size = @offsetOf(vt.GhosttyTerminalProgressReport, "progress") + @sizeOf(i8);
+    if (report == null or report[0].size < minimum_size) return;
+    const update: Terminal.ProgressUpdate = switch (report[0].state) {
+        vt.GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE => .remove,
+        vt.GHOSTTY_TERMINAL_PROGRESS_STATE_SET => .{ .report = .{ .state = .normal, .value = progressValue(report[0].progress) } },
+        vt.GHOSTTY_TERMINAL_PROGRESS_STATE_ERROR => .{ .report = .{ .state = .error_state, .value = progressValue(report[0].progress) } },
+        vt.GHOSTTY_TERMINAL_PROGRESS_STATE_INDETERMINATE => .{ .report = .{ .state = .indeterminate, .value = null } },
+        vt.GHOSTTY_TERMINAL_PROGRESS_STATE_PAUSE => .{ .report = .{ .state = .paused, .value = progressValue(report[0].progress) } },
+        else => return,
+    };
+    callback(self.progress_report_context, update);
+}
+
+fn progressValue(value: i8) ?u8 {
+    return if (value < 0) null else @intCast(@min(value, 100));
 }
 
 fn clipboardWrite(_: vt.GhosttyTerminal, userdata: ?*anyopaque, write: [*c]const vt.GhosttyClipboardWrite) callconv(.c) vt.GhosttyClipboardWriteResult {

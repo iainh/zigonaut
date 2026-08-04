@@ -411,6 +411,11 @@ fn windowStarted(context: ?*anyopaque, native_bridge: ?*anyopaque, hwnd: win.HWN
 fn initializeWindowImpl(self: *Application) !void {
     const hwnd = self.hwnd orelse return error.WindowUnavailable;
     self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
+    // WinUI activates the window before its Loaded callback invokes us, so the
+    // initial TaskbarButtonCreated message may already have been delivered.
+    // Keep handling the message for Explorer restarts, but the initial button
+    // is ready by the time this callback runs.
+    self.taskbar_ready = true;
     const dpi = win.GetDpiForWindow(hwnd);
     const font = createFontFor(self.settings, dpi);
     if (font == null) return error.CreateFontFailed;
