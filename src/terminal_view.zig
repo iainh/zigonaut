@@ -335,6 +335,8 @@ pub const View = struct {
         dpi: u32,
         padding_horizontal: u16,
         padding_vertical: u16,
+        padding_balance: config.PaddingBalance,
+        padding_color: config.PaddingColor,
         background_opacity: u8,
         titles_changed_message: win.UINT,
         shell_exited_message: win.UINT,
@@ -359,6 +361,8 @@ pub const View = struct {
             .cell_height = cell_size.height,
             .padding_horizontal = padding_horizontal,
             .padding_vertical = padding_vertical,
+            .balance_padding = padding_balance == .equal,
+            .padding_color = padding_color,
             .background_opacity = background_opacity,
             .titles_changed_message = titles_changed_message,
             .shell_exited_message = shell_exited_message,
@@ -833,12 +837,20 @@ pub const View = struct {
         self.invalidate();
     }
 
-    pub fn updatePadding(self: *View, horizontal: u16, vertical: u16) void {
+    pub fn updatePadding(self: *View, horizontal: u16, vertical: u16, balance: config.PaddingBalance, color: config.PaddingColor) void {
+        const size_changed = self.padding_horizontal != horizontal or self.padding_vertical != vertical;
+        const appearance_changed = self.balance_padding != (balance == .equal) or self.padding_color != color;
+        if (!size_changed and !appearance_changed) return;
         self.padding_horizontal = horizontal;
         self.padding_vertical = vertical;
-        self.columns = 0;
-        self.rows = 0;
-        self.resizeSessions();
+        self.balance_padding = balance == .equal;
+        self.padding_color = color;
+        self.full_rebuild_required.store(true, .release);
+        if (size_changed) {
+            self.columns = 0;
+            self.rows = 0;
+            self.resizeSessions();
+        }
         self.invalidate();
     }
 

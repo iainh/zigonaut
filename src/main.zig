@@ -193,7 +193,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -1539,7 +1539,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     if (changed.theme) self.themes = theme.Catalog.load(std.heap.page_allocator, self.io);
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
-    for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical);
+    for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);
     self.updateTheme(changed.theme);
     if (new_font != null) _ = win.DeleteObject(old_font);
     for (self.views.items) |entry| entry.view.invalidate();

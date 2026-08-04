@@ -138,6 +138,8 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["color_scheme"] = to_string(themes.GetNamedString(L"colorScheme"));
     values["padding_horizontal"] = number(padding.GetNamedNumber(L"horizontal"));
     values["padding_vertical"] = number(padding.GetNamedNumber(L"vertical"));
+    values["padding_balance"] = to_string(padding.GetNamedString(L"balance", L"none"));
+    values["padding_color"] = to_string(padding.GetNamedString(L"color", L"background"));
     values["background_opacity"] = number(background.GetNamedNumber(L"opacity"));
     values["backdrop"] = to_string(background.GetNamedString(L"backdrop"));
     values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
@@ -602,7 +604,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 
     ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, text_antialiasing{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
-    ComboBox color_scheme{nullptr}, backdrop{nullptr};
+    ComboBox color_scheme{nullptr}, backdrop{nullptr}, padding_balance{nullptr}, padding_color{nullptr};
     ToggleSwitch random_background{nullptr};
     std::vector<TextBox> colors;
     std::vector<ThemeChoice> themes;
@@ -822,9 +824,16 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         initial_rows = numberBox(value(values, "initial_rows", "24"), 24, 4, 1000);
         padding_horizontal = numberBox(value(values, "padding_horizontal", "8"), 8, 0, 128);
         padding_vertical = numberBox(value(values, "padding_vertical", "8"), 8, 0, 128);
+        padding_balance = combo("", {L"Top left", L"Centered"});
+        padding_balance.SelectedIndex(value(values, "padding_balance", "none") == "equal" ? 1 : 0);
+        padding_color = combo("", {L"Terminal background", L"Extend edge colors", L"Always extend edge colors"});
+        auto const padding_color_value = value(values, "padding_color", "background");
+        padding_color.SelectedIndex(padding_color_value == "extend" ? 1 : padding_color_value == "extendAlways" ? 2 : 0);
         auto padding = StackPanel{}; padding.Spacing(8);
         appendLabeled(padding, L"Horizontal (pixels)", padding_horizontal);
         appendLabeled(padding, L"Vertical (pixels)", padding_vertical);
+        appendLabeled(padding, L"Terminal alignment", padding_balance);
+        appendLabeled(padding, L"Padding color", padding_color);
         auto initial_size = StackPanel{}; initial_size.Spacing(8);
         appendLabeled(initial_size, L"Columns", initial_columns);
         appendLabeled(initial_size, L"Rows", initial_rows);
@@ -884,7 +893,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         return page(L"Terminal", L"Configure terminal history, dimensions, spacing, and optional palette overrides.", {
             card(L"Scrollback size", L"Maximum number of history lines kept for new terminal sessions.", scrollback_size),
             card(L"Initial window size", L"Terminal columns and rows used when opening a new window.", initial_size, true),
-            card(L"Padding", L"Space between terminal cells and the pane edge.", padding, true),
+            card(L"Padding", L"Position the terminal grid and optionally continue application edge colors to the pane boundary.", padding, true),
             card(L"Palette overrides", L"Leave a field empty to use the selected theme. Colors use #RRGGBB.", palette_expander, true),
         });
     }
@@ -1313,6 +1322,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         JsonObject padding;
         padding.Insert(L"horizontal", number(horizontal_padding_value));
         padding.Insert(L"vertical", number(vertical_padding_value));
+        padding.Insert(L"balance", text(padding_balance.SelectedIndex() == 1 ? "equal" : "none"));
+        padding.Insert(L"color", text(padding_color.SelectedIndex() == 1 ? "extend" : padding_color.SelectedIndex() == 2 ? "extendAlways" : "background"));
         appearance.Insert(L"padding", padding);
         JsonObject terminal_background;
         terminal_background.Insert(L"opacity", number(opacity_value));
@@ -1410,6 +1421,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         dark_theme.SelectionChanged(selection_changed);
         light_theme.SelectionChanged(selection_changed);
         text_antialiasing.SelectionChanged(selection_changed);
+        padding_balance.SelectionChanged(selection_changed);
+        padding_color.SelectionChanged(selection_changed);
         font_family.SelectionChanged([this](auto const&, auto const&) {
             auto const family = unbox_value<hstring>(font_family.SelectedItem());
             updating_font_weights = true;

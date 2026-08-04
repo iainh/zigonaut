@@ -8,7 +8,7 @@ pub const default_contents =
     \\  "appearance": {
     \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
-    \\    "padding": { "horizontal": 8, "vertical": 8 },
+    \\    "padding": { "horizontal": 8, "vertical": 8, "balance": "none", "color": "background" },
     \\    "background": { "opacity": 100, "backdrop": "mica" },
     \\    "palette": {},
     \\    "randomizeTabBackground": true
@@ -99,6 +99,8 @@ const JsonConfig = struct {
         padding: struct {
             horizontal: u16,
             vertical: u16,
+            balance: PaddingBalance = .none,
+            color: PaddingColor = .background,
         },
         background: struct {
             opacity: u8,
@@ -148,6 +150,8 @@ pub const Config = struct {
     color_scheme: ColorScheme = .system,
     padding_horizontal: u16 = 8,
     padding_vertical: u16 = 8,
+    padding_balance: PaddingBalance = .none,
+    padding_color: PaddingColor = .background,
     background_opacity: u8 = 100,
     backdrop: Backdrop = .mica,
     palette: theme.Overrides = .{},
@@ -325,6 +329,8 @@ fn configFromJson(json: JsonConfig) !Config {
     result.color_scheme = json.appearance.themes.colorScheme;
     result.padding_horizontal = json.appearance.padding.horizontal;
     result.padding_vertical = json.appearance.padding.vertical;
+    result.padding_balance = json.appearance.padding.balance;
+    result.padding_color = json.appearance.padding.color;
     result.background_opacity = json.appearance.background.opacity;
     result.backdrop = json.appearance.background.backdrop;
     result.randomize_tab_background = json.appearance.randomizeTabBackground;
@@ -379,7 +385,7 @@ test "configuration parses structured JSON" {
         \\  "appearance": {
         \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold" },
         \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
-        \\    "padding": { "horizontal": 12, "vertical": 4 },
+        \\    "padding": { "horizontal": 12, "vertical": 4, "balance": "equal", "color": "extend" },
         \\    "background": { "opacity": 82, "backdrop": "acrylic" },
         \\    "palette": { "ansi": ["#000000", null, null, null, null, null, null, null, null, null, null, null, null, null, null, "#abcdef"] },
         \\    "randomizeTabBackground": false
@@ -409,6 +415,8 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqual(@as(u16, 40), value.initial_rows);
     try std.testing.expectEqual(ColorScheme.light, value.color_scheme);
     try std.testing.expectEqual(Backdrop.acrylic, value.backdrop);
+    try std.testing.expectEqual(PaddingBalance.equal, value.padding_balance);
+    try std.testing.expectEqual(PaddingColor.extend, value.padding_color);
     try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, value.palette.ansi[15].?);
     try std.testing.expectEqualStrings("Dev Shell", value.defaultProfile().name);
     try std.testing.expectEqual(@as(usize, 2), value.profile_count);
@@ -459,6 +467,22 @@ test "font weights default for existing configurations" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(FontWeight.regular, value.font_weight);
     try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
+}
+
+test "padding appearance defaults for existing configurations" {
+    const legacy_contents = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        default_contents,
+        ", \"balance\": \"none\", \"color\": \"background\"",
+        "",
+    );
+    defer std.testing.allocator.free(legacy_contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(PaddingBalance.none, value.padding_balance);
+    try std.testing.expectEqual(PaddingColor.background, value.padding_color);
 }
 
 test "first-run configuration prefers installed PowerShell 7" {
