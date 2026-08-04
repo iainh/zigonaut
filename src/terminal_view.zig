@@ -6,6 +6,7 @@ const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
 const GdiRenderer = @import("gdi_renderer.zig");
+const config = @import("config.zig");
 const input = @import("input.zig");
 const search = @import("search.zig");
 const shell_quote = @import("shell_quote.zig");
@@ -293,6 +294,7 @@ pub const View = struct {
     padding_horizontal: u16,
     padding_vertical: u16,
     balance_padding: bool = false,
+    padding_color: config.PaddingColor = .background,
     background_opacity: u8,
     ime_preedit: std.ArrayList(u16) = .empty,
     ime_selection_start: u32 = 0,
@@ -959,8 +961,11 @@ pub const View = struct {
             .runtime = if (session) |active| active.runtime else null,
             .cell_width = self.cell_width,
             .cell_height = self.cell_height,
+            .columns = self.columns,
+            .rows = self.rows,
             .focused = self.focused,
             .high_contrast = self.high_contrast,
+            .padding_color = self.padding_color,
             .origin_x = geometry.left,
             .origin_y = geometry.top,
             .hover_row = if (self.hovered_link) |hovered| hovered.link.row else null,
@@ -1703,6 +1708,7 @@ const DirectWriteCellRenderer = struct {
     search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
+    row_metadata: Terminal.RowMetadata = .{},
     draw_error: ?anyerror = null,
 
     pub fn searchState(self: *DirectWriteCellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
@@ -1716,14 +1722,34 @@ const DirectWriteCellRenderer = struct {
         self.search_cursor = .init(self.search_matches, self.search_offset);
     }
 
+    pub fn rowMetadata(self: *DirectWriteCellRenderer, _: u16, metadata: Terminal.RowMetadata) void {
+        self.row_metadata = metadata;
+    }
+
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
         const top = self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height));
+        const extend = self.view.padding_color != .background and !self.view.high_contrast;
         self.engine.clearRect(
-            @floatFromInt(self.origin_x),
+            @floatFromInt(if (extend) self.client.left else self.origin_x),
             @floatFromInt(top),
-            @floatFromInt(self.origin_x + @as(i32, self.view.columns) * @as(i32, @intCast(self.view.cell_width))),
+            @floatFromInt(if (extend) self.client.right else self.origin_x + @as(i32, self.view.columns) * @as(i32, @intCast(self.view.cell_width))),
             @floatFromInt(top + @as(i32, @intCast(self.view.cell_height))),
+            self.background,
+        );
+        if (extend and y == 0 and self.origin_y > self.client.top) self.engine.clearRect(
+            @floatFromInt(self.client.left),
+            @floatFromInt(self.client.top),
+            @floatFromInt(self.client.right),
+            @floatFromInt(self.origin_y),
+            self.background,
+        );
+        const grid_bottom = self.origin_y + @as(i32, self.view.rows) * @as(i32, @intCast(self.view.cell_height));
+        if (extend and y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
+            @floatFromInt(self.client.left),
+            @floatFromInt(grid_bottom),
+            @floatFromInt(self.client.right),
+            @floatFromInt(self.client.bottom),
             self.background,
         );
         self.engine.beginRow(
@@ -1750,6 +1776,32 @@ const DirectWriteCellRenderer = struct {
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, self.frame.?.background);
         const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
+        const extension_foreground = if (search_kind != 0 and self.view.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 2)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 1)
+            normal_background
+        else if (cell.selected)
+            (if (self.view.copy_flash and !self.view.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
+        else
+            normal_foreground;
+        const extension_background = if (search_kind != 0 and self.view.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 2)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 1)
+            normal_foreground
+        else if (cell.selected)
+            (if (self.view.copy_flash and !self.view.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
+        else
+            normal_background;
+        const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
+        const extension_color = if (full_block)
+            (if (cell.faint and !self.view.high_contrast) blendColorRef(extension_foreground, extension_background) else extension_foreground)
+        else
+            extension_background;
+        self.extendBackground(cell, span, extension_color);
         const foreground = if (search_kind != 0 and self.view.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -1800,6 +1852,37 @@ const DirectWriteCellRenderer = struct {
         ) catch |err| {
             self.draw_error = err;
         };
+    }
+
+    fn extendBackground(self: *DirectWriteCellRenderer, cell: Terminal.Cell, span: u32, color: u32) void {
+        if (self.view.padding_color == .background or self.view.high_contrast) return;
+        const cell_width: i32 = @intCast(self.view.cell_width);
+        const cell_height: i32 = @intCast(self.view.cell_height);
+        const left = self.origin_x + @as(i32, cell.x) * cell_width;
+        const right = left + @as(i32, @intCast(span)) * cell_width;
+        const top = self.origin_y + @as(i32, cell.y) * cell_height;
+        const bottom = top + cell_height;
+        if (cell.x == 0 and self.origin_x > self.client.left) self.engine.clearRect(
+            @floatFromInt(self.client.left), @floatFromInt(top), @floatFromInt(self.origin_x), @floatFromInt(bottom), color,
+        );
+        if (@as(u32, cell.x) + span >= self.view.columns) {
+            const grid_right = self.origin_x + @as(i32, self.view.columns) * cell_width;
+            if (grid_right < self.client.right) self.engine.clearRect(
+                @floatFromInt(grid_right), @floatFromInt(top), @floatFromInt(self.client.right), @floatFromInt(bottom), color,
+            );
+        }
+        const vertical = self.view.padding_color == .extendAlways or
+            (!self.row_metadata.semantic_prompt and !self.row_metadata.never_extend_background);
+        if (!vertical) return;
+        const strip_left = if (cell.x == 0) self.client.left else left;
+        const strip_right = if (@as(u32, cell.x) + span >= self.view.columns) self.client.right else right;
+        if (cell.y == 0 and self.origin_y > self.client.top) self.engine.clearRect(
+            @floatFromInt(strip_left), @floatFromInt(self.client.top), @floatFromInt(strip_right), @floatFromInt(self.origin_y), color,
+        );
+        const grid_bottom = self.origin_y + @as(i32, self.view.rows) * cell_height;
+        if (cell.y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
+            @floatFromInt(strip_left), @floatFromInt(grid_bottom), @floatFromInt(strip_right), @floatFromInt(self.client.bottom), color,
+        );
     }
 
     pub fn endRow(self: *DirectWriteCellRenderer, _: u16) void {

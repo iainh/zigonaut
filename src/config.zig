@@ -57,6 +57,8 @@ const default_profiles = [3]Profile{
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };
+pub const PaddingBalance = enum { none, equal };
+pub const PaddingColor = enum { background, extend, extendAlways };
 pub const TextAntialiasing = enum { acceleratedGrayscale, nativeClearType };
 pub const FontWeight = enum(u16) {
     thin = 100,

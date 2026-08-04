@@ -89,6 +89,14 @@ pub const Terminal = struct {
         overline: bool,
         underline: u8,
         selected: bool,
+        background_is_default: bool = false,
+        background_matches_default: bool = false,
+        powerline: bool = false,
+    };
+
+    pub const RowMetadata = struct {
+        semantic_prompt: bool = false,
+        never_extend_background: bool = false,
     };
 
     pub const Point = struct {
@@ -189,6 +197,7 @@ pub const Terminal = struct {
         const Row = struct {
             graphemes: std.ArrayList(u32) = .empty,
             dirty: bool = false,
+            metadata: RowMetadata = .{},
         };
 
         const OwnedCell = struct {
@@ -197,6 +206,12 @@ pub const Terminal = struct {
             background: theme.Color,
             underline_color: theme.Color,
             codepoint_count: u8,
+            extension_flags: packed struct(u8) {
+                background_is_default: bool,
+                background_matches_default: bool,
+                powerline: bool,
+                reserved: u5 = 0,
+            },
             attributes: packed struct(u16) {
                 occupancy: u2,
                 bold: bool,
@@ -215,6 +230,11 @@ pub const Terminal = struct {
                     .background = cell.background,
                     .underline_color = cell.underline_color,
                     .codepoint_count = @intCast(@min(cell.codepoints.len, 16)),
+                    .extension_flags = .{
+                        .background_is_default = cell.background_is_default,
+                        .background_matches_default = cell.background_matches_default,
+                        .powerline = cell.powerline,
+                    },
                     .attributes = .{
                         .occupancy = @intCast(@intFromEnum(cell.occupancy)),
                         .bold = cell.bold,
@@ -248,6 +268,9 @@ pub const Terminal = struct {
                     .overline = self.attributes.overline,
                     .underline = self.attributes.underline,
                     .selected = self.attributes.selected,
+                    .background_is_default = self.extension_flags.background_is_default,
+                    .background_matches_default = self.extension_flags.background_matches_default,
+                    .powerline = self.extension_flags.powerline,
                 };
             }
         };
@@ -265,6 +288,11 @@ pub const Terminal = struct {
             pub fn beginRow(self: *Recorder, y: u16) void {
                 self.snapshot.rows.items[y].dirty = true;
                 self.snapshot.rows.items[y].graphemes.clearRetainingCapacity();
+                self.snapshot.rows.items[y].metadata.never_extend_background = false;
+            }
+
+            pub fn rowMetadata(self: *Recorder, y: u16, metadata: RowMetadata) void {
+                self.snapshot.rows.items[y].metadata = metadata;
             }
 
             pub fn drawCell(self: *Recorder, cell: Cell) !void {
@@ -274,6 +302,8 @@ pub const Terminal = struct {
                 try row.graphemes.appendSlice(self.allocator, cell.codepoints[0..count]);
                 const index = @as(usize, cell.y) * self.snapshot.columns() + cell.x;
                 self.snapshot.cells.items[index] = .init(cell, offset);
+                row.metadata.never_extend_background = row.metadata.never_extend_background or
+                    cell.background_is_default or cell.background_matches_default or cell.powerline;
             }
 
             pub fn endRow(_: *Recorder, _: u16) void {}
@@ -469,6 +499,8 @@ pub const Terminal = struct {
             const column_count = self.columns();
             for (self.rows.items, 0..) |*row, y| {
                 if (dirty_only and !row.dirty) continue;
+                if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata"))
+                    renderer.rowMetadata(@intCast(y), row.metadata);
                 renderer.beginRow(@intCast(y));
                 for (self.cells.items[y * column_count ..][0..column_count], 0..) |*cell, x| {
                     renderer.drawCell(cell.value(row, @intCast(x), @intCast(y)));
@@ -1267,6 +1299,18 @@ pub const Terminal = struct {
                 vt.GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
                 &selection,
             ) == vt.GHOSTTY_SUCCESS;
+            var raw_row: vt.GhosttyRow = 0;
+            var semantic: vt.GhosttyRowSemanticPrompt = vt.GHOSTTY_ROW_SEMANTIC_NONE;
+            if (vt.ghostty_render_state_row_get(
+                self.row_iterator,
+                vt.GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+                @ptrCast(&raw_row),
+            ) == vt.GHOSTTY_SUCCESS and raw_row != 0)
+                _ = vt.ghostty_row_get(raw_row, vt.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &semantic);
+            if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata")) renderer.rowMetadata(y, .{
+                .semantic_prompt = semantic == vt.GHOSTTY_ROW_SEMANTIC_PROMPT or
+                    semantic == vt.GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION,
+            });
             renderer.beginRow(y);
             defer renderer.endRow(y);
             var x: u16 = 0;
@@ -1291,11 +1335,14 @@ pub const Terminal = struct {
                 if (style.bold and style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_PALETTE and style.fg_color.value.palette < 8) {
                     foreground = colors.palette[style.fg_color.value.palette + 8];
                 }
-                if (vt.ghostty_render_state_row_cells_get(
+                const has_background = vt.ghostty_render_state_row_cells_get(
                     self.row_cells,
                     vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
                     &background,
-                ) != vt.GHOSTTY_SUCCESS) background = colors.background;
+                ) == vt.GHOSTTY_SUCCESS;
+                if (!has_background) background = colors.background;
+                const background_is_default = !has_background;
+                const background_matches_default = has_background and std.meta.eql(fromGhostty(background), fromGhostty(colors.background));
                 if (style.inverse) std.mem.swap(vt.GhosttyColorRgb, &foreground, &background);
                 var underline_color = foreground;
                 switch (style.underline_color.tag) {
@@ -1336,6 +1383,9 @@ pub const Terminal = struct {
                     .overline = style.overline,
                     .underline = @intCast(@max(style.underline, 0)),
                     .selected = has_selection and x >= selection.start_x and x <= selection.end_x,
+                    .background_is_default = background_is_default,
+                    .background_matches_default = background_matches_default,
+                    .powerline = codepoint_count <= codepoints.len and count != 0 and isPowerline(codepoints[0]),
                 });
                 if (comptime @TypeOf(draw_result) != void) try draw_result;
             }
@@ -1892,6 +1942,13 @@ fn fromGhostty(color: vt.GhosttyColorRgb) theme.Color {
     return .{ .red = color.r, .green = color.g, .blue = color.b };
 }
 
+fn isPowerline(codepoint: u32) bool {
+    return codepoint >= 0xe0b0 and codepoint <= 0xe0c8 or
+        codepoint == 0xe0ca or
+        codepoint >= 0xe0cc and codepoint <= 0xe0d2 or
+        codepoint == 0xe0d4;
+}
+
 fn check(result: vt.GhosttyResult) !void {
     if (result != vt.GHOSTTY_SUCCESS) return error.LibGhosttyFailure;
 }
@@ -2237,6 +2294,29 @@ test "render state resolves ANSI colors through the Rasmus theme" {
 
     try std.testing.expectEqual(theme.rasmus.background, renderer.frame.?.background);
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
+}
+
+test "render snapshot retains padding extension safety facts" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expect(snapshot.rows.items[0].metadata.never_extend_background);
+
+    terminal.feed("\x1b[41m\x1b[2K");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expect(!snapshot.rows.items[0].metadata.never_extend_background);
+}
+
+test "Powerline glyph ranges are recognized for padding extension" {
+    try std.testing.expect(isPowerline(0xe0b0));
+    try std.testing.expect(isPowerline(0xe0c8));
+    try std.testing.expect(isPowerline(0xe0ca));
+    try std.testing.expect(isPowerline(0xe0d4));
+    try std.testing.expect(!isPowerline(0xe0c9));
+    try std.testing.expect(!isPowerline('A'));
 }
 
 test "background erase after soft wrap remains reflow content" {

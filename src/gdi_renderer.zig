@@ -3,6 +3,7 @@ const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = @import("terminal.zig").Terminal;
 const search = @import("search.zig");
 const theme = @import("theme.zig");
+const config = @import("config.zig");
 const SearchMatch = search.Match;
 const win = @import("win32.zig").c;
 
@@ -15,8 +16,11 @@ pub const Context = struct {
     runtime: ?*SessionRuntime,
     cell_width: u32,
     cell_height: u32,
+    columns: u16,
+    rows: u16,
     focused: bool,
     high_contrast: bool,
+    padding_color: config.PaddingColor,
     origin_x: i32,
     origin_y: i32,
     hover_row: ?u16 = null,
@@ -97,6 +101,7 @@ const CellRenderer = struct {
     search_cursor: search.RowCursor = .{ .matches = &.{} },
     search_active: ?usize = null,
     search_offset: u64 = 0,
+    row_metadata: Terminal.RowMetadata = .{},
 
     pub fn searchState(self: *CellRenderer, _: bool, _: []const u8, matches: []const SearchMatch, active: ?usize, offset: u64, _: bool) void {
         self.search_matches = matches;
@@ -110,6 +115,9 @@ const CellRenderer = struct {
         if (!self.context.high_contrast) fill(self.dc, self.client, translucentColorRef(frame.background, self.context.background_opacity, self.context.dark_theme));
         _ = win.SelectObject(self.dc, self.context.font);
         _ = win.SetBkMode(self.dc, win.OPAQUE);
+    }
+    pub fn rowMetadata(self: *CellRenderer, _: u16, metadata: Terminal.RowMetadata) void {
+        self.row_metadata = metadata;
     }
     pub fn beginRow(self: *CellRenderer, y: u16) void {
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
@@ -134,6 +142,31 @@ const CellRenderer = struct {
         else
             colorRef(cell.background);
         const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
+        const extension_foreground = if (search_kind != 0 and self.context.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 2)
+            win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
+        else if (search_kind == 1)
+            normal_background
+        else if (cell.selected)
+            (if (self.context.copy_flash and !self.context.high_contrast) normal_background else win.GetSysColor(win.COLOR_HIGHLIGHTTEXT))
+        else
+            normal_foreground;
+        const extension_background = if (search_kind != 0 and self.context.high_contrast)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 2)
+            win.GetSysColor(win.COLOR_HIGHLIGHT)
+        else if (search_kind == 1)
+            normal_foreground
+        else if (cell.selected)
+            (if (self.context.copy_flash and !self.context.high_contrast) normal_foreground else win.GetSysColor(win.COLOR_HIGHLIGHT))
+        else
+            normal_background;
+        const full_block = search_kind == 0 and !cell.selected and cell.codepoints.len == 1 and cell.codepoints[0] == 0x2588;
+        self.extendBackground(cell, span, if (full_block)
+            (if (cell.faint and !self.context.high_contrast) blendColorRef(extension_foreground, extension_background) else extension_foreground)
+        else
+            extension_background);
         const foreground = if (search_kind != 0 and self.context.high_contrast)
             win.GetSysColor(win.COLOR_HIGHLIGHTTEXT)
         else if (search_kind == 2)
@@ -176,6 +209,31 @@ const CellRenderer = struct {
             fill(self.dc, .{ .left = rect.left, .top = middle, .right = rect.right, .bottom = middle + 1 }, text_foreground);
         }
         if (cell.overline) fill(self.dc, .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.top + 1 }, text_foreground);
+    }
+
+    fn extendBackground(self: *CellRenderer, cell: Terminal.Cell, span: i32, color: win.COLORREF) void {
+        if (self.context.padding_color == .background or self.context.high_contrast) return;
+        const cell_width: i32 = @intCast(self.context.cell_width);
+        const cell_height: i32 = @intCast(self.context.cell_height);
+        const left = self.context.origin_x + @as(i32, cell.x) * cell_width;
+        const right = left + span * cell_width;
+        const top = self.context.origin_y + @as(i32, cell.y) * cell_height;
+        const bottom = top + cell_height;
+        if (cell.x == 0) fill(self.dc, .{ .left = self.client.left, .top = top, .right = self.context.origin_x, .bottom = bottom }, color);
+        if (@as(i32, cell.x) + span >= self.context.columns) {
+            const grid_right = self.context.origin_x + @as(i32, self.context.columns) * cell_width;
+            fill(self.dc, .{ .left = grid_right, .top = top, .right = self.client.right, .bottom = bottom }, color);
+        }
+        const vertical = self.context.padding_color == .extendAlways or
+            (!self.row_metadata.semantic_prompt and !self.row_metadata.never_extend_background);
+        if (!vertical) return;
+        const strip_left = if (cell.x == 0) self.client.left else left;
+        const strip_right = if (@as(i32, cell.x) + span >= self.context.columns) self.client.right else right;
+        if (cell.y == 0) fill(self.dc, .{ .left = strip_left, .top = self.client.top, .right = strip_right, .bottom = self.context.origin_y }, color);
+        if (cell.y + 1 == self.context.rows) {
+            const grid_bottom = self.context.origin_y + @as(i32, self.context.rows) * cell_height;
+            fill(self.dc, .{ .left = strip_left, .top = grid_bottom, .right = strip_right, .bottom = self.client.bottom }, color);
+        }
     }
 
     pub fn endFrame(self: *CellRenderer, frame: Terminal.Frame) void {
