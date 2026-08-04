@@ -186,7 +186,10 @@ fn accessibilitySnapshot(view: *View, query: *win.zigonaut_accessibility_snapsho
     if (query.size != @sizeOf(win.zigonaut_accessibility_snapshot) or (query.text == null and query.text_capacity != 0) or (query.runs == null and query.run_capacity != 0)) return false;
     const session = view.boundSession() orelse return false;
     const runtime = session.runtime orelse return false;
-    var origin = win.POINT{ .x = scaled(@intCast(view.padding_horizontal), win.GetDpiForWindow(view.hwnd)), .y = scaled(@intCast(view.padding_vertical), win.GetDpiForWindow(view.hwnd)) };
+    var client: win.RECT = undefined;
+    if (win.GetClientRect(view.hwnd, &client) == 0) return false;
+    const geometry = view.gridGeometry(client);
+    var origin = win.POINT{ .x = geometry.left, .y = geometry.top };
     _ = win.ClientToScreen(view.hwnd, &origin);
     query.grid_left = origin.x; query.grid_top = origin.y;
     query.cell_width = view.cell_width; query.cell_height = view.cell_height;
@@ -289,6 +292,7 @@ pub const View = struct {
     copy_flash: bool = false,
     padding_horizontal: u16,
     padding_vertical: u16,
+    balance_padding: bool = false,
     background_opacity: u8,
     ime_preedit: std.ArrayList(u16) = .empty,
     ime_selection_start: u32 = 0,
@@ -612,16 +616,15 @@ pub const View = struct {
         if (self.hwnd == null or self.ime_target_search == null) return null;
         var client: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &client) == 0 or client.right <= client.left or client.bottom <= client.top) return null;
-        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
-        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
+        const geometry = self.gridGeometry(client);
         const targets_search = self.ime_target_search.?;
-        const caret_x = if (self.ime_caret_x != 0) self.ime_caret_x else padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
+        const caret_x = if (self.ime_caret_x != 0) self.ime_caret_x else geometry.left + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
         const caret_y = if (self.ime_caret_y != 0)
             self.ime_caret_y
         else if (targets_search)
-            @max(client.top, client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)))
+            @max(client.top, geometry.gridBottom() - 2 * @as(i32, @intCast(self.cell_height)))
         else
-            padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
+            geometry.top + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
         var caret_origin = win.POINT{ .x = std.math.clamp(caret_x, client.left, client.right - 1), .y = std.math.clamp(caret_y, client.top, client.bottom - 1) };
         var pane_origin = win.POINT{ .x = client.left, .y = client.top };
         var pane_end = win.POINT{ .x = client.right, .y = client.bottom };
@@ -837,6 +840,21 @@ pub const View = struct {
         self.invalidate();
     }
 
+    fn gridGeometry(self: *const View, client: win.RECT) GridGeometry {
+        const dpi = win.GetDpiForWindow(self.hwnd);
+        return calculateGridGeometry(
+            @max(client.right - client.left, 0),
+            @max(client.bottom - client.top, 0),
+            self.columns,
+            self.rows,
+            self.cell_width,
+            self.cell_height,
+            @max(scaled(@intCast(self.padding_horizontal), dpi), 0),
+            @max(scaled(@intCast(self.padding_vertical), dpi), 0),
+            self.balance_padding,
+        );
+    }
+
     fn resizeSessions(self: *View) void {
         var client: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &client) == 0) return;
@@ -930,8 +948,7 @@ pub const View = struct {
         if (!self.prepareBoundRender()) return;
         notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
 
-        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
-        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
+        const geometry = self.gridGeometry(client);
         const session = self.boundSession();
         self.gdi_renderer.present(dc, client, .{
             .font = self.font,
@@ -944,19 +961,19 @@ pub const View = struct {
             .cell_height = self.cell_height,
             .focused = self.focused,
             .high_contrast = self.high_contrast,
-            .origin_x = padding_x,
-            .origin_y = padding_y,
+            .origin_x = geometry.left,
+            .origin_y = geometry.top,
             .hover_row = if (self.hovered_link) |hovered| hovered.link.row else null,
             .hover_start = if (self.hovered_link) |hovered| hovered.link.start_column else 0,
             .hover_end = if (self.hovered_link) |hovered| hovered.link.end_column else 0,
             .copy_flash = self.copy_flash,
         });
         if (self.ime_preedit.items.len != 0) {
-            const left = padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
+            const left = geometry.left + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width));
             const top = if (self.ime_target_search orelse false)
-                client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height))
+                geometry.gridBottom() - 2 * @as(i32, @intCast(self.cell_height))
             else
-                padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
+                geometry.top + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
             const rect = win.RECT{ .left = left, .top = top, .right = client.right, .bottom = top + @as(i32, @intCast(self.cell_height)) };
             _ = win.SelectObject(dc, self.font);
             _ = win.SetTextColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.model.terminal_theme.foreground));
@@ -1011,15 +1028,14 @@ pub const View = struct {
         errdefer engine.abortFrame();
         full_rebuild = full_rebuild or native_rebuilt;
 
-        const padding_x = scaled(@intCast(self.padding_horizontal), win.GetDpiForWindow(self.hwnd));
-        const padding_y = scaled(@intCast(self.padding_vertical), win.GetDpiForWindow(self.hwnd));
+        const geometry = self.gridGeometry(client);
         if (self.boundSession()) |session| {
             var renderer = DirectWriteCellRenderer{
                 .engine = engine,
                 .view = self,
                 .client = client,
-                .origin_x = padding_x,
-                .origin_y = padding_y,
+                .origin_x = geometry.left,
+                .origin_y = geometry.top,
                 .background = background,
             };
             if (full_rebuild)
@@ -1028,8 +1044,8 @@ pub const View = struct {
                 session.runtime.?.replayPreparedViewportDirty(&renderer);
             if (renderer.draw_error) |err| return err;
             if (self.ime_preedit.items.len != 0) {
-                const left: f32 = @floatFromInt(padding_x + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
-                const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) client.bottom - padding_y - 2 * @as(i32, @intCast(self.cell_height)) else padding_y + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));
+                const left: f32 = @floatFromInt(geometry.left + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
+                const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) geometry.gridBottom() - 2 * @as(i32, @intCast(self.cell_height)) else geometry.top + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));
                 self.ime_caret_x = @intFromFloat(engine.drawPreedit(self.ime_preedit.items, self.ime_selection_start + self.ime_selection_length, left, top, @floatFromInt(@max(client.right - @as(i32, @intFromFloat(left)), 1)), @floatFromInt(self.cell_height), foreground, background) orelse left);
                 self.ime_caret_y = @intFromFloat(top);
             }
@@ -1037,7 +1053,7 @@ pub const View = struct {
             try drawDirectWriteMessage(
                 engine,
                 "Open a PowerShell or WSL session.",
-                paddedRect(client, padding_x, padding_y),
+                .{ .left = geometry.left, .top = geometry.top, .right = geometry.gridRight(), .bottom = geometry.gridBottom() },
                 foreground,
                 background,
             );
@@ -1382,22 +1398,18 @@ pub const View = struct {
     fn mouseGeometry(self: *View) ?Terminal.MouseGeometry {
         var rect: win.RECT = undefined;
         if (win.GetClientRect(self.hwnd, &rect) == 0) return null;
-        const dpi = win.GetDpiForWindow(self.hwnd);
-        const px: u32 = @intCast(@max(scaled(@intCast(self.padding_horizontal), dpi), 0));
-        const py: u32 = @intCast(@max(scaled(@intCast(self.padding_vertical), dpi), 0));
+        const geometry = self.gridGeometry(rect);
         const width: u32 = @intCast(@max(rect.right - rect.left, 1));
         const height: u32 = @intCast(@max(rect.bottom - rect.top, 1));
-        const grid_width = @as(u32, self.columns) * self.cell_width;
-        const grid_height = @as(u32, self.rows) * self.cell_height;
         return .{
             .screen_width = width,
             .screen_height = height,
             .cell_width = self.cell_width,
             .cell_height = self.cell_height,
-            .padding_top = py,
-            .padding_bottom = height -| py -| grid_height,
-            .padding_left = px,
-            .padding_right = width -| px -| grid_width,
+            .padding_top = @intCast(geometry.top),
+            .padding_bottom = @intCast(geometry.bottom),
+            .padding_left = @intCast(geometry.left),
+            .padding_right = @intCast(geometry.right),
         };
     }
 
@@ -1450,13 +1462,15 @@ pub const View = struct {
         if (active.runtime != self.selection.?.runtime) return self.abandonSelection();
         var cursor: win.POINT = undefined;
         if (win.GetCursorPos(&cursor) == 0 or win.ScreenToClient(self.hwnd, &cursor) == 0) return;
-        const dpi = win.GetDpiForWindow(self.hwnd);
-        const top = scaled(@intCast(self.padding_vertical), dpi);
+        var client: win.RECT = undefined;
+        if (win.GetClientRect(self.hwnd, &client) == 0) return;
+        const geometry = self.gridGeometry(client);
+        const top = geometry.top;
         const bottom = top + @as(i32, self.rows) * @as(i32, @intCast(self.cell_height));
         const distance = if (cursor.y < top) cursor.y - top else if (cursor.y >= bottom) cursor.y - bottom + 1 else return;
         const rows_per_tick: isize = @intCast(@min(@divTrunc(@abs(distance), self.cell_height) + 1, 8));
         self.scrollViewport(if (distance < 0) -rows_per_tick else rows_per_tick);
-        const point = self.pixelPoint(cursor.x - scaled(@intCast(self.padding_horizontal), dpi), cursor.y - top);
+        const point = self.pixelPoint(cursor.x - geometry.left, cursor.y - top);
         if (self.selection) |*selection| {
             selection.runtime.setDerivedSelection(point, selection.unit, selection.unit == .cell and win.GetKeyState(win.VK_MENU) < 0) catch return self.abandonSelection();
             selection.focus = point;
@@ -1492,9 +1506,11 @@ pub const View = struct {
 
     fn mousePoint(self: *View, lparam: win.LPARAM, clamp_to_grid: bool) ?Terminal.Point {
         if (self.columns == 0 or self.rows == 0) return null;
-        const dpi = win.GetDpiForWindow(self.hwnd);
-        var x = mouseCoordinate(lparam, 0) - scaled(@intCast(self.padding_horizontal), dpi);
-        var y = mouseCoordinate(lparam, 16) - scaled(@intCast(self.padding_vertical), dpi);
+        var client: win.RECT = undefined;
+        if (win.GetClientRect(self.hwnd, &client) == 0) return null;
+        const geometry = self.gridGeometry(client);
+        var x = mouseCoordinate(lparam, 0) - geometry.left;
+        var y = mouseCoordinate(lparam, 16) - geometry.top;
         const width = @as(i32, self.columns) * @as(i32, @intCast(self.cell_width));
         const height = @as(i32, self.rows) * @as(i32, @intCast(self.cell_height));
         if (!clamp_to_grid and (x < 0 or y < 0 or x >= width or y >= height)) return null;
@@ -2044,6 +2060,50 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
 
 const CellSize = struct { width: u32, height: u32 };
 
+const GridGeometry = struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    grid_width: i32,
+    grid_height: i32,
+
+    fn gridRight(self: GridGeometry) i32 {
+        return self.left + self.grid_width;
+    }
+
+    fn gridBottom(self: GridGeometry) i32 {
+        return self.top + self.grid_height;
+    }
+};
+
+fn calculateGridGeometry(
+    screen_width: i32,
+    screen_height: i32,
+    columns: u16,
+    rows: u16,
+    cell_width: u32,
+    cell_height: u32,
+    padding_x: i32,
+    padding_y: i32,
+    balanced: bool,
+) GridGeometry {
+    const grid_width = @as(i32, columns) * @as(i32, @intCast(cell_width));
+    const grid_height = @as(i32, rows) * @as(i32, @intCast(cell_height));
+    const remaining_x = @max(screen_width - grid_width, 0);
+    const remaining_y = @max(screen_height - grid_height, 0);
+    const left = if (balanced) @divTrunc(remaining_x, 2) else @min(padding_x, remaining_x);
+    const top = if (balanced) @divTrunc(remaining_y, 2) else @min(padding_y, remaining_y);
+    return .{
+        .left = left,
+        .top = top,
+        .right = remaining_x - left,
+        .bottom = remaining_y - top,
+        .grid_width = grid_width,
+        .grid_height = grid_height,
+    };
+}
+
 fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
     const dc = win.GetDC(hwnd);
     if (dc == null) return .{ .width = 9, .height = 18 };
@@ -2256,4 +2316,30 @@ test "protocol wheel accumulation keeps partial deltas" {
     try std.testing.expectEqual(WheelAccumulation{ .steps = 0, .remainder = 80 }, wheelAccumulation(40, 40));
     try std.testing.expectEqual(WheelAccumulation{ .steps = 1, .remainder = 0 }, wheelAccumulation(80, 40));
     try std.testing.expectEqual(WheelAccumulation{ .steps = -1, .remainder = -20 }, wheelAccumulation(0, -140));
+}
+
+test "balanced grid geometry divides residual space equally" {
+    const geometry = calculateGridGeometry(823, 517, 80, 24, 10, 20, 8, 8, true);
+    try std.testing.expectEqual(@as(i32, 11), geometry.left);
+    try std.testing.expectEqual(@as(i32, 12), geometry.right);
+    try std.testing.expectEqual(@as(i32, 18), geometry.top);
+    try std.testing.expectEqual(@as(i32, 19), geometry.bottom);
+    try std.testing.expectEqual(@as(i32, 823), geometry.left + geometry.grid_width + geometry.right);
+    try std.testing.expectEqual(@as(i32, 517), geometry.top + geometry.grid_height + geometry.bottom);
+}
+
+test "unbalanced geometry preserves configured top and left padding" {
+    const geometry = calculateGridGeometry(823, 517, 80, 24, 10, 20, 8, 8, false);
+    try std.testing.expectEqual(@as(i32, 8), geometry.left);
+    try std.testing.expectEqual(@as(i32, 15), geometry.right);
+    try std.testing.expectEqual(@as(i32, 8), geometry.top);
+    try std.testing.expectEqual(@as(i32, 29), geometry.bottom);
+}
+
+test "grid geometry clips an oversized mandatory cell without negative padding" {
+    const geometry = calculateGridGeometry(5, 7, 1, 1, 10, 20, 8, 8, true);
+    try std.testing.expectEqual(@as(i32, 0), geometry.left);
+    try std.testing.expectEqual(@as(i32, 0), geometry.right);
+    try std.testing.expectEqual(@as(i32, 0), geometry.top);
+    try std.testing.expectEqual(@as(i32, 0), geometry.bottom);
 }
