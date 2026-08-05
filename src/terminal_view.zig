@@ -626,7 +626,7 @@ pub const View = struct {
         runtime.searchSet(utf8) catch return;
         self.setRefreshInterval(search_refresh_interval_ms);
         self.notifySearchStatus();
-        self.invalidate();
+        if (utf8.len == 0) self.invalidate();
     }
 
     pub fn cancelSearch(self: *View) void {

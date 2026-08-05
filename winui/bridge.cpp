@@ -235,6 +235,7 @@ struct Bridge {
     Button find_previous{nullptr};
     Button find_next{nullptr};
     Button find_close{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer find_query_timer{nullptr};
     uint64_t find_pane{};
     bool updating_find = false;
     TabView tabs{nullptr};
@@ -280,6 +281,7 @@ struct Bridge {
     Button::Click_revoker find_previous_revoker{};
     Button::Click_revoker find_next_revoker{};
     Button::Click_revoker find_close_revoker{};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker find_query_tick{};
     bool handlers_detached = false;
     bool updating = false;
     uint32_t dragged_tab_index = UINT32_MAX;
@@ -357,7 +359,7 @@ struct Bridge {
         find_border.HorizontalAlignment(HorizontalAlignment::Right);
         find_border.VerticalAlignment(VerticalAlignment::Top);
         find_border.Margin(Thickness{0});
-        find_border.Padding(Thickness{8});
+        find_border.Padding(Thickness{8, 8, 8, 8});
         // This is an edge-attached command surface, not a floating card. Fluent
         // leaves corners square where a surface meets the window edge and uses
         // the large radius only on the exposed corner.
@@ -377,7 +379,7 @@ struct Bridge {
         find_text_column.Width(GridLength{240, GridUnitType::Pixel});
         find_layout.ColumnDefinitions().Append(find_text_column);
         auto find_status_column = ColumnDefinition{};
-        find_status_column.Width(GridLength{1, GridUnitType::Auto});
+        find_status_column.Width(GridLength{104, GridUnitType::Pixel});
         find_layout.ColumnDefinitions().Append(find_status_column);
         for (auto index = 0; index < 3; ++index) {
             auto column = ColumnDefinition{};
@@ -395,7 +397,6 @@ struct Bridge {
 
         find_status = TextBlock{};
         find_status.Text(L"0 matches");
-        find_status.MinWidth(72);
         find_status.VerticalAlignment(VerticalAlignment::Center);
         find_status.TextAlignment(TextAlignment::Center);
         Grid::SetColumn(find_status, 1);
@@ -421,10 +422,18 @@ struct Bridge {
         find_next.IsEnabled(false);
         find_border.Child(find_layout);
 
-        find_text_changed_revoker = find_box.TextChanged(auto_revoke, [this](auto&&, auto&&) {
-            if (updating_find || !find_pane) return;
+        find_query_timer = notification_activation->queue.CreateTimer();
+        find_query_timer.Interval(std::chrono::milliseconds(50));
+        find_query_timer.IsRepeating(false);
+        find_query_tick = find_query_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
+            if (!find_pane || find_border.Visibility() != Visibility::Visible) return;
             auto const text = find_box.Text();
             imeEvent(ZIGONAUT_PANE_EVENT_FIND_QUERY, find_pane, std::wstring_view{text.c_str(), text.size()});
+        });
+        find_text_changed_revoker = find_box.TextChanged(auto_revoke, [this](auto&&, auto&&) {
+            if (updating_find || !find_pane) return;
+            find_query_timer.Stop();
+            find_query_timer.Start();
         });
         find_key_down_revoker = find_box.KeyDown(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& args) {
             auto const control = GetKeyState(VK_CONTROL) < 0;
@@ -1285,6 +1294,7 @@ struct Bridge {
             return;
         }
         if (find_pane) closeFind(true);
+        find_query_timer.Stop();
         find_pane = pane_id;
         updating_find = true;
         find_box.Text(L"");
@@ -1301,13 +1311,14 @@ struct Bridge {
     void closeFind(bool notify_cancel) {
         if (!find_pane) return;
         auto const pane_id = find_pane;
+        find_query_timer.Stop();
         find_pane = 0;
         find_border.Visibility(Visibility::Collapsed);
         if (notify_cancel) paneEvent(ZIGONAUT_PANE_EVENT_FIND_CLOSE, pane_id, 0);
         focusTerminal();
     }
 
-    void updateFind(uint64_t pane_id, uint32_t match_count, int32_t active_match, bool scanning) {
+    void updateFind(uint64_t pane_id, uint32_t match_count, int32_t active_match, bool) {
         if (!pane_id || pane_id != find_pane) return;
         std::wstring status;
         if (active_match >= 0 && static_cast<uint32_t>(active_match) < match_count) {
@@ -1315,7 +1326,6 @@ struct Bridge {
         } else {
             status = std::to_wstring(match_count) + (match_count == 1 ? L" match" : L" matches");
         }
-        if (scanning) status += L"…";
         find_status.Text(status);
         find_previous.IsEnabled(match_count != 0);
         find_next.IsEnabled(match_count != 0);
@@ -1817,6 +1827,8 @@ struct Bridge {
         find_previous_revoker.revoke();
         find_next_revoker.revoke();
         find_close_revoker.revoke();
+        find_query_timer.Stop();
+        find_query_tick.revoke();
         new_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
@@ -1874,6 +1886,7 @@ struct Bridge {
         find_previous = nullptr;
         find_next = nullptr;
         find_close = nullptr;
+        find_query_timer = nullptr;
         app_title_bar = nullptr;
         bottom_border = nullptr;
         menu_button = nullptr;
