@@ -637,7 +637,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     Window::Closed_revoker closed_revoker{};
     NavigationView::SelectionChanged_revoker navigation_revoker{};
 
-    Dialog(std::string_view config_path, std::string_view contents, std::wstring_view version, std::wstring_view hash,
+    Dialog(HWND owner, std::string_view config_path, std::string_view contents, std::wstring_view version, std::wstring_view hash,
            bool high_contrast, bool dark_theme, std::function<void()> on_saved)
         : path(to_hstring(config_path).c_str()), app_version(version), git_hash(hash),
           saved(std::move(on_saved)), themes(loadThemes()) {
@@ -646,6 +646,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         window.Title(L"Zigonaut Settings");
         HWND settings_window{};
         check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&settings_window));
+        SetWindowLongPtrW(settings_window, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
         auto const app_icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
         if (app_icon) {
             SendMessageW(settings_window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(app_icon));
@@ -1466,10 +1467,10 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 };
 
-std::shared_ptr<Dialog> show(std::string_view path, std::string_view contents, std::wstring_view version,
+std::shared_ptr<Dialog> show(HWND owner, std::string_view path, std::string_view contents, std::wstring_view version,
                              std::wstring_view git_hash, bool high_contrast, bool dark_theme,
                              std::function<void()> saved) {
-    auto result = std::make_shared<Dialog>(path, contents, version, git_hash, high_contrast, dark_theme, std::move(saved));
+    auto result = std::make_shared<Dialog>(owner, path, contents, version, git_hash, high_contrast, dark_theme, std::move(saved));
     result->window.Activate();
     return result;
 }

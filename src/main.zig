@@ -987,6 +987,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
 
 fn confirmCloseTabs(hwnd: win.HWND, tab_count: usize) bool {
     if (tab_count <= 1) return true;
+    const dialog_owner = win.GetLastActivePopup(hwnd);
     var text_bytes: [192]u8 = undefined;
     const text = std.fmt.bufPrint(
         &text_bytes,
@@ -997,7 +998,7 @@ fn confirmCloseTabs(hwnd: win.HWND, tab_count: usize) bool {
     const length = std.unicode.utf8ToUtf16Le(&wide, text) catch return false;
     wide[length] = 0;
     return win.MessageBoxW(
-        hwnd,
+        dialog_owner,
         &wide,
         std.unicode.utf8ToUtf16LeStringLiteral("Close multiple tabs?"),
         win.MB_OKCANCEL | win.MB_ICONWARNING | win.MB_DEFBUTTON2,

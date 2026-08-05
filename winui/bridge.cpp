@@ -648,6 +648,7 @@ struct Bridge {
             saveWindowPlacement(parent);
             notify(ZIGONAUT_CHROME_SHUTDOWN, 0);
             close();
+            Application::Current().Exit();
         });
         window_activated_revoker = window.Activated(auto_revoke, [this](auto&&, WindowActivatedEventArgs const& args) {
             auto const active = pane_hosts.find(active_pane);
@@ -1786,7 +1787,7 @@ struct Bridge {
             ZigonautSettings::activate(settings_dialog);
             return;
         }
-        settings_dialog = ZigonautSettings::show(path, contents, app_version, git_hash, high_contrast, dark_theme, [this] {
+        settings_dialog = ZigonautSettings::show(parent, path, contents, app_version, git_hash, high_contrast, dark_theme, [this] {
             notify(ZIGONAUT_CHROME_RELOAD_SETTINGS, 0);
         });
     }

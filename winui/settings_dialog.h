@@ -10,6 +10,7 @@ namespace ZigonautSettings {
 struct Dialog;
 
 std::shared_ptr<Dialog> show(
+    HWND owner,
     std::string_view config_path,
     std::string_view contents,
     std::wstring_view version,
