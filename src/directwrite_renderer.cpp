@@ -352,8 +352,17 @@ struct ZigonautTextEngine {
     std::vector<GlyphInstance> glyph_instances;
     ID3D11VertexShader* glyph_vs = nullptr;
     ID3D11PixelShader* glyph_ps = nullptr;
-    ID3D11Buffer* glyph_buffer = nullptr;
-    ID3D11ShaderResourceView* glyph_buffer_view = nullptr;
+    struct GlyphBufferSlot {
+        ID3D11Buffer* buffer = nullptr;
+        ID3D11ShaderResourceView* view = nullptr;
+        UINT capacity = 0;
+    } glyph_slots[3];
+    uint32_t glyph_slot_next = 0;
+    bool benchmark_immutable_instances = false;
+    uint64_t glyph_slot_uses = 0;
+    uint64_t glyph_slot_wraps = 0;
+    uint64_t glyph_buffer_creations = 0;
+    uint64_t glyph_capacity_growths = 0;
     ID3D11ShaderResourceView* atlas_view = nullptr;
     ID3D11RenderTargetView* scene_rtv = nullptr;
     ID3D11SamplerState* glyph_sampler = nullptr;
@@ -472,6 +481,9 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
 
     HRESULT flushGlyphInstances() {
         if (glyph_instances.empty()) return glyph_frame_failure;
+        if (glyph_instances.size() > UINT_MAX / sizeof(GlyphInstance)) {
+            glyph_instances.clear(); glyph_frame_failure = E_OUTOFMEMORY; return glyph_frame_failure;
+        }
         const UINT submitted=static_cast<UINT>(glyph_instances.size());
         HRESULT hr=endAtlasDraw();
         if (FAILED(hr) || FAILED(initializeGlyphPipeline())) { glyph_instances.clear();
@@ -479,17 +491,50 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         hr=target->EndDraw();
         if (FAILED(hr)) { glyph_instances.clear(); if (SUCCEEDED(glyph_frame_failure)) glyph_frame_failure=hr; return hr; }
         target->SetTarget(nullptr);
-        release(glyph_buffer_view); release(glyph_buffer);
         if (test_fault == TestFault::instance_upload) hr = E_FAIL;
-        D3D11_BUFFER_DESC b{}; b.ByteWidth=static_cast<UINT>(glyph_instances.size()*sizeof(GlyphInstance));
-        b.Usage=D3D11_USAGE_IMMUTABLE; b.BindFlags=D3D11_BIND_SHADER_RESOURCE; b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        b.StructureByteStride=sizeof(GlyphInstance); D3D11_SUBRESOURCE_DATA data{glyph_instances.data(),0,0};
-        if (SUCCEEDED(hr)) hr=d3d_device->CreateBuffer(&b,&data,&glyph_buffer);
-        if (SUCCEEDED(hr)) { D3D11_SHADER_RESOURCE_VIEW_DESC sv{}; sv.Format=DXGI_FORMAT_UNKNOWN;
-            sv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER; sv.Buffer.NumElements=static_cast<UINT>(glyph_instances.size());
-            hr=d3d_device->CreateShaderResourceView(glyph_buffer,&sv,&glyph_buffer_view); }
+        ID3D11Buffer* upload_buffer = nullptr;
+        ID3D11ShaderResourceView* upload_view = nullptr;
+        GlyphBufferSlot* slot = nullptr;
+        if (SUCCEEDED(hr) && benchmark_immutable_instances) {
+            D3D11_BUFFER_DESC b{}; b.ByteWidth=submitted*sizeof(GlyphInstance);
+            b.Usage=D3D11_USAGE_IMMUTABLE; b.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; b.StructureByteStride=sizeof(GlyphInstance);
+            D3D11_SUBRESOURCE_DATA data{glyph_instances.data(),0,0};
+            hr=d3d_device->CreateBuffer(&b,&data,&upload_buffer);
+            if (SUCCEEDED(hr)) { D3D11_SHADER_RESOURCE_VIEW_DESC sv{}; sv.Format=DXGI_FORMAT_UNKNOWN;
+                sv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER; sv.Buffer.NumElements=submitted;
+                hr=d3d_device->CreateShaderResourceView(upload_buffer,&sv,&upload_view); }
+        } else if (SUCCEEDED(hr)) {
+            const uint32_t index = glyph_slot_next;
+            glyph_slot_next = (glyph_slot_next + 1) % 3;
+            ++glyph_slot_uses; if (glyph_slot_next == 0) ++glyph_slot_wraps;
+            slot = &glyph_slots[index];
+            if (slot->capacity < submitted) {
+                UINT capacity = slot->capacity ? slot->capacity : 256;
+                while (capacity < submitted) {
+                    if (capacity > UINT_MAX / 2) { capacity = submitted; break; }
+                    capacity *= 2;
+                }
+                if (capacity < submitted || capacity > UINT_MAX / sizeof(GlyphInstance)) hr=E_OUTOFMEMORY;
+                ID3D11Buffer* replacement = nullptr; ID3D11ShaderResourceView* replacement_view = nullptr;
+                D3D11_BUFFER_DESC b{}; b.ByteWidth=capacity*sizeof(GlyphInstance); b.Usage=D3D11_USAGE_DYNAMIC;
+                b.BindFlags=D3D11_BIND_SHADER_RESOURCE; b.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+                b.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; b.StructureByteStride=sizeof(GlyphInstance);
+                if (SUCCEEDED(hr)) hr=d3d_device->CreateBuffer(&b,nullptr,&replacement);
+                if (SUCCEEDED(hr)) { D3D11_SHADER_RESOURCE_VIEW_DESC sv{}; sv.Format=DXGI_FORMAT_UNKNOWN;
+                    sv.ViewDimension=D3D11_SRV_DIMENSION_BUFFER; sv.Buffer.NumElements=capacity;
+                    hr=d3d_device->CreateShaderResourceView(replacement,&sv,&replacement_view); }
+                if (SUCCEEDED(hr)) { release(slot->view); release(slot->buffer); slot->buffer=replacement;
+                    slot->view=replacement_view; slot->capacity=capacity; ++glyph_buffer_creations; ++glyph_capacity_growths;
+                } else { release(replacement_view); release(replacement); }
+            }
+            if (SUCCEEDED(hr)) { D3D11_MAPPED_SUBRESOURCE mapped{};
+                hr=d3d_context->Map(slot->buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
+                if (SUCCEEDED(hr)) { memcpy(mapped.pData,glyph_instances.data(),submitted*sizeof(GlyphInstance));
+                    d3d_context->Unmap(slot->buffer,0); upload_view=slot->view; } }
+        }
         if (SUCCEEDED(hr) && !scene_rtv) hr=d3d_device->CreateRenderTargetView(scene_texture,nullptr,&scene_rtv);
-        if (SUCCEEDED(hr)) { ID3D11ShaderResourceView* views[2]={atlas_view,glyph_buffer_view};
+        if (SUCCEEDED(hr)) { ID3D11ShaderResourceView* views[2]={atlas_view,upload_view};
             d3d_context->OMSetRenderTargets(1,&scene_rtv,nullptr); float factor[4]={};
             D3D11_VIEWPORT viewport{0,0,static_cast<float>(scene_width),static_cast<float>(scene_height),0,1};
             d3d_context->RSSetViewports(1,&viewport);
@@ -500,6 +545,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             if (benchmark_active) { ++benchmark.atlas_sprite_batches; benchmark.atlas_sprites += submitted; }
             ID3D11ShaderResourceView* nulls[2]={}; d3d_context->VSSetShaderResources(1,1,&nulls[0]); d3d_context->PSSetShaderResources(0,1,&nulls[0]);
             d3d_context->OMSetRenderTargets(0,nullptr,nullptr); d3d_context->ClearState(); }
+        if (benchmark_immutable_instances) { release(upload_view); release(upload_buffer); }
         glyph_instances.clear(); target->SetTarget(scene_bitmap); target->BeginDraw();
         if (FAILED(hr)) { markFullDamage(frame_damage); if (SUCCEEDED(glyph_frame_failure)) glyph_frame_failure=hr; }
         return hr;
@@ -1667,7 +1713,8 @@ ZigonautTextEngine::~ZigonautTextEngine() {
     delete grid_renderer;
     invalidateAtlas();
     discardTargetBitmap();
-    release(glyph_buffer_view); release(glyph_buffer); release(glyph_sampler);
+    for (auto& slot : glyph_slots) { release(slot.view); release(slot.buffer); }
+    release(glyph_sampler);
     release(glyph_blend); release(glyph_ps); release(glyph_vs);
     release(brush);
     release(target);
@@ -2269,7 +2316,27 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     if (SUCCEEDED(hr)) fragmentedFrames(true,3,&ignored);
     if (SUCCEEDED(hr)) fragmentedFrames(false,3,&ignored);
     if (SUCCEEDED(hr)) fragmentedFrames(true,frame_iterations,&engine->benchmark.legacy_fragmented_frame_nanoseconds);
-    if (SUCCEEDED(hr)) fragmentedFrames(false,frame_iterations,&engine->benchmark.instanced_fragmented_frame_nanoseconds);
+    const uint64_t slot_uses=engine->glyph_slot_uses;
+    const uint64_t slot_wraps=engine->glyph_slot_wraps;
+    const uint64_t buffer_creations=engine->glyph_buffer_creations;
+    const uint64_t capacity_growths=engine->glyph_capacity_growths;
+    // Alternate order so transient machine load and queued GPU work affect both
+    // upload strategies evenly within this same-invocation comparison.
+    for (uint32_t iteration=0; iteration<frame_iterations && SUCCEEDED(hr); ++iteration) {
+        for (uint32_t pass=0; pass<2 && SUCCEEDED(hr); ++pass) {
+            const bool immutable=((iteration+pass)&1)==0;
+            engine->benchmark_immutable_instances=immutable;
+            uint64_t elapsed=0; fragmentedFrames(false,1,&elapsed);
+            if (immutable) engine->benchmark.immutable_instance_frame_nanoseconds+=elapsed;
+            else engine->benchmark.dynamic_instance_frame_nanoseconds+=elapsed;
+        }
+    }
+    engine->benchmark_immutable_instances=false;
+    engine->benchmark.instanced_fragmented_frame_nanoseconds=engine->benchmark.dynamic_instance_frame_nanoseconds;
+    engine->benchmark.glyph_slot_uses=engine->glyph_slot_uses-slot_uses;
+    engine->benchmark.glyph_slot_wraps=engine->glyph_slot_wraps-slot_wraps;
+    engine->benchmark.glyph_buffer_creations=engine->glyph_buffer_creations-buffer_creations;
+    engine->benchmark.glyph_capacity_growths=engine->glyph_capacity_growths-capacity_growths;
     engine->benchmark_legacy_sprite_batch=false;
     engine->benchmark.atlas_warm_frame_nanoseconds=engine->benchmark.instanced_fragmented_frame_nanoseconds/frame_iterations;
     engine->benchmark.fragmented_frame_iterations=frame_iterations;

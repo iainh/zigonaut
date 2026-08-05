@@ -336,6 +336,10 @@ test "fragmented rows reuse plans across absolute columns" {
     // Dirty rows are coalesced into one D3D11 DrawInstanced submission.
     try std.testing.expect(result.atlas_sprite_batches >= 1);
     try std.testing.expect(result.uniform_native_glyph_submissions >= result.uniform_row_iterations);
+    try std.testing.expect(result.glyph_slot_uses > 3);
+    try std.testing.expect(result.glyph_slot_wraps > 0);
+    try std.testing.expect(result.glyph_buffer_creations <= 3);
+    try std.testing.expectEqual(result.glyph_buffer_creations, result.glyph_capacity_growths);
 }
 
 fn sum(values: []const f32) f32 {

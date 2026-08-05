@@ -62,6 +62,12 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t atlas_warm_frame_nanoseconds;
     uint64_t legacy_fragmented_frame_nanoseconds;
     uint64_t instanced_fragmented_frame_nanoseconds;
+    uint64_t immutable_instance_frame_nanoseconds;
+    uint64_t dynamic_instance_frame_nanoseconds;
+    uint64_t glyph_slot_uses;
+    uint64_t glyph_slot_wraps;
+    uint64_t glyph_buffer_creations;
+    uint64_t glyph_capacity_growths;
     uint64_t atlas_cold_frame_nanoseconds;
     uint64_t atlas_cold_rasterizations, atlas_cold_uploads;
     uint32_t warm_row_iterations;

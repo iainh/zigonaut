@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
         try snapshot.capture(std.heap.page_allocator, &terminal);
     }
     const one_row_capture_ns = timer.lap();
-    for (0..render_iterations) |_| snapshot.replay(&renderer);
+    for (0..render_iterations) |_| snapshot.replayDirty(&renderer);
     const replay_ns = timer.lap();
 
     var matches = std.ArrayList(SearchMatch).empty;
@@ -199,6 +199,14 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "  glyph submission A/B CPU submission (same invocation, 3 warm frames excluded, {d} measured; same 40 warm fragmented rows; includes full flush + EndDraw, excludes Present/GPU wait): legacy Direct2D SpriteBatch {d:.2} us/frame; D3D11 instancing {d:.2} us/frame; {d:.2}% change\n",
         .{ dwrite.fragmented_frame_iterations, perIterationUs(dwrite.legacy_fragmented_frame_nanoseconds, dwrite.fragmented_frame_iterations), perIterationUs(dwrite.instanced_fragmented_frame_nanoseconds, dwrite.fragmented_frame_iterations), improvement(dwrite.legacy_fragmented_frame_nanoseconds, dwrite.instanced_fragmented_frame_nanoseconds) },
+    );
+    std.debug.print(
+        "  instance upload A/B (same invocation, 40 warm fragmented rows): immutable buffer/SRV {d:.2} us/frame; triple dynamic WRITE_DISCARD {d:.2} us/frame; {d:.2}% change (uses={d}, wraps={d}, creations={d}, growths={d})\n",
+        .{ perIterationUs(dwrite.immutable_instance_frame_nanoseconds, dwrite.fragmented_frame_iterations), perIterationUs(dwrite.dynamic_instance_frame_nanoseconds, dwrite.fragmented_frame_iterations), improvement(dwrite.immutable_instance_frame_nanoseconds, dwrite.dynamic_instance_frame_nanoseconds), dwrite.glyph_slot_uses, dwrite.glyph_slot_wraps, dwrite.glyph_buffer_creations, dwrite.glyph_capacity_growths },
+    );
+    std.debug.print(
+        "  estimated snapshot-stage UI component cost (one-row update): synchronous capture + dirty replay {d:.2} us/frame; dirty replay after callback preparation {d:.2} us/frame; {d:.2}% change (excludes wait/message handoff)\n",
+        .{ @as(f64, @floatFromInt(one_row_capture_ns + replay_ns)) / @as(f64, render_iterations) / 1_000.0, @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0, improvement(one_row_capture_ns + replay_ns, replay_ns) },
     );
     std.debug.print(
         "  scroll A/B CPU submission (same invocation, {d} warm iterations excluded, {d} measured; includes draw + final transfer, excludes Present/GPU wait): full 40-row fragmented redraw {d:.2} us/frame; scratch shift + exposed fragmented row {d:.2} us/frame; {d:.2}% change\n",

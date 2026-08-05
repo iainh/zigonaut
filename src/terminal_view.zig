@@ -53,10 +53,40 @@ const ContextMenuCommand = enum(u32) {
     close_pane,
 };
 
-fn frameWaitCallback(context: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
-    const view: *View = @ptrCast(@alignCast(context orelse return));
-    const epoch = view.frame_epoch.load(.acquire);
-    _ = win.PostMessageW(view.hwnd, render_message, epoch, 0);
+const FrameWaitContext = struct {
+    view: ?*View = null,
+    runtime: ?*SessionRuntime,
+    wait_id: u64,
+    epoch: u32,
+};
+
+fn frameWaitCallback(raw: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
+    const context: *const FrameWaitContext = @ptrCast(@alignCast(raw orelse return));
+    const view = context.view orelse return;
+    const request_id = view.render_request_id.load(.acquire);
+    var outcome: u8 = 1; // no runtime is a successfully prepared empty view
+    var generation: u64 = 0;
+    if (context.runtime) |runtime| switch (runtime.captureRender() catch {
+        outcome = 3;
+        view.completion_request_id = request_id;
+        view.completion_generation = generation;
+        view.completion_outcome = outcome;
+        view.completion_epoch = context.epoch;
+        view.completion_runtime = context.runtime;
+        view.completion_wait_id.store(context.wait_id, .release);
+        _ = win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0);
+        return;
+    }) {
+        .prepared => |prepared| generation = prepared.content_generation,
+        .synchronized_output => outcome = 2,
+    };
+    view.completion_request_id = request_id;
+    view.completion_generation = generation;
+    view.completion_outcome = outcome;
+    view.completion_epoch = context.epoch;
+    view.completion_runtime = context.runtime;
+    view.completion_wait_id.store(context.wait_id, .release);
+    _ = win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0);
 }
 
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
@@ -251,6 +281,17 @@ pub const View = struct {
     frame_wait_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     frame_wait: win.HANDLE = null,
     frame_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+    render_request_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    next_wait_id: u64 = 0,
+    active_wait_id: u64 = 0,
+    frame_wait_context: FrameWaitContext = .{ .runtime = null, .wait_id = 0, .epoch = 0 },
+    completion_wait_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    completion_request_id: u64 = 0,
+    completion_generation: u64 = 0,
+    completion_epoch: u32 = 0,
+    completion_runtime: ?*SessionRuntime = null,
+    completion_outcome: u8 = 0,
+    prepared_available: bool = false,
     present_pending: bool = false,
     resize_render_pending: bool = false,
     scene_has_images: bool = false,
@@ -534,6 +575,7 @@ pub const View = struct {
 
     pub fn bindPane(self: *View, pane_id: ?pane_tree.PaneId) void {
         if (self.pane_id == pane_id) return;
+        self.stopFrameScheduling();
         self.releasePressedKeys();
         self.resetInteraction();
         self.clearImePreedit();
@@ -703,6 +745,7 @@ pub const View = struct {
 
     /// Terminal generation refreshes may update only libghostty's dirty rows.
     fn invalidateContent(self: *View) void {
+        _ = self.render_request_id.fetchAdd(1, .acq_rel);
         if (self.text_engine == null) {
             if (self.hwnd != null) _ = win.InvalidateRect(self.hwnd, null, 0);
             return;
@@ -715,9 +758,15 @@ pub const View = struct {
         if (self.hwnd == null or self.text_engine == null or self.renderer_failed or self.present_pending or
             self.frame_wait_pending.swap(true, .acq_rel)) return;
         const epoch = self.frame_epoch.load(.acquire);
-        if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, self, win.INFINITE, win.WT_EXECUTEONLYONCE) == 0) {
+        self.next_wait_id +%= 1;
+        if (self.next_wait_id == 0) self.next_wait_id = 1;
+        self.frame_wait_context = .{ .view = self, .runtime = self.boundRuntime(), .wait_id = self.next_wait_id, .epoch = epoch };
+        self.active_wait_id = self.frame_wait_context.wait_id;
+        if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, &self.frame_wait_context, win.INFINITE, win.WT_EXECUTEONLYONCE) == 0) {
+            self.frame_wait = null;
             self.frame_wait_pending.store(false, .release);
-            _ = win.PostMessageW(self.hwnd, render_message, epoch, 0);
+            self.active_wait_id = 0;
+            _ = win.PostMessageW(self.hwnd, render_message, 0, 0);
         }
     }
 
@@ -727,6 +776,7 @@ pub const View = struct {
         _ = self.frame_epoch.fetchAdd(1, .acq_rel);
         self.present_pending = false;
         self.resize_render_pending = false;
+        self.prepared_available = false;
         self.scene_has_images = false;
     }
 
@@ -735,6 +785,9 @@ pub const View = struct {
             _ = win.UnregisterWaitEx(self.frame_wait, win32.handleFromInt(win.HANDLE, std.math.maxInt(usize)));
             self.frame_wait = null;
         }
+        self.frame_wait_context.view = null;
+        self.active_wait_id = 0;
+        self.prepared_available = false;
         self.frame_wait_pending.store(false, .release);
     }
 
@@ -1052,7 +1105,9 @@ pub const View = struct {
         const width = client.right - client.left;
         const height = client.bottom - client.top;
         if (width <= 0 or height <= 0) return false;
-        if (!self.prepareBoundRender()) return false;
+        if (self.prepared_available) {
+            self.prepared_available = false;
+        } else if (!self.prepareBoundRender()) return false;
         notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
         const result = self.paintDirect2D(client, width, height) catch |err| {
             log.warn("terminal renderer failed: {}", .{err});
@@ -1093,7 +1148,7 @@ pub const View = struct {
 
         const geometry = self.gridGeometry(client);
         if (self.boundSession()) |session| {
-            const offset = session.runtime.?.render_scroll_offset;
+            const offset = session.runtime.?.preparedScrollOffset();
             const scroll_delta: ?i32 = if (!full_rebuild and self.retained_scroll_offset != null and
                 offset != self.retained_scroll_offset.? and self.padding_color == .background and
                 self.ime_preedit.items.len == 0 and self.hovered_link == null and
@@ -2080,12 +2135,38 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         render_message => {
             if (view) |current| {
-                if (wparam == current.frame_epoch.load(.acquire)) {
-                    current.clearFrameWait();
+                const posted_wait_id: u64 = @intCast(wparam);
+                if (posted_wait_id == 0) {
+                    // Registration-failure fallback remains synchronous.
                     if (current.resize_render_pending) {
                         current.paintPendingResize();
-                    } else if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain()) {
+                    } else if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain())
                         current.render_dirty.store(true, .release);
+                } else if (posted_wait_id == current.active_wait_id and
+                    current.completion_wait_id.load(.acquire) == posted_wait_id)
+                {
+                    const request_matches = current.completion_request_id == current.render_request_id.load(.acquire);
+                    const runtime_matches = current.completion_runtime == current.boundRuntime();
+                    const epoch_matches = current.completion_epoch == current.frame_epoch.load(.acquire);
+                    const outcome = current.completion_outcome;
+                    const generation_matches = outcome != 1 or current.completion_runtime == null or
+                        current.completion_generation == current.completion_runtime.?.contentGeneration();
+                    current.clearFrameWait();
+                    if (!request_matches or !runtime_matches or !epoch_matches or !generation_matches or outcome == 3) {
+                        // captureRender may have advanced RenderSnapshot dirty/hash
+                        // history even when this completion can no longer be used.
+                        current.full_rebuild_required.store(true, .release);
+                        current.render_dirty.store(true, .release);
+                        current.armFrameWait();
+                    } else if (outcome == 2) {
+                        current.render_dirty.store(true, .release);
+                        _ = current.deferSynchronizedOutput();
+                    } else if (current.resize_render_pending) {
+                        current.prepared_available = true;
+                        current.paintPendingResize();
+                    } else if (current.render_dirty.swap(false, .acq_rel)) {
+                        current.prepared_available = true;
+                        if (!current.paintSwapChain()) current.render_dirty.store(true, .release);
                     }
                 }
             }
@@ -2202,6 +2283,9 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_SIZE => {
             if (view) |current| {
+                // Blocking unregister precedes terminal resize; it is never
+                // performed while SessionRuntime's snapshot mutex is held.
+                current.clearFrameWait();
                 current.resizeSessions();
                 if (current.text_engine != null)
                     current.renderResize()

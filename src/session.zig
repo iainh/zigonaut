@@ -42,10 +42,8 @@ pub const SessionRuntime = struct {
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
     pending_clipboard_write: ?PendingClipboardWrite = null,
+    snapshot_mutex: @import("win32.zig").Mutex = .{},
     render_snapshot: Terminal.RenderSnapshot = .{},
-    render_search_enabled: bool = false,
-    render_search_active: ?usize = null,
-    render_search_scanning: bool = false,
     render_scroll_offset: usize = 0,
     // Search state is UI-thread-owned. The reader thread only changes terminal
     // content and generations, so synchronous rendering can borrow these lists.
@@ -309,7 +307,9 @@ pub const SessionRuntime = struct {
         if (self.pending_clipboard_write) |pending| self.freePendingClipboardWrite(pending);
         self.notifications.deinit(self.allocator);
         self.search.deinit(self.allocator);
+        self.snapshot_mutex.lock();
         self.render_snapshot.deinit(self.allocator);
+        self.snapshot_mutex.unlock();
         self.search_cache.deinit(self.allocator);
         self.link_scratch.deinit(self.allocator);
         self.terminal.deinit();
@@ -425,48 +425,78 @@ pub const SessionRuntime = struct {
         return self.terminal.linkAtAllocWithScratch(allocator, self.allocator, &self.link_scratch, point);
     }
 
-    /// Atomically admits a render and captures its terminal state. A mode 2026
-    /// transition after this returns cannot affect the prepared frame.
-    pub fn prepareRender(self: *SessionRuntime) !bool {
+    pub const RenderCapture = union(enum) {
+        prepared: struct { content_generation: u64 },
+        synchronized_output,
+    };
+
+    /// Captures terminal-owned render state only. This is safe on the frame
+    /// latency callback; UI-owned search state and timers are deliberately not
+    /// inspected here.
+    pub fn captureRender(self: *SessionRuntime) !RenderCapture {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
         self.render_handoff.lock(&self.terminal_mutex);
         if (self.synchronized_output.remaining(win.GetTickCount64()) != null) {
             self.render_handoff.unlock(&self.terminal_mutex);
-            return false;
+            return .synchronized_output;
         }
         const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
-        self.render_search_enabled = self.search.enabled;
-        self.render_search_active = self.search.active;
-        self.render_search_scanning = self.search.scanning;
         self.render_scroll_offset = scroll_state.offset;
+        const generation = self.content_generation.load(.monotonic);
         self.render_snapshot.capture(self.allocator, &self.terminal) catch |err| {
             self.render_handoff.unlock(&self.terminal_mutex);
             return err;
         };
         self.render_handoff.unlock(&self.terminal_mutex);
-        return true;
+        return .{ .prepared = .{ .content_generation = generation } };
+    }
+
+    /// Synchronous fallback used by GDI, resize, and wait-registration failure.
+    pub fn prepareRender(self: *SessionRuntime) !bool {
+        return switch (try self.captureRender()) {
+            .prepared => true,
+            .synchronized_output => false,
+        };
     }
 
     pub fn replayPreparedViewport(self: *SessionRuntime, renderer: anytype) void {
-        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        renderer.searchState(self.search.enabled, self.search.query.items, self.search.matches.items, self.search.active, self.render_scroll_offset, self.search.scanning);
         self.render_snapshot.replay(renderer);
     }
 
     pub fn replayPreparedViewportDirty(self: *SessionRuntime, renderer: anytype) void {
-        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        renderer.searchState(self.search.enabled, self.search.query.items, self.search.matches.items, self.search.active, self.render_scroll_offset, self.search.scanning);
         self.render_snapshot.replayDirty(renderer);
     }
 
     pub fn replayPreparedViewportShifted(self: *SessionRuntime, renderer: anytype, delta: i32) void {
-        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        renderer.searchState(self.search.enabled, self.search.query.items, self.search.matches.items, self.search.active, self.render_scroll_offset, self.search.scanning);
         self.render_snapshot.replayShifted(renderer, delta);
     }
 
-    pub fn preparedViewportCanShift(self: *const SessionRuntime, delta: i32) bool {
+    pub fn preparedViewportCanShift(self: *SessionRuntime, delta: i32) bool {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
         return self.render_snapshot.canShift(delta);
     }
 
-    pub fn preparedViewportHasImages(self: *const SessionRuntime) bool {
+    pub fn preparedViewportHasImages(self: *SessionRuntime) bool {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
         return self.render_snapshot.images.items.len != 0 or self.render_snapshot.placements.items.len != 0;
+    }
+
+    pub fn preparedScrollOffset(self: *SessionRuntime) usize {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        return self.render_scroll_offset;
     }
 
     /// Returns the delay before a synchronized-output frame may render. Once
@@ -709,6 +739,8 @@ pub const SessionRuntime = struct {
 
     pub fn resize(self: *SessionRuntime, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
         if (self.columns == columns and self.rows == rows and self.cell_width == cell_width and self.cell_height == cell_height) return;
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
         const grid_changed = self.columns != columns or self.rows != rows;
         self.terminal_mutex.lock();
         const resized = resized: {
@@ -735,6 +767,8 @@ pub const SessionRuntime = struct {
     }
 
     pub fn setTheme(self: *SessionRuntime, value: theme.Theme) void {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         self.terminal.setTheme(value) catch |err| {
