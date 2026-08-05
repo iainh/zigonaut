@@ -65,6 +65,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("gdi32", .{});
     exe.root_module.linkSystemLibrary("d2d1", .{});
     exe.root_module.linkSystemLibrary("d3d11", .{});
+    exe.root_module.linkSystemLibrary("d3dcompiler_47", .{});
     exe.root_module.linkSystemLibrary("dwrite", .{});
     exe.root_module.linkSystemLibrary("dxgi", .{});
     exe.root_module.linkSystemLibrary("advapi32", .{});
@@ -126,6 +127,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("gdi32", .{});
     tests.root_module.linkSystemLibrary("d2d1", .{});
     tests.root_module.linkSystemLibrary("d3d11", .{});
+    tests.root_module.linkSystemLibrary("d3dcompiler_47", .{});
     tests.root_module.linkSystemLibrary("dwrite", .{});
     tests.root_module.linkSystemLibrary("dxgi", .{});
     tests.root_module.linkSystemLibrary("kernel32", .{});
@@ -174,6 +176,7 @@ pub fn build(b: *std.Build) void {
     benchmark.root_module.linkSystemLibrary("gdi32", .{});
     benchmark.root_module.linkSystemLibrary("d2d1", .{});
     benchmark.root_module.linkSystemLibrary("d3d11", .{});
+    benchmark.root_module.linkSystemLibrary("d3dcompiler_47", .{});
     benchmark.root_module.linkSystemLibrary("dwrite", .{});
     benchmark.root_module.linkSystemLibrary("dxgi", .{});
     benchmark.root_module.linkSystemLibrary("kernel32", .{});

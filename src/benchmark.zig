@@ -197,6 +197,10 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     std.debug.print(
+        "  glyph submission A/B CPU submission (same invocation, 3 warm frames excluded, {d} measured; same 40 warm fragmented rows; includes full flush + EndDraw, excludes Present/GPU wait): legacy Direct2D SpriteBatch {d:.2} us/frame; D3D11 instancing {d:.2} us/frame; {d:.2}% change\n",
+        .{ dwrite.fragmented_frame_iterations, perIterationUs(dwrite.legacy_fragmented_frame_nanoseconds, dwrite.fragmented_frame_iterations), perIterationUs(dwrite.instanced_fragmented_frame_nanoseconds, dwrite.fragmented_frame_iterations), improvement(dwrite.legacy_fragmented_frame_nanoseconds, dwrite.instanced_fragmented_frame_nanoseconds) },
+    );
+    std.debug.print(
         "  scroll A/B CPU submission (same invocation, {d} warm iterations excluded, {d} measured; includes draw + final transfer, excludes Present/GPU wait): full 40-row fragmented redraw {d:.2} us/frame; scratch shift + exposed fragmented row {d:.2} us/frame; {d:.2}% change\n",
         .{
             3,
