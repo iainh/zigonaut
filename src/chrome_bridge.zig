@@ -61,6 +61,21 @@ pub const layout_leaf: u32 = @intCast(win.ZIGONAUT_LAYOUT_LEAF);
 pub const layout_split: u32 = @intCast(win.ZIGONAUT_LAYOUT_SPLIT);
 pub const axis_left_right: u32 = @intCast(win.ZIGONAUT_AXIS_LEFT_RIGHT);
 pub const axis_top_bottom: u32 = @intCast(win.ZIGONAUT_AXIS_TOP_BOTTOM);
+
+comptime {
+    // These types cross GetProcAddress boundaries and must stay identical to
+    // bridge.h on both supported 64-bit architectures.
+    std.debug.assert(@sizeOf(PaneEvent) == 48);
+    std.debug.assert(@alignOf(PaneEvent) == 8);
+    std.debug.assert(@offsetOf(PaneEvent, "target_id") == 8);
+    std.debug.assert(@offsetOf(PaneEvent, "text") == 24);
+    std.debug.assert(@offsetOf(PaneEvent, "attributes") == 44);
+    std.debug.assert(@sizeOf(LayoutNode) == 32);
+    std.debug.assert(@alignOf(LayoutNode) == 8);
+    std.debug.assert(@offsetOf(LayoutNode, "id") == 8);
+    std.debug.assert(@offsetOf(LayoutNode, "subtree_size") == 24);
+}
+
 const PaneCallback = *const fn (?*anyopaque, *const PaneEvent) callconv(.c) void;
 pub const Started = *const fn (?*anyopaque, ?*anyopaque, win.HWND) callconv(.c) win.BOOL;
 const Run = *const fn (Started, Callback, PaneCallback, ?*anyopaque, [*]const u8, u32, [*]const u8, u32) callconv(.c) win.HRESULT;

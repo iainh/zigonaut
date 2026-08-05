@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const PaneId = u64;
 pub const SplitId = u64;
+pub const max_panes = 64;
+const max_nodes = max_panes * 2 - 1;
 
 pub const Axis = enum { left_right, top_bottom };
 pub const Direction = enum { left, right, up, down };
@@ -24,6 +26,7 @@ pub const Error = error{
     PaneNotFound,
     SplitNotFound,
     InvalidRatio,
+    TreeFull,
 };
 
 const Node = union(enum) {
@@ -48,7 +51,9 @@ pub const Tree = struct {
         if (pane_id == 0) return error.InvalidId;
         const root = try allocator.create(Node);
         root.* = .{ .leaf = pane_id };
-        return .{ .allocator = allocator, .root = root, .focused = pane_id };
+        const tree = Tree{ .allocator = allocator, .root = root, .focused = pane_id };
+        tree.assertValid();
+        return tree;
     }
 
     pub fn deinit(self: *Tree) void {
@@ -58,9 +63,11 @@ pub const Tree = struct {
 
     pub fn split(self: *Tree, target: PaneId, new_pane: PaneId, split_id: SplitId, axis: Axis) (Error || std.mem.Allocator.Error)!void {
         if (new_pane == 0 or split_id == 0) return error.InvalidId;
-        if (findPane(self.root, new_pane) != null or findSplit(self.root, split_id) != null)
+        if (findPane(self.root, new_pane) != null or findSplit(self.root, new_pane) != null or
+            findPane(self.root, split_id) != null or findSplit(self.root, split_id) != null)
             return error.DuplicateId;
         const leaf = findPane(self.root, target) orelse return error.PaneNotFound;
+        if (self.nodeCount() >= max_nodes) return error.TreeFull;
         const old_id = leaf.leaf;
         const first = try self.allocator.create(Node);
         errdefer self.allocator.destroy(first);
@@ -74,11 +81,13 @@ pub const Tree = struct {
             .first = first,
             .second = second,
         } };
+        self.assertValid();
     }
 
     pub fn focus(self: *Tree, pane_id: PaneId) bool {
         if (findPane(self.root, pane_id) == null) return false;
         self.focused = pane_id;
+        self.assertValid();
         return true;
     }
 
@@ -86,6 +95,7 @@ pub const Tree = struct {
         if (ratio == 0 or ratio == std.math.maxInt(u16)) return error.InvalidRatio;
         const node = findSplit(self.root, split_id) orelse return error.SplitNotFound;
         node.split.ratio = ratio;
+        self.assertValid();
     }
 
     /// Returns a caller-owned preorder snapshot. Rect coordinates are normalized
@@ -116,6 +126,7 @@ pub const Tree = struct {
         self.root = removeLeaf(self.allocator, self.root.?, pane_id);
         if (self.focused == pane_id) self.focused = previous orelse next;
         if (self.root == null) self.focused = null;
+        self.assertValid();
         return true;
     }
 
@@ -155,6 +166,17 @@ pub const Tree = struct {
             return true;
         }
         return false;
+    }
+
+    fn assertValid(self: *const Tree) void {
+        const root = self.root orelse {
+            std.debug.assert(self.focused == null);
+            return;
+        };
+        std.debug.assert(self.focused != null);
+        std.debug.assert(findPane(root, self.focused.?) != null);
+        std.debug.assert(countNodes(root) <= max_nodes);
+        assertNodeValid(root, root);
     }
 };
 
@@ -216,6 +238,39 @@ fn countNodes(node: *const Node) usize {
     return switch (node.*) {
         .leaf => 1,
         .split => |split| 1 + countNodes(split.first) + countNodes(split.second),
+    };
+}
+
+fn assertNodeValid(root: *const Node, node: *const Node) void {
+    switch (node.*) {
+        .leaf => |id| {
+            std.debug.assert(id != 0);
+            std.debug.assert(countPane(root, id) == 1);
+            std.debug.assert(countSplit(root, id) == 0);
+        },
+        .split => |split| {
+            std.debug.assert(split.id != 0);
+            std.debug.assert(split.ratio != 0);
+            std.debug.assert(split.ratio != std.math.maxInt(u16));
+            std.debug.assert(countPane(root, split.id) == 0);
+            std.debug.assert(countSplit(root, split.id) == 1);
+            assertNodeValid(root, split.first);
+            assertNodeValid(root, split.second);
+        },
+    }
+}
+
+fn countPane(node: *const Node, id: PaneId) usize {
+    return switch (node.*) {
+        .leaf => |pane| @intFromBool(pane == id),
+        .split => |split| countPane(split.first, id) + countPane(split.second, id),
+    };
+}
+
+fn countSplit(node: *const Node, id: SplitId) usize {
+    return switch (node.*) {
+        .leaf => 0,
+        .split => |split| @intFromBool(split.id == id) + countSplit(split.first, id) + countSplit(split.second, id),
     };
 }
 
@@ -368,4 +423,15 @@ test "invalid duplicate and stale ids do not mutate the tree" {
     try std.testing.expectError(error.InvalidRatio, tree.setRatio(70, std.math.maxInt(u16)));
     try std.testing.expect(!tree.focus(99));
     try std.testing.expectEqual(@as(?PaneId, 7), tree.focused);
+}
+
+test "tree capacity bounds recursive traversal depth" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    for (2..max_panes + 1) |pane_id| {
+        try tree.split(@intCast(pane_id - 1), @intCast(pane_id), @intCast(10_000 + pane_id), .left_right);
+        try std.testing.expect(tree.focus(@intCast(pane_id)));
+    }
+    try std.testing.expectEqual(@as(usize, max_nodes), tree.nodeCount());
+    try std.testing.expectError(error.TreeFull, tree.split(max_panes, max_panes + 1, 20_000, .top_bottom));
 }

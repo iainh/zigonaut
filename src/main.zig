@@ -27,7 +27,9 @@ const runtime_refresh_message = win.WM_APP + 9;
 const ime_bounds_changed_message = win.WM_APP + 10;
 const search_status_changed_message = win.WM_APP + 11;
 const initial_chrome_message = win.WM_APP + 12;
-const pane_event_release_threshold = 1024;
+const pane_event_queue_capacity = 256;
+const pane_event_message_budget = 32;
+const pane_event_saturation_drain = 1;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
@@ -58,6 +60,116 @@ const LaunchPlan = struct {
     }
 };
 
+const PaneEventQueue = struct {
+    items: [pane_event_queue_capacity]chrome.PaneEvent = undefined,
+    len: usize = 0,
+    message_pending: bool = false,
+    dequeued_total: u64 = 0,
+
+    const EnqueueResult = enum { appended, replaced, full };
+
+    fn supersedable(event: chrome.PaneEvent) bool {
+        return event.kind == chrome.pane_scroll or event.kind == chrome.pane_committed_ratio;
+    }
+
+    fn enqueue(self: *PaneEventQueue, event: chrome.PaneEvent) EnqueueResult {
+        if (supersedable(event)) {
+            var index = self.len;
+            while (index > 0) {
+                index -= 1;
+                // Do not move state across a command or delta whose result may
+                // depend on the state visible when it was emitted.
+                if (!supersedable(self.items[index])) break;
+                if (self.items[index].kind == event.kind and self.items[index].target_id == event.target_id) {
+                    self.items[index] = event;
+                    return .replaced;
+                }
+            }
+        }
+        if (self.len == self.items.len) {
+            return .full;
+        }
+        self.items[self.len] = event;
+        self.len += 1;
+        return .appended;
+    }
+
+    fn pop(self: *PaneEventQueue) ?chrome.PaneEvent {
+        if (self.len == 0) return null;
+        const event = self.items[0];
+        self.len -= 1;
+        self.dequeued_total +%= 1;
+        std.mem.copyForwards(chrome.PaneEvent, self.items[0..self.len], self.items[1 .. self.len + 1]);
+        return event;
+    }
+
+    fn requestWake(self: *PaneEventQueue) bool {
+        if (self.message_pending) return false;
+        self.message_pending = true;
+        return true;
+    }
+
+    fn finishBatch(self: *PaneEventQueue) bool {
+        if (self.len != 0) return true;
+        self.message_pending = false;
+        return false;
+    }
+};
+
+fn testPaneEvent(kind: u32, target_id: u64, value: u32) chrome.PaneEvent {
+    var event = std.mem.zeroes(chrome.PaneEvent);
+    event.size = @sizeOf(chrome.PaneEvent);
+    event.kind = kind;
+    event.target_id = target_id;
+    event.value = value;
+    return event;
+}
+
+test "pane event queue coalesces only matching state" {
+    var queue: PaneEventQueue = .{};
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll, 1, 10)));
+    try std.testing.expectEqual(.replaced, queue.enqueue(testPaneEvent(chrome.pane_scroll, 1, 40)));
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll_wheel, 1, 20)));
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll, 2, 30)));
+    try std.testing.expectEqual(@as(usize, 3), queue.len);
+    try std.testing.expectEqual(@as(u32, 40), queue.pop().?.value);
+    try std.testing.expectEqual(@as(u32, 20), queue.pop().?.value);
+    try std.testing.expectEqual(@as(u32, 30), queue.pop().?.value);
+}
+
+test "pane event queue preserves state ordering across semantic events" {
+    var queue: PaneEventQueue = .{};
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll, 1, 10)));
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll_wheel, 1, 20)));
+    try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll, 1, 30)));
+    try std.testing.expectEqual(@as(usize, 3), queue.len);
+    try std.testing.expectEqual(@as(u32, 10), queue.pop().?.value);
+    try std.testing.expectEqual(@as(u32, 20), queue.pop().?.value);
+    try std.testing.expectEqual(@as(u32, 30), queue.pop().?.value);
+}
+
+test "pane event queue is bounded without discarding queued state" {
+    var queue: PaneEventQueue = .{};
+    _ = queue.enqueue(testPaneEvent(chrome.pane_scroll, 99, 1));
+    for (1..pane_event_queue_capacity) |index| {
+        try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll_wheel, @intCast(index), 1)));
+    }
+    try std.testing.expectEqual(.full, queue.enqueue(testPaneEvent(chrome.pane_find_next, 7, 0)));
+    try std.testing.expectEqual(@as(usize, pane_event_queue_capacity), queue.len);
+    try std.testing.expectEqual(chrome.pane_scroll, queue.items[0].kind);
+}
+
+test "pane event queue maintains one wake token until drained" {
+    var queue: PaneEventQueue = .{};
+    try std.testing.expect(queue.requestWake());
+    try std.testing.expect(!queue.requestWake());
+    _ = queue.enqueue(testPaneEvent(chrome.pane_focus, 1, 0));
+    try std.testing.expect(queue.finishBatch());
+    _ = queue.pop();
+    try std.testing.expect(!queue.finishBatch());
+    try std.testing.expect(queue.requestWake());
+}
+
 const Application = struct {
     const ViewEntry = struct { pane_id: u64, view: *TerminalView };
     io: std.Io,
@@ -82,8 +194,7 @@ const Application = struct {
     chrome: ?chrome.Bridge = null,
     attached_panes: std.ArrayList(u64) = .empty,
     pane_events_mutex: @import("win32.zig").Mutex = .{},
-    pane_events: std.ArrayList(chrome.PaneEvent) = .empty,
-    pane_events_head: usize = 0,
+    pane_events: PaneEventQueue = .{},
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
     chrome_colors: std.ArrayList(u32) = .empty,
@@ -115,7 +226,6 @@ const Application = struct {
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.chrome_colors.deinit(std.heap.page_allocator);
         self.chrome_activity.deinit(std.heap.page_allocator);
-        self.pane_events.deinit(std.heap.page_allocator);
         self.launch_plan.deinit();
         if (self.font != null) _ = win.DeleteObject(self.font);
         self.loaded.deinit();
@@ -163,19 +273,13 @@ const Application = struct {
     fn takePaneEvent(self: *Application) ?chrome.PaneEvent {
         self.pane_events_mutex.lock();
         defer self.pane_events_mutex.unlock();
-        if (self.pane_events_head == self.pane_events.items.len) return null;
-        const event = self.pane_events.items[self.pane_events_head];
-        self.pane_events_head += 1;
-        if (self.pane_events_head == self.pane_events.items.len) {
-            self.pane_events_head = 0;
-            if (self.pane_events.capacity > pane_event_release_threshold) {
-                self.pane_events.deinit(std.heap.page_allocator);
-                self.pane_events = .empty;
-            } else {
-                self.pane_events.clearRetainingCapacity();
-            }
-        }
-        return event;
+        return self.pane_events.pop();
+    }
+
+    fn finishPaneEventBatch(self: *Application) bool {
+        self.pane_events_mutex.lock();
+        defer self.pane_events_mutex.unlock();
+        return self.pane_events.finishBatch();
     }
 
     fn viewFor(self: *Application, id: u64) ?*TerminalView {
@@ -474,6 +578,276 @@ fn shutdownWindowImpl(self: *Application) void {
     if (self.chrome) |*bridge| bridge.detach();
 }
 
+fn paneEventMessageImpl(self: *Application, hwnd: win.HWND, saturation_drain: bool) win.LRESULT {
+    while (true) {
+        var processed: usize = 0;
+        while (processed < pane_event_message_budget) : (processed += 1) {
+            const current = self.takePaneEvent() orelse break;
+            if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
+            switch (current.kind) {
+                chrome.pane_scroll => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.scrollTo(current.value),
+                chrome.pane_scroll_wheel => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.handleMouseWheelDelta(@bitCast(current.value)),
+                chrome.pane_focus => {
+                    if (!self.isAttached(current.target_id)) continue;
+                    const active = self.model.activePane() orelse continue;
+                    const tab = self.model.activeTab() orelse continue;
+                    if (active.id != current.target_id and tab.tree.focus(current.target_id)) {
+                        self.syncChrome();
+                        self.syncScrollbar(false);
+                        self.syncTaskbarProgress();
+                    }
+                },
+                chrome.pane_committed_ratio => {
+                    if (current.value == 0 or current.value >= 65535) continue;
+                    _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
+                },
+                chrome.pane_find_next => if (self.viewFor(current.target_id)) |view| view.navigateSearch(true),
+                chrome.pane_find_previous => if (self.viewFor(current.target_id)) |view| view.navigateSearch(false),
+                chrome.pane_find_close => if (self.viewFor(current.target_id)) |view| view.cancelSearch(),
+                else => {},
+            }
+        }
+        // A saturation drain borrows the existing wake token. Its already
+        // queued owner remains responsible for completion or scheduling.
+        if (saturation_drain) return 0;
+        if (!self.finishPaneEventBatch()) return 0;
+        if (win.PostMessageW(hwnd, pane_event_message, 0, 0) != 0) return 0;
+        // A failed asynchronous wake must not strand a queue whose wake token
+        // remains set. Continue draining bounded batches synchronously.
+        log.err("unable to post the next pane event batch; draining synchronously", .{});
+    }
+}
+
+fn chromeMessageImpl(self: *Application, hwnd: win.HWND, wparam: win.WPARAM, lparam: win.LPARAM) win.LRESULT {
+    const command_value = std.math.cast(u32, wparam) orelse return 0;
+    const command = chrome.commandFromInt(command_value) orelse return 0;
+    const argument = std.math.cast(u32, lparam) orelse return 0;
+    switch (command) {
+        .new_profile => {
+            if (argument >= @as(u32, @intCast(self.settings.profile_count))) return 0;
+            const profile = self.settings.profiles[argument];
+            self.addProfile(profile) catch |err| self.showProfileLaunchError(profile, err);
+        },
+        .new_default => {
+            const profile = self.settings.defaultProfile();
+            self.addDefaultSession() catch |err| self.showProfileLaunchError(profile, err);
+            return 0;
+        },
+        .new_window => {
+            self.spawnNewWindow() catch |err| log.err("unable to open new window: {}", .{err});
+            return 0;
+        },
+        .pipe_command_output => {
+            self.pipeCommandOutput() catch |err| log.err("unable to process last command output: {}", .{err});
+            return 0;
+        },
+        .find => {
+            const pane = self.model.activePane() orelse return 0;
+            const view = self.viewFor(pane.id) orelse return 0;
+            if (self.chrome) |*bridge| if (bridge.showFind(pane.id)) view.beginSearch();
+            return 0;
+        },
+        .close => {
+            self.detachPresentation() catch |err| {
+                log.err("unable to detach panes before close: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            };
+            if (argument < self.model.tabs.items.len) {
+                for (self.model.tabs.items[argument].panes.items) |pane| if (!self.destroyView(pane.id)) {
+                    _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                    return 0;
+                };
+            }
+            self.model.closeTab(argument);
+            if (self.model.tabCount() == 0) {
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            }
+            self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+        },
+        .duplicate_tab => {
+            if (argument >= self.model.tabs.items.len) return 0;
+            const pane = self.model.tabs.items[argument].focusedPane() orelse return 0;
+            const session = &pane.session;
+            const reported_directory = if (session.runtime) |runtime|
+                runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null
+            else
+                null;
+            defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
+            const columns: u16 = if (self.activeView()) |view| view.columns else 80;
+            const rows: u16 = if (self.activeView()) |view| view.rows else 24;
+            _ = self.model.addSession(
+                session.shell,
+                session.profileTitle(),
+                session.command(),
+                reported_directory orelse session.workingDirectory(),
+                session.hold_on_exit,
+                columns,
+                rows,
+            ) catch |err| {
+                log.err("unable to duplicate tab: {}", .{err});
+                return 0;
+            };
+            self.syncPresentation() catch |err| log.err("unable to present duplicated tab: {}", .{err});
+        },
+        .close_other_tabs, .close_tabs_right => {
+            if (argument >= self.model.tabs.items.len) return 0;
+            if (self.activeView()) |view| view.resetInteraction();
+            self.detachPresentation() catch return 0;
+            var index = self.model.tabs.items.len;
+            while (index > 0) {
+                index -= 1;
+                const should_close = if (command == .close_other_tabs) index != argument else index > argument;
+                if (!should_close) continue;
+                for (self.model.tabs.items[index].panes.items) |pane_to_close| if (!self.destroyView(pane_to_close.id)) {
+                    _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                    return 0;
+                };
+                self.model.closeTab(index);
+            }
+            self.model.activateTab(@min(@as(usize, argument), self.model.tabs.items.len - 1));
+            self.syncPresentation() catch |err| log.err("unable to present remaining tabs: {}", .{err});
+        },
+        .reorder_tab => {
+            const from: usize = argument >> 16;
+            const to: usize = argument & 0xffff;
+            if (from >= self.model.tabs.items.len or to >= self.model.tabs.items.len or from == to) return 0;
+            if (self.activeView()) |view| view.resetInteraction();
+            self.detachPresentation() catch return 0;
+            self.model.moveTab(from, to) catch |err| {
+                log.err("unable to reorder tab: {}", .{err});
+                return 0;
+            };
+            self.syncPresentation() catch |err| log.err("unable to present reordered tabs: {}", .{err});
+        },
+        .split_right, .split_down => {
+            if (self.activeView()) |view| view.resetInteraction();
+            _ = self.model.splitFocused(if (command == .split_right) .left_right else .top_bottom) catch |err| {
+                log.err("unable to split focused pane: {}", .{err});
+                return 0;
+            };
+            self.syncPresentation() catch |err| {
+                log.err("unable to present split panes: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            };
+        },
+        .focus_left, .focus_right, .focus_up, .focus_down => {
+            const changed = self.model.focusDirection(switch (command) {
+                .focus_left => .left,
+                .focus_right => .right,
+                .focus_up => .up,
+                .focus_down => .down,
+                else => unreachable,
+            });
+            if (!changed) return 0;
+            const pane = self.model.activePane() orelse return 0;
+            if (self.chrome) |*bridge| _ = bridge.focusPane(pane.id);
+            self.syncChrome();
+            self.syncScrollbar(false);
+            self.syncTaskbarProgress();
+            return 0;
+        },
+        .close_pane => {
+            const pane_id = (self.model.activePane() orelse return 0).id;
+            const bridge = if (self.chrome) |*value| value else return 0;
+            if (!bridge.detachPane(pane_id)) {
+                log.err("unable to detach focused pane before close", .{});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            }
+            if (std.mem.indexOfScalar(u64, self.attached_panes.items, pane_id)) |index| _ = self.attached_panes.swapRemove(index);
+            var removed = self.model.extractFocusedPane() orelse return 0;
+            if (!self.destroyView(removed.pane_id)) {
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            }
+            self.model.destroyRemovedPane(&removed);
+            if (self.model.tabCount() == 0) {
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            }
+            self.syncPresentation() catch |err| {
+                log.err("unable to present panes after close: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            };
+        },
+        .select => {
+            if (self.activeView()) |view| view.resetInteraction();
+            self.detachPresentation() catch return 0;
+            self.model.activateTab(argument);
+            self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+        },
+        .open_settings => {
+            self.openSettingsPage() catch |err| log.err("unable to open settings: {}", .{err});
+            return 0;
+        },
+        .reload_settings => {
+            self.reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
+            return 0;
+        },
+        .quit => {
+            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+            return 0;
+        },
+        .scroll => {
+            if (self.activeView()) |view| view.scrollTo(argument);
+            return 0;
+        },
+        .scroll_wheel => {
+            if (self.activeView()) |view| view.handleMouseWheelDelta(@bitCast(argument));
+            return 0;
+        },
+        .notification_activate => {
+            if (self.activeView()) |view| view.resetInteraction();
+            self.detachPresentation() catch return 0;
+            if (!self.model.activateSessionId(argument)) return 0;
+            self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+            if (self.activeView()) |view| {
+                view.syncSessions();
+                view.invalidate();
+            }
+            self.syncChrome();
+            _ = win.ShowWindow(hwnd, win.SW_RESTORE);
+            _ = win.SetForegroundWindow(hwnd);
+            if (self.chrome) |*bridge| {
+                if (self.model.activePane()) |pane| _ = bridge.focusPane(pane.id);
+            }
+            return 0;
+        },
+        .zoom_in => {
+            self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, 1));
+            return 0;
+        },
+        .zoom_out => {
+            self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, -1));
+            return 0;
+        },
+        .zoom_reset => {
+            self.setZoomedFontSize(self.settings.font_size);
+            return 0;
+        },
+        .select_next, .select_previous => {
+            const count = self.model.tabCount();
+            const active = self.model.activeTabIndex() orelse return 0;
+            if (count <= 1) return 0;
+            if (self.activeView()) |view| view.resetInteraction();
+            self.detachPresentation() catch return 0;
+            const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
+            self.model.activateTab(next);
+            self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
+        },
+        .shutdown => return 0,
+    }
+    for (self.views.items) |entry| entry.view.syncSessions();
+    _ = win.InvalidateRect(hwnd, null, 0);
+    for (self.views.items) |entry| entry.view.invalidate();
+    self.syncChrome();
+    return 0;
+}
+
 fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM) win.LRESULT {
     const hwnd = self.hwnd.?;
     if (self.taskbar_button_created_message != 0 and message == self.taskbar_button_created_message) {
@@ -503,263 +877,8 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             if (self.chrome) |*bridge| _ = bridge.updateFind(pane_id, status.matches, status.active, status.scanning);
             return 0;
         },
-        pane_event_message => {
-            while (self.takePaneEvent()) |current| {
-                if (current.size != @sizeOf(chrome.PaneEvent) or current.reserved != 0) continue;
-                switch (current.kind) {
-                    chrome.pane_scroll => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.scrollTo(current.value),
-                    chrome.pane_scroll_wheel => if (self.isAttached(current.target_id)) if (self.viewFor(current.target_id)) |view| view.handleMouseWheelDelta(@bitCast(current.value)),
-                    chrome.pane_focus => {
-                        if (!self.isAttached(current.target_id)) continue;
-                        const active = self.model.activePane() orelse continue;
-                        const tab = self.model.activeTab() orelse continue;
-                        if (active.id != current.target_id and tab.tree.focus(current.target_id)) {
-                            self.syncChrome();
-                            self.syncScrollbar(false);
-                            self.syncTaskbarProgress();
-                        }
-                    },
-                    chrome.pane_committed_ratio => {
-                        if (current.value == 0 or current.value >= 65535) continue;
-                        _ = self.model.setSplitRatio(current.target_id, @truncate(current.value));
-                    },
-                    chrome.pane_find_next => if (self.viewFor(current.target_id)) |view| view.navigateSearch(true),
-                    chrome.pane_find_previous => if (self.viewFor(current.target_id)) |view| view.navigateSearch(false),
-                    chrome.pane_find_close => if (self.viewFor(current.target_id)) |view| view.cancelSearch(),
-                    else => {},
-                }
-            }
-            return 0;
-        },
-        chrome_message => {
-            const command_value = std.math.cast(u32, wparam) orelse return 0;
-            const command = chrome.commandFromInt(command_value) orelse return 0;
-            const argument = std.math.cast(u32, lparam) orelse return 0;
-            switch (command) {
-                .new_profile => {
-                    if (argument >= @as(u32, @intCast(self.settings.profile_count))) return 0;
-                    const profile = self.settings.profiles[argument];
-                    self.addProfile(profile) catch |err| self.showProfileLaunchError(profile, err);
-                },
-                .new_default => {
-                    const profile = self.settings.defaultProfile();
-                    self.addDefaultSession() catch |err| self.showProfileLaunchError(profile, err);
-                    return 0;
-                },
-                .new_window => {
-                    self.spawnNewWindow() catch |err| log.err("unable to open new window: {}", .{err});
-                    return 0;
-                },
-                .pipe_command_output => {
-                    self.pipeCommandOutput() catch |err| log.err("unable to process last command output: {}", .{err});
-                    return 0;
-                },
-                .find => {
-                    const pane = self.model.activePane() orelse return 0;
-                    const view = self.viewFor(pane.id) orelse return 0;
-                    if (self.chrome) |*bridge| if (bridge.showFind(pane.id)) view.beginSearch();
-                    return 0;
-                },
-                .close => {
-                    self.detachPresentation() catch |err| {
-                        log.err("unable to detach panes before close: {}", .{err});
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    };
-                    if (argument < self.model.tabs.items.len) {
-                        for (self.model.tabs.items[argument].panes.items) |pane| if (!self.destroyView(pane.id)) {
-                            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                            return 0;
-                        };
-                    }
-                    self.model.closeTab(argument);
-                    if (self.model.tabCount() == 0) {
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    }
-                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
-                },
-                .duplicate_tab => {
-                    if (argument >= self.model.tabs.items.len) return 0;
-                    const pane = self.model.tabs.items[argument].focusedPane() orelse return 0;
-                    const session = &pane.session;
-                    const reported_directory = if (session.runtime) |runtime|
-                        runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null
-                    else
-                        null;
-                    defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
-                    const columns: u16 = if (self.activeView()) |view| view.columns else 80;
-                    const rows: u16 = if (self.activeView()) |view| view.rows else 24;
-                    _ = self.model.addSession(
-                        session.shell,
-                        session.profileTitle(),
-                        session.command(),
-                        reported_directory orelse session.workingDirectory(),
-                        session.hold_on_exit,
-                        columns,
-                        rows,
-                    ) catch |err| {
-                        log.err("unable to duplicate tab: {}", .{err});
-                        return 0;
-                    };
-                    self.syncPresentation() catch |err| log.err("unable to present duplicated tab: {}", .{err});
-                },
-                .close_other_tabs, .close_tabs_right => {
-                    if (argument >= self.model.tabs.items.len) return 0;
-                    if (self.activeView()) |view| view.resetInteraction();
-                    self.detachPresentation() catch return 0;
-                    var index = self.model.tabs.items.len;
-                    while (index > 0) {
-                        index -= 1;
-                        const should_close = if (command == .close_other_tabs) index != argument else index > argument;
-                        if (!should_close) continue;
-                        for (self.model.tabs.items[index].panes.items) |pane_to_close| if (!self.destroyView(pane_to_close.id)) {
-                            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                            return 0;
-                        };
-                        self.model.closeTab(index);
-                    }
-                    self.model.activateTab(@min(@as(usize, argument), self.model.tabs.items.len - 1));
-                    self.syncPresentation() catch |err| log.err("unable to present remaining tabs: {}", .{err});
-                },
-                .reorder_tab => {
-                    const from: usize = argument >> 16;
-                    const to: usize = argument & 0xffff;
-                    if (from >= self.model.tabs.items.len or to >= self.model.tabs.items.len or from == to) return 0;
-                    if (self.activeView()) |view| view.resetInteraction();
-                    self.detachPresentation() catch return 0;
-                    self.model.moveTab(from, to) catch |err| {
-                        log.err("unable to reorder tab: {}", .{err});
-                        return 0;
-                    };
-                    self.syncPresentation() catch |err| log.err("unable to present reordered tabs: {}", .{err});
-                },
-                .split_right, .split_down => {
-                    if (self.activeView()) |view| view.resetInteraction();
-                    _ = self.model.splitFocused(if (command == .split_right) .left_right else .top_bottom) catch |err| {
-                        log.err("unable to split focused pane: {}", .{err});
-                        return 0;
-                    };
-                    self.syncPresentation() catch |err| {
-                        log.err("unable to present split panes: {}", .{err});
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    };
-                },
-                .focus_left, .focus_right, .focus_up, .focus_down => {
-                    const changed = self.model.focusDirection(switch (command) {
-                        .focus_left => .left,
-                        .focus_right => .right,
-                        .focus_up => .up,
-                        .focus_down => .down,
-                        else => unreachable,
-                    });
-                    if (!changed) return 0;
-                    const pane = self.model.activePane() orelse return 0;
-                    if (self.chrome) |*bridge| _ = bridge.focusPane(pane.id);
-                    self.syncChrome();
-                    self.syncScrollbar(false);
-                    self.syncTaskbarProgress();
-                    return 0;
-                },
-                .close_pane => {
-                    const pane_id = (self.model.activePane() orelse return 0).id;
-                    const bridge = if (self.chrome) |*value| value else return 0;
-                    if (!bridge.detachPane(pane_id)) {
-                        log.err("unable to detach focused pane before close", .{});
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    }
-                    if (std.mem.indexOfScalar(u64, self.attached_panes.items, pane_id)) |index| _ = self.attached_panes.swapRemove(index);
-                    var removed = self.model.extractFocusedPane() orelse return 0;
-                    if (!self.destroyView(removed.pane_id)) {
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    }
-                    self.model.destroyRemovedPane(&removed);
-                    if (self.model.tabCount() == 0) {
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    }
-                    self.syncPresentation() catch |err| {
-                        log.err("unable to present panes after close: {}", .{err});
-                        _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                        return 0;
-                    };
-                },
-                .select => {
-                    if (self.activeView()) |view| view.resetInteraction();
-                    self.detachPresentation() catch return 0;
-                    self.model.activateTab(argument);
-                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
-                },
-                .open_settings => {
-                    self.openSettingsPage() catch |err| log.err("unable to open settings: {}", .{err});
-                    return 0;
-                },
-                .reload_settings => {
-                    self.reloadSettings() catch |err| log.err("unable to reload settings: {}", .{err});
-                    return 0;
-                },
-                .quit => {
-                    _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
-                    return 0;
-                },
-                .scroll => {
-                    if (self.activeView()) |view| view.scrollTo(argument);
-                    return 0;
-                },
-                .scroll_wheel => {
-                    if (self.activeView()) |view| view.handleMouseWheelDelta(@bitCast(argument));
-                    return 0;
-                },
-                .notification_activate => {
-                    if (self.activeView()) |view| view.resetInteraction();
-                    self.detachPresentation() catch return 0;
-                    if (!self.model.activateSessionId(argument)) return 0;
-                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
-                    if (self.activeView()) |view| {
-                        view.syncSessions();
-                        view.invalidate();
-                    }
-                    self.syncChrome();
-                    _ = win.ShowWindow(hwnd, win.SW_RESTORE);
-                    _ = win.SetForegroundWindow(hwnd);
-                    if (self.chrome) |*bridge| {
-                        if (self.model.activePane()) |pane| _ = bridge.focusPane(pane.id);
-                    }
-                    return 0;
-                },
-                .zoom_in => {
-                    self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, 1));
-                    return 0;
-                },
-                .zoom_out => {
-                    self.setZoomedFontSize(config.clampZoom(self.zoomed_font_size, -1));
-                    return 0;
-                },
-                .zoom_reset => {
-                    self.setZoomedFontSize(self.settings.font_size);
-                    return 0;
-                },
-                .select_next, .select_previous => {
-                    const count = self.model.tabCount();
-                    const active = self.model.activeTabIndex() orelse return 0;
-                    if (count <= 1) return 0;
-                    if (self.activeView()) |view| view.resetInteraction();
-                    self.detachPresentation() catch return 0;
-                    const next = if (command == .select_previous) (active + count - 1) % count else (active + 1) % count;
-                    self.model.activateTab(next);
-                    self.syncPresentation() catch |err| log.err("unable to present active panes: {}", .{err});
-                },
-                .shutdown => return 0,
-            }
-            for (self.views.items) |entry| entry.view.syncSessions();
-            _ = win.InvalidateRect(hwnd, null, 0);
-            for (self.views.items) |entry| entry.view.invalidate();
-            self.syncChrome();
-            return 0;
-        },
+        pane_event_message => return paneEventMessageImpl(self, hwnd, wparam == pane_event_saturation_drain),
+        chrome_message => return chromeMessageImpl(self, hwnd, wparam, lparam),
         titles_changed_message => {
             if (self.model.syncTitles()) self.syncChrome();
             return 0;
@@ -1022,13 +1141,33 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
         };
         return;
     }
-    self.pane_events_mutex.lock();
-    self.pane_events.append(std.heap.page_allocator, source.*) catch {
+    while (true) {
+        self.pane_events_mutex.lock();
+        const result = self.pane_events.enqueue(source.*);
+        const wake_needed = if (result == .full) false else self.pane_events.requestWake();
         self.pane_events_mutex.unlock();
-        return;
-    };
-    self.pane_events_mutex.unlock();
-    _ = win.PostMessageW(hwnd, pane_event_message, 0, 0);
+        if (result != .full) {
+            if (wake_needed and win.PostMessageW(hwnd, pane_event_message, 0, 0) == 0) {
+                // SendMessageW either drains the queue before returning or is
+                // harmless during window teardown.
+                _ = win.SendMessageW(hwnd, pane_event_message, 0, 0);
+            }
+            return;
+        }
+        // Preserve FIFO semantics under overload by making room before
+        // admitting the new event rather than dropping unique state.
+        self.pane_events_mutex.lock();
+        const dequeued_before = self.pane_events.dequeued_total;
+        self.pane_events_mutex.unlock();
+        _ = win.SendMessageW(hwnd, pane_event_message, pane_event_saturation_drain, 0);
+        self.pane_events_mutex.lock();
+        const made_progress = self.pane_events.dequeued_total != dequeued_before;
+        self.pane_events_mutex.unlock();
+        if (!made_progress) {
+            log.err("unable to drain saturated pane event queue during window teardown", .{});
+            return;
+        }
+    }
 }
 
 fn requestRuntimeRefresh(context: ?*anyopaque) void {
@@ -1405,8 +1544,9 @@ fn isValidLaunchDirectory(path: []const u8) bool {
 test "launch arguments create tabs and splits with Windows Terminal aliases" {
     const allocator = std.testing.allocator;
     const arguments = [_][]const u8{
-        "zigonaut.exe", "new-tab", "-p", "PowerShell", "-d", "C:\\work", ";",
-        "sp", "-H", "--profile", "Command Prompt", ";", "split-pane", "-V", "--startingDirectory", ".",
+        "zigonaut.exe",        "new-tab", "-p",        "PowerShell",     "-d", "C:\\work",   ";",
+        "sp",                  "-H",      "--profile", "Command Prompt", ";",  "split-pane", "-V",
+        "--startingDirectory", ".",
     };
     var plan = try launchPlanFromArgumentsAlloc(allocator, &arguments);
     defer plan.deinit();

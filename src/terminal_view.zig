@@ -145,8 +145,12 @@ const AccessibilitySnapshotWriter = struct {
         if (cell.codepoints.len == 0) self.scalar(' ') else for (cell.codepoints) |cp| self.scalar(cp);
         if (self.cursor_has_position and cell.x == self.cursor_x and self.current_row == self.cursor_y) self.query.caret = start;
         if (self.run_count < self.query.run_capacity and self.query.runs != null) self.query.runs[self.run_count] = .{
-            .start = start, .end = self.offset, .row = self.current_row, .column = cell.x,
-            .columns = if (cell.occupancy == .wide) 2 else 1, .reserved = 0,
+            .start = start,
+            .end = self.offset,
+            .row = self.current_row,
+            .column = cell.x,
+            .columns = if (cell.occupancy == .wide) 2 else 1,
+            .reserved = 0,
         };
         self.run_count += 1;
         self.hashValue(start);
@@ -192,9 +196,12 @@ fn accessibilitySnapshot(view: *View, query: *win.zigonaut_accessibility_snapsho
     const geometry = view.gridGeometry(client);
     var origin = win.POINT{ .x = geometry.left, .y = geometry.top };
     _ = win.ClientToScreen(view.hwnd, &origin);
-    query.grid_left = origin.x; query.grid_top = origin.y;
-    query.cell_width = view.cell_width; query.cell_height = view.cell_height;
-    query.rows = view.rows; query.columns = view.columns;
+    query.grid_left = origin.x;
+    query.grid_top = origin.y;
+    query.cell_width = view.cell_width;
+    query.cell_height = view.cell_height;
+    query.rows = view.rows;
+    query.columns = view.columns;
     query.owner = @intFromPtr(view);
     var writer = AccessibilitySnapshotWriter{ .query = query };
     runtime.replayPreparedViewport(&writer);

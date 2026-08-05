@@ -578,6 +578,17 @@ pub const Terminal = struct {
         end_column: u16,
     };
 
+    pub const LinkScratch = struct {
+        row: std.ArrayList(u8) = .empty,
+        starts: std.ArrayList(usize) = .empty,
+
+        pub fn deinit(self: *LinkScratch, allocator: std.mem.Allocator) void {
+            self.row.deinit(allocator);
+            self.starts.deinit(allocator);
+            self.* = .{};
+        }
+    };
+
     pub const Key = enum {
         backquote,
         backslash,
@@ -1095,12 +1106,24 @@ pub const Terminal = struct {
     }
 
     pub fn linkAtAlloc(self: *Terminal, allocator: std.mem.Allocator, point: Point) !?Link {
+        var scratch = LinkScratch{};
+        defer scratch.deinit(allocator);
+        return self.linkAtAllocWithScratch(allocator, allocator, &scratch, point);
+    }
+
+    pub fn linkAtAllocWithScratch(
+        self: *Terminal,
+        output_allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        scratch: *LinkScratch,
+        point: Point,
+    ) !?Link {
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
         reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
-        if (try hyperlinkAlloc(allocator, &reference)) |uri| {
+        if (try hyperlinkAlloc(output_allocator, &reference)) |uri| {
             if (!link.hasAllowedScheme(uri)) {
-                allocator.free(uri);
+                output_allocator.free(uri);
                 return null;
             }
             var start = point.x;
@@ -1110,24 +1133,23 @@ pub const Terminal = struct {
             return .{ .uri = uri, .row = point.y, .start_column = start, .end_column = end };
         }
 
-        var row = std.ArrayList(u8).empty;
-        defer row.deinit(allocator);
-        const starts = try allocator.alloc(usize, @as(usize, self.columns) + 1);
-        defer allocator.free(starts);
+        scratch.row.clearRetainingCapacity();
+        try scratch.starts.resize(scratch_allocator, @as(usize, self.columns) + 1);
+        const starts = scratch.starts.items;
         var column: u16 = 0;
         while (column < self.columns) : (column += 1) {
-            starts[column] = row.items.len;
-            try self.appendCellText(allocator, &row, column, point.y);
+            starts[column] = scratch.row.items.len;
+            try self.appendCellText(scratch_allocator, &scratch.row, column, point.y);
         }
-        starts[self.columns] = row.items.len;
+        starts[self.columns] = scratch.row.items.len;
         const offset = starts[point.x];
-        const match = link.detectAt(row.items, offset) orelse return null;
+        const match = link.detectAt(scratch.row.items, offset) orelse return null;
         var start_column: u16 = 0;
         while (start_column < self.columns and starts[start_column + 1] <= match.start) start_column += 1;
         var end_column = start_column;
         while (end_column < self.columns and starts[end_column] < match.end) end_column += 1;
         return .{
-            .uri = try allocator.dupe(u8, row.items[match.start..match.end]),
+            .uri = try output_allocator.dupe(u8, scratch.row.items[match.start..match.end]),
             .row = point.y,
             .start_column = start_column,
             .end_column = end_column,

@@ -443,8 +443,7 @@ test "default JSON configuration parses" {
 }
 
 test "native ClearType parses and is a font reload change" {
-    const contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents,
-        "acceleratedGrayscale", "nativeClearType");
+    const contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, "acceleratedGrayscale", "nativeClearType");
     defer std.testing.allocator.free(contents);
     var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, contents, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();

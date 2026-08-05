@@ -57,6 +57,9 @@ jobs:
             Start-Sleep -Seconds (10 * $attempt)
           }
 
+      - name: Check formatting
+        run: zig fmt --check build.zig src
+
       - name: Run tests
         run: zig build test -Dtarget=${{ matrix.target }}
 

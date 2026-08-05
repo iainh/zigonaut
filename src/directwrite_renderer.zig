@@ -285,8 +285,7 @@ test "atlas AA policy, lifecycle, and deterministic fault fallbacks" {
 test "damage-aware transfer stays coherent across rotating buffers" {
     const std = @import("std");
     var result: native.ZigonautDamageTransferTest = undefined;
-    try std.testing.expectEqual(@as(native.HRESULT, 0),
-        native.zigonaut_test_damage_aware_transfer(&result));
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_damage_aware_transfer(&result));
     try std.testing.expectEqual(@as(u32, 10), result.compared_frames);
     try std.testing.expectEqual(@as(u32, 4), result.full_copies);
     try std.testing.expectEqual(@as(u32, 8), result.region_copies);
@@ -295,10 +294,8 @@ test "damage-aware transfer stays coherent across rotating buffers" {
 
 test "invalid numeric antialias policy is rejected before enum conversion" {
     const std = @import("std");
-    try std.testing.expectError(error.InvalidTextAntialiasing,
-        Engine.init("Consolas", 18, 400, 700, 96, 2));
-    try std.testing.expectError(error.InvalidTextAntialiasing,
-        Engine.init("Consolas", 18, 400, 700, 96, std.math.maxInt(u32)));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, 2));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, std.math.maxInt(u32)));
 }
 
 test "layout cache retains hot entries when crossing capacity" {

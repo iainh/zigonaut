@@ -51,6 +51,7 @@ pub const SessionRuntime = struct {
     // content and generations, so synchronous rendering can borrow these lists.
     search_cache: Terminal.SearchCache = .{},
     search_cache_generation: u64 = std.math.maxInt(u64),
+    link_scratch: Terminal.LinkScratch = .{},
     columns: u16,
     rows: u16,
     cell_width: u32 = 0,
@@ -165,31 +166,44 @@ pub const SessionRuntime = struct {
         head: usize = 0,
         count: usize = 0,
 
+        fn assertValid(self: *const NotificationQueue) void {
+            std.debug.assert(self.count <= capacity);
+            std.debug.assert(self.head < capacity);
+            std.debug.assert(self.slots.items.len == 0 or self.slots.items.len == capacity);
+            if (self.count == 0) std.debug.assert(self.head == 0);
+        }
+
         fn deinit(self: *NotificationQueue, allocator: std.mem.Allocator) void {
+            self.assertValid();
             while (self.pop()) |notification| notification.deinit(allocator);
             self.slots.deinit(allocator);
             self.* = .{};
         }
 
         fn push(self: *NotificationQueue, allocator: std.mem.Allocator, notification: Notification) !void {
+            self.assertValid();
             if (self.slots.items.len == 0) try self.slots.resize(allocator, capacity);
             if (self.count == capacity) {
                 self.slots.items[self.head].deinit(allocator);
                 self.slots.items[self.head] = notification;
                 self.head = (self.head + 1) % capacity;
+                self.assertValid();
                 return;
             }
             const index = (self.head + self.count) % capacity;
             self.slots.items[index] = notification;
             self.count += 1;
+            self.assertValid();
         }
 
         fn pop(self: *NotificationQueue) ?Notification {
+            self.assertValid();
             if (self.count == 0) return null;
             const notification = self.slots.items[self.head];
             self.head = (self.head + 1) % capacity;
             self.count -= 1;
             if (self.count == 0) self.head = 0;
+            self.assertValid();
             return notification;
         }
     };
@@ -297,6 +311,7 @@ pub const SessionRuntime = struct {
         self.search.deinit(self.allocator);
         self.render_snapshot.deinit(self.allocator);
         self.search_cache.deinit(self.allocator);
+        self.link_scratch.deinit(self.allocator);
         self.terminal.deinit();
         self.allocator.destroy(self);
     }
@@ -407,7 +422,7 @@ pub const SessionRuntime = struct {
     pub fn linkAtAlloc(self: *SessionRuntime, allocator: std.mem.Allocator, point: Terminal.Point) !?Terminal.Link {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
-        return self.terminal.linkAtAlloc(allocator, point);
+        return self.terminal.linkAtAllocWithScratch(allocator, self.allocator, &self.link_scratch, point);
     }
 
     /// Atomically admits a render and captures its terminal state. A mode 2026
@@ -733,6 +748,7 @@ pub const SessionRuntime = struct {
     }
 
     fn enqueuePtyInput(self: *SessionRuntime, bytes: []const u8) !void {
+        std.debug.assert(self.outstanding_input_bytes <= pty_write_queue_max_bytes);
         if (bytes.len > pty_write_queue_max_bytes -| self.outstanding_input_bytes) return error.PtyWriteQueueFull;
         if (self.pty_operations.items.len != 0) {
             const operation = &self.pty_operations.items[self.pty_operations.items.len - 1];
@@ -742,6 +758,7 @@ pub const SessionRuntime = struct {
             }
         } else try self.appendPtyInput(bytes);
         self.outstanding_input_bytes += bytes.len;
+        std.debug.assert(self.outstanding_input_bytes <= pty_write_queue_max_bytes);
     }
 
     pub fn paste(self: *SessionRuntime, data: []u8) !void {
@@ -829,6 +846,7 @@ pub const SessionRuntime = struct {
                         return;
                     };
                     self.pty_queue_mutex.lock();
+                    std.debug.assert(input.items.len <= self.outstanding_input_bytes);
                     self.outstanding_input_bytes -= input.items.len;
                     self.pty_queue_mutex.unlock();
                 },
@@ -854,6 +872,7 @@ pub const SessionRuntime = struct {
             }
             operation.deinit(self.allocator);
         }
+        std.debug.assert(removed_input_bytes <= self.outstanding_input_bytes);
         self.pty_operations.clearRetainingCapacity();
         self.outstanding_input_bytes -= removed_input_bytes;
     }
@@ -1247,6 +1266,7 @@ fn deinitTestRuntime(runtime: *SessionRuntime) void {
     runtime.search.deinit(runtime.allocator);
     runtime.render_snapshot.deinit(runtime.allocator);
     runtime.search_cache.deinit(runtime.allocator);
+    runtime.link_scratch.deinit(runtime.allocator);
     runtime.terminal.deinit();
 }
 

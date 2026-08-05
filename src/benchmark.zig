@@ -70,6 +70,24 @@ pub fn main(init: std.process.Init) !void {
     for (0..total_rows) |row| try terminal.searchRowCached(std.heap.page_allocator, &search_cache, @intCast(row), "compile", &matches);
     const warm_search_ns = timer.lap();
 
+    var link_terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer link_terminal.deinit();
+    var link_scratch = Terminal.LinkScratch{};
+    defer link_scratch.deinit(std.heap.page_allocator);
+    link_terminal.feed("https://example.com/zigonaut");
+    const link_iterations = 10_000;
+    for (0..link_iterations) |_| {
+        const found = (try link_terminal.linkAtAllocWithScratch(
+            std.heap.page_allocator,
+            std.heap.page_allocator,
+            &link_scratch,
+            .{ .x = 10, .y = 0 },
+        )).?;
+        std.mem.doNotOptimizeAway(found.start_column);
+        std.heap.page_allocator.free(found.uri);
+    }
+    const link_lookup_ns = timer.lap();
+
     var resize_terminals: [resize_session_count]Terminal = undefined;
     var initialized: usize = 0;
     defer for (resize_terminals[0..initialized]) |*resize_terminal| resize_terminal.deinit();
@@ -104,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
             "snapshot cell size: {d} bytes\n" ++
             "snapshot capture unchanged: {d:.2} us/frame; one-row update: {d:.2} us/frame; replay after one-row update: {d:.2} us/frame; checksum={d}\n" ++
             "search cold: {d} rows in {d:.2} ms; warm cached: {d} matches in {d:.2} ms\n" ++
+            "link lookup: {d} iterations in {d:.2} ms ({d:.2} us/lookup)\n" ++
             "resize: {d} sessions x {d} changes in {d:.2} ms ({d:.2} us/change); active-only {d:.2} ms ({d:.2} us/change)\n" ++
             "DirectWrite layout cache: {d} ReleaseFast repetitions in {d:.2} ms; {d} creations ({d} hot-reuse misses), {d} entries\n",
         .{
@@ -122,6 +141,9 @@ pub fn main(init: std.process.Init) !void {
             milliseconds(cold_search_ns),
             matches.items.len,
             milliseconds(warm_search_ns),
+            link_iterations,
+            milliseconds(link_lookup_ns),
+            @as(f64, @floatFromInt(link_lookup_ns)) / link_iterations / 1_000.0,
             resize_session_count,
             resize_iterations,
             milliseconds(all_resize_ns),
@@ -176,13 +198,7 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print(
         "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; population batches={d}\n",
-        .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation,
-            dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area,
-            dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets,
-            dwrite.atlas_sprite_batches, dwrite.atlas_sprites,
-            dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits,
-            dwrite.atlas_placement_misses, dwrite.atlas_rasterizations,
-            dwrite.atlas_uploads },
+        .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation, dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area, dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets, dwrite.atlas_sprite_batches, dwrite.atlas_sprites, dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits, dwrite.atlas_placement_misses, dwrite.atlas_rasterizations, dwrite.atlas_uploads },
     );
     std.debug.print(
         "    atlas warm frame: {d:.2} us ({d} fragmented rows; includes BeginDraw, Clear, row submission, and EndDraw; excludes transfer/Present)\n",
@@ -190,9 +206,7 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print(
         "    atlas cold frame CPU submission: {d:.2} us (resources={d}, rasterizations={d}, population batches={d}; includes lazy creation, one fragmented row, and EndDraw; excludes GPU completion)\n",
-        .{ perIterationUs(dwrite.atlas_cold_frame_nanoseconds, 1),
-            dwrite.atlas_cold_resource_allocations, dwrite.atlas_cold_rasterizations,
-            dwrite.atlas_cold_uploads },
+        .{ perIterationUs(dwrite.atlas_cold_frame_nanoseconds, 1), dwrite.atlas_cold_resource_allocations, dwrite.atlas_cold_rasterizations, dwrite.atlas_cold_uploads },
     );
     std.debug.print(
         "search highlighting: per-cell lookup {d:.2} ms; per-row lookup {d:.2} ms ({d:.2}% faster)\n" ++

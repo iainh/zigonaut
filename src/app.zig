@@ -3,6 +3,8 @@ const config = @import("config.zig");
 const directwrite_renderer = @import("directwrite_renderer.zig");
 const pane_tree = @import("pane_tree.zig");
 const SessionRuntime = @import("session.zig").SessionRuntime;
+
+pub const max_tabs = 256;
 const theme = @import("theme.zig");
 
 test {
@@ -254,6 +256,7 @@ pub const App = struct {
     }
 
     pub fn addSession(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, columns: u16, rows: u16) !usize {
+        if (self.tabs.items.len >= max_tabs) return error.TabLimitReached;
         const background_seed = self.takeBackgroundSeed();
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
@@ -266,6 +269,7 @@ pub const App = struct {
     }
 
     fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !usize {
+        if (self.tabs.items.len >= max_tabs) return error.TabLimitReached;
         var unowned_runtime = runtime;
         errdefer if (unowned_runtime) |value| value.destroy();
         const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
@@ -335,6 +339,7 @@ pub const App = struct {
 
     pub fn splitFocused(self: *App, axis: pane_tree.Axis) !pane_tree.PaneId {
         const tab = self.activeTab() orelse return error.NoFocusedPane;
+        if (tab.panes.items.len >= pane_tree.max_panes) return error.PaneLimitReached;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const background_seed = self.takeBackgroundSeed();
@@ -349,7 +354,9 @@ pub const App = struct {
     }
 
     pub fn splitFocusedSession(self: *App, axis: pane_tree.Axis, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool) !pane_tree.PaneId {
-        if (self.activePane() == null) return error.NoFocusedPane;
+        const tab = self.activeTab() orelse return error.NoFocusedPane;
+        if (tab.panes.items.len >= pane_tree.max_panes) return error.PaneLimitReached;
+        if (tab.focusedPane() == null) return error.NoFocusedPane;
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const background_seed = self.takeBackgroundSeed();
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
@@ -379,6 +386,7 @@ pub const App = struct {
         var unowned_runtime = runtime;
         errdefer if (unowned_runtime) |value| value.destroy();
         const tab = self.activeTab() orelse return error.NoFocusedPane;
+        if (tab.panes.items.len >= pane_tree.max_panes) return error.PaneLimitReached;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;
         const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
         var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata, .hold_on_exit = hold_on_exit };
@@ -760,4 +768,27 @@ test "focus title close extraction and stale identities" {
     try std.testing.expect(final.removed_tab);
     app.destroyRemovedPane(&final);
     try std.testing.expectEqual(@as(usize, 0), app.tabCount());
+}
+
+test "tab and pane limits reject work before model mutation" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    for (0..max_tabs) |index| {
+        _ = try app.addSessionRecord(.powershell, "test", "", "", null, theme.rasmus.background, @intCast(index));
+    }
+    try std.testing.expectError(
+        error.TabLimitReached,
+        app.addSessionRecord(.powershell, "overflow", "", "", null, theme.rasmus.background, 0),
+    );
+    try std.testing.expectEqual(@as(usize, max_tabs), app.tabCount());
+
+    app.activateTab(0);
+    for (1..pane_tree.max_panes) |index| {
+        _ = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, @intCast(index), null);
+    }
+    try std.testing.expectError(
+        error.PaneLimitReached,
+        app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 0, null),
+    );
+    try std.testing.expectEqual(@as(usize, pane_tree.max_panes), app.activeTab().?.panes.items.len);
 }
