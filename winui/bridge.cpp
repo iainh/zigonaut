@@ -191,6 +191,7 @@ struct Bridge {
         RECT bounds{-1,-1,-1,-1}; std::wstring translated_characters;
         TsfService::Provider tsf_provider{};
         bool tsf_focused{}, updating_scrollbar{}, pointer_over_scrollbar{}, initialized{}; uint32_t total{}, page{}, position{};
+        FrameworkElement::SizeChanged_revoker size_changed{};
         UIElement::KeyDown_revoker key_down{}; UIElement::KeyUp_revoker key_up{}; UIElement::CharacterReceived_revoker character{};
         UIElement::GotFocus_revoker focus{}; UIElement::LostFocus_revoker blur{};
         UIElement::PointerPressed_revoker pressed{}; UIElement::PointerReleased_revoker released{}; UIElement::PointerMoved_revoker moved{};
@@ -825,6 +826,12 @@ struct Bridge {
         p->scrollbar=Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{}; p->scrollbar.Orientation(Orientation::Vertical); p->scrollbar.HorizontalAlignment(HorizontalAlignment::Right); p->scrollbar.Width(12); p->scrollbar.Opacity(0); p->scrollbar.Visibility(Visibility::Collapsed);
         p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->grid.Children().Append(p->focus_indicator); p->frame.Child(p->grid);
         check_hresult(p->panel.as<ISwapChainPanelNative>()->SetSwapChain(p->swap_chain.get()));
+        // LayoutUpdated is intentionally coalesced for general XAML churn, but a
+        // pane size is presentation-critical. Resize the native render surface in
+        // this layout turn so composition never advances the panel a frame ahead.
+        p->size_changed = p->panel.SizeChanged(auto_revoke, [this, p](auto&&, auto&&) {
+            if (!layoutPane(*p)) scheduleLayoutTerminal();
+        });
         p->tsf_provider.hwnd = p->window;
         p->tsf_provider.commit = [this, id](std::wstring_view value) { imeEvent(ZIGONAUT_PANE_EVENT_IME_COMMIT, id, value); };
         p->tsf_provider.preedit = [this, id](std::wstring_view value, uint32_t start, uint32_t length) { imeEvent(ZIGONAUT_PANE_EVENT_IME_PREEDIT, id, value, start, length); };
@@ -1341,12 +1348,7 @@ struct Bridge {
         layout_pending = false;
         auto failed = false;
         for (auto& [_, owned] : pane_hosts) {
-            auto& p=*owned; if(!p.window || !IsWindow(p.window) || !p.panel.XamlRoot()) continue;
-            auto o=p.panel.TransformToVisual(root).TransformPoint({0,0}); RECT n{(LONG)std::lround(o.X*rasterization_scale),(LONG)std::lround(o.Y*rasterization_scale),(LONG)std::lround((o.X+p.panel.ActualWidth())*rasterization_scale),(LONG)std::lround((o.Y+p.panel.ActualHeight())*rasterization_scale)};
-            if(n.right>n.left&&n.bottom>n.top&&!EqualRect(&n,&p.bounds)) {
-                if(SetWindowPos(p.window,nullptr,n.left,n.top,n.right-n.left,n.bottom-n.top,SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_NOZORDER)) p.bounds=n;
-                else failed=true;
-            }
+            if (!layoutPane(*owned)) failed = true;
         }
         if (failed && layout_retry_count < 3 && !closed) {
             layout_retry_timer.Interval(std::chrono::milliseconds(16 << layout_retry_count));
@@ -1355,6 +1357,24 @@ struct Bridge {
         } else if (!failed) {
             layout_retry_count = 0;
         }
+    }
+
+    bool layoutPane(PaneHost& pane) {
+        if (!pane.window || !IsWindow(pane.window) || !pane.panel.XamlRoot()) return true;
+        auto const origin = pane.panel.TransformToVisual(root).TransformPoint({0, 0});
+        RECT bounds{
+            static_cast<LONG>(std::lround(origin.X * rasterization_scale)),
+            static_cast<LONG>(std::lround(origin.Y * rasterization_scale)),
+            static_cast<LONG>(std::lround((origin.X + pane.panel.ActualWidth()) * rasterization_scale)),
+            static_cast<LONG>(std::lround((origin.Y + pane.panel.ActualHeight()) * rasterization_scale)),
+        };
+        if (bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+            EqualRect(&bounds, &pane.bounds)) return true;
+        if (!SetWindowPos(pane.window, nullptr, bounds.left, bounds.top,
+                bounds.right - bounds.left, bounds.bottom - bounds.top,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER)) return false;
+        pane.bounds = bounds;
+        return true;
     }
 
     bool runBenchmarkIfRequested() {

@@ -241,6 +241,10 @@ pub const Engine = struct {
         if (result < 0) return error.Direct2DPresentFailed;
         return if (result == 0) .presented else .retry;
     }
+
+    pub fn abandonPendingPresent(self: *Engine) void {
+        native.zigonaut_text_engine_abandon_pending_present(self.handle);
+    }
 };
 
 test "cluster advances fit exact terminal spans" {

@@ -215,6 +215,8 @@ HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
 
 HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine);
 
+void zigonaut_text_engine_abandon_pending_present(ZigonautTextEngine* engine);
+
 void zigonaut_fit_cluster_advances(
     float* advances,
     uint32_t glyph_count,

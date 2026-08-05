@@ -3188,3 +3188,8 @@ extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine
     engine->discardTargetBitmap();
     return FAILED(present) ? present : E_UNEXPECTED;
 }
+
+extern "C" void zigonaut_text_engine_abandon_pending_present(
+    ZigonautTextEngine* engine) {
+    if (engine != nullptr) engine->present_pending = false;
+}

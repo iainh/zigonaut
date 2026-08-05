@@ -252,6 +252,7 @@ pub const View = struct {
     frame_wait: win.HANDLE = null,
     frame_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
     present_pending: bool = false,
+    resize_render_pending: bool = false,
     scene_has_images: bool = false,
     renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
@@ -723,6 +724,7 @@ pub const View = struct {
         self.clearFrameWait();
         _ = self.frame_epoch.fetchAdd(1, .acq_rel);
         self.present_pending = false;
+        self.resize_render_pending = false;
         self.scene_has_images = false;
     }
 
@@ -732,6 +734,37 @@ pub const View = struct {
             self.frame_wait = null;
         }
         self.frame_wait_pending.store(false, .release);
+    }
+
+    /// A composition surface size change must not wait for the ordinary frame
+    /// latency wakeup: WinUI has already committed the larger panel bounds. Draw
+    /// the replacement frame in this WM_SIZE turn, like Ghostty's bounds-change
+    /// display callback. If an older non-blocking Present is still queued, retain
+    /// this request and run it immediately after that Present completes.
+    fn renderResize(self: *View) void {
+        self.full_rebuild_required.store(true, .release);
+        self.render_dirty.store(true, .release);
+        self.resize_render_pending = true;
+        if (self.present_pending) {
+            // DXGI_ERROR_WAS_STILL_DRAWING means the non-blocking Present was not
+            // submitted. Do not present that obsolete-size frame before resizing.
+            _ = win.KillTimer(self.hwnd, present_retry_timer);
+            self.text_engine.?.abandonPendingPresent();
+            self.present_pending = false;
+        }
+        self.paintPendingResize();
+    }
+
+    fn paintPendingResize(self: *View) void {
+        if (!self.resize_render_pending or self.present_pending or self.text_engine == null or self.renderer_failed) return;
+        self.clearFrameWait();
+        if (!self.render_dirty.swap(false, .acq_rel)) return;
+        if (self.paintSwapChain()) {
+            self.resize_render_pending = false;
+        } else {
+            self.render_dirty.store(true, .release);
+            self.armFrameWait();
+        }
     }
 
     pub fn refresh(self: *View) void {
@@ -1105,6 +1138,10 @@ pub const View = struct {
             return;
         }
         self.present_pending = false;
+        if (self.resize_render_pending) {
+            self.paintPendingResize();
+            return;
+        }
         if (self.render_dirty.load(.acquire)) self.armFrameWait();
     }
 
@@ -2019,8 +2056,11 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             if (view) |current| {
                 if (wparam == current.frame_epoch.load(.acquire)) {
                     current.clearFrameWait();
-                    if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain())
+                    if (current.resize_render_pending) {
+                        current.paintPendingResize();
+                    } else if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain()) {
                         current.render_dirty.store(true, .release);
+                    }
                 }
             }
             return 0;
@@ -2137,7 +2177,10 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_SIZE => {
             if (view) |current| {
                 current.resizeSessions();
-                current.invalidate();
+                if (current.text_engine != null)
+                    current.renderResize()
+                else
+                    current.invalidate();
             }
             return 0;
         },
