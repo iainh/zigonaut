@@ -843,7 +843,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 
         colors.reserve(19);
         auto palette = StackPanel{}; palette.Spacing(8);
-        static wchar_t const* names[] = { L"Foreground", L"Background", L"Cursor", L"ANSI 0 · Black", L"ANSI 1 · Red", L"ANSI 2 · Green", L"ANSI 3 · Yellow", L"ANSI 4 · Blue", L"ANSI 5 · Magenta", L"ANSI 6 · Cyan", L"ANSI 7 · White", L"ANSI 8 · Bright black", L"ANSI 9 · Bright red", L"ANSI 10 · Bright green", L"ANSI 11 · Bright yellow", L"ANSI 12 · Bright blue", L"ANSI 13 · Bright magenta", L"ANSI 14 · Bright cyan", L"ANSI 15 · Bright white" };
+        static wchar_t const* names[] = { L"Foreground", L"Background", L"Cursor", L"ANSI 0 \u00B7 Black", L"ANSI 1 \u00B7 Red", L"ANSI 2 \u00B7 Green", L"ANSI 3 \u00B7 Yellow", L"ANSI 4 \u00B7 Blue", L"ANSI 5 \u00B7 Magenta", L"ANSI 6 \u00B7 Cyan", L"ANSI 7 \u00B7 White", L"ANSI 8 \u00B7 Bright black", L"ANSI 9 \u00B7 Bright red", L"ANSI 10 \u00B7 Bright green", L"ANSI 11 \u00B7 Bright yellow", L"ANSI 12 \u00B7 Bright blue", L"ANSI 13 \u00B7 Bright magenta", L"ANSI 14 \u00B7 Bright cyan", L"ANSI 15 \u00B7 Bright white" };
         for (size_t index = 0; index < 19; ++index) {
             auto const key = index == 0 ? "foreground" : index == 1 ? "background" : index == 2 ? "cursor" : "ansi" + std::to_string(index - 3);
             auto editor = textBox(colorOrEmpty(values, key), L"Use theme default (#RRGGBB)");
@@ -1104,7 +1104,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             card(L"Launch profiles", L"Choose a name, shell type, command, and working directory for each new-tab option.", profile_panel, true),
             card(L"Keep tabs open", L"Keep a new tab open after its process exits cleanly.", hold_on_exit),
             card(L"Windows default terminal", L"Open the Windows selector for apps that implement the native terminal-host handoff.", default_terminal),
-            card(L"File Explorer", L"Add or remove “Open in Zigonaut” for folders and folder backgrounds for this executable location.", explorer),
+            card(L"File Explorer", L"Add or remove \u201COpen in Zigonaut\u201D for folders and folder backgrounds for this executable location.", explorer),
         });
     }
 
@@ -1281,7 +1281,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             auto working_directory = string(editor.working_directory);
             auto kind = editor.shell.SelectedIndex() == 0 ? "powershell" : editor.shell.SelectedIndex() == 2 ? "wsl" : "windows";
             if (name.empty() || name.size() >= 128 || name.find_first_of("|\r\n") != std::string::npos)
-                throw FieldValidationError("Enter a profile name of 1–127 bytes without | or line breaks.", editor.name);
+                throw FieldValidationError("Enter a profile name of 1\xE2\x80\x93" "127 bytes without | or line breaks.", editor.name);
             if (command.empty() || command.find('\r') != std::string::npos || command.find('\n') != std::string::npos || command.find('\0') != std::string::npos)
                 throw FieldValidationError("Enter a command without line breaks or NUL characters.", editor.command);
             if (working_directory.find('\0') != std::string::npos)
@@ -1382,7 +1382,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     void save() noexcept {
-        for (auto const& status : save_status) status.Text(L"Saving…");
+        for (auto const& status : save_status) status.Text(L"Saving\u2026");
         try {
             auto output = serialize();
             auto temporary = path;
