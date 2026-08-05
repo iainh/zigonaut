@@ -2,6 +2,31 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.5.0] - 2026-08-05
+
+### Added
+
+- Configurable horizontal and vertical terminal padding.
+- End-to-end ConPTY throughput and native DirectWrite rendering benchmarks.
+
+### Changed
+
+- Moved glyph rendering to a GPU-instanced atlas and retained terminal scene,
+  substantially reducing CPU submission work during drawing and scrolling.
+- Pipelined terminal snapshot preparation with frame presentation to reduce UI-thread
+  rendering work and improve responsiveness under sustained output.
+- Made ConPTY reads and writes ordered, cancellable, and bounded during shutdown.
+- Improved the terminal find experience and adopted Ghostty's semantic terminal
+  effects.
+
+### Fixed
+
+- Synchronized rendering during terminal resize and retried transient layout failures.
+- Prevented stale frames from starving newer renders.
+- Corrected enhanced-keyboard punctuation and AltGr key-release handling.
+- Prevented settings text mojibake and dark-theme startup flicker.
+- Ensured closing the final window terminates the application completely.
+
 ## [0.4.1] - 2026-08-01
 
 ### Changed
@@ -125,6 +150,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.5.0]: https://github.com/iainh/zigonaut/releases/tag/v0.5.0
 [0.4.1]: https://github.com/iainh/zigonaut/releases/tag/v0.4.1
 [0.4.0]: https://github.com/iainh/zigonaut/releases/tag/v0.4.0
 [0.3.0]: https://github.com/iainh/zigonaut/releases/tag/v0.3.0
