@@ -2152,7 +2152,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                     const generation_matches = outcome != 1 or current.completion_runtime == null or
                         current.completion_generation == current.completion_runtime.?.contentGeneration();
                     current.clearFrameWait();
-                    if (!request_matches or !runtime_matches or !epoch_matches or !generation_matches or outcome == 3) {
+                    if (!runtime_matches or !epoch_matches or outcome == 3) {
                         // captureRender may have advanced RenderSnapshot dirty/hash
                         // history even when this completion can no longer be used.
                         current.full_rebuild_required.store(true, .release);
@@ -2164,9 +2164,20 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                     } else if (current.resize_render_pending) {
                         current.prepared_available = true;
                         current.paintPendingResize();
+                        if (!request_matches or !generation_matches) {
+                            current.render_dirty.store(true, .release);
+                            current.armFrameWait();
+                        }
                     } else if (current.render_dirty.swap(false, .acq_rel)) {
                         current.prepared_available = true;
-                        if (!current.paintSwapChain()) current.render_dirty.store(true, .release);
+                        const painted = current.paintSwapChain();
+                        // A snapshot remains coherent when output advances after
+                        // capture. Present it rather than requiring a quiet interval,
+                        // then schedule the newer generation for the next frame.
+                        if (!painted or !request_matches or !generation_matches) {
+                            current.render_dirty.store(true, .release);
+                            current.armFrameWait();
+                        }
                     }
                 }
             }
