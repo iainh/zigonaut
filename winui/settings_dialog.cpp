@@ -13,6 +13,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Text.h>
+#include <dwmapi.h>
 #include <dwrite_1.h>
 #include <algorithm>
 #include <array>
@@ -665,11 +666,13 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             width,
             height,
         });
+
+        root = Grid{};
+        applyTheme(high_contrast, dark_theme);
         auto backdrop = Media::MicaBackdrop{};
         backdrop.Kind(Microsoft::UI::Composition::SystemBackdrops::MicaKind::Base);
         window.SystemBackdrop(backdrop);
 
-        root = Grid{};
         auto error_row = RowDefinition{};
         error_row.Height(GridLength{1, GridUnitType::Auto});
         root.RowDefinitions().Append(error_row);
@@ -719,7 +722,6 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         });
         root.Children().Append(navigation);
         window.Content(root);
-        applyTheme(high_contrast, dark_theme);
         closed_revoker = window.Closed(auto_revoke, [this](auto const&, auto const&) { open = false; });
         registerAutoSave();
     }
@@ -1448,6 +1450,14 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     void applyTheme(bool high_contrast, bool dark_theme) {
+        HWND settings_window{};
+        check_hresult(window.as<::IWindowNative>()->get_WindowHandle(&settings_window));
+        BOOL const use_dark_frame = dark_theme && !high_contrast;
+        DwmSetWindowAttribute(
+            settings_window,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &use_dark_frame,
+            sizeof(use_dark_frame));
         root.RequestedTheme(high_contrast ? ElementTheme::Default : dark_theme ? ElementTheme::Dark : ElementTheme::Light);
         window.AppWindow().TitleBar().PreferredTheme(high_contrast
             ? Microsoft::UI::Windowing::TitleBarTheme::UseDefaultAppMode
