@@ -197,6 +197,16 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     std.debug.print(
+        "  scroll A/B CPU submission (same invocation, {d} warm iterations excluded, {d} measured; includes draw + final transfer, excludes Present/GPU wait): full 40-row fragmented redraw {d:.2} us/frame; scratch shift + exposed fragmented row {d:.2} us/frame; {d:.2}% change\n",
+        .{
+            3,
+            dwrite.scroll_iterations,
+            perIterationUs(dwrite.scroll_full_nanoseconds, dwrite.scroll_iterations),
+            perIterationUs(dwrite.scroll_shift_nanoseconds, dwrite.scroll_iterations),
+            improvement(dwrite.scroll_full_nanoseconds, dwrite.scroll_shift_nanoseconds),
+        },
+    );
+    std.debug.print(
         "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; population batches={d}\n",
         .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation, dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area, dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets, dwrite.atlas_sprite_batches, dwrite.atlas_sprites, dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits, dwrite.atlas_placement_misses, dwrite.atlas_rasterizations, dwrite.atlas_uploads },
     );

@@ -123,6 +123,11 @@ pub const Engine = struct {
         return required != 0;
     }
 
+    pub fn shiftScene(self: *Engine, row_delta: i32, left: u32, top: u32, width: u32, row_height: u32, row_count: u32) !void {
+        if (native.zigonaut_text_engine_shift_scene(self.handle, row_delta, left, top, width, row_height, row_count) < 0)
+            return error.Direct2DSceneShiftFailed;
+    }
+
     pub fn clearRect(self: *Engine, left: f32, top: f32, right: f32, bottom: f32, color: u32) void {
         native.zigonaut_text_engine_clear_rect(self.handle, left, top, right, bottom, color);
     }

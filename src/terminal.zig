@@ -165,10 +165,13 @@ pub const Terminal = struct {
 
     pub const RenderSnapshot = struct {
         frame: ?Frame = null,
+        previous_frame: ?Frame = null,
         cells: std.ArrayList(OwnedCell) = .empty,
         rows: std.ArrayList(Row) = .empty,
         images: std.ArrayList(OwnedImage) = .empty,
         placements: std.ArrayList(Placement) = .empty,
+        row_hashes: std.ArrayList(u64) = .empty,
+        previous_row_hashes: std.ArrayList(u64) = .empty,
 
         const OwnedImage = struct {
             image_id: u32,
@@ -222,6 +225,7 @@ pub const Terminal = struct {
                 selected: bool,
                 underline: u8,
             },
+            padding: [3]u8 = .{ 0, 0, 0 },
 
             fn init(cell: Cell, codepoint_offset: u32) OwnedCell {
                 return .{
@@ -318,6 +322,8 @@ pub const Terminal = struct {
             self.clearImages(allocator);
             self.images.deinit(allocator);
             self.placements.deinit(allocator);
+            self.row_hashes.deinit(allocator);
+            self.previous_row_hashes.deinit(allocator);
             self.* = .{};
         }
 
@@ -329,6 +335,8 @@ pub const Terminal = struct {
                 errdefer replacement.deinit(allocator);
                 try replacement.cells.resize(allocator, cell_count);
                 try replacement.rows.resize(allocator, terminal.rows);
+                try replacement.row_hashes.resize(allocator, terminal.rows);
+                try replacement.previous_row_hashes.resize(allocator, terminal.rows);
                 for (replacement.rows.items) |*row| row.* = .{};
                 for (replacement.rows.items) |*row|
                     try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
@@ -336,11 +344,16 @@ pub const Terminal = struct {
                 try terminal.renderViewportInternal(&recorder, null);
                 for (replacement.rows.items) |*row| row.dirty = true;
                 try replacement.captureImages(allocator, terminal);
+                replacement.updateRowHashes();
+                @memcpy(replacement.previous_row_hashes.items, replacement.row_hashes.items);
+                replacement.previous_frame = replacement.frame;
                 self.deinit(allocator);
                 self.* = replacement;
                 return;
             }
             const previous_frame = self.frame;
+            self.previous_frame = previous_frame;
+            @memcpy(self.previous_row_hashes.items, self.row_hashes.items);
             for (self.rows.items) |*row| row.dirty = false;
             var recorder = Recorder{ .snapshot = self, .allocator = allocator };
             terminal.renderViewportInternal(&recorder, self.frame) catch |err| {
@@ -364,6 +377,48 @@ pub const Terminal = struct {
                 self.frame = null;
                 return err;
             };
+            self.updateRowHashes();
+        }
+
+        fn updateRowHashes(self: *RenderSnapshot) void {
+            const count = self.columns();
+            for (self.rows.items, 0..) |*row, y| {
+                if (!row.dirty) continue;
+                const cells = self.cells.items[y * count ..][0..count];
+                var hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&row.metadata));
+                hash = std.hash.Wyhash.hash(hash, std.mem.sliceAsBytes(cells));
+                self.row_hashes.items[y] = std.hash.Wyhash.hash(
+                    hash,
+                    std.mem.sliceAsBytes(row.graphemes.items),
+                );
+            }
+        }
+
+        pub fn canShift(self: *const RenderSnapshot, delta: i32) bool {
+            const amount: usize = @intCast(@abs(@as(i64, delta)));
+            return self.frame != null and self.previous_frame != null and delta != 0 and
+                amount < self.rows.items.len and self.images.items.len == 0 and self.placements.items.len == 0;
+        }
+
+        pub fn replayShifted(self: *const RenderSnapshot, renderer: anytype, delta: i32) void {
+            const frame = self.frame orelse return;
+            renderer.beginFrame(frame);
+            const columns_count = self.columns();
+            for (self.rows.items, 0..) |*row, y| {
+                const old_y: i64 = @as(i64, @intCast(y)) - delta;
+                const old_cursor = if (self.previous_frame) |old| old.cursor_visible and
+                    old.cursor_has_position and old_y == old.cursor_y else false;
+                const new_cursor = frame.cursor_visible and frame.cursor_has_position and y == frame.cursor_y;
+                const changed = old_y < 0 or old_y >= self.rows.items.len or old_cursor or new_cursor or
+                    self.row_hashes.items[y] != self.previous_row_hashes.items[@intCast(old_y)];
+                if (!changed) continue;
+                if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata")) renderer.rowMetadata(@intCast(y), row.metadata);
+                renderer.beginRow(@intCast(y));
+                for (self.cells.items[y * columns_count ..][0..columns_count], 0..) |*cell, x|
+                    renderer.drawCell(cell.value(row, @intCast(x), @intCast(y)));
+                renderer.endRow(@intCast(y));
+            }
+            renderer.endFrame(frame);
         }
 
         fn cursorChanged(previous: Frame, current: Frame) bool {
@@ -2878,3 +2933,78 @@ fn expectSnapshotsEqual(expected: *const Terminal.RenderSnapshot, actual: *const
         }
     }
 }
+
+test "render snapshot shifted replay emits only exposed mismatched and cursor rows" {
+    var terminal = try Terminal.init(4, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("aaaa\r\nbbbb\r\ncccc\r\ndddd");
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    // Model a +1 retained shift. Rows 1 and 3 match their shifted source;
+    // row 2 is deliberately mismatched. Cursor movement additionally exposes
+    // old row 1 and new row 3 (row 1 is already retained and row 3 retained).
+    snapshot.previous_row_hashes.items[0] = snapshot.row_hashes.items[1];
+    snapshot.previous_row_hashes.items[1] = snapshot.row_hashes.items[1] ^ 1;
+    snapshot.previous_row_hashes.items[2] = snapshot.row_hashes.items[3];
+    var previous = snapshot.frame.?;
+    previous.cursor_visible = true;
+    previous.cursor_has_position = true;
+    previous.cursor_y = 0; // old cursor maps to new row 1
+    snapshot.previous_frame = previous;
+    snapshot.frame.?.cursor_visible = true;
+    snapshot.frame.?.cursor_has_position = true;
+    snapshot.frame.?.cursor_y = 3;
+
+    var shifted = ShiftReplayTestRenderer{};
+    snapshot.replayShifted(&shifted, 1);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 1, 2, 3 }, shifted.rows[0..shifted.row_count]);
+
+    // With cursors disabled, only the exposed row and hash mismatch remain.
+    snapshot.previous_frame.?.cursor_visible = false;
+    snapshot.frame.?.cursor_visible = false;
+    shifted = .{};
+    snapshot.replayShifted(&shifted, 1);
+    try std.testing.expectEqualSlices(u16, &.{ 0, 2 }, shifted.rows[0..shifted.row_count]);
+    var full = ShiftReplayTestRenderer{};
+    snapshot.replay(&full);
+    try std.testing.expectEqual(shifted.row_checksums[0], full.row_checksums[0]);
+    try std.testing.expectEqual(shifted.row_checksums[1], full.row_checksums[2]);
+
+    try std.testing.expect(snapshot.canShift(1));
+    try std.testing.expect(!snapshot.canShift(4));
+    try std.testing.expect(!snapshot.canShift(-4));
+    snapshot.previous_frame = null;
+    try std.testing.expect(!snapshot.canShift(1));
+    snapshot.previous_frame = snapshot.frame;
+    try snapshot.images.append(std.testing.allocator, .{
+        .image_id = 1,
+        .generation = 1,
+        .width = 1,
+        .height = 1,
+        .pixels = try std.testing.allocator.dupe(u8, &.{ 0, 0, 0, 0 }),
+    });
+    try std.testing.expect(!snapshot.canShift(1));
+}
+
+const ShiftReplayTestRenderer = struct {
+    rows: [8]u16 = undefined,
+    row_checksums: [8]u64 = [_]u64{0} ** 8,
+    row_count: usize = 0,
+
+    pub fn beginFrame(_: *ShiftReplayTestRenderer, _: Terminal.Frame) void {}
+    pub fn beginRow(self: *ShiftReplayTestRenderer, row: u16) void {
+        self.rows[self.row_count] = row;
+        self.row_checksums[self.row_count] = 0;
+    }
+    pub fn drawCell(self: *ShiftReplayTestRenderer, cell: Terminal.Cell) void {
+        for (cell.codepoints) |codepoint| self.row_checksums[self.row_count] +%= codepoint;
+        self.row_checksums[self.row_count] +%= @intFromBool(cell.selected);
+    }
+    pub fn endRow(self: *ShiftReplayTestRenderer, _: u16) void {
+        self.row_count += 1;
+    }
+    pub fn drawImage(_: *ShiftReplayTestRenderer, _: Terminal.Image) void {}
+    pub fn endFrame(_: *ShiftReplayTestRenderer, _: Terminal.Frame) void {}
+};

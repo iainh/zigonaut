@@ -367,6 +367,7 @@ struct ZigonautTextEngine {
     ID2D1Bitmap1* scene_bitmap = nullptr;
     ID3D11Texture2D* backbuffer_texture = nullptr;
     ID3D11Texture2D* scene_texture = nullptr;
+    ID3D11Texture2D* scene_shift_scratch = nullptr;
     ID2D1SolidColorBrush* brush = nullptr;
     std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
     std::list<const LayoutKey*> layout_recency;
@@ -880,6 +881,7 @@ struct ZigonautTextEngine {
         release(scene_bitmap);
         release(backbuffer_texture);
         release(scene_texture);
+        release(scene_shift_scratch);
         clearImages();
         scene_width = 0;
         scene_height = 0;
@@ -1059,6 +1061,8 @@ struct ZigonautTextEngine {
             scene_description.Usage = D3D11_USAGE_DEFAULT;
             scene_description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
             hr = d3d_device->CreateTexture2D(&scene_description, nullptr, &scene_texture);
+            if (SUCCEEDED(hr)) hr = d3d_device->CreateTexture2D(&scene_description, nullptr,
+                &scene_shift_scratch);
         }
         IDXGISurface* scene_surface = nullptr;
         if (SUCCEEDED(hr)) hr = scene_texture->QueryInterface(IID_PPV_ARGS(&scene_surface));
@@ -2150,6 +2154,37 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
         engine->benchmark.atlas_warm_frame_nanoseconds = nanoseconds(now() - start);
     }
     engine->benchmark.atlas_warm_frame_rows = frame_rows;
+    constexpr uint32_t scroll_iterations = 30;
+    const auto scrollCase = [&](bool shifted, uint32_t count, uint64_t* elapsed) {
+        const uint64_t start = now();
+        for (uint32_t iteration = 0; iteration < count && SUCCEEDED(hr); ++iteration) {
+            hr = zigonaut_text_engine_begin_frame(engine, width, height, 0x181818,
+                shifted ? FALSE : TRUE, &rebuild);
+            if (shifted && SUCCEEDED(hr)) hr = zigonaut_text_engine_shift_scene(engine,
+                iteration & 1 ? -1 : 1, 0, 0, columns * engine->metrics.width,
+                engine->metrics.height, frame_rows);
+            const uint32_t first = shifted ? (iteration & 1 ? frame_rows - 1 : 0) : 0;
+            const uint32_t count_rows = shifted ? 1 : frame_rows;
+            for (uint32_t index = 0; index < count_rows && SUCCEEDED(hr); ++index)
+                hr = row(true, static_cast<float>((first + index) * engine->metrics.height));
+            if (SUCCEEDED(hr)) {
+                hr = engine->target->EndDraw();
+                engine->frame_active = false;
+                engine->target->SetTarget(nullptr);
+            }
+            if (SUCCEEDED(hr)) hr = engine->transferScene();
+        }
+        *elapsed = nanoseconds(now() - start);
+    };
+    // Warm both complete paths before measuring; each timed invocation includes
+    // final scene transfer but excludes Present and GPU-completion waiting.
+    if (SUCCEEDED(hr)) scrollCase(false, 3, &engine->benchmark.scroll_full_nanoseconds);
+    if (SUCCEEDED(hr)) scrollCase(true, 3, &engine->benchmark.scroll_shift_nanoseconds);
+    if (SUCCEEDED(hr)) scrollCase(false, scroll_iterations,
+        &engine->benchmark.scroll_full_nanoseconds);
+    if (SUCCEEDED(hr)) scrollCase(true, scroll_iterations,
+        &engine->benchmark.scroll_shift_nanoseconds);
+    engine->benchmark.scroll_iterations = scroll_iterations;
     if (SUCCEEDED(hr)) {
         // Plans stay hot while the atlas generation and resources start cold.
         // Include BeginDraw, lazy creation, rasterization/population, one fragmented
@@ -2348,6 +2383,55 @@ extern "C" HRESULT zigonaut_test_damage_aware_transfer(
     if (SUCCEEDED(hr)) hr = begin();
     if (SUCCEEDED(hr)) paintRows(0, 3, 0x204080);
     if (SUCCEEDED(hr)) hr = finish();                         // High-area fallback.
+
+    // Verify both shift directions against independently fully repainted
+    // textures. Four distinct row colors make reversed direction or an
+    // off-by-one copy immediately visible.
+    const uint32_t colors[4] = {0x201040, 0x204010, 0x401020, 0x404010};
+    const auto paintFour = [&](const uint32_t values[4]) {
+        for (uint32_t row_index = 0; row_index < 4; ++row_index)
+            paintRows(row_index, 1, values[row_index]);
+    };
+    const auto saveExpected = [&](ID3D11Texture2D* destination) -> HRESULT {
+        HRESULT value = engine->target->EndDraw();
+        engine->frame_active = false;
+        if (SUCCEEDED(value)) engine->d3d_context->CopyResource(destination,
+            engine->scene_texture);
+        return value;
+    };
+    if (SUCCEEDED(hr) && (engine->scene_shift_scratch == engine->scene_texture ||
+            engine->scene_shift_scratch == buffers[0])) hr = E_FAIL;
+    const uint32_t positive[4] = {0x102030, colors[0], colors[1], colors[2]};
+    if (SUCCEEDED(hr)) hr = begin(true);
+    if (SUCCEEDED(hr)) paintFour(positive);
+    if (SUCCEEDED(hr)) hr = saveExpected(buffers[0]);
+    if (SUCCEEDED(hr)) hr = begin(true);
+    if (SUCCEEDED(hr)) paintFour(colors);
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_shift_scene(engine, 1, 0, 0,
+        width, row_height, 4);
+    if (SUCCEEDED(hr)) paintRows(0, 1, positive[0]);
+    if (SUCCEEDED(hr)) {
+        hr = engine->target->EndDraw();
+        engine->frame_active = false;
+    }
+    if (SUCCEEDED(hr)) hr = equalTextures(buffers[0], engine->scene_texture);
+    if (SUCCEEDED(hr) && !engine->frame_damage.full) hr = E_FAIL;
+
+    const uint32_t negative[4] = {colors[1], colors[2], colors[3], 0x302010};
+    if (SUCCEEDED(hr)) hr = begin(true);
+    if (SUCCEEDED(hr)) paintFour(negative);
+    if (SUCCEEDED(hr)) hr = saveExpected(buffers[1]);
+    if (SUCCEEDED(hr)) hr = begin(true);
+    if (SUCCEEDED(hr)) paintFour(colors);
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_shift_scene(engine, -1, 0, 0,
+        width, row_height, 4);
+    if (SUCCEEDED(hr)) paintRows(3, 1, negative[3]);
+    if (SUCCEEDED(hr)) {
+        hr = engine->target->EndDraw();
+        engine->frame_active = false;
+    }
+    if (SUCCEEDED(hr)) hr = equalTextures(buffers[1], engine->scene_texture);
+    if (SUCCEEDED(hr) && !engine->frame_damage.full) hr = E_FAIL;
 
     if (SUCCEEDED(hr)) {
         release(buffers[1]);
@@ -2953,6 +3037,47 @@ extern "C" void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
     engine->addDamage(engine->frame_damage, left, top, right, bottom);
     engine->brush->SetColor(color(background));
     engine->target->FillRectangle(D2D1::RectF(left, top, right, bottom), engine->brush);
+}
+
+extern "C" HRESULT zigonaut_text_engine_shift_scene(ZigonautTextEngine* engine,
+    int32_t row_delta, uint32_t left, uint32_t top, uint32_t width,
+    uint32_t row_height, uint32_t row_count) {
+    const int64_t signed_delta = row_delta;
+    const uint64_t amount64 = signed_delta < 0 ? static_cast<uint64_t>(-signed_delta) :
+        static_cast<uint64_t>(signed_delta);
+    const uint64_t grid_right = static_cast<uint64_t>(left) + width;
+    const uint64_t grid_bottom = static_cast<uint64_t>(top) +
+        static_cast<uint64_t>(row_height) * row_count;
+    if (!engine || !engine->frame_active || !engine->scene_texture ||
+        !engine->scene_shift_scratch || row_delta == 0 || width == 0 || row_height == 0 ||
+        row_count == 0 || amount64 >= row_count || grid_right > engine->scene_width ||
+        grid_bottom > engine->scene_height)
+        return E_INVALIDARG;
+    HRESULT hr = engine->target->EndDraw();
+    if (FAILED(hr)) {
+        engine->markFullDamage(engine->frame_damage);
+        engine->target->BeginDraw();
+        return hr;
+    }
+    engine->target->SetTarget(nullptr);
+    const uint32_t amount = static_cast<uint32_t>(amount64);
+    const uint32_t pixels = amount * row_height;
+    const uint32_t retained = (row_count - amount) * row_height;
+    D3D11_BOX source{left, top + (row_delta > 0 ? 0u : pixels), 0,
+        left + width, top + (row_delta > 0 ? retained : pixels + retained), 1};
+    // The two operations deliberately use a distinct resource: overlapping
+    // CopySubresourceRegion on scene_texture is undefined by D3D11.
+    engine->d3d_context->CopySubresourceRegion(engine->scene_shift_scratch, 0,
+        left, top, 0, engine->scene_texture, 0, &source);
+    D3D11_BOX scratch{left, top, 0, left + width, top + retained, 1};
+    engine->d3d_context->CopySubresourceRegion(engine->scene_texture, 0, left,
+        top + (row_delta > 0 ? pixels : 0u), 0, engine->scene_shift_scratch, 0, &scratch);
+    engine->markFullDamage(engine->frame_damage);
+    engine->target->SetTarget(engine->scene_bitmap);
+    engine->target->BeginDraw();
+    hr = engine->d3d_device->GetDeviceRemovedReason();
+    if (FAILED(hr)) engine->markFullDamage(engine->frame_damage);
+    return hr;
 }
 
 extern "C" void zigonaut_text_engine_abort_frame(ZigonautTextEngine* engine) {

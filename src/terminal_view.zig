@@ -254,6 +254,7 @@ pub const View = struct {
     present_pending: bool = false,
     resize_render_pending: bool = false,
     scene_has_images: bool = false,
+    retained_scroll_offset: ?usize = null,
     renderer_failed: bool = false,
     refresh_interval_ms: u32 = 0,
     model: *App,
@@ -506,6 +507,7 @@ pub const View = struct {
         if (self.text_engine) |*engine| engine.deinit();
         self.text_engine = prepared.engine;
         self.renderer_failed = false;
+        self.retained_scroll_offset = null;
         self.font = prepared.font;
         self.updateCellSize(prepared.font);
     }
@@ -950,7 +952,7 @@ pub const View = struct {
         const session = self.boundSession() orelse return;
         session.runtime.?.scrollViewport(delta);
         self.notifyScrollbar(true);
-        self.invalidate();
+        self.invalidateContent();
     }
 
     pub fn scrollTo(self: *View, requested: u32) void {
@@ -1082,11 +1084,31 @@ pub const View = struct {
             self.full_rebuild_required.store(true, .release);
             return err;
         };
-        errdefer engine.abortFrame();
+        errdefer {
+            engine.abortFrame();
+            self.retained_scroll_offset = null;
+            self.full_rebuild_required.store(true, .release);
+        }
         full_rebuild = full_rebuild or native_rebuilt;
 
         const geometry = self.gridGeometry(client);
         if (self.boundSession()) |session| {
+            const offset = session.runtime.?.render_scroll_offset;
+            const scroll_delta: ?i32 = if (!full_rebuild and self.retained_scroll_offset != null and
+                offset != self.retained_scroll_offset.? and self.padding_color == .background and
+                self.ime_preedit.items.len == 0 and self.hovered_link == null and
+                geometry.left >= client.left and geometry.top >= client.top and
+                geometry.gridRight() <= client.right and geometry.gridBottom() <= client.bottom)
+            blk: {
+                // Scrollbar offsets grow toward the bottom, while a positive
+                // scene delta moves retained pixels down. Convert between those
+                // opposite coordinate systems here.
+                const raw: i64 = @as(i64, @intCast(self.retained_scroll_offset.?)) - @as(i64, @intCast(offset));
+                if (raw < std.math.minInt(i32) or raw > std.math.maxInt(i32)) break :blk null;
+                const value: i32 = @intCast(raw);
+                if (!session.runtime.?.preparedViewportCanShift(value)) break :blk null;
+                break :blk value;
+            } else null;
             var renderer = DirectWriteCellRenderer{
                 .engine = engine,
                 .view = self,
@@ -1095,11 +1117,15 @@ pub const View = struct {
                 .origin_y = geometry.top,
                 .background = background,
             };
-            if (full_rebuild)
+            if (scroll_delta) |delta| {
+                try engine.shiftScene(delta, @intCast(geometry.left), @intCast(geometry.top), self.columns * self.cell_width, self.cell_height, self.rows);
+                session.runtime.?.replayPreparedViewportShifted(&renderer, delta);
+            } else if (full_rebuild or (self.retained_scroll_offset != null and offset != self.retained_scroll_offset.?))
                 session.runtime.?.replayPreparedViewport(&renderer)
             else
                 session.runtime.?.replayPreparedViewportDirty(&renderer);
             if (renderer.draw_error) |err| return err;
+            self.retained_scroll_offset = offset;
             if (self.ime_preedit.items.len != 0) {
                 const left: f32 = @floatFromInt(geometry.left + @as(i32, self.ime_anchor_x) * @as(i32, @intCast(self.cell_width)));
                 const top: f32 = @floatFromInt(if (self.ime_target_search orelse false) geometry.gridBottom() - 2 * @as(i32, @intCast(self.cell_height)) else geometry.top + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height)));

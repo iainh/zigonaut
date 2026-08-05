@@ -35,6 +35,8 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t scene_region_copy_nanoseconds;
     uint64_t scene_copy_gpu_nanoseconds;
     uint64_t scene_region_copy_gpu_nanoseconds;
+    uint64_t scroll_full_nanoseconds;
+    uint64_t scroll_shift_nanoseconds;
     uint64_t layout_hits;
     uint64_t layout_misses;
     uint64_t layout_draws;
@@ -73,6 +75,7 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t scene_width;
     uint32_t scene_height;
     uint32_t scene_region_height;
+    uint32_t scroll_iterations;
 } ZigonautDirectWriteBenchmark;
 
 typedef struct ZigonautGlyphAtlasPixelsTest {
@@ -155,6 +158,10 @@ HRESULT zigonaut_text_engine_begin_frame(
     uint32_t background,
     BOOL full_rebuild,
     BOOL* full_rebuild_required);
+
+HRESULT zigonaut_text_engine_shift_scene(ZigonautTextEngine* engine,
+    int32_t row_delta, uint32_t grid_left, uint32_t grid_top,
+    uint32_t grid_width, uint32_t row_height, uint32_t row_count);
 
 void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
     float left, float top, float right, float bottom, uint32_t color);

@@ -456,6 +456,15 @@ pub const SessionRuntime = struct {
         self.render_snapshot.replayDirty(renderer);
     }
 
+    pub fn replayPreparedViewportShifted(self: *SessionRuntime, renderer: anytype, delta: i32) void {
+        renderer.searchState(self.render_search_enabled, self.search.query.items, self.search.matches.items, self.render_search_active, self.render_scroll_offset, self.render_search_scanning);
+        self.render_snapshot.replayShifted(renderer, delta);
+    }
+
+    pub fn preparedViewportCanShift(self: *const SessionRuntime, delta: i32) bool {
+        return self.render_snapshot.canShift(delta);
+    }
+
     pub fn preparedViewportHasImages(self: *const SessionRuntime) bool {
         return self.render_snapshot.images.items.len != 0 or self.render_snapshot.placements.items.len != 0;
     }
