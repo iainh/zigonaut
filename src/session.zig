@@ -31,6 +31,7 @@ pub const SessionRuntime = struct {
     closing: bool = false,
     writer_failed: bool = false,
     pty_writer_in_io: bool = false,
+    reader_stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
@@ -864,6 +865,12 @@ pub const SessionRuntime = struct {
         return pty.exitedCleanly();
     }
 
+    pub fn waitingForProcessExit(self: *const SessionRuntime) bool {
+        if (!self.reader_stopped.load(.acquire)) return false;
+        const pty = self.pty orelse return false;
+        return !pty.exited();
+    }
+
     pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16, consumed_modifiers: u16, utf8: []const u8, unshifted_codepoint: u32) !bool {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();
@@ -885,6 +892,7 @@ pub const SessionRuntime = struct {
         }
         const cancel_writer = self.makePtyUnavailable();
         if (cancel_writer) self.pty.?.cancelIo(null, self.writer_thread);
+        self.reader_stopped.store(true, .release);
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
         self.synchronized_output.clear();

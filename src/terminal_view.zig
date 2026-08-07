@@ -32,6 +32,7 @@ const synchronized_output_timer = 4;
 const present_retry_timer = 5;
 const frame_wait_fallback_timer = 6;
 const search_refresh_interval_ms = 33;
+const process_exit_refresh_interval_ms = 50;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
 const wheel_rows = 3;
@@ -931,6 +932,7 @@ pub const View = struct {
         if (self.model.hasCleanlyExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
         }
+        const waiting_for_process_exit = self.model.hasSessionWaitingForProcessExit();
         const titles_generation = self.model.titlesGeneration();
         if (titles_generation != self.last_titles_generation) {
             self.last_titles_generation = titles_generation;
@@ -967,7 +969,12 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
         }
         const search_tick = runtime.searchTick(search_time_budget_ns);
-        self.setRefreshInterval(if (search_tick.scanning) search_refresh_interval_ms else 0);
+        self.setRefreshInterval(if (search_tick.scanning)
+            search_refresh_interval_ms
+        else if (waiting_for_process_exit)
+            process_exit_refresh_interval_ms
+        else
+            0);
         if (search_tick.changed) {
             self.notifySearchStatus();
             self.invalidate();

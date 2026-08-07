@@ -594,6 +594,11 @@ pub const App = struct {
         return false;
     }
 
+    pub fn hasSessionWaitingForProcessExit(self: *const App) bool {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.waitingForProcessExit()) return true;
+        return false;
+    }
+
     pub fn closeCleanlyExitedSessions(self: *App) bool {
         var changed = false;
         var ti = self.tabs.items.len;

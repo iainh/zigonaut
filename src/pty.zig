@@ -205,9 +205,13 @@ pub const Pty = struct {
     }
 
     pub fn exitedCleanly(self: *const Pty) bool {
-        if (win.WaitForSingleObject(self.process, 0) != win.WAIT_OBJECT_0) return false;
+        if (!self.exited()) return false;
         var exit_code: win.DWORD = 0;
         return win.GetExitCodeProcess(self.process, &exit_code) != 0 and exit_code == 0;
+    }
+
+    pub fn exited(self: *const Pty) bool {
+        return win.WaitForSingleObject(self.process, 0) == win.WAIT_OBJECT_0;
     }
 
     pub fn cancelIo(self: *Pty, reader_thread: ?std.Thread, writer_thread: ?std.Thread) void {
