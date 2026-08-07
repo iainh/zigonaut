@@ -1320,15 +1320,16 @@ fn pipeCommandOutputImpl(self: *Application) !void {
     errdefer std.heap.page_allocator.free(output);
     const directory = try runtime.currentDirectoryAlloc(std.heap.page_allocator);
     errdefer if (directory) |value| std.heap.page_allocator.free(value);
-    try PipeCommandTask.spawn(self.settings.pipe_command_output, output, directory);
+    try PipeCommandTask.spawn(self.io, self.settings.pipe_command_output, output, directory);
 }
 
 const PipeCommandTask = struct {
+    io: std.Io,
     command: []u8,
     output: []u8,
     directory: ?[]u8,
 
-    fn spawn(command: []const u8, output: []u8, directory: ?[]u8) !void {
+    fn spawn(io: std.Io, command: []const u8, output: []u8, directory: ?[]u8) !void {
         if (pipe_command_active.swap(true, .acq_rel)) return error.PipeCommandAlreadyActive;
         errdefer pipe_command_active.store(false, .release);
 
@@ -1336,6 +1337,7 @@ const PipeCommandTask = struct {
         const task = try allocator.create(PipeCommandTask);
         errdefer allocator.destroy(task);
         task.* = .{
+            .io = io,
             .command = try allocator.dupe(u8, command),
             .output = output,
             .directory = directory,
@@ -1355,13 +1357,13 @@ const PipeCommandTask = struct {
             pipe_command_active.store(false, .release);
         }
 
-        runPipeCommand(allocator, self.command, self.output, self.directory) catch |err| {
+        runPipeCommand(self.io, allocator, self.command, self.output, self.directory) catch |err| {
             log.err("unable to start pipe_command_output: {}", .{err});
         };
     }
 };
 
-fn createPipeCommandStagingFile() !win.HANDLE {
+fn createPipeCommandStagingFile(io: std.Io) !win.HANDLE {
     var temp_path: [win.MAX_PATH]u16 = undefined;
     const path_length = win.GetTempPathW(temp_path.len, &temp_path);
     if (path_length == 0 or path_length >= temp_path.len) return error.TempDirectoryUnavailable;
@@ -1374,10 +1376,11 @@ fn createPipeCommandStagingFile() !win.HANDLE {
     const random_start = path_length + prefix.len;
 
     // CREATE_NEW makes even an extraordinarily unlikely collision harmless.
-    // std.crypto.random is backed by the operating system's secure RNG.
+    const random_source: std.Random.IoSource = .{ .io = io };
+    const random = random_source.interface();
     var random_bytes: [16]u8 = undefined;
     for (0..8) |_| {
-        std.crypto.random.bytes(&random_bytes);
+        random.bytes(&random_bytes);
         for (random_bytes, 0..) |byte, index| {
             temp_path[random_start + index * 2] = hex[byte >> 4];
             temp_path[random_start + index * 2 + 1] = hex[byte & 0x0f];
@@ -1402,8 +1405,8 @@ fn createPipeCommandStagingFile() !win.HANDLE {
     return error.StagingFileNameCollision;
 }
 
-fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []const u8, directory: ?[]const u8) !void {
-    var staging = try createPipeCommandStagingFile();
+fn runPipeCommand(io: std.Io, allocator: std.mem.Allocator, command: []const u8, output: []const u8, directory: ?[]const u8) !void {
+    var staging = try createPipeCommandStagingFile(io);
     defer {
         if (staging != null) _ = win.CloseHandle(staging);
     }
