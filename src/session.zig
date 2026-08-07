@@ -30,6 +30,7 @@ pub const SessionRuntime = struct {
     render_handoff: RenderHandoff = .{},
     closing: bool = false,
     writer_failed: bool = false,
+    pty_writer_in_io: bool = false,
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
@@ -882,6 +883,8 @@ pub const SessionRuntime = struct {
             if (count == 0) break;
             if (self.processOutput(buffer[0..count], win.GetTickCount64())) self.requestRefresh();
         }
+        const cancel_writer = self.makePtyUnavailable();
+        if (cancel_writer) self.pty.?.cancelIo(null, self.writer_thread);
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
         self.synchronized_output.clear();
@@ -897,7 +900,7 @@ pub const SessionRuntime = struct {
         }
         while (true) {
             self.pty_queue_mutex.lock();
-            if (self.closing) {
+            if (self.closing or self.writer_failed) {
                 self.pty_queue_mutex.unlock();
                 return;
             }
@@ -918,25 +921,47 @@ pub const SessionRuntime = struct {
                 continue;
             }
 
-            for (operations.items) |*operation| switch (operation.*) {
-                .resize => |size| self.pty.?.resize(size.columns, size.rows) catch |err| {
-                    log.warn("unable to resize pseudoconsole: {}", .{err});
-                },
-                .input => |*input| {
-                    self.pty.?.write(input.items) catch |err| {
-                        log.debug("unable to write pseudoconsole input: {}", .{err});
-                        self.pty_queue_mutex.lock();
-                        self.writer_failed = true;
-                        self.pty_queue_mutex.unlock();
-                        self.requestRefresh();
-                        return;
-                    };
-                    self.pty_queue_mutex.lock();
-                    std.debug.assert(input.items.len <= self.outstanding_input_bytes);
-                    self.outstanding_input_bytes -= input.items.len;
+            for (operations.items) |*operation| {
+                self.pty_queue_mutex.lock();
+                if (self.closing or self.writer_failed) {
                     self.pty_queue_mutex.unlock();
-                },
-            };
+                    return;
+                }
+                self.pty_writer_in_io = true;
+                self.pty_queue_mutex.unlock();
+
+                const operation_failed = switch (operation.*) {
+                    .resize => |size| failed: {
+                        self.pty.?.resize(size.columns, size.rows) catch |err| {
+                            log.warn("unable to resize pseudoconsole: {}", .{err});
+                        };
+                        break :failed false;
+                    },
+                    .input => |*input| failed: {
+                        self.pty.?.write(input.items) catch |err| {
+                            log.debug("unable to write pseudoconsole input: {}", .{err});
+                            break :failed true;
+                        };
+                        break :failed false;
+                    },
+                };
+
+                self.pty_queue_mutex.lock();
+                self.pty_writer_in_io = false;
+                if (operation_failed) self.writer_failed = true;
+                if (!operation_failed) switch (operation.*) {
+                    .input => |input| {
+                        std.debug.assert(input.items.len <= self.outstanding_input_bytes);
+                        self.outstanding_input_bytes -= input.items.len;
+                    },
+                    .resize => {},
+                };
+                self.pty_queue_mutex.unlock();
+                if (operation_failed) {
+                    self.requestRefresh();
+                    return;
+                }
+            }
             for (operations.items) |*operation| operation.deinit(self.allocator);
             operations.clearRetainingCapacity();
         }
@@ -991,6 +1016,18 @@ pub const SessionRuntime = struct {
         self.clearPtyOperations();
         self.wakeWriter();
         self.pty_queue_mutex.unlock();
+    }
+
+    /// Publish PTY EOF/failure to input producers without retiring the runtime.
+    /// The PTY itself remains owned until the reader and writer have been joined.
+    fn makePtyUnavailable(self: *SessionRuntime) bool {
+        self.pty_queue_mutex.lock();
+        defer self.pty_queue_mutex.unlock();
+        self.writer_failed = true;
+        self.clearPtyOperations();
+        const cancel_writer = self.pty_writer_in_io;
+        self.wakeWriter();
+        return cancel_writer;
     }
 
     fn wakeWriter(self: *SessionRuntime) void {
@@ -1139,6 +1176,28 @@ test "PTY work queue preserves input ordering and coalesces adjacent resizes" {
         .resize => return error.ExpectedInput,
     }
     try std.testing.expectEqual(@as(usize, 3), runtime.outstanding_input_bytes);
+}
+
+test "PTY reader exit makes writes unavailable and wakes the writer" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    try runtime.enqueuePtyInput("queued input");
+    try runtime.enqueuePtyResize(.{ .columns = 100, .rows = 40 });
+    runtime.pty_writer_in_io = true;
+    const generation = runtime.pty_writer_generation.load(.acquire);
+
+    try std.testing.expect(runtime.makePtyUnavailable());
+    try std.testing.expect(runtime.writer_failed);
+    try std.testing.expectEqual(@as(usize, 0), runtime.pty_operations.items.len);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outstanding_input_bytes);
+    try std.testing.expect(runtime.pty_writer_generation.load(.acquire) != generation);
 }
 
 test "runtime retirement closes writes and disables refresh callbacks" {
