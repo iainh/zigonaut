@@ -217,8 +217,12 @@ const Application = struct {
         return result;
     }
 
-    fn deinit(self: *Application) void {
+    /// Returns false when a native View could not be destroyed. In that case
+    /// the entire owner is retained so its session runtimes cannot be retired
+    /// while a native callback can still reach them.
+    fn deinit(self: *Application) bool {
         self.destroyAllViews();
+        if (self.views.items.len != 0) return false;
         self.model.deinit();
         self.views.deinit(std.heap.page_allocator);
         self.attached_panes.deinit(std.heap.page_allocator);
@@ -229,6 +233,7 @@ const Application = struct {
         self.launch_plan.deinit();
         if (self.font != null) _ = win.DeleteObject(self.font);
         self.loaded.deinit();
+        return true;
     }
 
     const windowMessage = windowMessageImpl;
@@ -469,8 +474,7 @@ pub fn main(init: std.process.Init) !void {
         // If synchronous window destruction fails, retain the owner until
         // process exit rather than leave a subclass callback pointing at freed memory.
         if (application.hwnd == null) {
-            application.deinit();
-            std.heap.page_allocator.destroy(application);
+            if (application.deinit()) std.heap.page_allocator.destroy(application);
         }
     }
 

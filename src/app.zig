@@ -183,7 +183,10 @@ pub const App = struct {
     }
 
     fn deinitSession(self: *App, session: *Session) void {
-        if (session.runtime) |runtime| runtime.destroy();
+        if (session.runtime) |runtime| {
+            session.runtime = null;
+            runtime.retire();
+        }
         session.metadata.release();
         session.title.deinit(self.allocator);
     }
@@ -271,7 +274,7 @@ pub const App = struct {
     fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !usize {
         if (self.tabs.items.len >= max_tabs) return error.TabLimitReached;
         var unowned_runtime = runtime;
-        errdefer if (unowned_runtime) |value| value.destroy();
+        errdefer if (unowned_runtime) |value| value.retire();
         const metadata = try LaunchMetadata.create(self.allocator, profile_title, command, working_directory);
         var session = Session{ .id = self.next_session_id, .shell = shell, .runtime = unowned_runtime, .background = background, .background_seed = background_seed, .metadata = metadata };
         unowned_runtime = null;
@@ -384,7 +387,7 @@ pub const App = struct {
 
     fn insertFocusedSessionRecord(self: *App, axis: pane_tree.Axis, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, hold_on_exit: bool, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !pane_tree.PaneId {
         var unowned_runtime = runtime;
-        errdefer if (unowned_runtime) |value| value.destroy();
+        errdefer if (unowned_runtime) |value| value.retire();
         const tab = self.activeTab() orelse return error.NoFocusedPane;
         if (tab.panes.items.len >= pane_tree.max_panes) return error.PaneLimitReached;
         const source = tab.focusedPane() orelse return error.NoFocusedPane;

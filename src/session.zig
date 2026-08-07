@@ -13,7 +13,7 @@ const synchronized_output_timeout_ms = 1000;
 const notification_max_bytes = 4096;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
-/// Call `destroy` only after no caller can submit input or rendering work.
+/// Call `retire` only after no caller can submit input or rendering work.
 pub const SessionRuntime = struct {
     allocator: std.mem.Allocator,
     terminal: Terminal,
@@ -21,6 +21,7 @@ pub const SessionRuntime = struct {
     reader_thread: ?std.Thread = null,
     writer_thread: ?std.Thread = null,
     refresh: Refresh,
+    refresh_mutex: @import("win32.zig").Mutex = .{},
     terminal_mutex: @import("win32.zig").Mutex = .{},
     pty_queue_mutex: @import("win32.zig").Mutex = .{},
     pty_writer_generation: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -287,9 +288,42 @@ pub const SessionRuntime = struct {
         return self;
     }
 
-    pub fn destroy(self: *SessionRuntime) void {
+    /// Stop accepting PTY writes and refresh callbacks before transferring the
+    /// runtime to a background thread. The caller gives up ownership here.
+    pub fn retire(self: *SessionRuntime) void {
+        self.prepareForRetirement();
+        const thread = std.Thread.spawn(.{}, destroyRetired, .{self}) catch |err| {
+            // Joining or disposing ConPTY on the caller (normally UI) thread is
+            // worse than retaining this already-quiesced runtime until exit.
+            log.err("unable to start session runtime reaper: {}", .{err});
+            return;
+        };
+        thread.detach();
+    }
+
+    fn prepareForRetirement(self: *SessionRuntime) void {
+        self.requestWriterClose();
+        // requestRefresh holds this lock through the callback. Acquiring it
+        // here therefore also drains a callback which already borrowed the
+        // Application context before that context can be freed.
+        self.refresh_mutex.lock();
+        self.refresh = .{};
+        self.refresh_mutex.unlock();
+    }
+
+    fn requestRefresh(self: *SessionRuntime) void {
+        self.refresh_mutex.lock();
+        defer self.refresh_mutex.unlock();
+        self.refresh.request();
+    }
+
+    fn destroyRetired(self: *SessionRuntime) void {
+        self.destroy();
+    }
+
+    /// Complete destruction on a reaper thread after prepareForRetirement.
+    fn destroy(self: *SessionRuntime) void {
         if (self.pty) |*pty| {
-            self.requestWriterClose();
             while (!workersStopped(self.reader_thread, self.writer_thread)) {
                 pty.cancelIo(self.reader_thread, self.writer_thread);
                 win.Sleep(1);
@@ -846,13 +880,13 @@ pub const SessionRuntime = struct {
         while (true) {
             const count = self.pty.?.read(&buffer) catch break;
             if (count == 0) break;
-            if (self.processOutput(buffer[0..count], win.GetTickCount64())) self.refresh.request();
+            if (self.processOutput(buffer[0..count], win.GetTickCount64())) self.requestRefresh();
         }
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
         self.synchronized_output.clear();
         self.terminal_mutex.unlock();
-        self.refresh.request();
+        self.requestRefresh();
     }
 
     fn writerMain(self: *SessionRuntime) void {
@@ -894,7 +928,7 @@ pub const SessionRuntime = struct {
                         self.pty_queue_mutex.lock();
                         self.writer_failed = true;
                         self.pty_queue_mutex.unlock();
-                        self.refresh.request();
+                        self.requestRefresh();
                         return;
                     };
                     self.pty_queue_mutex.lock();
@@ -1013,7 +1047,7 @@ pub const SessionRuntime = struct {
         @memcpy(payload[title.len..], body);
         const notification = Notification{ .payload = payload, .title_len = @intCast(title.len) };
         self.notifications.push(self.allocator, notification) catch notification.deinit(self.allocator);
-        self.refresh.request();
+        self.requestRefresh();
     }
 
     /// Ghostty invokes this synchronously from `Terminal.feed` after parsing
@@ -1032,7 +1066,7 @@ pub const SessionRuntime = struct {
             },
         };
         _ = self.progress_generation.fetchAdd(1, .release);
-        self.refresh.request();
+        self.requestRefresh();
     }
 
     /// Ghostty invokes this synchronously from `Terminal.feed`, while the reader
@@ -1066,7 +1100,7 @@ pub const SessionRuntime = struct {
         };
         if (self.pending_clipboard_write) |previous| self.freePendingClipboardWrite(previous);
         self.pending_clipboard_write = pending;
-        self.refresh.request();
+        self.requestRefresh();
         return .success;
     }
 };
@@ -1105,6 +1139,31 @@ test "PTY work queue preserves input ordering and coalesces adjacent resizes" {
         .resize => return error.ExpectedInput,
     }
     try std.testing.expectEqual(@as(usize, 3), runtime.outstanding_input_bytes);
+}
+
+test "runtime retirement closes writes and disables refresh callbacks" {
+    var callback_count: usize = 0;
+    const Callback = struct {
+        fn request(context: ?*anyopaque) void {
+            const count: *usize = @ptrCast(@alignCast(context.?));
+            count.* += 1;
+        }
+    };
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{ .callback = Callback.request, .context = &callback_count },
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    runtime.requestRefresh();
+    try std.testing.expectEqual(@as(usize, 1), callback_count);
+    runtime.prepareForRetirement();
+    try std.testing.expect(runtime.closing);
+    runtime.requestRefresh();
+    try std.testing.expectEqual(@as(usize, 1), callback_count);
 }
 
 test "synchronized output arms once and releases when disabled" {
