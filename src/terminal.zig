@@ -12,6 +12,10 @@ const image_native = @import("win32.zig").c;
 // Bound both encoded and decoded images. Terminal output is untrusted and can
 // otherwise make the process retain an unbounded amount of image data.
 const kitty_image_limit: usize = 32 * 1024 * 1024;
+// Keep libghostty's upstream default allocation ceiling alongside Zigonaut's
+// user-configurable line limit. A line limit alone does not bound style,
+// grapheme, hyperlink, and other page-owned allocations.
+const scrollback_byte_limit: usize = 50_000_000;
 var decode_png_mutex: @import("win32.zig").Mutex = .{};
 var decode_png_installed = false;
 
@@ -824,9 +828,8 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_new(null, &terminal, columns, rows));
         errdefer vt.ghostty_terminal_free(terminal);
         const scrollback_lines: usize = max_scrollback;
-        // Preserve Zigonaut's line-based setting instead of also inheriting
-        // libghostty's default byte cap, which could truncate history first.
-        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, null));
+        const scrollback_bytes: usize = scrollback_byte_limit;
+        try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_bytes));
         try check(vt.ghostty_terminal_set(terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
         const image_limit: usize = kitty_image_limit;
         const disabled = false;

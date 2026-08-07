@@ -577,8 +577,17 @@ pub const SessionRuntime = struct {
         }
         self.search.enabled = false;
         self.search.saved_offset = null;
-        self.search.query.clearRetainingCapacity();
-        self.search.reset();
+        // Searching can materialize the entire scrollback. Release that peak
+        // allocation when the search UI closes instead of retaining it for the
+        // lifetime of the session.
+        self.search.query.deinit(self.allocator);
+        self.search.query = .empty;
+        self.search.matches.deinit(self.allocator);
+        self.search.matches = .empty;
+        self.search.active = null;
+        self.search.next_row = 0;
+        self.search.scanning = false;
+        self.search_cache.deinit(self.allocator);
     }
 
     pub fn searchSet(self: *SessionRuntime, bytes: []const u8) !void {
