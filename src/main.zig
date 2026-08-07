@@ -34,8 +34,11 @@ const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
 // Serialize process creation while temporary inheritable handles are open.
-// Without this lock, an unrelated child can inherit a pipe or NUL handle.
+// Without this lock, an unrelated child can inherit a staging or NUL handle.
 var process_spawn_mutex: @import("win32.zig").Mutex = .{};
+// Piping stages a potentially large capture on a worker. Keep only one such
+// worker alive so repeated shortcuts cannot consume an unbounded thread pool.
+var pipe_command_active = std.atomic.Value(bool).init(false);
 
 const LaunchKind = enum { new_tab, split_right, split_down };
 
@@ -1326,6 +1329,9 @@ const PipeCommandTask = struct {
     directory: ?[]u8,
 
     fn spawn(command: []const u8, output: []u8, directory: ?[]u8) !void {
+        if (pipe_command_active.swap(true, .acq_rel)) return error.PipeCommandAlreadyActive;
+        errdefer pipe_command_active.store(false, .release);
+
         const allocator = std.heap.page_allocator;
         const task = try allocator.create(PipeCommandTask);
         errdefer allocator.destroy(task);
@@ -1346,6 +1352,7 @@ const PipeCommandTask = struct {
             allocator.free(self.output);
             if (self.directory) |directory| allocator.free(directory);
             allocator.destroy(self);
+            pipe_command_active.store(false, .release);
         }
 
         runPipeCommand(allocator, self.command, self.output, self.directory) catch |err| {
@@ -1354,24 +1361,73 @@ const PipeCommandTask = struct {
     }
 };
 
+fn createPipeCommandStagingFile() !win.HANDLE {
+    var temp_path: [win.MAX_PATH]u16 = undefined;
+    const path_length = win.GetTempPathW(temp_path.len, &temp_path);
+    if (path_length == 0 or path_length >= temp_path.len) return error.TempDirectoryUnavailable;
+
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("zigonaut-pipe-");
+    const suffix = std.unicode.utf8ToUtf16LeStringLiteral(".tmp");
+    const hex = std.unicode.utf8ToUtf16LeStringLiteral("0123456789abcdef");
+    if (path_length + prefix.len + 32 + suffix.len + 1 > temp_path.len) return error.TempPathTooLong;
+    @memcpy(temp_path[path_length..][0..prefix.len], prefix);
+    const random_start = path_length + prefix.len;
+
+    // CREATE_NEW makes even an extraordinarily unlikely collision harmless.
+    // std.crypto.random is backed by the operating system's secure RNG.
+    var random_bytes: [16]u8 = undefined;
+    for (0..8) |_| {
+        std.crypto.random.bytes(&random_bytes);
+        for (random_bytes, 0..) |byte, index| {
+            temp_path[random_start + index * 2] = hex[byte >> 4];
+            temp_path[random_start + index * 2 + 1] = hex[byte & 0x0f];
+        }
+        const suffix_start = random_start + random_bytes.len * 2;
+        @memcpy(temp_path[suffix_start..][0..suffix.len], suffix);
+        temp_path[suffix_start + suffix.len] = 0;
+
+        const handle = win.CreateFileW(
+            &temp_path,
+            win.GENERIC_READ | win.GENERIC_WRITE,
+            win.FILE_SHARE_READ | win.FILE_SHARE_WRITE | win.FILE_SHARE_DELETE,
+            null,
+            win.CREATE_NEW,
+            win.FILE_ATTRIBUTE_TEMPORARY | win.FILE_FLAG_DELETE_ON_CLOSE | win.FILE_FLAG_SEQUENTIAL_SCAN,
+            null,
+        );
+        if (handle != win.INVALID_HANDLE_VALUE) return handle;
+        if (win.GetLastError() != win.ERROR_FILE_EXISTS and win.GetLastError() != win.ERROR_ALREADY_EXISTS)
+            return error.CreateStagingFileFailed;
+    }
+    return error.StagingFileNameCollision;
+}
+
 fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []const u8, directory: ?[]const u8) !void {
+    var staging = try createPipeCommandStagingFile();
+    defer {
+        if (staging != null) _ = win.CloseHandle(staging);
+    }
+    var offset: usize = 0;
+    while (offset < output.len) {
+        var written: win.DWORD = 0;
+        const chunk: win.DWORD = @intCast(@min(output.len - offset, std.math.maxInt(win.DWORD)));
+        if (win.WriteFile(staging, output[offset..].ptr, chunk, &written, null) == 0 or written == 0)
+            return error.WriteStagingFileFailed;
+        offset += written;
+    }
+    if (win.SetFilePointer(staging, 0, null, win.FILE_BEGIN) == win.INVALID_SET_FILE_POINTER)
+        return error.RewindStagingFileFailed;
+
     process_spawn_mutex.lock();
     var spawn_locked = true;
     defer if (spawn_locked) process_spawn_mutex.unlock();
-
-    var stdin_read: win.HANDLE = null;
-    var stdin_write: win.HANDLE = null;
     var security = win.SECURITY_ATTRIBUTES{
         .nLength = @sizeOf(win.SECURITY_ATTRIBUTES),
         .lpSecurityDescriptor = null,
         .bInheritHandle = win.TRUE,
     };
-    if (win.CreatePipe(&stdin_read, &stdin_write, &security, 0) == 0) return error.CreatePipeFailed;
-    defer {
-        if (stdin_read != null) _ = win.CloseHandle(stdin_read);
-        if (stdin_write != null) _ = win.CloseHandle(stdin_write);
-    }
-    if (win.SetHandleInformation(stdin_write, win.HANDLE_FLAG_INHERIT, 0) == 0) return error.SetHandleInformationFailed;
+    if (win.SetHandleInformation(staging, win.HANDLE_FLAG_INHERIT, win.HANDLE_FLAG_INHERIT) == 0)
+        return error.SetHandleInformationFailed;
 
     const nul_name = std.unicode.utf8ToUtf16LeStringLiteral("NUL");
     var nul = win.CreateFileW(
@@ -1395,7 +1451,7 @@ fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []c
     const attributes: win.LPPROC_THREAD_ATTRIBUTE_LIST = @ptrCast(attribute_memory);
     if (win.InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes) == 0) return error.InitializeAttributeListFailed;
     defer win.DeleteProcThreadAttributeList(attributes);
-    var inherited_handles = [_]win.HANDLE{ stdin_read, nul };
+    var inherited_handles = [_]win.HANDLE{ staging, nul };
     if (win.UpdateProcThreadAttribute(
         attributes,
         0,
@@ -1427,7 +1483,7 @@ fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []c
     var startup: win.STARTUPINFOEXW = std.mem.zeroes(win.STARTUPINFOEXW);
     startup.StartupInfo.cb = @sizeOf(win.STARTUPINFOEXW);
     startup.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = stdin_read;
+    startup.StartupInfo.hStdInput = staging;
     startup.StartupInfo.hStdOutput = nul;
     startup.StartupInfo.hStdError = nul;
     startup.lpAttributeList = attributes;
@@ -1445,23 +1501,13 @@ fn runPipeCommand(allocator: std.mem.Allocator, command: []const u8, output: []c
         &process,
     ) == 0) return error.CreateProcessFailed;
     _ = win.CloseHandle(process.hThread);
-    stdin_read = null;
+    _ = win.CloseHandle(process.hProcess);
+    staging = null;
     _ = win.CloseHandle(inherited_handles[0]);
     nul = null;
     _ = win.CloseHandle(inherited_handles[1]);
     process_spawn_mutex.unlock();
     spawn_locked = false;
-
-    var offset: usize = 0;
-    while (offset < output.len) {
-        var written: win.DWORD = 0;
-        if (win.WriteFile(stdin_write, output[offset..].ptr, @intCast(output.len - offset), &written, null) == 0 or written == 0) break;
-        offset += written;
-    }
-    _ = win.CloseHandle(stdin_write);
-    stdin_write = null;
-    _ = win.WaitForSingleObject(process.hProcess, win.INFINITE);
-    _ = win.CloseHandle(process.hProcess);
 }
 
 fn launchPlanFromArgsAlloc(allocator: std.mem.Allocator, args: std.process.Args) !LaunchPlan {
