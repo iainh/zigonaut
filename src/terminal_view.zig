@@ -30,6 +30,7 @@ const copy_flash_timer = 2;
 const selection_scroll_timer = 3;
 const synchronized_output_timer = 4;
 const present_retry_timer = 5;
+const frame_wait_fallback_timer = 6;
 const search_refresh_interval_ms = 33;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
@@ -74,7 +75,13 @@ fn frameWaitCallback(raw: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
         view.completion_epoch = context.epoch;
         view.completion_runtime = context.runtime;
         view.completion_wait_id.store(context.wait_id, .release);
-        _ = win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0);
+        if (win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0) == 0 and
+            win.SetTimer(view.hwnd, frame_wait_fallback_timer, 1, null) == 0)
+        {
+            // Do not unregister from this callback: that can deadlock. Allow a
+            // later UI-thread scheduling attempt to recover the completion.
+            view.frame_wait_pending.store(false, .release);
+        }
         return;
     }) {
         .prepared => |prepared| generation = prepared.content_generation,
@@ -86,7 +93,12 @@ fn frameWaitCallback(raw: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
     view.completion_epoch = context.epoch;
     view.completion_runtime = context.runtime;
     view.completion_wait_id.store(context.wait_id, .release);
-    _ = win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0);
+    if (win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0) == 0 and
+        win.SetTimer(view.hwnd, frame_wait_fallback_timer, 1, null) == 0)
+    {
+        // See the error path above. UnregisterWaitEx is UI-thread-only here.
+        view.frame_wait_pending.store(false, .release);
+    }
 }
 
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
@@ -755,6 +767,15 @@ pub const View = struct {
     }
 
     fn armFrameWait(self: *View) void {
+        // A callback whose message and fallback timer both failed leaves a
+        // completed wait for the UI thread to reap before registering another.
+        const completed_wait_id = self.completion_wait_id.load(.acquire);
+        if (!self.frame_wait_pending.load(.acquire) and self.active_wait_id != 0 and
+            completed_wait_id == self.active_wait_id)
+        {
+            self.completeFrameWait(completed_wait_id);
+            return;
+        }
         if (self.hwnd == null or self.text_engine == null or self.renderer_failed or self.present_pending or
             self.frame_wait_pending.swap(true, .acq_rel)) return;
         const epoch = self.frame_epoch.load(.acquire);
@@ -773,6 +794,9 @@ pub const View = struct {
     fn stopFrameScheduling(self: *View) void {
         _ = win.KillTimer(self.hwnd, present_retry_timer);
         self.clearFrameWait();
+        // clearFrameWait waits for an in-flight callback, so kill after it can
+        // no longer race with the callback arming this timer.
+        _ = win.KillTimer(self.hwnd, frame_wait_fallback_timer);
         _ = self.frame_epoch.fetchAdd(1, .acq_rel);
         self.present_pending = false;
         self.resize_render_pending = false;
@@ -789,6 +813,42 @@ pub const View = struct {
         self.active_wait_id = 0;
         self.prepared_available = false;
         self.frame_wait_pending.store(false, .release);
+    }
+
+    fn completeFrameWait(self: *View, posted_wait_id: u64) void {
+        if (posted_wait_id == 0 or posted_wait_id != self.active_wait_id or
+            self.completion_wait_id.load(.acquire) != posted_wait_id) return;
+        const request_matches = self.completion_request_id == self.render_request_id.load(.acquire);
+        const runtime_matches = self.completion_runtime == self.boundRuntime();
+        const epoch_matches = self.completion_epoch == self.frame_epoch.load(.acquire);
+        const outcome = self.completion_outcome;
+        const generation_matches = outcome != 1 or self.completion_runtime == null or
+            self.completion_generation == self.completion_runtime.?.contentGeneration();
+        self.clearFrameWait();
+        if (!runtime_matches or !epoch_matches or outcome == 3) {
+            // captureRender may have advanced RenderSnapshot dirty/hash
+            // history even when this completion can no longer be used.
+            self.full_rebuild_required.store(true, .release);
+            self.render_dirty.store(true, .release);
+            self.armFrameWait();
+        } else if (outcome == 2) {
+            self.render_dirty.store(true, .release);
+            _ = self.deferSynchronizedOutput();
+        } else if (self.resize_render_pending) {
+            self.prepared_available = true;
+            self.paintPendingResize();
+            if (!request_matches or !generation_matches) {
+                self.render_dirty.store(true, .release);
+                self.armFrameWait();
+            }
+        } else if (self.render_dirty.swap(false, .acq_rel)) {
+            self.prepared_available = true;
+            const painted = self.paintSwapChain();
+            if (!painted or !request_matches or !generation_matches) {
+                self.render_dirty.store(true, .release);
+                self.armFrameWait();
+            }
+        }
     }
 
     /// A composition surface size change must not wait for the ordinary frame
@@ -2142,44 +2202,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                         current.paintPendingResize();
                     } else if (current.render_dirty.swap(false, .acq_rel) and !current.paintSwapChain())
                         current.render_dirty.store(true, .release);
-                } else if (posted_wait_id == current.active_wait_id and
-                    current.completion_wait_id.load(.acquire) == posted_wait_id)
-                {
-                    const request_matches = current.completion_request_id == current.render_request_id.load(.acquire);
-                    const runtime_matches = current.completion_runtime == current.boundRuntime();
-                    const epoch_matches = current.completion_epoch == current.frame_epoch.load(.acquire);
-                    const outcome = current.completion_outcome;
-                    const generation_matches = outcome != 1 or current.completion_runtime == null or
-                        current.completion_generation == current.completion_runtime.?.contentGeneration();
-                    current.clearFrameWait();
-                    if (!runtime_matches or !epoch_matches or outcome == 3) {
-                        // captureRender may have advanced RenderSnapshot dirty/hash
-                        // history even when this completion can no longer be used.
-                        current.full_rebuild_required.store(true, .release);
-                        current.render_dirty.store(true, .release);
-                        current.armFrameWait();
-                    } else if (outcome == 2) {
-                        current.render_dirty.store(true, .release);
-                        _ = current.deferSynchronizedOutput();
-                    } else if (current.resize_render_pending) {
-                        current.prepared_available = true;
-                        current.paintPendingResize();
-                        if (!request_matches or !generation_matches) {
-                            current.render_dirty.store(true, .release);
-                            current.armFrameWait();
-                        }
-                    } else if (current.render_dirty.swap(false, .acq_rel)) {
-                        current.prepared_available = true;
-                        const painted = current.paintSwapChain();
-                        // A snapshot remains coherent when output advances after
-                        // capture. Present it rather than requiring a quiet interval,
-                        // then schedule the newer generation for the next frame.
-                        if (!painted or !request_matches or !generation_matches) {
-                            current.render_dirty.store(true, .release);
-                            current.armFrameWait();
-                        }
-                    }
-                }
+                } else current.completeFrameWait(posted_wait_id);
             }
             return 0;
         },
@@ -2332,6 +2355,9 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 if (view) |current| current.refreshIfNeeded();
             } else if (wparam == present_retry_timer) {
                 if (view) |current| current.retryPresent();
+            } else if (wparam == frame_wait_fallback_timer) {
+                _ = win.KillTimer(hwnd, frame_wait_fallback_timer);
+                if (view) |current| current.completeFrameWait(current.completion_wait_id.load(.acquire));
             }
             return 0;
         },
@@ -2346,6 +2372,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             _ = win.KillTimer(hwnd, selection_scroll_timer);
             _ = win.KillTimer(hwnd, synchronized_output_timer);
             _ = win.KillTimer(hwnd, present_retry_timer);
+            _ = win.KillTimer(hwnd, frame_wait_fallback_timer);
             if (view) |current| current.deinitResources();
             return 0;
         },
