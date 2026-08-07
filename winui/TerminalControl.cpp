@@ -419,9 +419,22 @@ namespace winrt::ZigonautWinUIBridge::implementation
     TerminalAutomationPeer::TerminalAutomationPeer(ZigonautWinUIBridge::TerminalControl const& owner)
         : TerminalAutomationPeer_base<TerminalAutomationPeer>(owner)
     {
-        auto window = get_self<TerminalControl>(owner)->Window();
+        m_registeredWindow = get_self<TerminalControl>(owner)->Window();
         std::scoped_lock lock(registryMutex);
-        registry[window] = Registration{ *this, ++nextToken };
+        m_registrationToken = ++nextToken;
+        registry[m_registeredWindow] = Registration{ *this, m_registrationToken };
+    }
+
+    TerminalAutomationPeer::~TerminalAutomationPeer() noexcept
+    {
+        try
+        {
+            std::scoped_lock lock(registryMutex);
+            auto found = registry.find(m_registeredWindow);
+            if (found != registry.end() && found->second.token == m_registrationToken)
+                registry.erase(found);
+        }
+        catch (...) {}
     }
 
     hstring TerminalAutomationPeer::Query(uint32_t kind)

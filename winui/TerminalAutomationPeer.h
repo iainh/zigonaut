@@ -7,6 +7,7 @@ namespace winrt::ZigonautWinUIBridge::implementation
     struct TerminalAutomationPeer : TerminalAutomationPeerT<TerminalAutomationPeer>
     {
         explicit TerminalAutomationPeer(ZigonautWinUIBridge::TerminalControl const& owner);
+        ~TerminalAutomationPeer() noexcept;
         winrt::hstring ProviderClassName() { return L"ZigonautTerminalPane"; }
         winrt::hstring GetClassNameCore();
         Microsoft::UI::Xaml::Automation::Peers::AutomationControlType GetAutomationControlTypeCore();
@@ -26,6 +27,8 @@ namespace winrt::ZigonautWinUIBridge::implementation
 
     private:
         winrt::hstring Query(uint32_t kind);
+        HWND m_registeredWindow{};
+        uint64_t m_registrationToken{};
     };
 }
 
