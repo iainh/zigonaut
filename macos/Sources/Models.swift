@@ -23,13 +23,20 @@ private final class TerminalCallbackBox: @unchecked Sendable {
   }
 
   @MainActor private func drain() {
-    while true {
-      lock.lock()
-      dirty = false
+    lock.lock()
+    dirty = false
+    lock.unlock()
+    model?.refresh()
+    lock.lock()
+    if dirty {
       lock.unlock()
-      model?.refresh()
-      lock.lock()
-      guard dirty else { scheduled = false; lock.unlock(); return }
+      // Cap sustained output near the fastest common display cadence and yield
+      // to keyboard/window events instead of rendering once per PTY read.
+      DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(8)) { [weak self] in
+        self?.drain()
+      }
+    } else {
+      scheduled = false
       lock.unlock()
     }
   }
@@ -79,6 +86,7 @@ struct TerminalRenderCell: Identifiable {
   let strikethrough: Bool
   let overline: Bool
   let selected: Bool
+  let backgroundIsDefault: Bool
   let searchHighlight: UInt8
 }
 
@@ -179,6 +187,7 @@ struct TerminalRenderSnapshot {
       box.model = nil
       callbackBox.release()
     }
+    applyClipboardSettings()
     refresh()
   }
 
@@ -193,7 +202,6 @@ struct TerminalRenderSnapshot {
     }
     retrieveSnapshot(core: core.pointer, retry: true)
     retrieveTitle(core: core.pointer)
-    applyClipboardSettings()
     drainNotifications(core: core.pointer)
     drainClipboard(core: core.pointer)
   }
@@ -298,6 +306,7 @@ struct TerminalRenderSnapshot {
         strikethrough: cell.strikethrough != 0,
         overline: cell.overline != 0,
         selected: cell.selected != 0,
+        backgroundIsDefault: cell.background_is_default != 0 && cell.background_rgb == frame.background_rgb,
         searchHighlight: cell.search_highlight
       )
     }
@@ -314,11 +323,16 @@ struct TerminalRenderSnapshot {
       ),
       cells: cells
     )
+  }
+
+  func accessibilityText() -> String {
+    let cells = renderSnapshot.cells
+    guard !cells.isEmpty else { return text }
     var rows = [Int: [(Int, String)]]()
     for cell in cells where cell.occupancy != 2 {
       rows[cell.y, default: []].append((cell.x, cell.text.isEmpty ? " " : cell.text))
     }
-    text = rows.keys.sorted().map { row in
+    return rows.keys.sorted().map { row in
       var value = ""
       var column = 0
       for (x, cellText) in (rows[row] ?? []).sorted(by: { $0.0 < $1.0 }) {
@@ -346,6 +360,7 @@ struct TerminalRenderSnapshot {
     title = newTitle
   }
   func resize(columns: Int, rows: Int) {
+    guard columns != currentColumns || rows != currentRows else { return }
     currentColumns = columns
     currentRows = rows
     if let core {

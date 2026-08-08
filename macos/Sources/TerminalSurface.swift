@@ -3,6 +3,26 @@ import CoreText
 import SwiftUI
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
+  private struct TextStyle: Equatable {
+    let rgb: UInt32
+    let bold: Bool
+    let italic: Bool
+    let faint: Bool
+  }
+
+  private struct TextRun {
+    let x: Int
+    let y: Int
+    var nextX: Int
+    let style: TextStyle
+    var bytes: [UInt8]
+  }
+
+  private struct ColorKey: Hashable {
+    let rgb: UInt32
+    let alpha: UInt64
+  }
+
   let model: TerminalModel
   var preferences: Preferences
   var focused = false
@@ -14,17 +34,83 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var reportingButton: UInt8 = 0
   private var trackingArea: NSTrackingArea?
   private var lastMousePoint: NSPoint?
+  private var cachedFontFamily = ""
+  private var cachedFontSize = 0.0
+  private var cachedFonts: [UInt: NSFont] = [:]
+  private var cachedCellWidth: CGFloat = 1
+  private var cachedLineHeight: CGFloat = 1
+  private var cachedFontAdvances: [UInt: CGFloat] = [:]
+  private var clipboardEnabled: Bool?
+  private var clipboardMaximumBytes = 0
+  private var lastAccessibilityValue = ""
+  private var voiceOverObservation: NSKeyValueObservation?
+  private var colorCache: [ColorKey: NSColor] = [:]
 
   private var font: NSFont {
-    preferences.terminalFont(size: preferences.fontSize)
+    styledFont(traits: [])
+  }
+
+  func updateFont() {
+    guard cachedFontFamily != preferences.fontFamily || cachedFontSize != preferences.fontSize else {
+      return
+    }
+    cachedFontFamily = preferences.fontFamily
+    cachedFontSize = preferences.fontSize
+    cachedFonts.removeAll(keepingCapacity: true)
+    cachedFontAdvances.removeAll(keepingCapacity: true)
+    let base = preferences.terminalFont(size: preferences.fontSize)
+    cachedFonts[0] = base
+    cachedCellWidth = ceil(("M" as NSString).size(withAttributes: [.font: base]).width)
+    cachedLineHeight = ceil(base.ascender - base.descender + base.leading)
+  }
+
+  private func styledFont(traits: NSFontTraitMask) -> NSFont {
+    let traitKey = traits.rawValue
+    if let cached = cachedFonts[traitKey] { return cached }
+    let base = cachedFonts[0] ?? preferences.terminalFont(size: preferences.fontSize)
+    cachedFonts[0] = base
+    let result = traits.isEmpty ? base : NSFontManager.shared.convert(base, toHaveTrait: traits)
+    cachedFonts[traitKey] = result
+    return result
+  }
+
+  private func styledAdvance(traits: NSFontTraitMask, font: NSFont) -> CGFloat {
+    let traitKey = traits.rawValue
+    if let cached = cachedFontAdvances[traitKey] { return cached }
+    let advance = ("M" as NSString).size(withAttributes: [.font: font, .ligature: 0]).width
+    cachedFontAdvances[traitKey] = advance
+    return advance
+  }
+
+  func updateClipboardSettings() {
+    let enabled = preferences.terminalClipboardWrites
+    let maximumBytes = preferences.terminalClipboardMaxBytes
+    guard clipboardEnabled != enabled || clipboardMaximumBytes != maximumBytes else { return }
+    clipboardEnabled = enabled
+    clipboardMaximumBytes = maximumBytes
+    model.applyClipboardSettings()
+  }
+
+  func updateAccessibilityValue() {
+    guard NSWorkspace.shared.isVoiceOverEnabled else { return }
+    let value = String(model.accessibilityText().prefix(100_000))
+    guard value != lastAccessibilityValue else { return }
+    lastAccessibilityValue = value
+    setAccessibilityValue(value)
+    NSAccessibility.post(element: self, notification: .valueChanged)
+  }
+
+  override func accessibilityValue() -> Any? {
+    if NSWorkspace.shared.isVoiceOverEnabled { return lastAccessibilityValue }
+    return String(model.accessibilityText().prefix(100_000))
   }
 
   private var cellWidth: CGFloat {
-    ceil(("M" as NSString).size(withAttributes: [.font: font]).width)
+    cachedCellWidth
   }
 
   private var lineHeight: CGFloat {
-    ceil(font.ascender - font.descender + font.leading)
+    cachedLineHeight
   }
 
   init(model: TerminalModel, preferences: Preferences, onFocus: @escaping () -> Void) {
@@ -36,6 +122,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     setAccessibilityElement(true)
     setAccessibilityRole(.textArea)
     setAccessibilityLabel("Terminal")
+    updateFont()
+    voiceOverObservation = NSWorkspace.shared.observe(
+      \.isVoiceOverEnabled, options: [.initial, .new]
+    ) { [weak self] _, change in
+      guard change.newValue == true else { return }
+      DispatchQueue.main.async { [weak self] in
+        self?.model.refresh()
+        self?.updateAccessibilityValue()
+      }
+    }
   }
 
   required init?(coder: NSCoder) {
@@ -299,12 +395,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   private func color(_ rgb: UInt32, alpha: CGFloat = 1) -> NSColor {
-    NSColor(
+    let key = ColorKey(rgb: rgb, alpha: Double(alpha).bitPattern)
+    if let cached = colorCache[key] { return cached }
+    let result = NSColor(
       calibratedRed: CGFloat((rgb >> 16) & 0xff) / 255,
       green: CGFloat((rgb >> 8) & 0xff) / 255,
       blue: CGFloat(rgb & 0xff) / 255,
       alpha: alpha
     )
+    colorCache[key] = result
+    return result
   }
 
   override func draw(_ dirtyRect: NSRect) {
@@ -314,7 +414,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: bounds).addClip()
     for cell in snapshot.cells {
-      draw(cell)
+      drawBackground(cell)
+    }
+    drawText(snapshot.cells)
+    for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
+      drawDecorations(cell, rect: cellRect(cell))
     }
     drawCursor(snapshot.frame)
     drawMarkedText(snapshot.frame)
@@ -327,34 +431,87 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
   }
 
-  private func draw(_ cell: TerminalRenderCell) {
+  private func cellRect(_ cell: TerminalRenderCell) -> NSRect {
     let width = cell.occupancy == 1 ? cellWidth * 2 : cellWidth
-    let rect = NSRect(
+    return NSRect(
       x: preferences.padding + CGFloat(cell.x) * cellWidth,
       y: preferences.padding + CGFloat(cell.y) * lineHeight,
       width: width,
       height: lineHeight
     )
+  }
+
+  private func drawBackground(_ cell: TerminalRenderCell) {
     let highlightBackground: NSColor? =
       cell.searchHighlight == 2 ? .systemOrange : cell.searchHighlight == 1 ? .systemYellow : nil
+    if highlightBackground == nil && !cell.selected && cell.backgroundIsDefault { return }
     (highlightBackground ?? color(cell.selected ? cell.foreground : cell.background,
       alpha: preferences.opacity)).setFill()
-    rect.fill()
-    guard !cell.text.isEmpty, cell.occupancy != 2 else { return }
+    cellRect(cell).fill()
+  }
+
+  private func drawText(_ cells: [TerminalRenderCell]) {
+    var run: TextRun?
+    func flush() {
+      guard let current = run else { return }
+      drawText(String(decoding: current.bytes, as: UTF8.self), x: current.x, y: current.y,
+        style: current.style, batched: true)
+      run = nil
+    }
+    for cell in cells {
+      guard cell.occupancy == 0, let byte = asciiByte(cell.text) else {
+        flush()
+        if !cell.text.isEmpty && cell.occupancy != 2 {
+          drawText(cell.text, x: cell.x, y: cell.y, style: textStyle(cell), batched: false)
+        }
+        continue
+      }
+      let style = textStyle(cell)
+      if var current = run, current.y == cell.y, current.nextX == cell.x, current.style == style {
+        current.bytes.append(byte)
+        current.nextX += 1
+        run = current
+      } else {
+        flush()
+        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: [byte])
+      }
+    }
+    flush()
+  }
+
+  private func asciiByte(_ text: String) -> UInt8? {
+    if text.isEmpty { return 0x20 }
+    let bytes = text.utf8
+    guard bytes.count == 1, let byte = bytes.first, byte < 0x80 else { return nil }
+    return byte
+  }
+
+  private func textStyle(_ cell: TerminalRenderCell) -> TextStyle {
+    TextStyle(
+      rgb: cell.selected ? cell.background : cell.foreground,
+      bold: cell.bold,
+      italic: cell.italic,
+      faint: cell.faint)
+  }
+
+  private func drawText(_ text: String, x: Int, y: Int, style: TextStyle, batched: Bool) {
     var traits: NSFontTraitMask = []
-    if cell.bold { traits.insert(.boldFontMask) }
-    if cell.italic { traits.insert(.italicFontMask) }
-    let styledFont = NSFontManager.shared.convert(font, toHaveTrait: traits)
-    let foreground = color(
-      cell.selected ? cell.background : cell.foreground, alpha: cell.faint ? 0.55 : 1)
-    let attributes: [NSAttributedString.Key: Any] = [
+    if style.bold { traits.insert(.boldFontMask) }
+    if style.italic { traits.insert(.italicFontMask) }
+    let styledFont = styledFont(traits: traits)
+    let foreground = color(style.rgb, alpha: style.faint ? 0.55 : 1)
+    var attributes: [NSAttributedString.Key: Any] = [
       .font: styledFont,
       .foregroundColor: foreground,
     ]
-    let baseline = rect.minY + font.ascender
-    (cell.text as NSString).draw(
-      at: NSPoint(x: rect.minX, y: baseline - styledFont.ascender), withAttributes: attributes)
-    drawDecorations(cell, rect: rect)
+    if batched {
+      attributes[.ligature] = 0
+      attributes[.kern] = cellWidth - styledAdvance(traits: traits, font: styledFont)
+    }
+    let origin = NSPoint(
+      x: preferences.padding + CGFloat(x) * cellWidth,
+      y: preferences.padding + CGFloat(y) * lineHeight + font.ascender - styledFont.ascender)
+    (text as NSString).draw(at: origin, withAttributes: attributes)
   }
 
   private func drawMarkedText(_ frame: TerminalRenderFrame) {
@@ -373,6 +530,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   private func drawDecorations(_ cell: TerminalRenderCell, rect: NSRect) {
+    guard cell.underlineStyle != 0 || cell.strikethrough || cell.overline else { return }
     color(cell.underlineColor).setStroke()
     if cell.underlineStyle != 0 {
       strokeLine(y: rect.maxY - 1.5, rect: rect, width: cell.underlineStyle == 2 ? 2 : 1)
@@ -430,16 +588,16 @@ struct TerminalSurface: NSViewRepresentable {
 
   func updateNSView(_ view: TerminalSurfaceView, context: Context) {
     view.preferences = preferences
+    view.updateFont()
     view.onFocus = onFocus
     view.focused = focused
     let shouldClaimKeyboardFocus = wantsKeyboardFocus && !view.wantsKeyboardFocus
     view.wantsKeyboardFocus = wantsKeyboardFocus
-    model.applyClipboardSettings()
+    view.updateClipboardSettings()
     view.resizeTerminal()
     view.needsDisplay = true
-    view.setAccessibilityValue(String(model.text.prefix(100_000)))
+    view.updateAccessibilityValue()
     view.setAccessibilityFocused(focused)
-    NSAccessibility.post(element: view, notification: .valueChanged)
     if shouldClaimKeyboardFocus {
       view.window?.makeFirstResponder(view)
     }
