@@ -16,6 +16,7 @@
         "LICENSE",
         "licenses",
         "src",
+        "macos",
         "winui",
         "zigonaut.manifest",
         "README.md",

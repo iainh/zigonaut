@@ -3,7 +3,12 @@ const package = @import("build.zig.zon");
 const app_version = package.version;
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    var target_query = b.standardTargetOptionsQueryOnly(.{});
+    const target_os = target_query.os_tag orelse b.graph.host.result.os.tag;
+    if (target_os == .macos and target_query.os_version_min == null) {
+        target_query.os_version_min = .{ .semver = .{ .major = 15, .minor = 0, .patch = 0 } };
+    }
+    const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
@@ -14,6 +19,13 @@ pub fn build(b: *std.Build) void {
         .@"emit-lib-vt" = true,
         .simd = true,
     });
+
+    // Keep native products in separate build graphs: the macOS embedded core
+    // must never inherit Win32 resources, C++ sources, or system libraries.
+    if (target.result.os.tag == .macos) {
+        buildMacos(b, target, optimize, ghostty);
+        return;
+    }
 
     const app_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -191,6 +203,58 @@ pub fn build(b: *std.Build) void {
     run_conpty_benchmark.step.dependOn(winui_step);
     const conpty_benchmark_step = b.step("benchmark-conpty", "Benchmark end-to-end ConPTY transport and terminal parsing");
     conpty_benchmark_step.dependOn(&run_conpty_benchmark.step);
+}
+
+fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency) void {
+    const helper = b.addExecutable(.{
+        .name = "zigonaut-pty-helper",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/macos_pty_helper.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    helper.root_module.link_libc = true;
+    b.installArtifact(helper);
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/macos_core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    module.link_libc = true;
+    configureGhostty(module, ghostty);
+    const library = b.addLibrary(.{ .name = "zigonaut-core", .root_module = module, .linkage = .dynamic });
+    b.installArtifact(library);
+    const core_step = b.step("macos-core", "Build the macOS embedded Zig core");
+    core_step.dependOn(&library.step);
+
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/macos_core.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    tests.root_module.link_libc = true;
+    configureGhostty(tests.root_module, ghostty);
+    const test_step = b.step("test", "Run macOS core tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const helper_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/macos_pty_helper.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    helper_tests.root_module.link_libc = true;
+    test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+
+    const swift = b.addSystemCommand(&.{ "swift", "build", "--package-path", "macos" });
+    swift.step.dependOn(b.getInstallStep());
+    const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh" });
+    bundle.step.dependOn(&swift.step);
+    const app_step = b.step("macos-app", "Build the native macOS frontend");
+    app_step.dependOn(&bundle.step);
+    const run = b.addSystemCommand(&.{ "open", "zig-out/Zigonaut.app" });
+    run.step.dependOn(&bundle.step);
+    const run_step = b.step("macos-run", "Run the native macOS frontend");
+    run_step.dependOn(&run.step);
 }
 
 fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) void {

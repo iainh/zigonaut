@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const link = @import("link.zig");
 const theme = @import("theme.zig");
 const SearchMatch = @import("search.zig").Match;
@@ -7,7 +8,7 @@ const vt = @cImport({
     @cDefine("GHOSTTY_STATIC", "1");
     @cInclude("ghostty/vt.h");
 });
-const image_native = @import("win32.zig").c;
+const image_native = if (builtin.os.tag == .windows) @import("win32.zig").c else struct {};
 
 // Bound both encoded and decoded images. Terminal output is untrusted and can
 // otherwise make the process retain an unbounded amount of image data.
@@ -16,7 +17,7 @@ const kitty_image_limit: usize = 32 * 1024 * 1024;
 // user-configurable line limit. A line limit alone does not bound style,
 // grapheme, hyperlink, and other page-owned allocations.
 const scrollback_byte_limit: usize = 50_000_000;
-var decode_png_mutex: @import("win32.zig").Mutex = .{};
+var decode_png_mutex: @import("platform_sync.zig").Mutex = .{};
 var decode_png_installed = false;
 
 fn installDecodePng() !void {
@@ -2034,6 +2035,7 @@ fn check(result: vt.GhosttyResult) !void {
 }
 
 fn decodePng(_: ?*anyopaque, allocator: [*c]const vt.GhosttyAllocator, data: [*c]const u8, data_len: usize, out: [*c]vt.GhosttySysImage) callconv(.c) bool {
+    if (comptime builtin.os.tag != .windows) return false;
     if (allocator == null or data == null or out == null or data_len == 0 or data_len > kitty_image_limit) return false;
     var decoded: image_native.ZigonautDecodedImage = undefined;
     if (image_native.zigonaut_decode_png(data, data_len, &decoded) < 0) return false;
@@ -2556,6 +2558,7 @@ test "render snapshots own cell graphemes" {
 }
 
 test "render snapshots own direct Kitty PNG placements" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
     try terminal.resize(4, 2, 8, 16);
@@ -2612,6 +2615,7 @@ test "render snapshots own direct Kitty PNG placements" {
 }
 
 test "Kitty snapshot placements share image storage" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
     try terminal.resize(4, 2, 8, 16);

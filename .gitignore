@@ -1,6 +1,7 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+macos/.build/
 winui/obj/
 winui/x64/
 winui/Zigonaut.*/
