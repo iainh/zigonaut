@@ -154,7 +154,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   func resizeTerminal() {
     let columns = max(2, Int((bounds.width - 2 * preferences.padding) / cellWidth))
     let rows = max(2, Int((bounds.height - 2 * preferences.padding) / lineHeight))
-    model.resize(columns: columns, rows: rows)
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    model.resize(columns: columns, rows: rows,
+      pixelWidth: Int(bounds.width * scale), pixelHeight: Int(bounds.height * scale),
+      cellWidth: Int(cellWidth * scale), cellHeight: Int(lineHeight * scale), scale: scale)
   }
 
   override func setFrameSize(_ size: NSSize) {
@@ -420,6 +423,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
       drawDecorations(cell, rect: cellRect(cell))
     }
+    drawImages(snapshot.images)
     drawCursor(snapshot.frame)
     drawMarkedText(snapshot.frame)
     NSGraphicsContext.current?.restoreGraphicsState()
@@ -429,6 +433,24 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       path.lineWidth = 3
       path.stroke()
     }
+  }
+
+  private func drawImages(_ images: [TerminalRenderImage]) {
+    guard !images.isEmpty else { return }
+    NSGraphicsContext.current?.saveGraphicsState()
+    let columns = max(0, floor((bounds.width - 2 * preferences.padding) / cellWidth))
+    let rows = max(0, floor((bounds.height - 2 * preferences.padding) / lineHeight))
+    NSBezierPath(rect: NSRect(x: preferences.padding, y: preferences.padding,
+      width: columns * cellWidth, height: rows * lineHeight)).addClip()
+    for placement in images {
+      let destination = NSRect(
+        x: preferences.padding + CGFloat(placement.viewportColumn) * cellWidth + placement.xOffset,
+        y: preferences.padding + CGFloat(placement.viewportRow) * lineHeight + placement.yOffset,
+        width: placement.pixelWidth, height: placement.pixelHeight)
+      placement.image.draw(in: destination, from: placement.source, operation: .sourceOver,
+        fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
+    }
+    NSGraphicsContext.current?.restoreGraphicsState()
   }
 
   private func cellRect(_ cell: TerminalRenderCell) -> NSRect {

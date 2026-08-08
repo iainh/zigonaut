@@ -93,6 +93,18 @@ struct TerminalRenderCell: Identifiable {
 struct TerminalRenderSnapshot {
   var frame = TerminalRenderFrame()
   var cells: [TerminalRenderCell] = []
+  var images: [TerminalRenderImage] = []
+}
+
+struct TerminalRenderImage {
+  let image: NSImage
+  let source: NSRect
+  let pixelWidth: CGFloat
+  let pixelHeight: CGFloat
+  let viewportColumn: Int
+  let viewportRow: Int
+  let xOffset: CGFloat
+  let yOffset: CGFloat
 }
 
 @MainActor final class Preferences: ObservableObject {
@@ -155,14 +167,29 @@ struct TerminalRenderSnapshot {
   private var cellBuffer = [zigonaut_render_cell_v1](
     repeating: zigonaut_render_cell_v1(), count: 80 * 24)
   private var textBuffer = [UInt8](repeating: 0, count: 80 * 24 * 4)
+  private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
+  private var imageData = [UInt8](repeating: 0, count: 1_048_576)
+  private var imageCache: [ImageKey: NSImage] = [:]
   private var currentColumns = 80
   private var currentRows = 24
+  private var currentPixelWidth = 0
+  private var currentPixelHeight = 0
+  private var currentCellWidth = 0
+  private var currentCellHeight = 0
+  private var currentScale: CGFloat = 1
   private let maximumCells = 500_000
   private let maximumTextBytes = 8_000_000
+  private let maximumImages = 256
+  private let maximumImageBytes = 64 * 1_024 * 1_024
   // Selection pasteboard writes are all-or-nothing and capped to bound memory use.
   private let maximumSelectionBytes = 4_194_304
   private let preferences: Preferences
   private let defaultTitle: String
+
+  private struct ImageKey: Hashable {
+    let id: UInt32
+    let generation: UInt64
+  }
 
   init(shell: String, preferences: Preferences) {
     self.preferences = preferences
@@ -312,6 +339,7 @@ struct TerminalRenderSnapshot {
         searchHighlight: cell.search_highlight
       )
     }
+    let images = retrieveImages(core: core)
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -323,8 +351,69 @@ struct TerminalRenderSnapshot {
         cursorStyle: frame.cursor_style,
         cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0
       ),
-      cells: cells
+      cells: cells,
+      images: images
     )
+  }
+
+  private func retrieveImages(core: OpaquePointer, retry: Bool = true) -> [TerminalRenderImage] {
+    var result = zigonaut_render_images_result_v1()
+    imageBuffer.withUnsafeMutableBufferPointer { images in
+      imageData.withUnsafeMutableBufferPointer { bytes in
+        zigonaut_core_render_images(core, images.baseAddress, UInt32(clamping: images.count),
+          bytes.baseAddress, UInt32(clamping: bytes.count), &result)
+      }
+    }
+    if retry && result.status == 1 {
+      let requiredImages = min(Int(result.required_images), maximumImages)
+      let requiredBytes = min(Int(result.required_data_bytes), maximumImageBytes)
+      if requiredImages > imageBuffer.count {
+        imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: requiredImages)
+      }
+      if requiredBytes > imageData.count {
+        imageData = [UInt8](repeating: 0, count: requiredBytes)
+      }
+      if requiredImages <= maximumImages && requiredBytes <= maximumImageBytes {
+        return retrieveImages(core: core, retry: false)
+      }
+    }
+    guard result.status != 2 else { return [] }
+    var activeKeys = Set<ImageKey>()
+    let rendered = imageBuffer.prefix(min(Int(result.written_images), imageBuffer.count)).compactMap { placement -> TerminalRenderImage? in
+      let key = ImageKey(id: placement.image_id, generation: placement.generation)
+      activeKeys.insert(key)
+      let image: NSImage
+      if let cached = imageCache[key] {
+        image = cached
+      } else {
+        let start = Int(placement.data_offset)
+        let end = start + Int(placement.data_length)
+        guard start >= 0, end <= imageData.count, placement.width > 0, placement.height > 0,
+          Int(placement.data_length) == Int(placement.width) * Int(placement.height) * 4 else { return nil }
+        let data = Data(imageData[start..<end]) as CFData
+        guard let provider = CGDataProvider(data: data),
+          let value = CGImage(width: Int(placement.width), height: Int(placement.height),
+            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(placement.width) * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { return nil }
+        image = NSImage(cgImage: value, size: NSSize(width: Int(placement.width), height: Int(placement.height)))
+        imageCache[key] = image
+      }
+      return TerminalRenderImage(
+        image: image,
+        source: NSRect(x: Int(placement.source_x),
+          y: Int(placement.height - placement.source_y - placement.source_height),
+          width: Int(placement.source_width), height: Int(placement.source_height)),
+        pixelWidth: CGFloat(placement.pixel_width) / currentScale,
+        pixelHeight: CGFloat(placement.pixel_height) / currentScale,
+        viewportColumn: Int(placement.viewport_column), viewportRow: Int(placement.viewport_row),
+        xOffset: CGFloat(placement.x_offset) / currentScale,
+        yOffset: CGFloat(placement.y_offset) / currentScale)
+    }
+    imageCache = imageCache.filter { activeKeys.contains($0.key) }
+    return rendered
   }
 
   func accessibilityText() -> String {
@@ -361,12 +450,24 @@ struct TerminalRenderSnapshot {
     guard title != newTitle else { return }
     title = newTitle
   }
-  func resize(columns: Int, rows: Int) {
-    guard columns != currentColumns || rows != currentRows else { return }
+  func resize(columns: Int, rows: Int, pixelWidth: Int, pixelHeight: Int, cellWidth: Int, cellHeight: Int,
+    scale: CGFloat)
+  {
+    guard columns != currentColumns || rows != currentRows || pixelWidth != currentPixelWidth
+      || pixelHeight != currentPixelHeight || cellWidth != currentCellWidth || cellHeight != currentCellHeight
+      || scale != currentScale
+    else { return }
     currentColumns = columns
     currentRows = rows
+    currentPixelWidth = pixelWidth
+    currentPixelHeight = pixelHeight
+    currentCellWidth = cellWidth
+    currentCellHeight = cellHeight
+    currentScale = scale
     if let core {
-      zigonaut_core_resize(core.pointer, UInt16(clamping: columns), UInt16(clamping: rows))
+      zigonaut_core_resize(core.pointer, UInt16(clamping: columns), UInt16(clamping: rows),
+        UInt16(clamping: pixelWidth), UInt16(clamping: pixelHeight),
+        UInt32(clamping: cellWidth), UInt32(clamping: cellHeight))
     }
   }
   func write(_ value: String) { enqueue(value, paste: false) }

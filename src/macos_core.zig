@@ -49,6 +49,7 @@ const Core = struct {
     search_matches: std.ArrayList(search.Match) = .empty,
     search_active: ?usize = null,
     search_saved_offset: ?u64 = null,
+    render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
 pub const NotificationResult = extern struct {
@@ -128,6 +129,40 @@ pub const RenderSnapshotResult = extern struct {
     written_cells: u32,
     required_text_bytes: u32,
     written_text_bytes: u32,
+    status: u8,
+    reserved: [7]u8,
+};
+
+pub const RenderImage = extern struct {
+    version: u32,
+    size: u32,
+    image_id: u32,
+    generation: u64,
+    data_offset: u32,
+    data_length: u32,
+    width: u32,
+    height: u32,
+    source_x: u32,
+    source_y: u32,
+    source_width: u32,
+    source_height: u32,
+    pixel_width: u32,
+    pixel_height: u32,
+    viewport_column: i32,
+    viewport_row: i32,
+    z: i32,
+    x_offset: u32,
+    y_offset: u32,
+    reserved: [8]u8,
+};
+
+pub const RenderImagesResult = extern struct {
+    version: u32,
+    size: u32,
+    required_images: u32,
+    written_images: u32,
+    required_data_bytes: u32,
+    written_data_bytes: u32,
     status: u8,
     reserved: [7]u8,
 };
@@ -298,11 +333,11 @@ fn readLoop(self: *Core) void {
     }
 }
 
-export fn zigonaut_core_resize(self: ?*Core, columns: u16, rows: u16) void {
+export fn zigonaut_core_resize(self: ?*Core, columns: u16, rows: u16, pixel_width: u16, pixel_height: u16, cell_width: u32, cell_height: u32) void {
     const core = self orelse return;
-    var size = c.winsize{ .ws_row = rows, .ws_col = columns, .ws_xpixel = 0, .ws_ypixel = 0 };
+    var size = c.winsize{ .ws_row = rows, .ws_col = columns, .ws_xpixel = pixel_width, .ws_ypixel = pixel_height };
     core.mutex.lock();
-    core.terminal.resize(columns, rows, 0, 0) catch {};
+    core.terminal.resize(columns, rows, cell_width, cell_height) catch {};
     core.mutex.unlock();
     _ = c.ioctl(core.master, c.TIOCSWINSZ, &size);
 }
@@ -387,10 +422,7 @@ const SnapshotCollector = struct {
     pub fn endFrame(_: *SnapshotCollector, _: Terminal.Frame) void {}
     pub fn beginRow(_: *SnapshotCollector, _: u16) void {}
     pub fn endRow(_: *SnapshotCollector, _: u16) void {}
-    pub fn drawImage(self: *SnapshotCollector, _: Terminal.Image) void {
-        self.frame.images_skipped = 1;
-        self.truncated = true;
-    }
+    pub fn drawImage(_: *SnapshotCollector, _: Terminal.Image) void {}
     pub fn drawCell(self: *SnapshotCollector, cell: Terminal.Cell) void {
         var length: usize = 0;
         for (cell.codepoints) |codepoint| {
@@ -460,7 +492,73 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, frame: ?*RenderFrame, cell
     collector.search_matches = core.search_matches.items;
     collector.search_active = core.search_active;
     collector.viewport_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
-    core.terminal.renderViewport(&collector) catch return;
+    core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
+    core.render_snapshot.replay(&collector);
+    output.status = if (collector.truncated) 1 else 0;
+}
+
+const ImageCollector = struct {
+    images: []RenderImage,
+    rgba: []u8,
+    result: *RenderImagesResult,
+    truncated: bool = false,
+
+    pub fn beginFrame(_: *ImageCollector, _: Terminal.Frame) void {}
+    pub fn endFrame(_: *ImageCollector, _: Terminal.Frame) void {}
+    pub fn beginRow(_: *ImageCollector, _: u16) void {}
+    pub fn endRow(_: *ImageCollector, _: u16) void {}
+    pub fn drawCell(_: *ImageCollector, _: Terminal.Cell) void {}
+    pub fn drawImage(self: *ImageCollector, image: Terminal.Image) void {
+        self.result.required_images +|= 1;
+        self.result.required_data_bytes +|= @intCast(image.pixels.len);
+        const image_index = self.result.written_images;
+        const data_offset = self.result.written_data_bytes;
+        if (image_index >= self.images.len or data_offset + image.pixels.len > self.rgba.len) {
+            self.truncated = true;
+            return;
+        }
+        @memcpy(self.rgba[data_offset..][0..image.pixels.len], image.pixels);
+        self.images[image_index] = .{
+            .version = 1,
+            .size = @sizeOf(RenderImage),
+            .image_id = image.image_id,
+            .generation = image.generation,
+            .data_offset = data_offset,
+            .data_length = @intCast(image.pixels.len),
+            .width = image.width,
+            .height = image.height,
+            .source_x = image.source_x,
+            .source_y = image.source_y,
+            .source_width = image.source_width,
+            .source_height = image.source_height,
+            .pixel_width = image.pixel_width,
+            .pixel_height = image.pixel_height,
+            .viewport_column = image.viewport_col,
+            .viewport_row = image.viewport_row,
+            .z = image.z,
+            .x_offset = image.x_offset,
+            .y_offset = image.y_offset,
+            .reserved = @splat(0),
+        };
+        self.result.written_images += 1;
+        self.result.written_data_bytes += @intCast(image.pixels.len);
+    }
+};
+
+/// Replays the images from the most recent coherent text snapshot. RGBA data is
+/// bounded by caller-owned storage and is copied only when a full placement fits.
+export fn zigonaut_core_render_images(self: ?*Core, images: ?[*]RenderImage, image_capacity: u32, rgba_arena: ?[*]u8, rgba_capacity: u32, result: ?*RenderImagesResult) void {
+    const output = result orelse return;
+    output.* = .{ .version = 1, .size = @sizeOf(RenderImagesResult), .required_images = 0, .written_images = 0, .required_data_bytes = 0, .written_data_bytes = 0, .status = 2, .reserved = @splat(0) };
+    const core = self orelse return;
+    var empty_images: [0]RenderImage = .{};
+    var empty_rgba: [0]u8 = .{};
+    const image_slice = if (images) |pointer| pointer[0..image_capacity] else if (image_capacity == 0) empty_images[0..] else return;
+    const rgba_slice = if (rgba_arena) |pointer| pointer[0..rgba_capacity] else if (rgba_capacity == 0) empty_rgba[0..] else return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    var collector = ImageCollector{ .images = image_slice, .rgba = rgba_slice, .result = output };
+    core.render_snapshot.replay(&collector);
     output.status = if (collector.truncated) 1 else 0;
 }
 
@@ -793,6 +891,7 @@ export fn zigonaut_core_destroy(self: ?*Core) void {
     core.notifications.deinit(std.heap.c_allocator);
     for (core.clipboard_writes.items) |item| std.heap.c_allocator.free(item.payload);
     core.clipboard_writes.deinit(std.heap.c_allocator);
+    core.render_snapshot.deinit(std.heap.c_allocator);
     core.terminal.deinit();
     std.heap.c_allocator.destroy(core);
 }
@@ -826,7 +925,7 @@ fn completeCopyFits(required: usize, has_output: bool, capacity: usize) bool {
 }
 
 test "null ABI handles are safe" {
-    zigonaut_core_resize(null, 80, 24);
+    zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
     zigonaut_core_write(null, null, 0);
     try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0));
@@ -837,6 +936,9 @@ test "null ABI handles are safe" {
     var clipboard = std.mem.zeroes(ClipboardResult);
     zigonaut_core_take_clipboard_write(null, null, 0, &clipboard);
     try std.testing.expectEqual(@as(u8, 2), clipboard.status);
+    var images = std.mem.zeroes(RenderImagesResult);
+    zigonaut_core_render_images(null, null, 0, null, 0, &images);
+    try std.testing.expectEqual(@as(u8, 2), images.status);
     zigonaut_core_destroy(null);
 }
 
@@ -922,6 +1024,48 @@ test "styled snapshot accounts for and writes graphemes larger than 64 bytes" {
     collector.drawCell(cell);
     try std.testing.expectEqual(@as(u32, 80), result.written_text_bytes);
     try std.testing.expectEqualStrings("🙂" ** 20, &text);
+}
+
+test "image collector preserves placements and rejects partial RGBA copies" {
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+    const image = Terminal.Image{
+        .image_id = 7,
+        .generation = 9,
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .source_x = 0,
+        .source_y = 0,
+        .source_width = 1,
+        .source_height = 1,
+        .pixel_width = 20,
+        .pixel_height = 30,
+        .viewport_col = -1,
+        .viewport_row = 2,
+        .x_offset = 3,
+        .y_offset = 4,
+        .z = 5,
+    };
+    var records: [1]RenderImage = undefined;
+    var short_rgba: [3]u8 = undefined;
+    var result = std.mem.zeroes(RenderImagesResult);
+    var collector = ImageCollector{ .images = &records, .rgba = &short_rgba, .result = &result };
+    collector.drawImage(image);
+    try std.testing.expect(collector.truncated);
+    try std.testing.expectEqual(@as(u32, 1), result.required_images);
+    try std.testing.expectEqual(@as(u32, 4), result.required_data_bytes);
+    try std.testing.expectEqual(@as(u32, 0), result.written_images);
+
+    var rgba: [4]u8 = undefined;
+    result = std.mem.zeroes(RenderImagesResult);
+    collector = .{ .images = &records, .rgba = &rgba, .result = &result };
+    collector.drawImage(image);
+    try std.testing.expectEqualSlices(u8, &pixels, &rgba);
+    try std.testing.expectEqual(@as(u32, 7), records[0].image_id);
+    try std.testing.expectEqual(@as(u64, 9), records[0].generation);
+    try std.testing.expectEqual(@as(i32, -1), records[0].viewport_column);
+    try std.testing.expectEqual(@as(u32, 20), records[0].pixel_width);
+    try std.testing.expectEqual(@as(i32, 5), records[0].z);
 }
 
 test "null search and mouse APIs and bounded queries are safe" {
