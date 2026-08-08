@@ -230,8 +230,12 @@ pub const Pty = struct {
 
         // Give the shell two seconds to exit before forced termination.
         if (win.WaitForSingleObject(self.process, 2000) == win.WAIT_TIMEOUT) {
-            _ = win.TerminateProcess(self.process, 1);
+            _ = self.terminate();
         }
+    }
+
+    pub fn terminate(self: *Pty) bool {
+        return win.TerminateProcess(self.process, 1) != 0;
     }
 
     pub fn finishClose(self: *Pty) void {

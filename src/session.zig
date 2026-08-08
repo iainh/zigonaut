@@ -885,13 +885,21 @@ pub const SessionRuntime = struct {
 
     fn readerMain(self: *SessionRuntime) void {
         var buffer: [reader_buffer_bytes]u8 = undefined;
+        var read_failure: ?anyerror = null;
         while (true) {
-            const count = self.pty.?.read(&buffer) catch break;
+            const count = self.pty.?.read(&buffer) catch |err| {
+                read_failure = err;
+                break;
+            };
             if (count == 0) break;
             if (self.processOutput(buffer[0..count], win.GetTickCount64())) self.requestRefresh();
         }
         const cancel_writer = self.makePtyUnavailable();
         if (cancel_writer) self.pty.?.cancelIo(null, self.writer_thread);
+        if (read_failure) |err| {
+            log.err("pseudoconsole output failed: {}", .{err});
+            if (!self.pty.?.terminate()) log.err("unable to terminate shell after pseudoconsole output failure", .{});
+        }
         self.reader_stopped.store(true, .release);
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
