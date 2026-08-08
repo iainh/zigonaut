@@ -115,6 +115,20 @@ struct TerminalRenderImage {
   let yOffset: CGFloat
 }
 
+struct TerminalProgress: Equatable {
+  enum State: UInt8 {
+    case normal = 0
+    case error = 1
+    case indeterminate = 2
+    case paused = 3
+  }
+
+  let state: State
+  let value: Int
+  let generation: UInt64
+  let updatedAt: Date
+}
+
 struct TerminalPalette: Equatable {
   var foreground: UInt32
   var background: UInt32
@@ -340,6 +354,7 @@ struct TerminalPalette: Equatable {
   @Published private(set) var searchMatchCount = 0
   @Published private(set) var searchActiveIndex: Int?
   @Published private(set) var searchError = false
+  @Published private(set) var progress: TerminalProgress?
   nonisolated(unsafe) private var core: TerminalCoreHandle?
   nonisolated private let writer = DispatchQueue(label: "dev.zigonaut.pty-writer")
   nonisolated private let callbackBox: Unmanaged<TerminalCallbackBox>
@@ -356,6 +371,7 @@ struct TerminalPalette: Equatable {
   private var currentCellWidth = 0
   private var currentCellHeight = 0
   private var currentScale: CGFloat = 1
+  private var progressGeneration: UInt64 = 0
   private let maximumCells = 500_000
   private let maximumTextBytes = 8_000_000
   private let maximumImages = 256
@@ -411,8 +427,22 @@ struct TerminalPalette: Equatable {
     }
     retrieveSnapshot(core: core.pointer, retry: true)
     retrieveTitle(core: core.pointer)
+    retrieveProgress(core: core.pointer)
     drainNotifications(core: core.pointer)
     drainClipboard(core: core.pointer)
+  }
+
+  private func retrieveProgress(core: OpaquePointer) {
+    var result = zigonaut_progress_v1()
+    zigonaut_core_progress(core, &result)
+    guard result.generation != progressGeneration else { return }
+    progressGeneration = result.generation
+    guard result.active != 0, let state = TerminalProgress.State(rawValue: result.state) else {
+      progress = nil
+      return
+    }
+    progress = TerminalProgress(state: state, value: min(100, Int(result.value)),
+      generation: result.generation, updatedAt: Date())
   }
 
   func link(column: Int, row: Int) -> URL? {
@@ -883,11 +913,13 @@ indirect enum PaneNode: Identifiable {
     }
   }
   @Published private(set) var title: String
+  @Published private(set) var progress: TerminalProgress?
   @Published var findVisible = false { didSet { synchronizeFindOwner() } }
   @Published var findQuery = ""
   @Published private(set) var findFocusRequest = 0
   private weak var searchOwner: TerminalModel?
   private var titleObservation: AnyCancellable?
+  private var progressObservation: AnyCancellable?
   let preferences: Preferences
   init(preferences: Preferences) {
     self.preferences = preferences
@@ -921,7 +953,9 @@ indirect enum PaneNode: Identifiable {
   private func synchronizeTitleOwner() {
     let owner = focused
     title = owner?.title ?? "Terminal"
+    progress = owner?.progress
     titleObservation = owner?.$title.sink { [weak self] value in self?.title = value }
+    progressObservation = owner?.$progress.sink { [weak self] value in self?.progress = value }
   }
   func split(_ axis: Axis) {
     guard let focus = focusedPane,

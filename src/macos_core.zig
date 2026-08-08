@@ -51,6 +51,10 @@ const Core = struct {
     search_saved_offset: ?u64 = null,
     selection_unit: Terminal.SelectionUnit = .cell,
     selection_rectangle: bool = false,
+    progress_active: bool = false,
+    progress_state: Terminal.ProgressState = .normal,
+    progress_value: u8 = 0,
+    progress_generation: u64 = 0,
     render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
@@ -179,6 +183,16 @@ pub const TerminalTheme = extern struct {
     reserved: [8]u8,
 };
 
+pub const Progress = extern struct {
+    version: u32,
+    size: u32,
+    generation: u64,
+    active: u8,
+    state: u8,
+    value: u8,
+    reserved: [5]u8,
+};
+
 fn rgb(color: theme.Color) u32 {
     return (@as(u32, color.red) << 16) | (@as(u32, color.green) << 8) | color.blue;
 }
@@ -233,6 +247,19 @@ fn clipboardWrite(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperat
     return .success;
 }
 
+fn progressReport(context: ?*anyopaque, update: Terminal.ProgressUpdate) void {
+    const self: *Core = @ptrCast(@alignCast(context orelse return));
+    switch (update) {
+        .remove => self.progress_active = false,
+        .report => |report| {
+            self.progress_active = true;
+            self.progress_state = report.state;
+            self.progress_value = report.value orelse if (report.state == .normal) 0 else self.progress_value;
+        },
+    }
+    self.progress_generation +%= 1;
+}
+
 // Called by terminal.feed while mutex is held. Only serialize the PTY write;
 // acquiring the terminal mutex here would deadlock.
 fn terminalWritePty(context: ?*anyopaque, bytes: []const u8) void {
@@ -257,6 +284,7 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     self.terminal.setWritePty(terminalWritePty, self) catch return failCreate(self, -1);
     self.terminal.setDesktopNotification(desktopNotification, self) catch return failCreate(self, -1);
     self.terminal.setClipboardWrite(clipboardWrite, self) catch return failCreate(self, -1);
+    self.terminal.setProgressReport(progressReport, self) catch return failCreate(self, -1);
     var slave: c_int = -1;
     var size = c.winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
     if (c.openpty(&self.master, &slave, null, null, &size) != 0) {
@@ -602,6 +630,18 @@ export fn zigonaut_core_set_scrollback(self: ?*Core, lines: u32) bool {
     defer core.mutex.unlock();
     core.terminal.setScrollbackSize(lines) catch return false;
     return true;
+}
+
+export fn zigonaut_core_progress(self: ?*Core, result: ?*Progress) void {
+    const output = result orelse return;
+    output.* = .{ .version = 1, .size = @sizeOf(Progress), .generation = 0, .active = 0, .state = 0, .value = 0, .reserved = @splat(0) };
+    const core = self orelse return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    output.generation = core.progress_generation;
+    output.active = @intFromBool(core.progress_active);
+    output.state = @intFromEnum(core.progress_state);
+    output.value = core.progress_value;
 }
 
 /// Returns the required title byte count and copies at most `capacity` bytes.
@@ -988,6 +1028,9 @@ test "null ABI handles are safe" {
     var terminal_theme = std.mem.zeroes(TerminalTheme);
     try std.testing.expect(!zigonaut_core_set_theme(null, &terminal_theme));
     try std.testing.expect(!zigonaut_core_set_scrollback(null, 10_000));
+    var progress = std.mem.zeroes(Progress);
+    zigonaut_core_progress(null, &progress);
+    try std.testing.expectEqual(@as(u8, 0), progress.active);
     zigonaut_core_destroy(null);
 }
 

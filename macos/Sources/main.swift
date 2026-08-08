@@ -13,7 +13,9 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
     let kind: Kind
     var didClose: ((NSWindow) -> Void)?
     var addTab: ((NSWindow) -> Void)?
+    var progressChanged: (() -> Void)?
     private var titleObservation: AnyCancellable?
+    private var progressObservation: AnyCancellable?
 
     init(window: NSWindow, kind: Kind) {
         self.kind = kind
@@ -22,6 +24,9 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
         if case .terminal(let model) = kind {
             titleObservation = model.$title.sink { [weak window] title in
                 window?.title = title
+            }
+            progressObservation = model.$progress.sink { [weak self] _ in
+                self?.progressChanged?()
             }
         }
     }
@@ -35,9 +40,55 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
         didClose?(window)
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        progressChanged?()
+    }
+
     override func newWindowForTab(_ sender: Any?) {
         guard case .terminal = kind, let window else { return }
         addTab?(window)
+    }
+}
+
+@MainActor
+private final class DockProgressView: NSView {
+    private let icon = NSImageView()
+    private let indicator = NSProgressIndicator()
+    private let stateMarker = NSView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        icon.image = NSApp.applicationIconImage
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        indicator.style = .bar
+        indicator.minValue = 0
+        indicator.maxValue = 100
+        stateMarker.wantsLayer = true
+        addSubview(icon)
+        addSubview(indicator)
+        addSubview(stateMarker)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        icon.frame = bounds
+        stateMarker.frame = NSRect(x: 10, y: 10, width: 8, height: 8)
+        stateMarker.layer?.cornerRadius = 4
+        indicator.frame = NSRect(x: 20, y: 8, width: max(1, bounds.width - 30), height: 12)
+    }
+
+    func update(_ progress: TerminalProgress) {
+        indicator.stopAnimation(nil)
+        indicator.isIndeterminate = progress.state == .indeterminate
+        indicator.doubleValue = Double(progress.value)
+        switch progress.state {
+        case .normal, .indeterminate: stateMarker.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        case .error: stateMarker.layer?.backgroundColor = NSColor.systemRed.cgColor
+        case .paused: stateMarker.layer?.backgroundColor = NSColor.systemYellow.cgColor
+        }
+        if indicator.isIndeterminate { indicator.startAnimation(nil) }
     }
 }
 
@@ -46,6 +97,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let preferences = Preferences()
     private var terminalWindows: [NSWindow: ManagedWindowController] = [:]
     private var settingsController: ManagedWindowController?
+    private var dockProgressView: DockProgressView?
+    private var dockProgressTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -59,6 +112,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        dockProgressTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -115,10 +169,48 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.setFrameAutosaveName("ZigonautTerminalWindow")
         window.contentView = NSHostingView(rootView: ContentView(window: model))
         let controller = ManagedWindowController(window: window, kind: .terminal(model))
-        controller.didClose = { [weak self] window in self?.terminalWindows.removeValue(forKey: window) }
+        controller.didClose = { [weak self] window in
+            self?.terminalWindows.removeValue(forKey: window)
+            self?.updateDockProgress()
+        }
         controller.addTab = { [weak self] window in self?.addTab(to: window) }
+        controller.progressChanged = { [weak self] in self?.updateDockProgress() }
         terminalWindows[window] = controller
+        updateDockProgress()
         return controller
+    }
+
+    private func updateDockProgress() {
+        dockProgressTimer?.invalidate()
+        let keyProgress = NSApp.keyWindow.flatMap { window -> TerminalProgress? in
+            guard let controller = terminalWindows[window], case .terminal(let model) = controller.kind else {
+                return nil
+            }
+            return model.progress
+        }
+        let fallback = NSApp.orderedWindows.lazy.compactMap { window -> TerminalProgress? in
+            guard window.isVisible, let controller = self.terminalWindows[window],
+                  case .terminal(let model) = controller.kind else { return nil }
+            return model.progress
+        }.first
+        guard let progress = keyProgress ?? fallback,
+              Date().timeIntervalSince(progress.updatedAt) < 15 else {
+            NSApp.dockTile.contentView = nil
+            dockProgressView = nil
+            NSApp.dockTile.display()
+            return
+        }
+        let view = dockProgressView ?? DockProgressView(
+            frame: NSRect(origin: .zero, size: NSApp.dockTile.size))
+        dockProgressView = view
+        view.frame.size = NSApp.dockTile.size
+        view.update(progress)
+        NSApp.dockTile.contentView = view
+        NSApp.dockTile.display()
+        let remaining = max(0.05, 15 - Date().timeIntervalSince(progress.updatedAt))
+        dockProgressTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) {
+            [weak self] _ in Task { @MainActor in self?.updateDockProgress() }
+        }
     }
 
     private var current: WindowModel? {
