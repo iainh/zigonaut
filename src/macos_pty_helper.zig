@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("errno.h");
     @cInclude("fcntl.h");
+    @cInclude("pwd.h");
     @cInclude("stdlib.h");
     @cInclude("sys/ioctl.h");
     @cInclude("termios.h");
@@ -10,6 +11,15 @@ const c = @cImport({
 
 fn validArguments(args: []const []const u8) bool {
     return args.len == 2 and args[1].len > 0 and args[1][0] == '/';
+}
+
+fn changeToHomeDirectory() bool {
+    if (c.getenv("HOME")) |home| {
+        if (home[0] == '/' and c.chdir(home) == 0) return true;
+    }
+    const account = c.getpwuid(c.getuid()) orelse return false;
+    const home = account.*.pw_dir orelse return false;
+    return home[0] == '/' and c.chdir(home) == 0;
 }
 
 pub fn main(init: std.process.Init) u8 {
@@ -27,6 +37,7 @@ pub fn main(init: std.process.Init) u8 {
     if (c.tcsetattr(10, c.TCSANOW, &attributes) != 0) return 71;
     if (c.ioctl(10, c.TIOCSCTTY, @as(c_int, 0)) < 0) return 71;
     inline for (0..3) |fd| if (c.dup2(10, fd) < 0) return 71;
+    if (!changeToHomeDirectory()) return 71;
     const descriptor_limit = c.sysconf(c._SC_OPEN_MAX);
     if (descriptor_limit < 0) return 71;
     var fd: c_int = 3;
