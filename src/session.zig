@@ -11,6 +11,8 @@ const feed_chunk_bytes = 4 * 1024;
 const pty_write_queue_max_bytes = 8 * 1024 * 1024;
 const synchronized_output_timeout_ms = 1000;
 const notification_max_bytes = 4096;
+const retirement_retry_initial_ms = 1;
+const retirement_retry_max_ms = 250;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `retire` only after no caller can submit input or rendering work.
@@ -326,9 +328,13 @@ pub const SessionRuntime = struct {
     /// Complete destruction on a reaper thread after prepareForRetirement.
     fn destroy(self: *SessionRuntime) void {
         if (self.pty) |*pty| {
+            var retry_delay_ms: u32 = retirement_retry_initial_ms;
             while (!workersStopped(self.reader_thread, self.writer_thread)) {
+                // Cancellation can race with a worker entering synchronous I/O,
+                // so keep retrying without polling a stuck worker at 1 kHz.
                 pty.cancelIo(self.reader_thread, self.writer_thread);
-                win.Sleep(1);
+                win.Sleep(retry_delay_ms);
+                retry_delay_ms = @min(retry_delay_ms * 2, retirement_retry_max_ms);
             }
             if (self.reader_thread) |thread| thread.join();
             if (self.writer_thread) |thread| thread.join();
