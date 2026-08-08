@@ -630,35 +630,30 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     func flush() {
       guard let current = run else { return }
       drawText(String(decoding: current.bytes, as: UTF8.self), x: current.x, y: current.y,
-        style: current.style, batched: true)
+        columns: current.nextX - current.x, style: current.style, batched: true)
       run = nil
     }
     for cell in cells {
-      guard cell.occupancy == 0, let byte = asciiByte(cell.text) else {
+      guard cell.occupancy == 0 else {
         flush()
         if !cell.text.isEmpty && cell.occupancy != 2 {
-          drawText(cell.text, x: cell.x, y: cell.y, style: textStyle(cell), batched: false)
+          drawText(cell.text, x: cell.x, y: cell.y, columns: cell.occupancy == 1 ? 2 : 1,
+            style: textStyle(cell), batched: false)
         }
         continue
       }
+      let bytes = Array((cell.text.isEmpty ? " " : cell.text).utf8)
       let style = textStyle(cell)
       if var current = run, current.y == cell.y, current.nextX == cell.x, current.style == style {
-        current.bytes.append(byte)
+        current.bytes.append(contentsOf: bytes)
         current.nextX += 1
         run = current
       } else {
         flush()
-        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: [byte])
+        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: bytes)
       }
     }
     flush()
-  }
-
-  private func asciiByte(_ text: String) -> UInt8? {
-    if text.isEmpty { return 0x20 }
-    let bytes = text.utf8
-    guard bytes.count == 1, let byte = bytes.first, byte < 0x80 else { return nil }
-    return byte
   }
 
   private func textStyle(_ cell: TerminalRenderCell) -> TextStyle {
@@ -669,7 +664,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       faint: cell.faint)
   }
 
-  private func drawText(_ text: String, x: Int, y: Int, style: TextStyle, batched: Bool) {
+  private func drawText(_ text: String, x: Int, y: Int, columns: Int, style: TextStyle, batched: Bool) {
     var traits: NSFontTraitMask = []
     if style.bold { traits.insert(.boldFontMask) }
     if style.italic { traits.insert(.italicFontMask) }
@@ -679,14 +674,19 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       .font: styledFont,
       .foregroundColor: foreground,
     ]
-    if batched {
+    if batched && text.unicodeScalars.allSatisfy(\.isASCII) {
       attributes[.ligature] = 0
       attributes[.kern] = cellWidth - styledAdvance(traits: traits, font: styledFont)
     }
     let origin = NSPoint(
       x: originX + CGFloat(x) * cellWidth,
       y: originY + CGFloat(y) * lineHeight + font.ascender - styledFont.ascender)
-    (text as NSString).draw(at: origin, withAttributes: attributes)
+    let target = NSRect(x: origin.x, y: origin.y, width: CGFloat(columns) * cellWidth,
+      height: max(lineHeight, styledFont.ascender - styledFont.descender + styledFont.leading))
+    NSGraphicsContext.current?.saveGraphicsState()
+    NSBezierPath(rect: target).addClip()
+    NSAttributedString(string: text, attributes: attributes).draw(at: origin)
+    NSGraphicsContext.current?.restoreGraphicsState()
   }
 
   private func drawMarkedText(_ frame: TerminalRenderFrame) {
@@ -707,8 +707,20 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private func drawDecorations(_ cell: TerminalRenderCell, rect: NSRect) {
     guard cell.underlineStyle != 0 || cell.strikethrough || cell.overline else { return }
     color(cell.underlineColor).setStroke()
-    if cell.underlineStyle != 0 {
-      strokeLine(y: rect.maxY - 1.5, rect: rect, width: cell.underlineStyle == 2 ? 2 : 1)
+    switch cell.underlineStyle {
+    case 1:
+      strokeLine(y: rect.maxY - 1.5, rect: rect, width: 1)
+    case 2:
+      strokeLine(y: rect.maxY - 1, rect: rect, width: 1)
+      strokeLine(y: rect.maxY - 3, rect: rect, width: 1)
+    case 3:
+      strokeWavyLine(y: rect.maxY - 2, rect: rect)
+    case 4:
+      strokePattern(y: rect.maxY - 1.5, rect: rect, pattern: [1, 2], rounded: true)
+    case 5:
+      strokePattern(y: rect.maxY - 1.5, rect: rect, pattern: [4, 2], rounded: false)
+    default:
+      if cell.underlineStyle != 0 { strokeLine(y: rect.maxY - 1.5, rect: rect, width: 1) }
     }
     if cell.strikethrough {
       strokeLine(y: rect.midY, rect: rect, width: 1)
@@ -723,6 +735,29 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     path.move(to: NSPoint(x: rect.minX, y: y))
     path.line(to: NSPoint(x: rect.maxX, y: y))
     path.lineWidth = width
+    path.stroke()
+  }
+
+  private func strokePattern(y: CGFloat, rect: NSRect, pattern: [CGFloat], rounded: Bool) {
+    let path = NSBezierPath()
+    path.move(to: NSPoint(x: rect.minX, y: y))
+    path.line(to: NSPoint(x: rect.maxX, y: y))
+    path.lineWidth = 1
+    path.setLineDash(pattern, count: pattern.count, phase: 0)
+    path.lineCapStyle = rounded ? .round : .butt
+    path.stroke()
+  }
+
+  private func strokeWavyLine(y: CGFloat, rect: NSRect) {
+    let path = NSBezierPath()
+    path.move(to: NSPoint(x: rect.minX, y: y))
+    var x = rect.minX + 1
+    while x <= rect.maxX {
+      let offset = sin((x - rect.minX) * .pi / 2)
+      path.line(to: NSPoint(x: x, y: y + offset))
+      x += 1
+    }
+    path.lineWidth = 1
     path.stroke()
   }
 

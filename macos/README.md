@@ -8,7 +8,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - New/close/select operations and pane focus cycling; focused panes have a native focus ring.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
-- Accurate font-derived grid resize, bounded styled-cell CoreText/AppKit rendering, per-cell colours and decoration, terminal cursors, and light/dark colours.
+- Accurate font-derived grid resize, bounded CoreText shaping with native font fallback and colour glyphs, per-cell colours, complete underline variants and terminal cursors.
 - Full scrollback find with match/active counts, native match highlights, wrapped previous/next navigation, viewport restoration, and Escape-to-close. Scanning runs on the serialized background queue and queries are limited to 256 UTF-8 bytes.
 - OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
 - Bounded Kitty graphics snapshots with RGBA image caching, source cropping and Retina-aware placement.
