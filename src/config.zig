@@ -238,16 +238,17 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
     const path = try pathAlloc(allocator);
     defer allocator.free(path);
     const directory = std.fs.path.dirname(path) orelse return error.InvalidConfigPath;
+    const basename = std.fs.path.basename(path);
 
     try std.Io.Dir.cwd().createDirPath(io, directory);
-    var file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+    var config_directory = try std.Io.Dir.openDirAbsolute(io, directory, .{});
+    defer config_directory.close(io);
+    var file = config_directory.openFile(io, basename, .{}) catch |err| switch (err) {
         error.FileNotFound => create: {
-            var created = try std.Io.Dir.createFileAbsolute(io, path, .{});
-            defer created.close(io);
             const initial = try firstRunContentsAlloc(allocator, commandAvailable("pwsh.exe"));
             defer allocator.free(initial);
-            try created.writeStreamingAll(io, initial);
-            break :create try std.Io.Dir.openFileAbsolute(io, path, .{});
+            try publishInitialConfig(config_directory, io, basename, initial);
+            break :create try config_directory.openFile(io, basename, .{});
         },
         else => return err,
     };
@@ -262,6 +263,17 @@ pub fn loadOrCreate(allocator: std.mem.Allocator, io: std.Io) !Loaded {
         .contents = contents,
         .value = try configFromJson(parsed.value),
         .parsed = parsed,
+    };
+}
+
+fn publishInitialConfig(directory: std.Io.Dir, io: std.Io, basename: []const u8, contents: []const u8) !void {
+    var atomic_file = try directory.createFileAtomic(io, basename, .{});
+    defer atomic_file.deinit(io);
+    try atomic_file.file.writeStreamingAll(io, contents);
+    try atomic_file.file.sync(io);
+    atomic_file.link(io) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
     };
 }
 
@@ -492,6 +504,16 @@ test "first-run configuration prefers installed PowerShell 7" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqualStrings("PowerShell 7", value.defaultProfile().name);
     try std.testing.expectEqualStrings("pwsh.exe", value.defaultProfile().command);
+}
+
+test "first-run configuration publication preserves a concurrent winner" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try publishInitialConfig(temporary.dir, std.testing.io, "zigonaut.json", "first");
+    try publishInitialConfig(temporary.dir, std.testing.io, "zigonaut.json", "second");
+    const contents = try temporary.dir.readFileAlloc(std.testing.io, "zigonaut.json", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("first", contents);
 }
 
 test "configuration rejects strings Windows cannot represent" {
