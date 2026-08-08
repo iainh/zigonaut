@@ -328,8 +328,11 @@ const Application = struct {
 
     fn detachPresentation(self: *Application) !void {
         const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
-        for (self.attached_panes.items) |id| if (!bridge.detachPane(id)) return error.DetachPaneFailed;
-        self.attached_panes.clearRetainingCapacity();
+        while (self.attached_panes.items.len != 0) {
+            const id = self.attached_panes.items[self.attached_panes.items.len - 1];
+            if (!bridge.detachPane(id)) return error.DetachPaneFailed;
+            _ = self.attached_panes.pop();
+        }
     }
 
     fn isAttached(self: *const Application, id: u64) bool {
