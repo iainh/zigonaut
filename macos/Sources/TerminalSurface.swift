@@ -32,6 +32,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var markedText = NSMutableAttributedString()
   private var markedSelection = NSRange(location: NSNotFound, length: 0)
   private var reportingButton: UInt8 = 0
+  private var selecting = false
+  private var selectionShouldCopy = false
   private var trackingArea: NSTrackingArea?
   private var lastMousePoint: NSPoint?
   private var cachedFontFamily = ""
@@ -163,6 +165,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     self.onFocus = onFocus
     super.init(frame: .zero)
     wantsLayer = true
+    registerForDraggedTypes([.fileURL])
     setAccessibilityElement(true)
     setAccessibilityRole(.textArea)
     setAccessibilityLabel("Terminal")
@@ -331,15 +334,23 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   private func cell(_ event: NSEvent) -> (Int, Int) {
     let point = convert(event.locationInWindow, from: nil)
-    let column = max(0, Int((point.x - originX) / cellWidth))
-    let row = max(0, Int((point.y - originY) / lineHeight))
+    let column = min(gridColumns - 1, max(0, Int((point.x - originX) / cellWidth)))
+    let row = min(gridRows - 1, max(0, Int((point.y - originY) / lineHeight)))
     return (column, row)
   }
 
   override func mouseDown(with event: NSEvent) {
     handleMouseDown(event)
   }
-  override func rightMouseDown(with event: NSEvent) { handleMouseDown(event) }
+  override func rightMouseDown(with event: NSEvent) {
+    if shouldReport(event) {
+      handleMouseDown(event)
+    } else {
+      onFocus()
+      window?.makeFirstResponder(self)
+      NSMenu.popUpContextMenu(terminalMenu(), with: event, for: self)
+    }
+  }
   override func otherMouseDown(with event: NSEvent) { handleMouseDown(event) }
 
   private func handleMouseDown(_ event: NSEvent) {
@@ -355,7 +366,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       sendMouse(event, action: 0, button: reportingButton, pressed: true)
       return
     }
-    model.selectionBegin(point.0, point.1)
+    selecting = true
+    selectionShouldCopy = event.clickCount >= 2
+    let unit: UInt8 = event.clickCount >= 3 ? 2 : event.clickCount == 2 ? 1 : 0
+    model.selectionBegin(point.0, point.1, unit: unit,
+      rectangle: unit == 0 && event.modifierFlags.contains(.option))
+    model.refresh()
   }
 
   override func mouseDragged(with event: NSEvent) {
@@ -369,6 +385,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       sendMouse(event, action: 2, button: reportingButton, pressed: true)
       return
     }
+    guard selecting else { return }
+    selectionShouldCopy = true
+    let location = convert(event.locationInWindow, from: nil)
+    if location.y < originY {
+      model.scroll(1)
+    } else if location.y > originY + CGFloat(gridRows) * lineHeight {
+      model.scroll(-1)
+    }
+    _ = autoscroll(with: event)
     let point = cell(event)
     model.selectionUpdate(point.0, point.1)
   }
@@ -385,7 +410,55 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       reportingButton = 0
       return
     }
+    guard selecting else { return }
+    selecting = false
     model.selectionEnd()
+    if selectionShouldCopy {
+      model.copy()
+    } else {
+      model.clearSelection()
+    }
+    model.refresh()
+  }
+
+  override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+    droppedFileURLs(sender).isEmpty ? [] : .copy
+  }
+
+  override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+    let urls = droppedFileURLs(sender)
+    guard !urls.isEmpty else { return false }
+    let command = urls.map { shellQuote($0.path) }.joined(separator: " ")
+    model.paste(command)
+    return true
+  }
+
+  private func droppedFileURLs(_ sender: any NSDraggingInfo) -> [URL] {
+    let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+    return sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL] ?? []
+  }
+
+  private func shellQuote(_ path: String) -> String {
+    "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  }
+
+  private func terminalMenu() -> NSMenu {
+    let menu = NSMenu(title: "Terminal")
+    let copyItem = menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+    copyItem.target = self
+    let pasteItem = menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
+    pasteItem.target = self
+    menu.addItem(.separator())
+    let findItem = menu.addItem(withTitle: "Find…", action: #selector(Delegate.find(_:)), keyEquivalent: "")
+    findItem.target = NSApp.delegate
+    menu.addItem(.separator())
+    let splitRight = menu.addItem(withTitle: "Split Right", action: #selector(Delegate.splitRight(_:)), keyEquivalent: "")
+    splitRight.target = NSApp.delegate
+    let splitDown = menu.addItem(withTitle: "Split Down", action: #selector(Delegate.splitDown(_:)), keyEquivalent: "")
+    splitDown.target = NSApp.delegate
+    let close = menu.addItem(withTitle: "Close Pane or Tab", action: #selector(Delegate.closePane(_:)), keyEquivalent: "")
+    close.target = NSApp.delegate
+    return menu
   }
 
   override func scrollWheel(with event: NSEvent) {

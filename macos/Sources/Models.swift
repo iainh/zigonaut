@@ -800,9 +800,9 @@ struct TerminalPalette: Equatable {
         UInt32(clamping: paddingRight), modifiers, pressed)
     }
   }
-  func selectionBegin(_ column: Int, _ row: Int) {
+  func selectionBegin(_ column: Int, _ row: Int, unit: UInt8, rectangle: Bool) {
     if let core {
-      zigonaut_core_selection_begin(core.pointer, UInt16(clamping: column), UInt16(clamping: row))
+      zigonaut_core_selection_begin(core.pointer, UInt16(clamping: column), UInt16(clamping: row), unit, rectangle)
     }
   }
   func selectionUpdate(_ column: Int, _ row: Int) {
@@ -812,6 +812,7 @@ struct TerminalPalette: Equatable {
     refresh()
   }
   func selectionEnd() { if let core { zigonaut_core_selection_end(core.pointer) } }
+  func clearSelection() { if let core { zigonaut_core_selection_clear(core.pointer) } }
   func copy() {
     guard let core else { return }
     let required = zigonaut_core_copy_selection(core.pointer, nil, 0)

@@ -12,7 +12,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - Full scrollback find with match/active counts, native match highlights, wrapped previous/next navigation, viewport restoration, and Escape-to-close. Scanning runs on the serialized background queue and queries are limited to 256 UTF-8 bytes.
 - OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
 - Bounded Kitty graphics snapshots with RGBA image caching, source cropping and Retina-aware placement.
-- Precise local scroll wheel movement and mouse cell selection; terminal mouse press, release, drag, and wheel reporting when requested by applications, with Shift forcing local selection.
+- Precise local scrolling, copy-on-select cell/word/line selection, Option-drag rectangular selection, drag auto-scroll, shell-quoted Finder file drops, and a native terminal context menu. Terminal mouse press, release, drag, and wheel reporting remain available when requested by applications, with Shift forcing local selection.
 - Basic bounded text-area accessibility value, label, focus state, and value-change notifications.
 - Command-C copy and bracketed Command-V paste.
 - Command-hover/click opens only terminal-detected links with schemes accepted by the terminal core.

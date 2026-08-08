@@ -49,6 +49,8 @@ const Core = struct {
     search_matches: std.ArrayList(search.Match) = .empty,
     search_active: ?usize = null,
     search_saved_offset: ?u64 = null,
+    selection_unit: Terminal.SelectionUnit = .cell,
+    selection_rectangle: bool = false,
     render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
@@ -836,19 +838,22 @@ export fn zigonaut_core_working_directory(self: ?*Core, output: ?[*]u8, capacity
     return value.len;
 }
 
-export fn zigonaut_core_selection_begin(self: ?*Core, column: u16, row: u16) void {
+export fn zigonaut_core_selection_begin(self: ?*Core, column: u16, row: u16, unit: u8, rectangle: bool) void {
     const core = self orelse return;
+    if (unit > @intFromEnum(Terminal.SelectionUnit.line)) return;
     core.mutex.lock();
     defer core.mutex.unlock();
+    core.selection_unit = @enumFromInt(unit);
+    core.selection_rectangle = rectangle and core.selection_unit == .cell;
     core.terminal.beginSelectionAnchor(.{ .x = column, .y = row }) catch {};
-    core.terminal.setDerivedSelection(.{ .x = column, .y = row }, .cell, false) catch {};
+    core.terminal.setDerivedSelection(.{ .x = column, .y = row }, core.selection_unit, core.selection_rectangle) catch {};
 }
 
 export fn zigonaut_core_selection_update(self: ?*Core, column: u16, row: u16) void {
     const core = self orelse return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    core.terminal.setDerivedSelection(.{ .x = column, .y = row }, .cell, false) catch {};
+    core.terminal.setDerivedSelection(.{ .x = column, .y = row }, core.selection_unit, core.selection_rectangle) catch {};
 }
 
 export fn zigonaut_core_selection_end(self: ?*Core) void {
@@ -968,6 +973,7 @@ test "null ABI handles are safe" {
     zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
     zigonaut_core_write(null, null, 0);
+    zigonaut_core_selection_begin(null, 0, 0, 0, false);
     try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0));
     var notification = std.mem.zeroes(NotificationResult);
     zigonaut_core_take_notification(null, null, 0, null, 0, &notification);
