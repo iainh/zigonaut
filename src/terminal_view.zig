@@ -31,6 +31,8 @@ const selection_scroll_timer = 3;
 const synchronized_output_timer = 4;
 const present_retry_timer = 5;
 const frame_wait_fallback_timer = 6;
+const present_retry_initial_ms = 1;
+const present_retry_max_ms = 250;
 const search_refresh_interval_ms = 33;
 const process_exit_refresh_interval_ms = 50;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
@@ -306,6 +308,7 @@ pub const View = struct {
     completion_outcome: u8 = 0,
     prepared_available: bool = false,
     present_pending: bool = false,
+    present_retry_delay_ms: u32 = present_retry_initial_ms,
     resize_render_pending: bool = false,
     scene_has_images: bool = false,
     retained_scroll_offset: ?usize = null,
@@ -793,16 +796,22 @@ pub const View = struct {
     }
 
     fn stopFrameScheduling(self: *View) void {
-        _ = win.KillTimer(self.hwnd, present_retry_timer);
+        self.cancelPendingPresent();
         self.clearFrameWait();
         // clearFrameWait waits for an in-flight callback, so kill after it can
         // no longer race with the callback arming this timer.
         _ = win.KillTimer(self.hwnd, frame_wait_fallback_timer);
         _ = self.frame_epoch.fetchAdd(1, .acq_rel);
-        self.present_pending = false;
         self.resize_render_pending = false;
         self.prepared_available = false;
         self.scene_has_images = false;
+    }
+
+    fn cancelPendingPresent(self: *View) void {
+        _ = win.KillTimer(self.hwnd, present_retry_timer);
+        if (self.present_pending) if (self.text_engine) |*engine| engine.abandonPendingPresent();
+        self.present_pending = false;
+        self.present_retry_delay_ms = present_retry_initial_ms;
     }
 
     fn clearFrameWait(self: *View) void {
@@ -864,9 +873,7 @@ pub const View = struct {
         if (self.present_pending) {
             // DXGI_ERROR_WAS_STILL_DRAWING means the non-blocking Present was not
             // submitted. Do not present that obsolete-size frame before resizing.
-            _ = win.KillTimer(self.hwnd, present_retry_timer);
-            self.text_engine.?.abandonPendingPresent();
-            self.present_pending = false;
+            self.cancelPendingPresent();
         }
         self.paintPendingResize();
     }
@@ -1184,6 +1191,7 @@ pub const View = struct {
         };
         if (result == .retry) {
             self.present_pending = true;
+            self.present_retry_delay_ms = present_retry_initial_ms;
             if (!self.armPresentRetry()) return true;
         } else if (self.render_dirty.load(.acquire)) self.armFrameWait();
         return true;
@@ -1277,7 +1285,7 @@ pub const View = struct {
         const result = self.text_engine.?.retryPresent() catch |err| {
             log.warn("terminal renderer present retry failed: {}", .{err});
             self.renderer_failed = true;
-            self.present_pending = false;
+            self.cancelPendingPresent();
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
             return;
         };
@@ -1286,6 +1294,7 @@ pub const View = struct {
             return;
         }
         self.present_pending = false;
+        self.present_retry_delay_ms = present_retry_initial_ms;
         if (self.resize_render_pending) {
             self.paintPendingResize();
             return;
@@ -1294,10 +1303,13 @@ pub const View = struct {
     }
 
     fn armPresentRetry(self: *View) bool {
-        if (win.SetTimer(self.hwnd, present_retry_timer, 1, null) != 0) return true;
+        if (win.SetTimer(self.hwnd, present_retry_timer, self.present_retry_delay_ms, null) != 0) {
+            self.present_retry_delay_ms = @min(self.present_retry_delay_ms * 2, present_retry_max_ms);
+            return true;
+        }
         log.warn("unable to schedule terminal presentation retry", .{});
         self.renderer_failed = true;
-        self.present_pending = false;
+        self.cancelPendingPresent();
         _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
         return false;
     }
