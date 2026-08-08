@@ -128,6 +128,23 @@ fn testPaneEvent(kind: u32, target_id: u64, value: u32) chrome.PaneEvent {
     return event;
 }
 
+fn paneEventCopy(source: *const chrome.PaneEvent) ?chrome.PaneEvent {
+    if (source.size < @sizeOf(chrome.PaneEvent)) return null;
+    var event = source.*;
+    event.size = @sizeOf(chrome.PaneEvent);
+    return event;
+}
+
+test "pane event copies reject short structures and normalize newer ones" {
+    var event = testPaneEvent(chrome.pane_focus, 7, 0);
+    event.size -= 1;
+    try std.testing.expect(paneEventCopy(&event) == null);
+    event.size = @sizeOf(chrome.PaneEvent) + 16;
+    const copied = paneEventCopy(&event).?;
+    try std.testing.expectEqual(@as(u32, @sizeOf(chrome.PaneEvent)), copied.size);
+    try std.testing.expectEqual(@as(u64, 7), copied.target_id);
+}
+
 test "pane event queue coalesces only matching state" {
     var queue: PaneEventQueue = .{};
     try std.testing.expectEqual(.appended, queue.enqueue(testPaneEvent(chrome.pane_scroll, 1, 10)));
@@ -1134,27 +1151,27 @@ fn chromeCommand(context: ?*anyopaque, command: u32, argument: u32) callconv(.c)
 fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c) void {
     const self: *Application = @ptrCast(@alignCast(context orelse return));
     const hwnd = self.hwnd orelse return;
-    if (source.size >= @sizeOf(chrome.PaneEvent) and
-        (source.kind == chrome.pane_ime_preedit or source.kind == chrome.pane_ime_commit or
-            source.kind == chrome.pane_ime_clear or source.kind == chrome.pane_find_query))
+    const event = paneEventCopy(source) orelse return;
+    if (event.kind == chrome.pane_ime_preedit or event.kind == chrome.pane_ime_commit or
+        event.kind == chrome.pane_ime_clear or event.kind == chrome.pane_find_query)
     {
-        const view = self.viewFor(source.target_id) orelse return;
-        const text: []const u16 = if (source.text_length == 0) &.{} else if (source.text) |ptr| ptr[0..source.text_length] else return;
-        switch (source.kind) {
-            chrome.pane_ime_preedit => view.setImePreedit(text, source.selection_start, source.selection_length),
+        const view = self.viewFor(event.target_id) orelse return;
+        const text: []const u16 = if (event.text_length == 0) &.{} else if (event.text) |ptr| ptr[0..event.text_length] else return;
+        switch (event.kind) {
+            chrome.pane_ime_preedit => view.setImePreedit(text, event.selection_start, event.selection_length),
             chrome.pane_ime_commit => view.commitIme(text),
             chrome.pane_ime_clear => view.clearImePreedit(),
             chrome.pane_find_query => view.setSearchQuery(text),
             else => unreachable,
         }
-        if (source.kind != chrome.pane_find_query) if (view.imeBounds()) |bounds| {
-            if (self.chrome) |*bridge| _ = bridge.updateImeBounds(source.target_id, bounds);
+        if (event.kind != chrome.pane_find_query) if (view.imeBounds()) |bounds| {
+            if (self.chrome) |*bridge| _ = bridge.updateImeBounds(event.target_id, bounds);
         };
         return;
     }
     while (true) {
         self.pane_events_mutex.lock();
-        const result = self.pane_events.enqueue(source.*);
+        const result = self.pane_events.enqueue(event);
         const wake_needed = if (result == .full) false else self.pane_events.requestWake();
         self.pane_events_mutex.unlock();
         if (result != .full) {
