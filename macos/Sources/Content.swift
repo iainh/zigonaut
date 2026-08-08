@@ -43,38 +43,17 @@ struct ContentView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      tabBar
       if window.findVisible {
         if let terminal = window.focused {
           FindBar(window: window, terminal: terminal)
         }
       }
-      if let index = window.tabIndex {
-        PaneView(node: window.tabs[index].root, window: window)
-      }
+      PaneView(node: window.root, window: window)
     }
     .preferredColorScheme(colourScheme)
     .onExitCommand {
       closeFind()
     }
-  }
-
-  private var tabBar: some View {
-    HStack {
-      ForEach(window.tabs) { tab in
-        if let terminal = tab.root.leaves.first {
-          TabLabel(terminal: terminal, selected: window.selectedTab == tab.id) {
-            window.selectedTab = tab.id
-            window.focusedPane = terminal.id
-          }
-        }
-      }
-      Spacer()
-      Button("+") { window.newTab() }
-        .buttonStyle(.borderless)
-        .padding()
-    }
-    .background(.bar)
   }
 
   private var colourScheme: ColorScheme? {
@@ -88,18 +67,6 @@ struct ContentView: View {
   private func closeFind() {
     guard window.findVisible else { return }
     window.findVisible = false
-  }
-}
-
-private struct TabLabel: View {
-  @ObservedObject var terminal: TerminalModel
-  let selected: Bool
-  let select: () -> Void
-  var body: some View {
-    Button(terminal.title, action: select)
-      .buttonStyle(.borderless)
-      .padding(6)
-      .background(selected ? Color.accentColor.opacity(0.2) : Color.clear)
   }
 }
 

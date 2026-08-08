@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import ZigonautCore
 
@@ -308,7 +309,9 @@ struct TerminalRenderSnapshot {
     }
     let count = min(Int(required), bytes.count)
     let value = String(decoding: bytes[0..<count], as: UTF8.self)
-    title = value.isEmpty ? "Terminal" : value
+    let newTitle = value.isEmpty ? "Terminal" : value
+    guard title != newTitle else { return }
+    title = newTitle
   }
   func resize(columns: Int, rows: Int) {
     currentColumns = columns
@@ -466,28 +469,29 @@ indirect enum PaneNode: Identifiable {
   }
 }
 
-struct TerminalTab: Identifiable {
-  let id = UUID()
-  var root: PaneNode
-}
-
 @MainActor final class WindowModel: ObservableObject {
-  @Published var tabs: [TerminalTab] = []
-  @Published var selectedTab: UUID? { didSet { synchronizeFindOwner() } }
-  @Published var focusedPane: UUID? { didSet { synchronizeFindOwner() } }
+  @Published var root: PaneNode
+  @Published var focusedPane: UUID? {
+    didSet {
+      synchronizeTitleOwner()
+      synchronizeFindOwner()
+    }
+  }
+  @Published private(set) var title: String
   @Published var findVisible = false { didSet { synchronizeFindOwner() } }
   @Published var findQuery = ""
   private weak var searchOwner: TerminalModel?
+  private var titleObservation: AnyCancellable?
   let preferences: Preferences
   init(preferences: Preferences) {
     self.preferences = preferences
-    newTab()
+    let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
+    root = .leaf(pane)
+    focusedPane = pane.id
+    title = pane.title
+    synchronizeTitleOwner()
   }
-  var tabIndex: Int? { tabs.firstIndex { $0.id == selectedTab } }
-  var focused: TerminalModel? {
-    guard let i = tabIndex else { return nil }
-    return tabs[i].root.leaves.first { $0.id == focusedPane }
-  }
+  var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
   func updateFindQuery(_ query: String) {
     findQuery = query
     synchronizeFindOwner()
@@ -500,46 +504,28 @@ struct TerminalTab: Identifiable {
     searchOwner = newOwner
     if let newOwner { newOwner.setSearch(findQuery) }
   }
-  func newTab() {
-    let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
-    let tab = TerminalTab(root: .leaf(pane))
-    tabs.append(tab)
-    selectedTab = tab.id
-    focusedPane = pane.id
+  private func synchronizeTitleOwner() {
+    let owner = focused
+    title = owner?.title ?? "Terminal"
+    titleObservation = owner?.$title.sink { [weak self] value in self?.title = value }
   }
   func split(_ axis: Axis) {
-    guard let i = tabIndex, let focus = focusedPane,
-      let existing = tabs[i].root.leaves.first(where: { $0.id == focus })
+    guard let focus = focusedPane,
+      let existing = root.leaves.first(where: { $0.id == focus })
     else { return }
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
-    tabs[i].root = tabs[i].root.replacing(
-      focus, with: .split(UUID(), axis, .leaf(existing), .leaf(pane)))
+    root = root.replacing(focus, with: .split(UUID(), axis, .leaf(existing), .leaf(pane)))
     focusedPane = pane.id
   }
-  func closeFocused() {
-    guard let i = tabIndex, let focus = focusedPane else { return }
-    if let root = tabs[i].root.removing(focus) {
-      tabs[i].root = root
-      focusedPane = root.leaves.first?.id
-    } else {
-      tabs.remove(at: i)
-      if tabs.isEmpty {
-        newTab()
-      } else {
-        selectedTab = tabs[min(i, tabs.count - 1)].id
-        focusedPane = tabs[min(i, tabs.count - 1)].root.leaves.first?.id
-      }
-    }
-  }
-  func selectTab(_ delta: Int) {
-    guard !tabs.isEmpty, let i = tabIndex else { return }
-    let n = (i + delta + tabs.count) % tabs.count
-    selectedTab = tabs[n].id
-    focusedPane = tabs[n].root.leaves.first?.id
+  /// Returns false when the native window tab itself should be closed.
+  func closeFocused() -> Bool {
+    guard let focus = focusedPane, let remaining = root.removing(focus) else { return false }
+    root = remaining
+    focusedPane = remaining.leaves.first?.id
+    return true
   }
   func focus(_ delta: Int) {
-    guard let i = tabIndex else { return }
-    let leaves = tabs[i].root.leaves
+    let leaves = root.leaves
     guard let p = leaves.firstIndex(where: { $0.id == focusedPane }) else { return }
     focusedPane = leaves[(p + delta + leaves.count) % leaves.count].id
   }

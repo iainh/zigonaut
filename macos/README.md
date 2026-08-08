@@ -1,10 +1,10 @@
 # Zigonaut native macOS frontend
 
-Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`. `zig build macos-run` builds and opens it. AppKit owns application lifecycle, windows, menus, command routing and persistent `NSView` terminal surfaces. SwiftUI owns tabs, recursive split topology, find and settings. Keeping presentation topology in Swift is an intentional interim boundary; the Zig core continues to own each terminal and PTY.
+Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`. `zig build macos-run` builds and opens it. AppKit owns application lifecycle, Safari-style native window tabs, windows, menus, command routing and persistent `NSView` terminal surfaces. SwiftUI owns recursive split topology, find and settings. Keeping split presentation topology in Swift is an intentional interim boundary; the Zig core continues to own each terminal and PTY.
 
 ## Supported now
 
-- Multiple windows, persistent tabs, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
+- Multiple windows, native title-bar tabs, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
 - New/close/select operations and pane focus cycling; focused panes have a native focus ring.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
