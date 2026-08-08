@@ -88,6 +88,14 @@ struct TerminalRenderSnapshot {
 }
 
 @MainActor final class Preferences: ObservableObject {
+  static let defaultFontFamily = "System Monospaced"
+  static let defaultFontSize = 14.0
+  static let defaultPadding = 8.0
+  static let monospacedFontFamilies = NSFontManager.shared.availableFontFamilies.filter { family in
+    NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 13)?.isFixedPitch == true
+  }.sorted()
+
+  @AppStorage("fontFamily") var fontFamily = defaultFontFamily
   @AppStorage("fontSize") var fontSize = 14.0
   @AppStorage("padding") var padding = 8.0
   @AppStorage("colourScheme") var colourScheme = "System"
@@ -100,12 +108,33 @@ struct TerminalRenderSnapshot {
     shellPath.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: shellPath)
       ? shellPath : "/bin/zsh"
   }
+
+  func terminalFont(size: CGFloat) -> NSFont {
+    guard fontFamily != Self.defaultFontFamily,
+      let selected = NSFontManager.shared.font(
+        withFamily: fontFamily, traits: [], weight: 5, size: size), selected.isFixedPitch
+    else {
+      return .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+    return selected
+  }
+
+  func restoreDefaults() {
+    fontFamily = Self.defaultFontFamily
+    fontSize = Self.defaultFontSize
+    padding = Self.defaultPadding
+    colourScheme = "System"
+    shellPath = "/bin/zsh"
+    opacity = 1
+    terminalClipboardWrites = false
+    terminalClipboardMaxBytes = 1_048_576
+  }
 }
 
 @MainActor final class TerminalModel: ObservableObject, Identifiable, @unchecked Sendable {
   let id = UUID()
   @Published private(set) var text = "Starting shell…"
-  @Published private(set) var title = "Terminal"
+  @Published private(set) var title: String
   @Published private(set) var renderSnapshot = TerminalRenderSnapshot()
   @Published private(set) var searchMatchCount = 0
   @Published private(set) var searchActiveIndex: Int?
@@ -123,9 +152,12 @@ struct TerminalRenderSnapshot {
   // Selection pasteboard writes are all-or-nothing and capped to bound memory use.
   private let maximumSelectionBytes = 4_194_304
   private let preferences: Preferences
+  private let defaultTitle: String
 
   init(shell: String, preferences: Preferences) {
     self.preferences = preferences
+    defaultTitle = URL(fileURLWithPath: shell).lastPathComponent
+    title = defaultTitle
     let box = TerminalCallbackBox()
     callbackBox = .passRetained(box)
     guard
@@ -309,7 +341,7 @@ struct TerminalRenderSnapshot {
     }
     let count = min(Int(required), bytes.count)
     let value = String(decoding: bytes[0..<count], as: UTF8.self)
-    let newTitle = value.isEmpty ? "Terminal" : value
+    let newTitle = value.isEmpty ? defaultTitle : value
     guard title != newTitle else { return }
     title = newTitle
   }
@@ -480,6 +512,7 @@ indirect enum PaneNode: Identifiable {
   @Published private(set) var title: String
   @Published var findVisible = false { didSet { synchronizeFindOwner() } }
   @Published var findQuery = ""
+  @Published private(set) var findFocusRequest = 0
   private weak var searchOwner: TerminalModel?
   private var titleObservation: AnyCancellable?
   let preferences: Preferences
@@ -496,6 +529,14 @@ indirect enum PaneNode: Identifiable {
     findQuery = query
     synchronizeFindOwner()
     searchOwner?.setSearch(query)
+  }
+  func showFind() {
+    findVisible = true
+    findFocusRequest &+= 1
+  }
+  func navigateSearch(forward: Bool) {
+    guard findVisible else { return }
+    focused?.navigateSearch(forward: forward)
   }
   private func synchronizeFindOwner() {
     let newOwner = findVisible ? focused : nil

@@ -11,7 +11,8 @@ struct PaneView: View {
       TerminalSurface(
         model: pane,
         preferences: window.preferences,
-        focused: window.focusedPane == pane.id
+        focused: window.focusedPane == pane.id,
+        wantsKeyboardFocus: window.focusedPane == pane.id && !window.findVisible
       ) {
         window.focusedPane = pane.id
       }
@@ -75,13 +76,27 @@ private struct FindBar: View {
   @ObservedObject var terminal: TerminalModel
   var body: some View {
     HStack {
-      TextField("Find in scrollback", text: Binding(
-        get: { window.findQuery }, set: { window.updateFindQuery($0) }))
-        .textFieldStyle(.roundedBorder)
-        .onSubmit { terminal.navigateSearch(forward: true) }
+      NativeSearchField(text: Binding(
+        get: { window.findQuery }, set: { window.updateFindQuery($0) }
+      ), focusRequest: window.findFocusRequest) {
+        terminal.navigateSearch(forward: true)
+      }
+      .frame(minWidth: 220, idealWidth: 320)
       Text(description)
-      Button("‹") { terminal.navigateSearch(forward: false) }.disabled(terminal.searchMatchCount == 0)
-      Button("›") { terminal.navigateSearch(forward: true) }.disabled(terminal.searchMatchCount == 0)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+      Button { terminal.navigateSearch(forward: false) } label: {
+        Image(systemName: "chevron.up")
+      }
+      .buttonStyle(.borderless)
+      .help("Previous Match")
+      .disabled(terminal.searchMatchCount == 0)
+      Button { terminal.navigateSearch(forward: true) } label: {
+        Image(systemName: "chevron.down")
+      }
+      .buttonStyle(.borderless)
+      .help("Next Match")
+      .disabled(terminal.searchMatchCount == 0)
       Button("Done") { window.findVisible = false }
     }
     .padding(6)
@@ -95,30 +110,181 @@ private struct FindBar: View {
   }
 }
 
+private struct NativeSearchField: NSViewRepresentable {
+  @Binding var text: String
+  let focusRequest: Int
+  let submit: () -> Void
+
+  func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+  func makeNSView(context: Context) -> NSSearchField {
+    let field = NSSearchField()
+    field.placeholderString = "Find in Scrollback"
+    field.sendsWholeSearchString = true
+    field.delegate = context.coordinator
+    field.target = context.coordinator
+    field.action = #selector(Coordinator.submit)
+    context.coordinator.lastFocusRequest = focusRequest
+    DispatchQueue.main.async { field.window?.makeFirstResponder(field) }
+    return field
+  }
+
+  func updateNSView(_ field: NSSearchField, context: Context) {
+    context.coordinator.parent = self
+    if field.stringValue != text { field.stringValue = text }
+    if context.coordinator.lastFocusRequest != focusRequest {
+      context.coordinator.lastFocusRequest = focusRequest
+      DispatchQueue.main.async { field.window?.makeFirstResponder(field) }
+    }
+  }
+
+  @MainActor final class Coordinator: NSObject, NSSearchFieldDelegate {
+    var parent: NativeSearchField
+    var lastFocusRequest = 0
+    init(_ parent: NativeSearchField) { self.parent = parent }
+
+    func controlTextDidChange(_ notification: Notification) {
+      guard let field = notification.object as? NSSearchField else { return }
+      parent.text = field.stringValue
+    }
+
+    @objc func submit() { parent.submit() }
+  }
+}
+
 struct SettingsView: View {
   @ObservedObject var preferences: Preferences
+  @State private var confirmRestore = false
 
   var body: some View {
+    VStack(spacing: 0) {
+      TabView {
+        appearance
+          .tabItem { Label("Appearance", systemImage: "paintbrush") }
+        terminal
+          .tabItem { Label("Terminal", systemImage: "terminal") }
+        advanced
+          .tabItem { Label("Advanced", systemImage: "gearshape.2") }
+      }
+      Divider()
+      HStack {
+        Button("Restore Defaults…") { confirmRestore = true }
+        Spacer()
+      }
+      .padding(16)
+    }
+    .frame(width: 560, height: 410)
+    .confirmationDialog(
+      "Restore all settings to their defaults?", isPresented: $confirmRestore,
+      titleVisibility: .visible
+    ) {
+      Button("Restore Defaults", role: .destructive) { preferences.restoreDefaults() }
+      Button("Cancel", role: .cancel) {}
+    }
+  }
+
+  private var appearance: some View {
     Form {
-      Slider(value: $preferences.fontSize, in: 9...32) { Text("Font size") }
-      Slider(value: $preferences.padding, in: 0...32) { Text("Padding") }
-      Picker("Colour scheme", selection: $preferences.colourScheme) {
-        ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+      Section("Application") {
+        Picker("Colour scheme", selection: $preferences.colourScheme) {
+          ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+        }
+        .pickerStyle(.segmented)
+        LabeledContent("Background opacity") {
+          HStack {
+            Slider(value: $preferences.opacity, in: 0.5...1, step: 0.05)
+            Text(preferences.opacity, format: .percent.precision(.fractionLength(0)))
+              .monospacedDigit()
+              .frame(width: 42, alignment: .trailing)
+          }
+        }
       }
-      TextField("Shell path", text: $preferences.shellPath)
-      if preferences.validShell != preferences.shellPath {
-        Text("Shell must be an executable absolute path; new panes use /bin/zsh.")
-          .foregroundStyle(.red)
+      Section("Font") {
+        Picker("Family", selection: $preferences.fontFamily) {
+          ForEach(fontFamilies, id: \.self) { Text($0) }
+        }
+        LabeledContent("Size") {
+          HStack {
+            Slider(value: $preferences.fontSize, in: 9...32, step: 1)
+            Text("\(Int(preferences.fontSize)) pt")
+              .monospacedDigit()
+              .frame(width: 42, alignment: .trailing)
+          }
+        }
       }
-      Slider(value: $preferences.opacity, in: 0.5...1) { Text("Terminal background opacity") }
-      Toggle("Allow terminal clipboard writes", isOn: $preferences.terminalClipboardWrites)
-      Text("Security warning: terminal programs may replace the system clipboard when enabled.")
-        .foregroundStyle(.orange)
-      Stepper("Maximum clipboard write: \(preferences.terminalClipboardMaxBytes) bytes",
-        value: $preferences.terminalClipboardMaxBytes, in: 1024...4_194_304, step: 1024)
     }
     .formStyle(.grouped)
-    .padding()
-    .frame(width: 460)
+  }
+
+  private var terminal: some View {
+    Form {
+      Section("Shell") {
+        LabeledContent("Executable") {
+          HStack {
+            TextField("/bin/zsh", text: $preferences.shellPath)
+            Button("Choose…", action: chooseShell)
+          }
+        }
+        if preferences.validShell != preferences.shellPath {
+          Label("New panes will use /bin/zsh until this is an executable absolute path.",
+            systemImage: "exclamationmark.triangle.fill")
+            .foregroundStyle(.orange)
+        }
+      }
+      Section("Layout") {
+        LabeledContent("Padding") {
+          HStack {
+            Slider(value: $preferences.padding, in: 0...32, step: 1)
+            Text("\(Int(preferences.padding)) pt")
+              .monospacedDigit()
+              .frame(width: 42, alignment: .trailing)
+          }
+        }
+      }
+      Text("Shell changes apply to new tabs and panes. Appearance changes apply immediately.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .formStyle(.grouped)
+  }
+
+  private var advanced: some View {
+    Form {
+      Section("Terminal Clipboard") {
+        Toggle("Allow terminal applications to write to the clipboard",
+          isOn: $preferences.terminalClipboardWrites)
+        LabeledContent("Maximum write") {
+          Stepper(value: $preferences.terminalClipboardMaxBytes,
+            in: 1_024...4_194_304, step: 1_024) {
+            Text(ByteCountFormatter.string(
+              fromByteCount: Int64(preferences.terminalClipboardMaxBytes), countStyle: .memory))
+              .monospacedDigit()
+          }
+        }
+        .disabled(!preferences.terminalClipboardWrites)
+        Label("Terminal programs can replace the system clipboard when this is enabled.",
+          systemImage: "exclamationmark.shield.fill")
+          .foregroundStyle(.orange)
+      }
+    }
+    .formStyle(.grouped)
+  }
+
+  private var fontFamilies: [String] {
+    let installed = Preferences.monospacedFontFamilies
+    let selected = installed.contains(preferences.fontFamily) ? [] : [preferences.fontFamily]
+    return [Preferences.defaultFontFamily] + selected.filter { $0 != Preferences.defaultFontFamily } + installed
+  }
+
+  private func chooseShell() {
+    let panel = NSOpenPanel()
+    panel.title = "Choose a Shell"
+    panel.prompt = "Choose"
+    panel.directoryURL = URL(fileURLWithPath: "/bin", isDirectory: true)
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    preferences.shellPath = url.path
   }
 }

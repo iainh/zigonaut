@@ -3,10 +3,11 @@ set -eu
 root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 app="$root/zig-out/Zigonaut.app/Contents"
 rm -rf "$root/zig-out/Zigonaut.app"
-mkdir -p "$app/MacOS" "$app/Frameworks"
+mkdir -p "$app/MacOS" "$app/Frameworks" "$app/Resources"
 cp "$root/macos/.build/debug/ZigonautMac" "$app/MacOS/ZigonautMac"
 cp "$root/zig-out/bin/zigonaut-pty-helper" "$app/MacOS/zigonaut-pty-helper"
 cp "$root/zig-out/lib/libzigonaut-core.dylib" "$app/Frameworks/"
+cp "$root/macos/Resources/Zigonaut.icns" "$app/Resources/Zigonaut.icns"
 cp "$root/macos/Info.plist" "$app/Info.plist"
 # Keep local builds unsigned by a developer identity, while satisfying modern
 # macOS validation after all bundle mutations.

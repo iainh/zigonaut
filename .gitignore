@@ -1,6 +1,7 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+.DS_Store
 macos/.build/
 winui/obj/
 winui/x64/

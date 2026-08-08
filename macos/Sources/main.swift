@@ -12,6 +12,7 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
 
     let kind: Kind
     var didClose: ((NSWindow) -> Void)?
+    var addTab: ((NSWindow) -> Void)?
     private var titleObservation: AnyCancellable?
 
     init(window: NSWindow, kind: Kind) {
@@ -33,13 +34,18 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
         guard let window = notification.object as? NSWindow else { return }
         didClose?(window)
     }
+
+    override func newWindowForTab(_ sender: Any?) {
+        guard case .terminal = kind, let window else { return }
+        addTab?(window)
+    }
 }
 
 @MainActor
-final class Delegate: NSObject, NSApplicationDelegate {
+final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let preferences = Preferences()
     private var terminalWindows: [NSWindow: ManagedWindowController] = [:]
-    private var settingsWindows: [NSWindow: ManagedWindowController] = [:]
+    private var settingsController: ManagedWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -57,7 +63,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showDesktopNotification(_ notification: Notification) {
-        guard NSApp.keyWindow == nil,
+        guard terminalWindows.keys.allSatisfy({ !$0.isKeyWindow }),
               let title = notification.userInfo?["title"] as? String,
               let body = notification.userInfo?["body"] as? String else { return }
         let content = UNMutableNotificationContent()
@@ -68,13 +74,20 @@ final class Delegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !terminalWindows.keys.contains(where: \.isVisible) {
+            newWindow(nil)
+        }
+        return true
     }
 
     @objc func newWindow(_ sender: Any?) {
         let controller = makeTerminalWindow()
         guard let window = controller.window else { return }
-        window.center()
+        if !window.setFrameUsingName("ZigonautTerminalWindow") { window.center() }
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
     }
@@ -92,9 +105,11 @@ final class Delegate: NSObject, NSApplicationDelegate {
         window.titlebarSeparatorStyle = .none
         window.tabbingIdentifier = "dev.zigonaut.terminal"
         window.tabbingMode = .preferred
+        window.setFrameAutosaveName("ZigonautTerminalWindow")
         window.contentView = NSHostingView(rootView: ContentView(window: model))
         let controller = ManagedWindowController(window: window, kind: .terminal(model))
         controller.didClose = { [weak self] window in self?.terminalWindows.removeValue(forKey: window) }
+        controller.addTab = { [weak self] window in self?.addTab(to: window) }
         terminalWindows[window] = controller
         return controller
     }
@@ -108,10 +123,16 @@ final class Delegate: NSObject, NSApplicationDelegate {
 
     /// AppKit's native tab-bar add button dispatches this standard action.
     @objc func newWindowForTab(_ sender: Any?) {
-        guard let currentWindow = NSApp.keyWindow, terminalWindows[currentWindow] != nil else {
+        let host = NSApp.keyWindow.flatMap { terminalWindows[$0] == nil ? nil : $0 }
+          ?? NSApp.orderedWindows.first { terminalWindows[$0] != nil }
+        guard let host else {
             newWindow(sender)
             return
         }
+        addTab(to: host)
+    }
+
+    private func addTab(to currentWindow: NSWindow) {
         let controller = makeTerminalWindow()
         guard let window = controller.window else { return }
         currentWindow.addTabbedWindow(window, ordered: .above)
@@ -119,7 +140,9 @@ final class Delegate: NSObject, NSApplicationDelegate {
     }
     @objc func splitRight(_ sender: Any?) { current?.split(.horizontal) }
     @objc func splitDown(_ sender: Any?) { current?.split(.vertical) }
-    @objc func find(_ sender: Any?) { current?.findVisible = true }
+    @objc func find(_ sender: Any?) { current?.showFind() }
+    @objc func findNext(_ sender: Any?) { current?.navigateSearch(forward: true) }
+    @objc func findPrevious(_ sender: Any?) { current?.navigateSearch(forward: false) }
     @objc func nextTab(_ sender: Any?) { NSApp.keyWindow?.selectNextTab(sender) }
     @objc func previousTab(_ sender: Any?) { NSApp.keyWindow?.selectPreviousTab(sender) }
     @objc func focusNext(_ sender: Any?) { current?.focus(1) }
@@ -127,26 +150,33 @@ final class Delegate: NSObject, NSApplicationDelegate {
 
     @objc func closePane(_ sender: Any?) {
         guard let window = NSApp.keyWindow else { return }
-        if settingsWindows[window] != nil {
+        guard let model = current else {
             window.performClose(sender)
             return
         }
-        if current?.closeFocused() == false {
+        if !model.closeFocused() {
             window.performClose(sender)
         }
     }
 
     @objc func settings(_ sender: Any?) {
+        if let controller = settingsController, let window = controller.window {
+            controller.showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
         let hosting = NSHostingController(rootView: SettingsView(preferences: preferences))
         let window = NSWindow(contentViewController: hosting)
         window.title = "Settings"
         window.styleMask = [.titled, .closable]
+        window.tabbingMode = .disallowed
+        window.isReleasedWhenClosed = false
+        window.setFrameAutosaveName("ZigonautSettingsWindow")
         let controller = ManagedWindowController(window: window, kind: .settings)
-        controller.didClose = { [weak self] window in self?.settingsWindows.removeValue(forKey: window) }
-        settingsWindows[window] = controller
-        window.center()
+        settingsController = controller
+        if !window.setFrameUsingName("ZigonautSettingsWindow") { window.center() }
         controller.showWindow(nil)
-        window.makeKey()
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc func zoomIn(_ sender: Any?) { preferences.fontSize = min(32, preferences.fontSize + 1) }
@@ -170,7 +200,19 @@ final class Delegate: NSObject, NSApplicationDelegate {
             return menu
         }
         let app = menu("Zigonaut")
+        app.addItem(item("About Zigonaut", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""))
+        app.addItem(.separator())
         app.addItem(item("Settings…", #selector(settings), ","))
+        app.addItem(.separator())
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        let services = NSMenu(title: "Services")
+        servicesItem.submenu = services
+        app.addItem(servicesItem)
+        NSApp.servicesMenu = services
+        app.addItem(.separator())
+        app.addItem(item("Hide Zigonaut", #selector(NSApplication.hide(_:)), "h"))
+        app.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
+        app.addItem(item("Show All", #selector(NSApplication.unhideAllApplications(_:)), ""))
         app.addItem(.separator())
         app.addItem(item("Quit Zigonaut", #selector(NSApplication.terminate(_:)), "q"))
         let file = menu("File")
@@ -182,7 +224,14 @@ final class Delegate: NSObject, NSApplicationDelegate {
         let edit = menu("Edit")
         edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
         edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
-        edit.addItem(item("Find…", #selector(find), "f"))
+        edit.addItem(.separator())
+        let findItem = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        let findMenu = NSMenu(title: "Find")
+        findMenu.addItem(item("Find…", #selector(find), "f"))
+        findMenu.addItem(item("Find Next", #selector(findNext), "g"))
+        findMenu.addItem(item("Find Previous", #selector(findPrevious), "g", [.command, .shift]))
+        findItem.submenu = findMenu
+        edit.addItem(findItem)
         let view = menu("View")
         view.addItem(item("Zoom In", #selector(zoomIn), "+"))
         view.addItem(item("Zoom Out", #selector(zoomOut), "-"))
@@ -191,11 +240,33 @@ final class Delegate: NSObject, NSApplicationDelegate {
         view.addItem(item("Previous Tab", #selector(previousTab), "{", [.command, .shift]))
         view.addItem(item("Focus Right/Down", #selector(focusNext), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.control, .option]))
         view.addItem(item("Focus Left/Up", #selector(focusPrevious), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.control, .option]))
+        view.addItem(.separator())
+        view.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
         let window = menu("Window")
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
+        window.addItem(item("Zoom", #selector(NSWindow.performZoom(_:)), ""))
         window.addItem(.separator())
         window.addItem(item("Move Tab to New Window", #selector(NSWindow.moveTabToNewWindow(_:)), ""))
         window.addItem(item("Show All Tabs", #selector(NSWindow.toggleTabOverview(_:)), "\\", [.command, .shift]))
+        window.addItem(.separator())
+        window.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)), ""))
+        NSApp.windowsMenu = window
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(splitRight), #selector(splitDown), #selector(find),
+             #selector(focusNext), #selector(focusPrevious):
+            return current != nil
+        case #selector(findNext), #selector(findPrevious):
+            return current?.findVisible == true && !(current?.findQuery.isEmpty ?? true)
+        case #selector(nextTab), #selector(previousTab):
+            return (NSApp.keyWindow?.tabbedWindows?.count ?? 0) > 1
+        case #selector(closePane):
+            return NSApp.keyWindow != nil
+        default:
+            return true
+        }
     }
 }
 

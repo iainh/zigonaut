@@ -6,6 +6,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   let model: TerminalModel
   var preferences: Preferences
   var focused = false
+  var wantsKeyboardFocus = false
   var onFocus: () -> Void
   private var scrollRemainder: CGFloat = 0
   private var markedText = NSMutableAttributedString()
@@ -15,7 +16,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var lastMousePoint: NSPoint?
 
   private var font: NSFont {
-    .monospacedSystemFont(ofSize: preferences.fontSize, weight: .regular)
+    preferences.terminalFont(size: preferences.fontSize)
   }
 
   private var cellWidth: CGFloat {
@@ -96,7 +97,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
-    if focused {
+    if wantsKeyboardFocus {
       window?.makeFirstResponder(self)
     }
   }
@@ -420,6 +421,7 @@ struct TerminalSurface: NSViewRepresentable {
   @ObservedObject var model: TerminalModel
   @ObservedObject var preferences: Preferences
   let focused: Bool
+  let wantsKeyboardFocus: Bool
   let onFocus: () -> Void
 
   func makeNSView(context: Context) -> TerminalSurfaceView {
@@ -430,13 +432,15 @@ struct TerminalSurface: NSViewRepresentable {
     view.preferences = preferences
     view.onFocus = onFocus
     view.focused = focused
+    let shouldClaimKeyboardFocus = wantsKeyboardFocus && !view.wantsKeyboardFocus
+    view.wantsKeyboardFocus = wantsKeyboardFocus
     model.applyClipboardSettings()
     view.resizeTerminal()
     view.needsDisplay = true
     view.setAccessibilityValue(String(model.text.prefix(100_000)))
     view.setAccessibilityFocused(focused)
     NSAccessibility.post(element: view, notification: .valueChanged)
-    if focused {
+    if shouldClaimKeyboardFocus {
       view.window?.makeFirstResponder(view)
     }
   }
