@@ -143,6 +143,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func find(_ sender: Any?) { current?.showFind() }
     @objc func findNext(_ sender: Any?) { current?.navigateSearch(forward: true) }
     @objc func findPrevious(_ sender: Any?) { current?.navigateSearch(forward: false) }
+    @objc func previousPrompt(_ sender: Any?) { current?.focused?.navigatePrompt(forward: false) }
+    @objc func nextPrompt(_ sender: Any?) { current?.focused?.navigatePrompt(forward: true) }
+    @objc func copyCommandOutput(_ sender: Any?) { current?.focused?.copyLastCommandOutput() }
     @objc func nextTab(_ sender: Any?) { NSApp.keyWindow?.selectNextTab(sender) }
     @objc func previousTab(_ sender: Any?) { NSApp.keyWindow?.selectPreviousTab(sender) }
     @objc func focusNext(_ sender: Any?) { current?.focus(1) }
@@ -232,6 +235,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         findMenu.addItem(item("Find Previous", #selector(findPrevious), "g", [.command, .shift]))
         findItem.submenu = findMenu
         edit.addItem(findItem)
+        edit.addItem(.separator())
+        edit.addItem(item("Previous Prompt", #selector(previousPrompt), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.control, .shift]))
+        edit.addItem(item("Next Prompt", #selector(nextPrompt), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.control, .shift]))
+        edit.addItem(item("Copy or Pipe Last Command Output", #selector(copyCommandOutput), "g", [.control, .shift]))
         let view = menu("View")
         view.addItem(item("Zoom In", #selector(zoomIn), "+"))
         view.addItem(item("Zoom Out", #selector(zoomOut), "-"))
@@ -260,6 +267,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return current != nil
         case #selector(findNext), #selector(findPrevious):
             return current?.findVisible == true && !(current?.findQuery.isEmpty ?? true)
+        case #selector(previousPrompt), #selector(nextPrompt), #selector(copyCommandOutput):
+            return current?.focused != nil
         case #selector(nextTab), #selector(previousTab):
             return (NSApp.keyWindow?.tabbedWindows?.count ?? 0) > 1
         case #selector(closePane):

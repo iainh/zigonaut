@@ -266,6 +266,13 @@ struct SettingsView: View {
           systemImage: "exclamationmark.shield.fill")
           .foregroundStyle(.orange)
       }
+      Section("Shell Integration") {
+        TextField("Pipe command output", text: $preferences.pipeCommandOutput,
+          prompt: Text("Copy output to the clipboard"))
+        Text("The command receives the latest OSC 133 command output on standard input. Leave empty to copy it.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
     }
     .formStyle(.grouped)
   }

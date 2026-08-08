@@ -669,6 +669,35 @@ export fn zigonaut_core_search_clear(self: ?*Core) void {
     core.search_active = null;
 }
 
+export fn zigonaut_core_navigate_prompt(self: ?*Core, forward: bool) bool {
+    const core = self orelse return false;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    return core.terminal.navigatePrompt(forward) catch false;
+}
+
+export fn zigonaut_core_last_command_output(self: ?*Core, output: ?[*]u8, capacity: usize) usize {
+    const core = self orelse return 0;
+    if (output == null and capacity != 0) return 0;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const value = (core.terminal.lastCommandOutputAlloc(std.heap.c_allocator) catch return 0) orelse return 0;
+    defer std.heap.c_allocator.free(value);
+    if (completeCopyFits(value.len, output != null, capacity)) @memcpy(output.?[0..value.len], value);
+    return value.len;
+}
+
+export fn zigonaut_core_working_directory(self: ?*Core, output: ?[*]u8, capacity: usize) usize {
+    const core = self orelse return 0;
+    if (output == null and capacity != 0) return 0;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const value = (core.terminal.pwdAlloc(std.heap.c_allocator) catch return 0) orelse return 0;
+    defer std.heap.c_allocator.free(value);
+    if (completeCopyFits(value.len, output != null, capacity)) @memcpy(output.?[0..value.len], value);
+    return value.len;
+}
+
 export fn zigonaut_core_selection_begin(self: ?*Core, column: u16, row: u16) void {
     const core = self orelse return;
     core.mutex.lock();
@@ -902,6 +931,9 @@ test "null search and mouse APIs and bounded queries are safe" {
     zigonaut_core_search_set(null, null, 0, &status);
     zigonaut_core_search_navigate(null, true, &status);
     zigonaut_core_search_clear(null);
+    try std.testing.expect(!zigonaut_core_navigate_prompt(null, true));
+    try std.testing.expectEqual(@as(usize, 0), zigonaut_core_last_command_output(null, null, 0));
+    try std.testing.expectEqual(@as(usize, 0), zigonaut_core_working_directory(null, null, 0));
     try std.testing.expect(!zigonaut_core_mouse_tracking(null));
     try std.testing.expect(!zigonaut_core_mouse(null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false));
     try std.testing.expectEqual(@as(usize, 256), maximum_search_query_bytes);

@@ -111,6 +111,7 @@ struct TerminalRenderSnapshot {
   @AppStorage("opacity") var opacity = 1.0
   @AppStorage("terminalClipboardWrites") var terminalClipboardWrites = false
   @AppStorage("terminalClipboardMaxBytes") var terminalClipboardMaxBytes = 1_048_576
+  @AppStorage("pipeCommandOutput") var pipeCommandOutput = ""
 
   var validShell: String {
     shellPath.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: shellPath)
@@ -136,6 +137,7 @@ struct TerminalRenderSnapshot {
     opacity = 1
     terminalClipboardWrites = false
     terminalClipboardMaxBytes = 1_048_576
+    pipeCommandOutput = ""
   }
 }
 
@@ -408,6 +410,60 @@ struct TerminalRenderSnapshot {
       DispatchQueue.main.async {
         self?.applySearch(status)
         self?.refresh()
+      }
+    }
+  }
+  func navigatePrompt(forward: Bool) {
+    guard let core else { return }
+    writer.async { [weak self] in
+      guard zigonaut_core_navigate_prompt(core.pointer, forward) else { return }
+      DispatchQueue.main.async { self?.refresh() }
+    }
+  }
+  func copyLastCommandOutput() {
+    guard let core else { return }
+    let command = preferences.pipeCommandOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    writer.async {
+      let required = Int(zigonaut_core_last_command_output(core.pointer, nil, 0))
+      guard required > 0, required <= 4_194_304 else { return }
+      var output = [UInt8](repeating: 0, count: required)
+      guard zigonaut_core_last_command_output(core.pointer, &output, output.count) == required else { return }
+      if command.isEmpty {
+        guard let value = String(bytes: output, encoding: .utf8) else { return }
+        DispatchQueue.main.async {
+          NSPasteboard.general.clearContents()
+          NSPasteboard.general.setString(value, forType: .string)
+        }
+        return
+      }
+
+      let directoryRequired = Int(zigonaut_core_working_directory(core.pointer, nil, 0))
+      var directory: String?
+      if directoryRequired > 0, directoryRequired <= 16_384 {
+        var bytes = [UInt8](repeating: 0, count: directoryRequired)
+        if zigonaut_core_working_directory(core.pointer, &bytes, bytes.count) == directoryRequired {
+          directory = String(bytes: bytes, encoding: .utf8)
+        }
+      }
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+      process.arguments = ["-lc", command]
+      if let directory {
+        let url = URL(string: directory)
+        let path = url?.isFileURL == true ? url!.path : directory
+        if FileManager.default.fileExists(atPath: path) {
+          process.currentDirectoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        }
+      }
+      let input = Pipe()
+      process.standardInput = input
+      do {
+        try process.run()
+        try input.fileHandleForWriting.write(contentsOf: Data(output))
+        try input.fileHandleForWriting.close()
+      } catch {
+        try? input.fileHandleForWriting.close()
+        NSSound.beep()
       }
     }
   }
