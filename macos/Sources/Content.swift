@@ -51,6 +51,7 @@ struct ContentView: View {
       }
       PaneView(node: window.root, window: window)
     }
+    .background(windowBackground)
     .preferredColorScheme(colourScheme)
     .onExitCommand {
       closeFind()
@@ -62,6 +63,15 @@ struct ContentView: View {
     case "Dark": return .dark
     case "Light": return .light
     default: return nil
+    }
+  }
+
+  private var windowBackground: AnyShapeStyle {
+    switch preferences.windowMaterial {
+    case "Under Window": return AnyShapeStyle(.ultraThinMaterial)
+    case "Sidebar": return AnyShapeStyle(.thinMaterial)
+    case "HUD": return AnyShapeStyle(.regularMaterial)
+    default: return AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
     }
   }
 
@@ -173,7 +183,7 @@ struct SettingsView: View {
       }
       .padding(16)
     }
-    .frame(width: 560, height: 410)
+    .frame(width: 620, height: 520)
     .confirmationDialog(
       "Restore all settings to their defaults?", isPresented: $confirmRestore,
       titleVisibility: .visible
@@ -190,6 +200,12 @@ struct SettingsView: View {
           ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
         }
         .pickerStyle(.segmented)
+        Picker("Window material", selection: $preferences.windowMaterial) {
+          Text("Window").tag("Window")
+          Text("Under Window").tag("Under Window")
+          Text("Sidebar").tag("Sidebar")
+          Text("HUD").tag("HUD")
+        }
         LabeledContent("Background opacity") {
           HStack {
             Slider(value: $preferences.opacity, in: 0.5...1, step: 0.05)
@@ -198,6 +214,15 @@ struct SettingsView: View {
               .frame(width: 42, alignment: .trailing)
           }
         }
+      }
+      Section("Terminal Themes") {
+        Picker("Dark appearance", selection: $preferences.darkTerminalTheme) {
+          ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
+        }
+        Picker("Light appearance", selection: $preferences.lightTerminalTheme) {
+          ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
+        }
+        Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
       }
       Section("Font") {
         Picker("Family", selection: $preferences.fontFamily) {
@@ -210,6 +235,12 @@ struct SettingsView: View {
               .monospacedDigit()
               .frame(width: 42, alignment: .trailing)
           }
+        }
+        Picker("Normal weight", selection: $preferences.fontWeight) {
+          ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+        }
+        Picker("Intense weight", selection: $preferences.intenseFontWeight) {
+          ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
         }
       }
     }
@@ -232,14 +263,50 @@ struct SettingsView: View {
         }
       }
       Section("Layout") {
-        LabeledContent("Padding") {
+        LabeledContent("Horizontal padding") {
           HStack {
-            Slider(value: $preferences.padding, in: 0...32, step: 1)
-            Text("\(Int(preferences.padding)) pt")
+            Slider(value: $preferences.paddingHorizontal, in: 0...64, step: 1)
+            Text("\(Int(preferences.paddingHorizontal)) pt")
               .monospacedDigit()
               .frame(width: 42, alignment: .trailing)
           }
         }
+        LabeledContent("Vertical padding") {
+          HStack {
+            Slider(value: $preferences.paddingVertical, in: 0...64, step: 1)
+            Text("\(Int(preferences.paddingVertical)) pt")
+              .monospacedDigit()
+              .frame(width: 42, alignment: .trailing)
+          }
+        }
+        Picker("Grid alignment", selection: $preferences.paddingBalance) {
+          Text("Top Left").tag("Top Left")
+          Text("Centered").tag("Centered")
+        }
+        Picker("Padding colour", selection: $preferences.paddingColor) {
+          Text("Terminal Background").tag("Background")
+          Text("Extend Edge Colours").tag("Extend")
+          Text("Always Extend Edge Colours").tag("Always Extend")
+        }
+      }
+      Section("History and Initial Size") {
+        LabeledContent("Scrollback lines") {
+          Stepper(value: $preferences.scrollbackSize, in: 0...1_000_000, step: 1_000) {
+            Text(preferences.scrollbackSize.formatted())
+              .monospacedDigit()
+          }
+        }
+        LabeledContent("New window") {
+          HStack {
+            Stepper("\(preferences.initialColumns) columns", value: $preferences.initialColumns,
+              in: 10...1_000)
+            Stepper("\(preferences.initialRows) rows", value: $preferences.initialRows,
+              in: 4...1_000)
+          }
+        }
+      }
+      Section("Palette Overrides") {
+        PaletteEditor(preferences: preferences)
       }
       Text("Shell changes apply to new tabs and panes. Appearance changes apply immediately.")
         .font(.caption)
@@ -283,6 +350,10 @@ struct SettingsView: View {
     return [Preferences.defaultFontFamily] + selected.filter { $0 != Preferences.defaultFontFamily } + installed
   }
 
+  private func themeTitle(_ name: String) -> String {
+    name.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+  }
+
   private func chooseShell() {
     let panel = NSOpenPanel()
     panel.title = "Choose a Shell"
@@ -293,5 +364,46 @@ struct SettingsView: View {
     panel.allowsMultipleSelection = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
     preferences.shellPath = url.path
+  }
+}
+
+private struct PaletteEditor: View {
+  @ObservedObject var preferences: Preferences
+  @State private var expanded = false
+
+  private var base: TerminalPalette { TerminalPalette.load(preferences.darkTerminalTheme) }
+  private var entries: [(String, String, UInt32)] {
+    var values = [
+      ("Foreground", "foreground", base.foreground),
+      ("Background", "background", base.background),
+      ("Cursor", "cursor", base.cursor),
+    ]
+    let names = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White",
+      "Bright Black", "Bright Red", "Bright Green", "Bright Yellow", "Bright Blue",
+      "Bright Magenta", "Bright Cyan", "Bright White"]
+    values += names.enumerated().map { ($0.element, "ansi\($0.offset)", base.ansi[$0.offset]) }
+    return values
+  }
+
+  var body: some View {
+    DisclosureGroup("Edit foreground, background, cursor and ANSI colours", isExpanded: $expanded) {
+      ForEach(entries, id: \.1) { entry in
+        HStack {
+          ColorPicker(entry.0, selection: Binding(
+            get: { preferences.overrideColor(entry.1, fallback: entry.2) },
+            set: { preferences.setOverrideColor($0, for: entry.1) }
+          ), supportsOpacity: false)
+          if preferences.hasOverride(entry.1) {
+            Button {
+              preferences.clearOverride(entry.1)
+            } label: {
+              Image(systemName: "arrow.uturn.backward")
+            }
+            .buttonStyle(.borderless)
+            .help("Use Theme Default")
+          }
+        }
+      }
+    }
   }
 }

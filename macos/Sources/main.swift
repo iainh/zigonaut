@@ -94,8 +94,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func makeTerminalWindow() -> ManagedWindowController {
         let model = WindowModel(preferences: preferences)
+        let font = preferences.terminalFont(size: preferences.fontSize)
+        let cellWidth = ceil(("M" as NSString).size(withAttributes: [.font: font]).width)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        let contentSize = NSSize(
+            width: max(320, CGFloat(preferences.initialColumns) * cellWidth + 2 * preferences.paddingHorizontal),
+            height: max(180, CGFloat(preferences.initialRows) * lineHeight + 2 * preferences.paddingVertical)
+        )
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650),
+            contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false

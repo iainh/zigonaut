@@ -3,6 +3,14 @@ import Combine
 import SwiftUI
 import ZigonautCore
 
+extension NSColor {
+  convenience init(rgb: UInt32) {
+    self.init(calibratedRed: CGFloat((rgb >> 16) & 0xff) / 255,
+      green: CGFloat((rgb >> 8) & 0xff) / 255,
+      blue: CGFloat(rgb & 0xff) / 255, alpha: 1)
+  }
+}
+
 extension Notification.Name {
   static let terminalDesktopNotification = Notification.Name("TerminalDesktopNotification")
 }
@@ -107,20 +115,75 @@ struct TerminalRenderImage {
   let yOffset: CGFloat
 }
 
+struct TerminalPalette: Equatable {
+  var foreground: UInt32
+  var background: UInt32
+  var cursor: UInt32
+  var ansi: [UInt32]
+
+  static let rasmus = TerminalPalette(
+    foreground: 0xd1d1d1, background: 0x1a1a19, cursor: 0xd1d1d1,
+    ansi: [0x333332, 0xff968c, 0x61957f, 0xffc591, 0x8db4d4, 0xde9bc8, 0x7bb099, 0xd1d1d1,
+      0x4c4c4b, 0xffafa5, 0x7aae98, 0xffdeaa, 0xa6cded, 0xf7b4e1, 0x94c9b2, 0xeaeaea])
+
+  static func load(_ name: String) -> TerminalPalette {
+    guard name != "rasmus",
+      let url = Bundle.main.url(forResource: name, withExtension: "json", subdirectory: "Themes"),
+      let data = try? Data(contentsOf: url),
+      let value = try? JSONDecoder().decode(ThemeFile.self, from: data),
+      let foreground = rgb(value.foreground), let background = rgb(value.background),
+      let cursor = rgb(value.cursor), value.ansi.count == 16
+    else { return .rasmus }
+    let ansi = value.ansi.compactMap(rgb)
+    guard ansi.count == 16 else { return .rasmus }
+    return TerminalPalette(foreground: foreground, background: background, cursor: cursor, ansi: ansi)
+  }
+
+  static func rgb(_ text: String) -> UInt32? {
+    let value = text.hasPrefix("#") ? String(text.dropFirst()) : text
+    guard value.count == 6 else { return nil }
+    return UInt32(value, radix: 16)
+  }
+
+  static func hex(_ value: UInt32) -> String { String(format: "#%06X", value & 0xffffff) }
+
+  private struct ThemeFile: Decodable {
+    let foreground: String
+    let background: String
+    let cursor: String
+    let ansi: [String]
+  }
+}
+
 @MainActor final class Preferences: ObservableObject {
   static let defaultFontFamily = "System Monospaced"
   static let defaultFontSize = 14.0
   static let defaultPadding = 8.0
+  static let themeNames = ["rasmus", "campbell", "campbell-light", "fluent-dark", "fluent-light", "solarized-dark"]
+  static let fontWeights = ["Thin", "Ultra Light", "Light", "Regular", "Medium", "Semibold", "Bold", "Heavy", "Black"]
   static let monospacedFontFamilies = NSFontManager.shared.availableFontFamilies.filter { family in
     NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 13)?.isFixedPitch == true
   }.sorted()
 
   @AppStorage("fontFamily") var fontFamily = defaultFontFamily
   @AppStorage("fontSize") var fontSize = 14.0
-  @AppStorage("padding") var padding = 8.0
+  @AppStorage("paddingHorizontal") var paddingHorizontal = 8.0
+  @AppStorage("paddingVertical") var paddingVertical = 8.0
+  @AppStorage("paddingBalance") var paddingBalance = "Top Left"
+  @AppStorage("paddingColor") var paddingColor = "Background"
   @AppStorage("colourScheme") var colourScheme = "System"
+  @AppStorage("windowMaterial") var windowMaterial = "Window"
+  @AppStorage("darkTerminalTheme") var darkTerminalTheme = "fluent-dark"
+  @AppStorage("lightTerminalTheme") var lightTerminalTheme = "fluent-light"
+  @AppStorage("paletteOverrides") var paletteOverrides = "{}"
+  @AppStorage("randomizeTabBackground") var randomizeTabBackground = true
   @AppStorage("shellPath") var shellPath = "/bin/zsh"
   @AppStorage("opacity") var opacity = 1.0
+  @AppStorage("fontWeight") var fontWeight = "Regular"
+  @AppStorage("intenseFontWeight") var intenseFontWeight = "Bold"
+  @AppStorage("scrollbackSize") var scrollbackSize = 10_000
+  @AppStorage("initialColumns") var initialColumns = 80
+  @AppStorage("initialRows") var initialRows = 24
   @AppStorage("terminalClipboardWrites") var terminalClipboardWrites = false
   @AppStorage("terminalClipboardMaxBytes") var terminalClipboardMaxBytes = 1_048_576
   @AppStorage("pipeCommandOutput") var pipeCommandOutput = ""
@@ -130,23 +193,139 @@ struct TerminalRenderImage {
       ? shellPath : "/bin/zsh"
   }
 
-  func terminalFont(size: CGFloat) -> NSFont {
+  func terminalFont(size: CGFloat, weightName: String? = nil) -> NSFont {
+    let name = weightName ?? fontWeight
+    let weight = Self.fontWeight(named: name)
     guard fontFamily != Self.defaultFontFamily,
-      let selected = NSFontManager.shared.font(
-        withFamily: fontFamily, traits: [], weight: 5, size: size), selected.isFixedPitch
+      let selected = NSFontManager.shared.font(withFamily: fontFamily, traits: [],
+        weight: Self.fontManagerWeight(named: name), size: size), selected.isFixedPitch
     else {
-      return .monospacedSystemFont(ofSize: size, weight: .regular)
+      return .monospacedSystemFont(ofSize: size, weight: weight)
     }
     return selected
+  }
+
+  func terminalPalette(dark: Bool, seed: UInt64) -> TerminalPalette {
+    var palette = TerminalPalette.load(dark ? darkTerminalTheme : lightTerminalTheme)
+    for (key, value) in overrideValues() {
+      guard let rgb = TerminalPalette.rgb(value) else { continue }
+      switch key {
+      case "foreground": palette.foreground = rgb
+      case "background": palette.background = rgb
+      case "cursor": palette.cursor = rgb
+      default:
+        if key.hasPrefix("ansi"), let index = Int(key.dropFirst(4)), palette.ansi.indices.contains(index) {
+          palette.ansi[index] = rgb
+        }
+      }
+    }
+    if randomizeTabBackground {
+      let accent = Self.hue(seed)
+      let background = palette.background
+      let red = (((background >> 16) & 0xff) * 7 + accent.0 + 4) / 8
+      let green = (((background >> 8) & 0xff) * 7 + accent.1 + 4) / 8
+      let blue = ((background & 0xff) * 7 + accent.2 + 4) / 8
+      palette.background = red << 16 | green << 8 | blue
+    }
+    return palette
+  }
+
+  func overrideColor(_ key: String, fallback: UInt32) -> Color {
+    Color(nsColor: NSColor(rgb: TerminalPalette.rgb(overrideValues()[key] ?? "") ?? fallback))
+  }
+
+  func setOverrideColor(_ color: Color, for key: String) {
+    guard let converted = NSColor(color).usingColorSpace(.deviceRGB) else { return }
+    let rgb = UInt32((converted.redComponent * 255).rounded()) << 16
+      | UInt32((converted.greenComponent * 255).rounded()) << 8
+      | UInt32((converted.blueComponent * 255).rounded())
+    var values = overrideValues()
+    values[key] = TerminalPalette.hex(rgb)
+    if let data = try? JSONEncoder().encode(values), let text = String(data: data, encoding: .utf8) {
+      paletteOverrides = text
+    }
+  }
+
+  func clearOverride(_ key: String) {
+    var values = overrideValues()
+    values.removeValue(forKey: key)
+    if let data = try? JSONEncoder().encode(values), let text = String(data: data, encoding: .utf8) {
+      paletteOverrides = text
+    }
+  }
+
+  func hasOverride(_ key: String) -> Bool { overrideValues()[key] != nil }
+
+  private func overrideValues() -> [String: String] {
+    guard let data = paletteOverrides.data(using: .utf8),
+      let values = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+    return values
+  }
+
+  private static func fontWeight(named name: String) -> NSFont.Weight {
+    switch name {
+    case "Thin": return .thin
+    case "Ultra Light": return .ultraLight
+    case "Light": return .light
+    case "Medium": return .medium
+    case "Semibold": return .semibold
+    case "Bold": return .bold
+    case "Heavy": return .heavy
+    case "Black": return .black
+    default: return .regular
+    }
+  }
+
+  private static func fontManagerWeight(named name: String) -> Int {
+    switch name {
+    case "Thin": return 1
+    case "Ultra Light": return 2
+    case "Light": return 3
+    case "Medium": return 7
+    case "Semibold": return 9
+    case "Bold": return 10
+    case "Heavy": return 12
+    case "Black": return 14
+    default: return 5
+    }
+  }
+
+  private static func hue(_ seed: UInt64) -> (UInt32, UInt32, UInt32) {
+    let hue = UInt32(seed % 1536)
+    let sector = hue / 256
+    let offset = hue % 256
+    let rising = 32 + offset * 223 / 255
+    let falling = 255 - offset * 223 / 255
+    switch sector {
+    case 0: return (255, rising, 32)
+    case 1: return (falling, 255, 32)
+    case 2: return (32, 255, rising)
+    case 3: return (32, falling, 255)
+    case 4: return (rising, 32, 255)
+    default: return (255, 32, falling)
+    }
   }
 
   func restoreDefaults() {
     fontFamily = Self.defaultFontFamily
     fontSize = Self.defaultFontSize
-    padding = Self.defaultPadding
+    paddingHorizontal = Self.defaultPadding
+    paddingVertical = Self.defaultPadding
+    paddingBalance = "Top Left"
+    paddingColor = "Background"
     colourScheme = "System"
+    windowMaterial = "Window"
+    darkTerminalTheme = "fluent-dark"
+    lightTerminalTheme = "fluent-light"
+    paletteOverrides = "{}"
+    randomizeTabBackground = true
     shellPath = "/bin/zsh"
     opacity = 1
+    fontWeight = "Regular"
+    intenseFontWeight = "Bold"
+    scrollbackSize = 10_000
+    initialColumns = 80
+    initialRows = 24
     terminalClipboardWrites = false
     terminalClipboardMaxBytes = 1_048_576
     pipeCommandOutput = ""
@@ -185,6 +364,7 @@ struct TerminalRenderImage {
   private let maximumSelectionBytes = 4_194_304
   private let preferences: Preferences
   private let defaultTitle: String
+  var themeSeed: UInt64 { id.uuidString.utf8.reduce(5381) { ($0 &* 33) &+ UInt64($1) } }
 
   private struct ImageKey: Hashable {
     let id: UInt32
@@ -248,6 +428,24 @@ struct TerminalRenderImage {
       zigonaut_core_set_clipboard_write(core.pointer, preferences.terminalClipboardWrites,
         UInt32(clamping: preferences.terminalClipboardMaxBytes))
     }
+  }
+  func applyTerminalSettings(palette: TerminalPalette, scrollback: Int) {
+    guard let core else { return }
+    var value = zigonaut_terminal_theme_v1()
+    value.version = 1
+    value.size = UInt32(MemoryLayout<zigonaut_terminal_theme_v1>.size)
+    value.foreground_rgb = palette.foreground
+    value.background_rgb = palette.background
+    value.cursor_rgb = palette.cursor
+    withUnsafeMutableBytes(of: &value.ansi_rgb) { bytes in
+      let destination = bytes.bindMemory(to: UInt32.self)
+      for (index, color) in palette.ansi.prefix(destination.count).enumerated() {
+        destination[index] = color
+      }
+    }
+    _ = zigonaut_core_set_theme(core.pointer, &value)
+    _ = zigonaut_core_set_scrollback(core.pointer, UInt32(clamping: scrollback))
+    DispatchQueue.main.async { [weak self] in self?.refresh() }
   }
   private func drainNotifications(core: OpaquePointer) {
     while true {
@@ -590,14 +788,16 @@ struct TerminalRenderImage {
   }
   func sendMouse(
     action: UInt8, button: UInt8, x: Int, y: Int, width: Int, height: Int, cellWidth: Int,
-    cellHeight: Int, padding: Int, modifiers: UInt16, pressed: Bool
+    cellHeight: Int, paddingTop: Int, paddingBottom: Int, paddingLeft: Int, paddingRight: Int,
+    modifiers: UInt16, pressed: Bool
   ) {
     guard let core else { return }
     writer.async {
       _ = zigonaut_core_mouse(
         core.pointer, action, button, Int32(clamping: x), Int32(clamping: y), UInt32(clamping: width),
         UInt32(clamping: height), UInt32(clamping: cellWidth), UInt32(clamping: cellHeight),
-        UInt32(clamping: padding), modifiers, pressed)
+        UInt32(clamping: paddingTop), UInt32(clamping: paddingBottom), UInt32(clamping: paddingLeft),
+        UInt32(clamping: paddingRight), modifiers, pressed)
     }
   }
   func selectionBegin(_ column: Int, _ row: Int) {

@@ -8,6 +8,8 @@ cp "$root/macos/.build/debug/ZigonautMac" "$app/MacOS/ZigonautMac"
 cp "$root/zig-out/bin/zigonaut-pty-helper" "$app/MacOS/zigonaut-pty-helper"
 cp "$root/zig-out/lib/libzigonaut-core.dylib" "$app/Frameworks/"
 cp "$root/macos/Resources/Zigonaut.icns" "$app/Resources/Zigonaut.icns"
+mkdir -p "$app/Resources/Themes"
+cp "$root/themes/"*.json "$app/Resources/Themes/"
 cp "$root/macos/Info.plist" "$app/Info.plist"
 # Keep local builds unsigned by a developer identity, while satisfying modern
 # macOS validation after all bundle mutations.

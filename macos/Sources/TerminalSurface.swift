@@ -36,6 +36,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var lastMousePoint: NSPoint?
   private var cachedFontFamily = ""
   private var cachedFontSize = 0.0
+  private var cachedFontWeight = ""
+  private var cachedIntenseFontWeight = ""
   private var cachedFonts: [UInt: NSFont] = [:]
   private var cachedCellWidth: CGFloat = 1
   private var cachedLineHeight: CGFloat = 1
@@ -45,17 +47,23 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var lastAccessibilityValue = ""
   private var voiceOverObservation: NSKeyValueObservation?
   private var colorCache: [ColorKey: NSColor] = [:]
+  private var appliedPalette: TerminalPalette?
+  private var appliedScrollback = -1
 
   private var font: NSFont {
     styledFont(traits: [])
   }
 
   func updateFont() {
-    guard cachedFontFamily != preferences.fontFamily || cachedFontSize != preferences.fontSize else {
+    guard cachedFontFamily != preferences.fontFamily || cachedFontSize != preferences.fontSize
+      || cachedFontWeight != preferences.fontWeight
+      || cachedIntenseFontWeight != preferences.intenseFontWeight else {
       return
     }
     cachedFontFamily = preferences.fontFamily
     cachedFontSize = preferences.fontSize
+    cachedFontWeight = preferences.fontWeight
+    cachedIntenseFontWeight = preferences.intenseFontWeight
     cachedFonts.removeAll(keepingCapacity: true)
     cachedFontAdvances.removeAll(keepingCapacity: true)
     let base = preferences.terminalFont(size: preferences.fontSize)
@@ -67,9 +75,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private func styledFont(traits: NSFontTraitMask) -> NSFont {
     let traitKey = traits.rawValue
     if let cached = cachedFonts[traitKey] { return cached }
-    let base = cachedFonts[0] ?? preferences.terminalFont(size: preferences.fontSize)
-    cachedFonts[0] = base
-    let result = traits.isEmpty ? base : NSFontManager.shared.convert(base, toHaveTrait: traits)
+    var remainingTraits = traits
+    let weight = traits.contains(.boldFontMask) ? preferences.intenseFontWeight : preferences.fontWeight
+    remainingTraits.remove(.boldFontMask)
+    let base = preferences.terminalFont(size: preferences.fontSize, weightName: weight)
+    if traits.isEmpty { cachedFonts[0] = base }
+    let result = remainingTraits.isEmpty ? base : NSFontManager.shared.convert(base, toHaveTrait: remainingTraits)
     cachedFonts[traitKey] = result
     return result
   }
@@ -113,6 +124,39 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     cachedLineHeight
   }
 
+  private var gridColumns: Int {
+    max(2, Int((bounds.width - 2 * preferences.paddingHorizontal) / cellWidth))
+  }
+
+  private var gridRows: Int {
+    max(2, Int((bounds.height - 2 * preferences.paddingVertical) / lineHeight))
+  }
+
+  private var originX: CGFloat {
+    preferences.paddingBalance == "Centered"
+      ? max(0, (bounds.width - CGFloat(gridColumns) * cellWidth) / 2)
+      : preferences.paddingHorizontal
+  }
+
+  private var originY: CGFloat {
+    preferences.paddingBalance == "Centered"
+      ? max(0, (bounds.height - CGFloat(gridRows) * lineHeight) / 2)
+      : preferences.paddingVertical
+  }
+
+  private var isDarkAppearance: Bool {
+    effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+  }
+
+  func updateTerminalSettings() {
+    let palette = preferences.terminalPalette(dark: isDarkAppearance, seed: model.themeSeed)
+    guard palette != appliedPalette || preferences.scrollbackSize != appliedScrollback else { return }
+    appliedPalette = palette
+    appliedScrollback = preferences.scrollbackSize
+    colorCache.removeAll(keepingCapacity: true)
+    model.applyTerminalSettings(palette: palette, scrollback: preferences.scrollbackSize)
+  }
+
   init(model: TerminalModel, preferences: Preferences, onFocus: @escaping () -> Void) {
     self.model = model
     self.preferences = preferences
@@ -141,6 +185,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   override var acceptsFirstResponder: Bool { true }
   override var isFlipped: Bool { true }
 
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    updateTerminalSettings()
+    needsDisplay = true
+  }
+
   override func becomeFirstResponder() -> Bool {
     needsDisplay = true
     return true
@@ -152,8 +202,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   func resizeTerminal() {
-    let columns = max(2, Int((bounds.width - 2 * preferences.padding) / cellWidth))
-    let rows = max(2, Int((bounds.height - 2 * preferences.padding) / lineHeight))
+    let columns = gridColumns
+    let rows = gridRows
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
     model.resize(columns: columns, rows: rows,
       pixelWidth: Int(bounds.width * scale), pixelHeight: Int(bounds.height * scale),
@@ -189,8 +239,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       NSCursor.arrow.set()
       return
     }
-    let column = max(0, Int((point.x - preferences.padding) / cellWidth))
-    let row = max(0, Int((point.y - preferences.padding) / lineHeight))
+    let column = max(0, Int((point.x - originX) / cellWidth))
+    let row = max(0, Int((point.y - originY) / lineHeight))
     (model.link(column: column, row: row) == nil ? NSCursor.arrow : NSCursor.pointingHand).set()
   }
 
@@ -263,8 +313,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     actualRange?.pointee = markedRange()
     let cursor = model.renderSnapshot.frame
     let local = NSRect(
-      x: preferences.padding + CGFloat(cursor.cursorX) * cellWidth,
-      y: preferences.padding + CGFloat(cursor.cursorY) * lineHeight,
+      x: originX + CGFloat(cursor.cursorX) * cellWidth,
+      y: originY + CGFloat(cursor.cursorY) * lineHeight,
       width: max(cellWidth, CGFloat(markedText.length) * cellWidth), height: lineHeight)
     return window?.convertToScreen(convert(local, to: nil)) ?? local
   }
@@ -281,8 +331,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   private func cell(_ event: NSEvent) -> (Int, Int) {
     let point = convert(event.locationInWindow, from: nil)
-    let column = max(0, Int((point.x - preferences.padding) / cellWidth))
-    let row = max(0, Int((point.y - preferences.padding) / lineHeight))
+    let column = max(0, Int((point.x - originX) / cellWidth))
+    let row = max(0, Int((point.y - originY) / lineHeight))
     return (column, row)
   }
 
@@ -374,7 +424,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     model.sendMouse(
       action: action, button: button, x: Int(point.x), y: Int(point.y), width: Int(bounds.width),
       height: Int(bounds.height), cellWidth: Int(cellWidth), cellHeight: Int(lineHeight),
-      padding: Int(preferences.padding), modifiers: modifiers, pressed: pressed)
+      paddingTop: Int(originY),
+      paddingBottom: Int(max(0, bounds.height - originY - CGFloat(gridRows) * lineHeight)),
+      paddingLeft: Int(originX),
+      paddingRight: Int(max(0, bounds.width - originX - CGFloat(gridColumns) * cellWidth)),
+      modifiers: modifiers, pressed: pressed)
   }
 
   private func sequence(_ event: NSEvent) -> String? {
@@ -416,6 +470,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     bounds.fill()
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: bounds).addClip()
+    drawEdgeColors(snapshot.cells)
     for cell in snapshot.cells {
       drawBackground(cell)
     }
@@ -435,17 +490,42 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     }
   }
 
+  private func drawEdgeColors(_ cells: [TerminalRenderCell]) {
+    guard preferences.paddingColor != "Background" else { return }
+    let always = preferences.paddingColor == "Always Extend"
+    let gridRight = originX + CGFloat(gridColumns) * cellWidth
+    let gridBottom = originY + CGFloat(gridRows) * lineHeight
+    for cell in cells where always || !cell.backgroundIsDefault {
+      color(cell.background, alpha: preferences.opacity).setFill()
+      if cell.y == 0 {
+        NSRect(x: originX + CGFloat(cell.x) * cellWidth, y: 0,
+          width: cell.occupancy == 1 ? cellWidth * 2 : cellWidth, height: originY).fill()
+      }
+      if cell.y == gridRows - 1 {
+        NSRect(x: originX + CGFloat(cell.x) * cellWidth, y: gridBottom,
+          width: cell.occupancy == 1 ? cellWidth * 2 : cellWidth,
+          height: max(0, bounds.height - gridBottom)).fill()
+      }
+      if cell.x == 0 {
+        NSRect(x: 0, y: originY + CGFloat(cell.y) * lineHeight,
+          width: originX, height: lineHeight).fill()
+      }
+      if cell.x == gridColumns - 1 {
+        NSRect(x: gridRight, y: originY + CGFloat(cell.y) * lineHeight,
+          width: max(0, bounds.width - gridRight), height: lineHeight).fill()
+      }
+    }
+  }
+
   private func drawImages(_ images: [TerminalRenderImage]) {
     guard !images.isEmpty else { return }
     NSGraphicsContext.current?.saveGraphicsState()
-    let columns = max(0, floor((bounds.width - 2 * preferences.padding) / cellWidth))
-    let rows = max(0, floor((bounds.height - 2 * preferences.padding) / lineHeight))
-    NSBezierPath(rect: NSRect(x: preferences.padding, y: preferences.padding,
-      width: columns * cellWidth, height: rows * lineHeight)).addClip()
+    NSBezierPath(rect: NSRect(x: originX, y: originY,
+      width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)).addClip()
     for placement in images {
       let destination = NSRect(
-        x: preferences.padding + CGFloat(placement.viewportColumn) * cellWidth + placement.xOffset,
-        y: preferences.padding + CGFloat(placement.viewportRow) * lineHeight + placement.yOffset,
+        x: originX + CGFloat(placement.viewportColumn) * cellWidth + placement.xOffset,
+        y: originY + CGFloat(placement.viewportRow) * lineHeight + placement.yOffset,
         width: placement.pixelWidth, height: placement.pixelHeight)
       placement.image.draw(in: destination, from: placement.source, operation: .sourceOver,
         fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
@@ -456,8 +536,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private func cellRect(_ cell: TerminalRenderCell) -> NSRect {
     let width = cell.occupancy == 1 ? cellWidth * 2 : cellWidth
     return NSRect(
-      x: preferences.padding + CGFloat(cell.x) * cellWidth,
-      y: preferences.padding + CGFloat(cell.y) * lineHeight,
+      x: originX + CGFloat(cell.x) * cellWidth,
+      y: originY + CGFloat(cell.y) * lineHeight,
       width: width,
       height: lineHeight
     )
@@ -531,16 +611,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       attributes[.kern] = cellWidth - styledAdvance(traits: traits, font: styledFont)
     }
     let origin = NSPoint(
-      x: preferences.padding + CGFloat(x) * cellWidth,
-      y: preferences.padding + CGFloat(y) * lineHeight + font.ascender - styledFont.ascender)
+      x: originX + CGFloat(x) * cellWidth,
+      y: originY + CGFloat(y) * lineHeight + font.ascender - styledFont.ascender)
     (text as NSString).draw(at: origin, withAttributes: attributes)
   }
 
   private func drawMarkedText(_ frame: TerminalRenderFrame) {
     guard markedText.length > 0 else { return }
     let point = NSPoint(
-      x: preferences.padding + CGFloat(frame.cursorX) * cellWidth,
-      y: preferences.padding + CGFloat(frame.cursorY) * lineHeight)
+      x: originX + CGFloat(frame.cursorX) * cellWidth,
+      y: originY + CGFloat(frame.cursorY) * lineHeight)
     markedText.addAttributes(
       [
         .font: font, .foregroundColor: NSColor.textColor,
@@ -576,8 +656,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private func drawCursor(_ frame: TerminalRenderFrame) {
     guard frame.cursorVisible else { return }
     let rect = NSRect(
-      x: preferences.padding + CGFloat(frame.cursorX) * cellWidth,
-      y: preferences.padding + CGFloat(frame.cursorY) * lineHeight,
+      x: originX + CGFloat(frame.cursorX) * cellWidth,
+      y: originY + CGFloat(frame.cursorY) * lineHeight,
       width: cellWidth * CGFloat(max(frame.cursorColumns, 1)),
       height: lineHeight
     )
@@ -616,6 +696,7 @@ struct TerminalSurface: NSViewRepresentable {
     let shouldClaimKeyboardFocus = wantsKeyboardFocus && !view.wantsKeyboardFocus
     view.wantsKeyboardFocus = wantsKeyboardFocus
     view.updateClipboardSettings()
+    view.updateTerminalSettings()
     view.resizeTerminal()
     view.needsDisplay = true
     view.updateAccessibilityValue()

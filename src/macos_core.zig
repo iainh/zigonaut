@@ -167,8 +167,22 @@ pub const RenderImagesResult = extern struct {
     reserved: [7]u8,
 };
 
+pub const TerminalTheme = extern struct {
+    version: u32,
+    size: u32,
+    foreground_rgb: u32,
+    background_rgb: u32,
+    cursor_rgb: u32,
+    ansi_rgb: [16]u32,
+    reserved: [8]u8,
+};
+
 fn rgb(color: theme.Color) u32 {
     return (@as(u32, color.red) << 16) | (@as(u32, color.green) << 8) | color.blue;
+}
+
+fn colorFromRgb(value: u32) theme.Color {
+    return .{ .red = @truncate(value >> 16), .green = @truncate(value >> 8), .blue = @truncate(value) };
 }
 
 fn titleChanged(context: ?*anyopaque, title: []const u8) void {
@@ -562,6 +576,32 @@ export fn zigonaut_core_render_images(self: ?*Core, images: ?[*]RenderImage, ima
     output.status = if (collector.truncated) 1 else 0;
 }
 
+export fn zigonaut_core_set_theme(self: ?*Core, value: ?*const TerminalTheme) bool {
+    const core = self orelse return false;
+    const input = value orelse return false;
+    if (input.version != 1 or input.size < @sizeOf(TerminalTheme)) return false;
+    var terminal_theme = theme.Theme{
+        .foreground = colorFromRgb(input.foreground_rgb),
+        .background = colorFromRgb(input.background_rgb),
+        .cursor = colorFromRgb(input.cursor_rgb),
+        .ansi = undefined,
+    };
+    for (input.ansi_rgb, 0..) |ansi, index| terminal_theme.ansi[index] = colorFromRgb(ansi);
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    core.terminal.setTheme(terminal_theme) catch return false;
+    return true;
+}
+
+export fn zigonaut_core_set_scrollback(self: ?*Core, lines: u32) bool {
+    const core = self orelse return false;
+    if (lines > 1_000_000) return false;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    core.terminal.setScrollbackSize(lines) catch return false;
+    return true;
+}
+
 /// Returns the required title byte count and copies at most `capacity` bytes.
 export fn zigonaut_core_title(self: ?*Core, output: ?[*]u8, capacity: u32) u32 {
     const core = self orelse return 0;
@@ -846,7 +886,7 @@ export fn zigonaut_core_mouse_tracking(self: ?*Core) bool {
 }
 
 /// action: press=0, release=1, motion=2. button follows Terminal.MouseButton.
-export fn zigonaut_core_mouse(self: ?*Core, action: u8, button: u8, x: i32, y: i32, screen_width: u32, screen_height: u32, cell_width: u32, cell_height: u32, padding: u32, modifiers: u16, any_button_pressed: bool) bool {
+export fn zigonaut_core_mouse(self: ?*Core, action: u8, button: u8, x: i32, y: i32, screen_width: u32, screen_height: u32, cell_width: u32, cell_height: u32, padding_top: u32, padding_bottom: u32, padding_left: u32, padding_right: u32, modifiers: u16, any_button_pressed: bool) bool {
     const core = self orelse return false;
     if (action > @intFromEnum(Terminal.MouseAction.motion) or button > @intFromEnum(Terminal.MouseButton.wheel_right)) return false;
     const mouse_action: Terminal.MouseAction = @enumFromInt(action);
@@ -858,10 +898,10 @@ export fn zigonaut_core_mouse(self: ?*Core, action: u8, button: u8, x: i32, y: i
         .screen_height = screen_height,
         .cell_width = cell_width,
         .cell_height = cell_height,
-        .padding_top = padding,
-        .padding_bottom = padding,
-        .padding_left = padding,
-        .padding_right = padding,
+        .padding_top = padding_top,
+        .padding_bottom = padding_bottom,
+        .padding_left = padding_left,
+        .padding_right = padding_right,
     }, any_button_pressed, &buffer) catch {
         core.mutex.unlock();
         return false;
@@ -939,6 +979,9 @@ test "null ABI handles are safe" {
     var images = std.mem.zeroes(RenderImagesResult);
     zigonaut_core_render_images(null, null, 0, null, 0, &images);
     try std.testing.expectEqual(@as(u8, 2), images.status);
+    var terminal_theme = std.mem.zeroes(TerminalTheme);
+    try std.testing.expect(!zigonaut_core_set_theme(null, &terminal_theme));
+    try std.testing.expect(!zigonaut_core_set_scrollback(null, 10_000));
     zigonaut_core_destroy(null);
 }
 
@@ -1079,7 +1122,7 @@ test "null search and mouse APIs and bounded queries are safe" {
     try std.testing.expectEqual(@as(usize, 0), zigonaut_core_last_command_output(null, null, 0));
     try std.testing.expectEqual(@as(usize, 0), zigonaut_core_working_directory(null, null, 0));
     try std.testing.expect(!zigonaut_core_mouse_tracking(null));
-    try std.testing.expect(!zigonaut_core_mouse(null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false));
+    try std.testing.expect(!zigonaut_core_mouse(null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false));
     try std.testing.expectEqual(@as(usize, 256), maximum_search_query_bytes);
 }
 

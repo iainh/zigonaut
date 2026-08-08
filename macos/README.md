@@ -10,12 +10,14 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
 - Accurate font-derived grid resize, bounded styled-cell CoreText/AppKit rendering, per-cell colours and decoration, terminal cursors, and light/dark colours.
 - Full scrollback find with match/active counts, native match highlights, wrapped previous/next navigation, viewport restoration, and Escape-to-close. Scanning runs on the serialized background queue and queries are limited to 256 UTF-8 bytes.
+- OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
+- Bounded Kitty graphics snapshots with RGBA image caching, source cropping and Retina-aware placement.
 - Precise local scroll wheel movement and mouse cell selection; terminal mouse press, release, drag, and wheel reporting when requested by applications, with Shift forcing local selection.
 - Basic bounded text-area accessibility value, label, focus state, and value-change notifications.
 - Command-C copy and bracketed Command-V paste.
 - Command-hover/click opens only terminal-detected links with schemes accepted by the terminal core.
 - Desktop notifications are queued (32, 4096 combined UTF-8 bytes), delivered only while no terminal window is key, and use unique identifiers. Permission is requested once by macOS.
-- A singleton native Settings window with installed monospaced-font selection, shell selection, restore defaults, and persisted live font size, padding, colour scheme, terminal background opacity, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
+- A singleton native Settings window with bundled themes, full palette overrides, normal and intense font weights, scrollback limits, initial dimensions, grid alignment, independent padding, edge colours, shell selection, restore defaults, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
 - Synchronized, bounded C ABI styled snapshots/copy and OSC terminal titles; nonblocking PTY writes on a serial background writer; callback teardown drains the reader before returning.
 - A bundled high-resolution application icon, dynamic shell/OSC window-tab titles, standard macOS application menus, frame restoration, and reopen-after-last-window behaviour.
 
@@ -34,4 +36,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. The isolated AppKit renderer is intended to be replaceable by Metal; terminal images are not rendered. Also missing are geometric directional pane focus, rich accessibility ranges and editable text semantics, pane restoration, close confirmation, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing/packaging.
+This is not feature parity. The isolated AppKit renderer remains replaceable by Metal. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, pane restoration, close confirmation, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.

@@ -901,6 +901,11 @@ pub const Terminal = struct {
         try applyTheme(self.terminal, value);
     }
 
+    pub fn setScrollbackSize(self: *Terminal, max_scrollback: u32) !void {
+        const scrollback_lines: usize = max_scrollback;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
+    }
+
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
         try check(vt.ghostty_terminal_resize(
             self.terminal,
@@ -2376,6 +2381,12 @@ test "render state resolves ANSI colors through the Rasmus theme" {
 
     try std.testing.expectEqual(theme.rasmus.background, renderer.frame.?.background);
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
+}
+
+test "scrollback limit can be updated after initialization" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.setScrollbackSize(25_000);
 }
 
 test "render snapshot retains padding extension safety facts" {
