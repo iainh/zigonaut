@@ -2519,11 +2519,21 @@ fn clipboardTextAlloc(hwnd: win.HWND, allocator: std.mem.Allocator) ![]u8 {
     if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
     defer _ = win.CloseClipboard();
     const memory = win.GetClipboardData(win.CF_UNICODETEXT) orelse return error.ClipboardTextUnavailable;
+    const byte_length = win.GlobalSize(memory);
+    if (byte_length == 0 or byte_length % @sizeOf(u16) != 0) return error.InvalidClipboardText;
     const raw = win.GlobalLock(memory) orelse return error.ClipboardLockFailed;
     defer _ = win.GlobalUnlock(memory);
-    const source: [*:0]const u16 = @ptrCast(@alignCast(raw));
-    const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.span(source));
+    const source: [*]const u16 = @ptrCast(@alignCast(raw));
+    const utf8 = try std.unicode.utf16LeToUtf8Alloc(
+        allocator,
+        try terminatedClipboardText(source[0 .. byte_length / @sizeOf(u16)]),
+    );
     return allocator.realloc(utf8, normalizeClipboardNewlines(utf8).len);
+}
+
+fn terminatedClipboardText(source: []const u16) ![]const u16 {
+    const end = std.mem.indexOfScalar(u16, source, 0) orelse return error.InvalidClipboardText;
+    return source[0..end];
 }
 
 fn normalizeClipboardNewlines(text: []u8) []u8 {
@@ -2627,6 +2637,12 @@ fn drawDirectWriteMessage(
 test "clipboard newlines normalize without changing lone carriage returns" {
     var text = [_]u8{ 'a', '\r', '\n', 'b', '\n', 'c', '\r', 'd' };
     try std.testing.expectEqualStrings("a\nb\nc\rd", normalizeClipboardNewlines(&text));
+}
+
+test "clipboard text requires a terminator within the allocation" {
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b' }, try terminatedClipboardText(&.{ 'a', 'b', 0, 'c' }));
+    try std.testing.expectError(error.InvalidClipboardText, terminatedClipboardText(&.{ 'a', 'b' }));
+    try std.testing.expectError(error.InvalidClipboardText, terminatedClipboardText(&.{}));
 }
 
 test "Windows clipboard conversion preserves CRLF and expands lone LF" {
