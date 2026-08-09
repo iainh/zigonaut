@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared = @import("shared");
 const win32 = @import("win32.zig");
 const native = win32.c;
 const vt = @cImport({
@@ -232,7 +233,7 @@ pub const Engine = struct {
         }
     }
 
-    pub fn drawImage(self: *Engine, image: @import("terminal.zig").Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) !void {
+    pub fn drawImage(self: *Engine, image: shared.terminal.Terminal.Image, left: f32, top: f32, width: f32, height: f32, clip: [4]f32) !void {
         if (native.zigonaut_text_engine_draw_image(self.handle, image.image_id, image.generation, image.pixels.ptr, image.pixels.len, image.width, image.height, left, top, width, height, @floatFromInt(image.source_x), @floatFromInt(image.source_y), @floatFromInt(image.source_width), @floatFromInt(image.source_height), clip[0], clip[1], clip[2], clip[3]) < 0)
             return error.Direct2DDrawImageFailed;
     }
@@ -286,8 +287,8 @@ pub const Engine = struct {
 };
 
 test "Windows PNG decoder produces owned Kitty image snapshots" {
-    const Terminal = @import("terminal.zig").Terminal;
-    const theme = @import("theme.zig");
+    const Terminal = shared.terminal.Terminal;
+    const theme = shared.theme;
     try installPngDecoder();
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();
@@ -340,8 +341,8 @@ test "Windows PNG decoder produces owned Kitty image snapshots" {
 }
 
 test "Windows PNG decoder shares image storage between placements" {
-    const Terminal = @import("terminal.zig").Terminal;
-    const theme = @import("theme.zig");
+    const Terminal = shared.terminal.Terminal;
+    const theme = shared.theme;
     try installPngDecoder();
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();

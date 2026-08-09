@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Mutex = if (@import("builtin").os.tag == .windows) @import("win32.zig").Mutex else struct {
+pub const Mutex = struct {
     value: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(self: *@This()) void {

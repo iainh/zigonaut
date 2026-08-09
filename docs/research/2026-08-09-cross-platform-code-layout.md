@@ -2,7 +2,7 @@
 
 **Date**: 2026-08-09
 **Question**: How should Zigonaut organize its macOS and Windows clients so future integration and parity work stays orderly?
-**Status**: Complete; migration sequencing and shared-behaviour scope need approval
+**Status**: Implemented through Stage 3; responsibility-based decomposition and parity work remain opportunistic
 
 ## Context
 
@@ -11,7 +11,7 @@ Zigonaut now has two native clients with intentionally different ownership model
 - Windows runs a Zig application and session model, then loads a C++/WinRT WinUI shell through a C ABI.
 - macOS runs an AppKit and SwiftUI application, then embeds one Zig terminal and POSIX pseudoterminal core per pane through a separate C ABI.
 
-This asymmetry is valid. Windows and macOS have different lifecycle, tab, window, process-launch, rendering and settings conventions. The current repository layout hides that distinction because portable Zig modules, Windows-only Zig modules and macOS-only Zig modules all occupy the flat `src/` directory.
+This asymmetry is valid. Windows and macOS have different lifecycle, tab, window, process-launch, rendering and settings conventions. Before implementation, the repository layout hid that distinction because portable Zig modules, Windows-only Zig modules and macOS-only Zig modules all occupied the flat `src/` directory.
 
 The goal should be a **shared terminal kernel with two native clients**, not one artificial cross-platform desktop application layer.
 
@@ -31,15 +31,15 @@ These files contain platform-neutral terminal semantics or value types:
 
 | File | Shared responsibility | Qualification |
 | --- | --- | --- |
-| `src/terminal.zig` | Ghostty VT state, input encoding and renderer-neutral snapshots | Windows Imaging Component PNG decoding still leaks through a compile-time Windows hook |
-| `src/search.zig` | Search state, navigation and row matching | Pure |
-| `src/link.zig` | Link detection and allowed-scheme policy | Pure |
-| `src/theme.zig` | Theme values, parsing, overrides and colour randomization | `Catalog.load` also owns Windows-style executable-relative resource discovery |
-| `src/pane_tree.zig` | Stable tree IDs, split mutation and normalized geometry | Pure, though only Windows currently consumes it |
+| `src/shared/terminal.zig` | Ghostty VT state, input encoding and renderer-neutral snapshots | Pure; the Windows host installs PNG decoding |
+| `src/shared/search.zig` | Search state, navigation and row matching | Pure |
+| `src/shared/link.zig` | Link detection and allowed-scheme policy | Pure |
+| `src/shared/theme.zig` | Theme values, parsing, overrides and colour randomization | Pure; hosts provide an open resource directory |
+| `src/shared/pane_tree.zig` | Stable tree IDs, split mutation and normalized geometry | Pure, though only Windows currently consumes it |
 
-`src/platform_sync.zig` is cross-target support code rather than application semantics. Its non-Windows mutex spins while waiting, so it should not become a broadly used shared-domain primitive without reviewing lock duration and replacing it with blocking synchronization where appropriate.
+`src/support/platform_sync.zig` is host support rather than application semantics. Its macOS implementation uses a blocking pthread mutex from Zig rather than spinning while terminal work holds the lock.
 
-### Most of the flat Zig source directory is Windows-specific
+### Most Zig application code is Windows-specific
 
 The following modules belong to the Windows client as written:
 
@@ -54,7 +54,7 @@ In particular, `app.zig` is not a ready-made common application model. Making it
 
 ### The macOS client has a clear but concentrated boundary
 
-`src/macos_core.zig` combines four responsibilities in 1,556 lines:
+`src/macos/core.zig` combines four responsibilities in 1,556 lines:
 
 1. The exported Swift-facing C ABI and structure marshaling
 2. POSIX PTY ownership, reader and writer workers and synchronization
@@ -109,11 +109,13 @@ The first useful boundary is `shared`, `windows` and `macos`. Avoid deeper `mode
 ```text
 src/
   shared/
+    root.zig
     terminal.zig
     search.zig
     link.zig
     theme.zig
     pane_tree.zig
+    tests.zig
 
   support/
     platform_sync.zig
@@ -141,6 +143,7 @@ src/
   macos/
     core.zig
     pty_helper.zig
+    abi_test.zig
 
 winui/                       # Native Windows C++/WinRT project and its ABI
 macos/                       # Native Swift package, resources, tests and C ABI
@@ -249,15 +252,15 @@ Use responsibility boundaries rather than line count alone:
 - No replacement of Swift `PaneNode` with Zig `pane_tree` without a concrete feature requiring identical semantics.
 - No one-use wrappers or empty architecture folders created in anticipation of future work.
 
-## Recommended first deliverable
+## Implemented first deliverable
 
-Implement Stages 1–3 as separate reviewable changes:
+Stages 1–3 were implemented as separate reviewable changes:
 
 1. Test and ABI boundary hardening
 2. Shared-module purification
 3. Mechanical source relocation
 
-This yields an orderly repository without committing either native client to the other client’s model. Configuration consolidation and large-file decomposition should follow as independent, behaviour-focused changes.
+The resulting build graph exposes a named Zig `shared` module to both native clients. Configuration consolidation and large-file decomposition should follow as independent, behaviour-focused changes.
 
 ## Open questions
 
@@ -269,14 +272,15 @@ This yields an orderly repository without committing either native client to the
 ## References
 
 - `build.zig`
-- `src/terminal.zig`
-- `src/search.zig`
-- `src/link.zig`
-- `src/theme.zig`
-- `src/pane_tree.zig`
-- `src/app.zig`
-- `src/session.zig`
-- `src/macos_core.zig`
+- `src/shared/root.zig`
+- `src/shared/terminal.zig`
+- `src/shared/search.zig`
+- `src/shared/link.zig`
+- `src/shared/theme.zig`
+- `src/shared/pane_tree.zig`
+- `src/windows/app.zig`
+- `src/windows/session.zig`
+- `src/macos/core.zig`
 - `macos/include/zigonaut_core.h`
 - `macos/Sources/Models.swift`
 - `macos/Sources/TerminalSurface.swift`

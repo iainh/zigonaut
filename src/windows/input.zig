@@ -1,5 +1,5 @@
 const std = @import("std");
-const Terminal = @import("terminal.zig").Terminal;
+const Terminal = @import("shared").terminal.Terminal;
 const win = @import("win32.zig").c;
 
 pub const KeyEvent = struct {

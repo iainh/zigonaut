@@ -11,9 +11,11 @@ const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("unistd.h");
 });
-const Terminal = @import("terminal.zig").Terminal;
-const search = @import("search.zig");
-const theme = @import("theme.zig");
+const shared = @import("shared");
+const Terminal = shared.terminal.Terminal;
+const search = shared.search;
+const theme = shared.theme;
+const Mutex = @import("platform_sync").Mutex;
 const public_abi = @cImport({
     @cInclude("zigonaut_core.h");
 });
@@ -30,9 +32,9 @@ const QueuedClipboard = struct { payload: []u8, token: u64, clear: bool };
 
 pub const Wake = ?*const fn (?*anyopaque) callconv(.c) void;
 const Core = struct {
-    mutex: @import("platform_sync.zig").Mutex = .{},
-    write_mutex: @import("platform_sync.zig").Mutex = .{},
-    callback_mutex: @import("platform_sync.zig").Mutex = .{},
+    mutex: Mutex = .{},
+    write_mutex: Mutex = .{},
+    callback_mutex: Mutex = .{},
     terminal: Terminal,
     master: c_int,
     cancel_read: c_int,

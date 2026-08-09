@@ -1,11 +1,12 @@
 const std = @import("std");
 const config = @import("config.zig");
 const directwrite_renderer = @import("directwrite_renderer.zig");
-const pane_tree = @import("pane_tree.zig");
+const shared = @import("shared");
+const pane_tree = shared.pane_tree;
 const SessionRuntime = @import("session.zig").SessionRuntime;
 
 pub const max_tabs = 256;
-const theme = @import("theme.zig");
+const theme = shared.theme;
 
 test {
     _ = directwrite_renderer;

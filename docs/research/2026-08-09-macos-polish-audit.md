@@ -72,7 +72,7 @@ Basic `NSMenuItemValidation` exists, but commands can be more precise. Disable C
 ## Evidence in the current implementation
 
 - `macos/Sources/Models.swift:514-594` performs full snapshot transfer and per-cell Swift materialization.
-- `src/macos_core.zig:535-553` exports the current complete render snapshot.
+- `src/macos/core.zig:535-553` exports the current complete render snapshot.
 - `macos/Sources/TerminalSurface.swift:663-699` uses row hashes to retain raster output, after full model materialization.
 - `macos/Sources/TerminalSurface.swift:723-749` filters all cells for each dirty row and redraws all image placements under the clip.
 - `macos/Sources/Models.swift:607-670` transfers image data on each retrieval despite generation-keyed decoded-image caching.

@@ -1,6 +1,6 @@
 const std = @import("std");
 const win32 = @import("win32.zig");
-const theme = @import("theme.zig");
+const theme = @import("shared").theme;
 
 pub const default_contents =
     \\{

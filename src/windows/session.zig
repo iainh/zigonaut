@@ -1,9 +1,10 @@
 const std = @import("std");
+const shared = @import("shared");
 const Pty = @import("pty.zig").Pty;
-const Terminal = @import("terminal.zig").Terminal;
-const theme = @import("theme.zig");
-const Search = @import("search.zig").State;
-const SearchMatch = @import("search.zig").Match;
+const Terminal = shared.terminal.Terminal;
+const theme = shared.theme;
+const Search = shared.search.State;
+const SearchMatch = shared.search.Match;
 const win = @import("win32.zig").c;
 const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;

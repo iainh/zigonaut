@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared = @import("shared");
 
 const modules = .{
     @import("app.zig"),
@@ -7,14 +8,14 @@ const modules = .{
     @import("directwrite_renderer.zig"),
     @import("gdi_renderer.zig"),
     @import("input.zig"),
-    @import("pane_tree.zig"),
+    shared.pane_tree,
     @import("pty.zig"),
-    @import("search.zig"),
+    shared.search,
     @import("session.zig"),
     @import("shell_quote.zig"),
-    @import("terminal.zig"),
+    shared.terminal,
     @import("terminal_view.zig"),
-    @import("theme.zig"),
+    shared.theme,
     @import("win32.zig"),
 };
 

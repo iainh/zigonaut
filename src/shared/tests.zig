@@ -1,11 +1,12 @@
 const std = @import("std");
+const shared = @import("root.zig");
 
 const modules = .{
-    @import("link.zig"),
-    @import("pane_tree.zig"),
-    @import("search.zig"),
-    @import("terminal.zig"),
-    @import("theme.zig"),
+    shared.link,
+    shared.pane_tree,
+    shared.search,
+    shared.terminal,
+    shared.theme,
 };
 
 test "shared declarations compile" {

@@ -4,8 +4,9 @@ const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
 const directwrite = @import("directwrite_renderer.zig");
-const pane_tree = @import("pane_tree.zig");
-const theme = @import("theme.zig");
+const shared = @import("shared");
+const pane_tree = shared.pane_tree;
+const theme = shared.theme;
 const TerminalView = @import("terminal_view.zig").View;
 
 const win32 = @import("win32.zig");

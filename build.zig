@@ -19,12 +19,19 @@ pub fn build(b: *std.Build) void {
         .@"emit-lib-vt" = true,
         .simd = true,
     });
+    const shared_module = b.createModule(.{
+        .root_source_file = b.path("src/shared/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shared_module.link_libc = true;
+    configureGhostty(shared_module, ghostty);
     const shared_test_step = addSharedTests(b, target, optimize, ghostty);
 
     // Keep native products in separate build graphs: the macOS embedded core
     // must never inherit Win32 resources, C++ sources, or system libraries.
     if (target.result.os.tag == .macos) {
-        buildMacos(b, target, optimize, ghostty, shared_test_step);
+        buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step);
         return;
     }
     if (target.result.os.tag != .windows) {
@@ -34,11 +41,12 @@ pub fn build(b: *std.Build) void {
     }
 
     const app_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/windows/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .Debug,
     });
+    app_module.addImport("shared", shared_module);
     app_module.addOptions("build_options", build_options);
     app_module.addIncludePath(b.path("winui"));
     configureGhostty(app_module, ghostty);
@@ -73,9 +81,9 @@ pub fn build(b: *std.Build) void {
     exe.subsystem = .Windows;
     exe.root_module.link_libc = true;
     exe.root_module.link_libcpp = true;
-    exe.root_module.addIncludePath(b.path("src"));
+    exe.root_module.addIncludePath(b.path("src/windows"));
     exe.root_module.addCSourceFile(.{
-        .file = b.path("src/directwrite_renderer.cpp"),
+        .file = b.path("src/windows/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
     exe.root_module.linkSystemLibrary("user32", .{});
@@ -127,18 +135,19 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
+            .root_source_file = b.path("src/windows/tests.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    tests.root_module.addImport("shared", shared_module);
     tests.root_module.addOptions("build_options", build_options);
     tests.root_module.link_libc = true;
     tests.root_module.link_libcpp = true;
-    tests.root_module.addIncludePath(b.path("src"));
+    tests.root_module.addIncludePath(b.path("src/windows"));
     tests.root_module.addIncludePath(b.path("winui"));
     tests.root_module.addCSourceFile(.{
-        .file = b.path("src/directwrite_renderer.cpp"),
+        .file = b.path("src/windows/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
     tests.root_module.linkSystemLibrary("user32", .{});
@@ -161,13 +170,13 @@ pub fn build(b: *std.Build) void {
     const conpty_test = b.addExecutable(.{
         .name = "conpty-resize-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/conpty_resize_test.zig"),
+            .root_source_file = b.path("src/windows/conpty_resize_test.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     conpty_test.root_module.link_libc = true;
-    conpty_test.root_module.addIncludePath(b.path("src"));
+    conpty_test.root_module.addIncludePath(b.path("src/windows"));
     conpty_test.root_module.addIncludePath(b.path("winui"));
     conpty_test.root_module.linkSystemLibrary("kernel32", .{});
     const install_conpty_test = b.addInstallArtifact(conpty_test, .{});
@@ -180,17 +189,18 @@ pub fn build(b: *std.Build) void {
     const benchmark = b.addExecutable(.{
         .name = "zigonaut-benchmark",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark.zig"),
+            .root_source_file = b.path("src/windows/benchmark.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    benchmark.root_module.addImport("shared", shared_module);
     benchmark.root_module.link_libc = true;
     benchmark.root_module.link_libcpp = true;
-    benchmark.root_module.addIncludePath(b.path("src"));
+    benchmark.root_module.addIncludePath(b.path("src/windows"));
     benchmark.root_module.addIncludePath(b.path("winui"));
     benchmark.root_module.addCSourceFile(.{
-        .file = b.path("src/directwrite_renderer.cpp"),
+        .file = b.path("src/windows/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
     benchmark.root_module.linkSystemLibrary("user32", .{});
@@ -216,7 +226,7 @@ pub fn build(b: *std.Build) void {
 
 fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency) *std.Build.Step {
     const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/shared_tests.zig"),
+        .root_source_file = b.path("src/shared/tests.zig"),
         .target = target,
         .optimize = optimize,
     }) });
@@ -227,11 +237,17 @@ fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     return test_step;
 }
 
-fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_test_step: *std.Build.Step) void {
+fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step) void {
+    const platform_sync = b.createModule(.{
+        .root_source_file = b.path("src/support/platform_sync.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    platform_sync.link_libc = true;
     const helper = b.addExecutable(.{
         .name = "zigonaut-pty-helper",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/macos_pty_helper.zig"),
+            .root_source_file = b.path("src/macos/pty_helper.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -239,10 +255,12 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     helper.root_module.link_libc = true;
     b.installArtifact(helper);
     const module = b.createModule(.{
-        .root_source_file = b.path("src/macos_core.zig"),
+        .root_source_file = b.path("src/macos/core.zig"),
         .target = target,
         .optimize = optimize,
     });
+    module.addImport("shared", shared_module);
+    module.addImport("platform_sync", platform_sync);
     module.link_libc = true;
     module.addIncludePath(b.path("macos/include"));
     configureGhostty(module, ghostty);
@@ -251,25 +269,28 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const core_step = b.step("macos-core", "Build the macOS embedded Zig core");
     core_step.dependOn(&library.step);
 
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/macos_core.zig"),
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/macos/core.zig"),
         .target = target,
         .optimize = optimize,
-    }) });
+    });
+    test_module.addImport("shared", shared_module);
+    test_module.addImport("platform_sync", platform_sync);
+    const tests = b.addTest(.{ .root_module = test_module });
     tests.root_module.link_libc = true;
     tests.root_module.addIncludePath(b.path("macos/include"));
     configureGhostty(tests.root_module, ghostty);
     const core_test_step = b.step("test-macos-core", "Run macOS Zig core and ABI tests");
     core_test_step.dependOn(&b.addRunArtifact(tests).step);
     const helper_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/macos_pty_helper.zig"),
+        .root_source_file = b.path("src/macos/pty_helper.zig"),
         .target = target,
         .optimize = optimize,
     }) });
     helper_tests.root_module.link_libc = true;
     core_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
     const abi_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/macos_abi_test.zig"),
+        .root_source_file = b.path("src/macos/abi_test.zig"),
         .target = target,
         .optimize = optimize,
     }) });
