@@ -15,6 +15,10 @@ comptime {
 }
 
 pub fn build(b: *std.Build) void {
+    const fmt = b.addFmt(.{ .paths = &.{ "build.zig", "src" }, .check = true });
+    const fmt_step = b.step("test:fmt", "Check Zig formatting");
+    fmt_step.dependOn(&fmt.step);
+
     var target_query = b.standardTargetOptionsQueryOnly(.{});
     const target_os = target_query.os_tag orelse b.graph.host.result.os.tag;
     if (target_os == .macos and target_query.os_version_min == null) {
@@ -43,7 +47,7 @@ pub fn build(b: *std.Build) void {
     // Keep native products in separate build graphs: the macOS embedded core
     // must never inherit Win32 resources, C++ sources, or system libraries.
     if (target.result.os.tag == .macos) {
-        buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step);
+        buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step, fmt_step);
         return;
     }
     if (target.result.os.tag != .windows) {
@@ -178,6 +182,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all supported tests");
     test_step.dependOn(shared_test_step);
     test_step.dependOn(windows_test_step);
+    addCiStep(b, check_step, test_step, fmt_step);
 
     const conpty_test = b.addExecutable(.{
         .name = "conpty-resize-test",
@@ -249,7 +254,7 @@ fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     return test_step;
 }
 
-fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step) void {
+fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
     const platform_sync = b.createModule(.{
         .root_source_file = b.path("src/support/platform_sync.zig"),
         .target = target,
@@ -280,6 +285,9 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     b.installArtifact(library);
     const core_step = b.step("macos-core", "Build the macOS embedded Zig core");
     core_step.dependOn(&library.step);
+    const check_step = b.step("check", "Compile Zigonaut without installing it");
+    check_step.dependOn(&helper.step);
+    check_step.dependOn(&library.step);
 
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/macos/core.zig"),
@@ -319,6 +327,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     test_step.dependOn(shared_test_step);
     test_step.dependOn(core_test_step);
     test_step.dependOn(ui_test_step);
+    addCiStep(b, check_step, test_step, fmt_step);
 
     const swift = b.addSystemCommand(&.{ "swift", "build", "--package-path", "macos" });
     swift.step.dependOn(b.getInstallStep());
@@ -330,6 +339,13 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     run.step.dependOn(&bundle.step);
     const run_step = b.step("macos-run", "Run the native macOS frontend");
     run_step.dependOn(&run.step);
+}
+
+fn addCiStep(b: *std.Build, check_step: *std.Build.Step, test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
+    const ci_step = b.step("ci", "Run all required checks");
+    ci_step.dependOn(check_step);
+    ci_step.dependOn(test_step);
+    ci_step.dependOn(fmt_step);
 }
 
 fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) void {
