@@ -8,7 +8,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - New/close/select operations and pane focus cycling; focused panes have a native focus ring.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
-- Accurate font-derived grid resize, bounded CoreText shaping with native font fallback and colour glyphs, per-cell colours, complete underline variants and terminal cursors.
+- Accurate font-derived grid resize and retained Metal presentation. CoreText rasterizes only rows whose core-provided visual hashes changed, preserving native shaping, fallback, colour glyphs, per-cell colours, complete underline variants and terminal cursors; Metal retains and composites the result without an idle display loop.
 - Full scrollback find with match/active counts, native match highlights, wrapped previous/next navigation, viewport restoration, and Escape-to-close. Scanning runs on the serialized background queue and queries are limited to 256 UTF-8 bytes.
 - OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
 - Bounded Kitty graphics snapshots with RGBA image caching, source cropping and Retina-aware placement.
@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. The isolated AppKit renderer remains replaceable by Metal. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, pane restoration, close confirmation, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, pane restoration, close confirmation, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.

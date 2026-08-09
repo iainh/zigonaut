@@ -1,5 +1,7 @@
 import AppKit
 import CoreText
+import Metal
+import QuartzCore
 import SwiftUI
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
@@ -51,6 +53,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var colorCache: [ColorKey: NSColor] = [:]
   private var appliedPalette: TerminalPalette?
   private var appliedScrollback = -1
+  private var metalLayer: CAMetalLayer?
+  private var metalQueue: MTLCommandQueue?
+  private var metalPipeline: MTLRenderPipelineState?
+  private var retainedTexture: MTLTexture?
+  private var retainedBitmap: CGContext?
+  private var retainedRowHashes: [UInt64] = []
+  private var retainedAppearance = ""
+  private var retainedPixelSize = CGSize.zero
 
   private var font: NSFont {
     styledFont(traits: [])
@@ -165,6 +175,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     self.onFocus = onFocus
     super.init(frame: .zero)
     wantsLayer = true
+    configureMetal()
     registerForDraggedTypes([.fileURL])
     setAccessibilityElement(true)
     setAccessibilityRole(.textArea)
@@ -185,12 +196,49 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     nil
   }
 
+  private func configureMetal() {
+    guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return }
+    let source = """
+      #include <metal_stdlib>
+      using namespace metal;
+      struct VertexOut { float4 position [[position]]; float2 uv; };
+      vertex VertexOut terminal_vertex(uint id [[vertex_id]]) {
+        const float2 positions[] = { {-1,-1}, {1,-1}, {-1,1}, {1,1} };
+        const float2 coordinates[] = { {0,1}, {1,1}, {0,0}, {1,0} };
+        return { float4(positions[id], 0, 1), coordinates[id] };
+      }
+      fragment float4 terminal_fragment(VertexOut in [[stage_in]],
+          texture2d<float> image [[texture(0)]]) {
+        constexpr sampler nearest(coord::normalized, address::clamp_to_edge, filter::nearest);
+        return image.sample(nearest, in.uv);
+      }
+      """
+    guard let library = try? device.makeLibrary(source: source, options: nil),
+      let vertex = library.makeFunction(name: "terminal_vertex"),
+      let fragment = library.makeFunction(name: "terminal_fragment") else { return }
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction = vertex
+    descriptor.fragmentFunction = fragment
+    descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+    guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    let presentation = CAMetalLayer()
+    presentation.device = device
+    presentation.pixelFormat = .bgra8Unorm
+    presentation.framebufferOnly = true
+    presentation.contentsGravity = .resize
+    layer?.addSublayer(presentation)
+    metalLayer = presentation
+    metalQueue = queue
+    metalPipeline = pipeline
+  }
+
   override var acceptsFirstResponder: Bool { true }
   override var isFlipped: Bool { true }
 
   override func viewDidChangeEffectiveAppearance() {
     super.viewDidChangeEffectiveAppearance()
     updateTerminalSettings()
+    retainedAppearance = ""
     needsDisplay = true
   }
 
@@ -215,6 +263,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   override func setFrameSize(_ size: NSSize) {
     super.setFrameSize(size)
+    metalLayer?.frame = bounds
     resizeTerminal()
     needsDisplay = true
   }
@@ -249,9 +298,20 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    resizeTerminal()
+    model.refresh()
+    needsDisplay = true
     if wantsKeyboardFocus {
       window?.makeFirstResponder(self)
     }
+  }
+
+  override func viewDidChangeBackingProperties() {
+    super.viewDidChangeBackingProperties()
+    resizeTerminal()
+    model.refresh()
+    retainedPixelSize = .zero
+    needsDisplay = true
   }
 
   override func keyDown(with event: NSEvent) {
@@ -538,6 +598,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   override func draw(_ dirtyRect: NSRect) {
+    if renderMetal() { return }
     let snapshot = model.renderSnapshot
     color(snapshot.frame.background, alpha: preferences.opacity).setFill()
     bounds.fill()
@@ -561,6 +622,131 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       path.lineWidth = 3
       path.stroke()
     }
+  }
+
+  private func renderMetal() -> Bool {
+    guard let presentation = metalLayer, let queue = metalQueue, let pipeline = metalPipeline,
+      let device = presentation.device else { return false }
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    let pixelWidth = max(1, Int((bounds.width * scale).rounded(.up)))
+    let pixelHeight = max(1, Int((bounds.height * scale).rounded(.up)))
+    presentation.frame = bounds
+    presentation.contentsScale = scale
+    presentation.drawableSize = CGSize(width: pixelWidth, height: pixelHeight)
+    let pixelSize = CGSize(width: pixelWidth, height: pixelHeight)
+    if retainedBitmap == nil || retainedPixelSize != pixelSize {
+      let colorSpace = CGColorSpaceCreateDeviceRGB()
+      retainedBitmap = CGContext(data: nil, width: pixelWidth, height: pixelHeight,
+        bitsPerComponent: 8, bytesPerRow: pixelWidth * 4, space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+          | CGBitmapInfo.byteOrder32Little.rawValue)
+      retainedBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
+      retainedBitmap?.scaleBy(x: scale, y: -scale)
+      let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+        width: pixelWidth, height: pixelHeight, mipmapped: false)
+      descriptor.usage = [.shaderRead]
+      descriptor.storageMode = .shared
+      retainedTexture = device.makeTexture(descriptor: descriptor)
+      retainedPixelSize = pixelSize
+      retainedRowHashes = []
+    }
+    guard let bitmap = retainedBitmap, let texture = retainedTexture,
+      let data = bitmap.data else { return disableMetal() }
+    let snapshot = model.renderSnapshot
+    let appearance = [
+      preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
+      preferences.intenseFontWeight, String(preferences.paddingHorizontal),
+      String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
+      String(preferences.opacity), String(focused), markedText.string,
+      snapshot.images.map(\.signature).joined(separator: ","),
+    ].joined(separator: "|")
+    let forceAll = retainedAppearance != appearance
+      || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
+    let rowCount = snapshot.rowHashes.isEmpty ? gridRows : snapshot.rowHashes.count
+    let dirtyRows = forceAll ? Array(0..<rowCount) : snapshot.rowHashes.indices.filter {
+      retainedRowHashes[$0] != snapshot.rowHashes[$0]
+    }
+    if forceAll || !dirtyRows.isEmpty {
+      rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : Set(dirtyRows), in: bitmap)
+      let rowsToUpload = forceAll ? Array(0..<rowCount) : dirtyRows
+      if forceAll || rowsToUpload.isEmpty {
+        texture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
+          withBytes: data, bytesPerRow: bitmap.bytesPerRow)
+      } else {
+        for row in rowsToUpload {
+          let visualMin = row == 0 ? 0
+            : max(0, Int(floor((originY + CGFloat(row) * lineHeight) * scale)))
+          let visualMax = row == rowCount - 1 ? pixelHeight
+            : min(pixelHeight, Int(ceil((originY + CGFloat(row + 1) * lineHeight) * scale)))
+          let physicalY = visualMin
+          let height = max(0, visualMax - visualMin)
+          guard height > 0 else { continue }
+          texture.replace(region: MTLRegionMake2D(0, physicalY, pixelWidth, height), mipmapLevel: 0,
+            withBytes: data.advanced(by: physicalY * bitmap.bytesPerRow),
+            bytesPerRow: bitmap.bytesPerRow)
+        }
+      }
+      retainedRowHashes = snapshot.rowHashes
+      retainedAppearance = appearance
+    }
+    guard let drawable = presentation.nextDrawable() else { return disableMetal() }
+    guard let command = queue.makeCommandBuffer() else { return disableMetal() }
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = drawable.texture
+    pass.colorAttachments[0].loadAction = .clear
+    pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+    guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return disableMetal() }
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setFragmentTexture(texture, index: 0)
+    encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    encoder.endEncoding()
+    command.present(drawable)
+    command.commit()
+    presentation.isHidden = false
+    return true
+  }
+
+  private func disableMetal() -> Bool {
+    metalLayer?.isHidden = true
+    return false
+  }
+
+  private func rasterize(snapshot: TerminalRenderSnapshot, rowCount: Int, rows: Set<Int>?,
+    in bitmap: CGContext)
+  {
+    let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    let renderRows = rows ?? Set(0..<rowCount)
+    for row in renderRows {
+      bitmap.saveGState()
+      var rowRect = NSRect(x: 0, y: originY + CGFloat(row) * lineHeight,
+        width: bounds.width, height: lineHeight)
+      if row == 0 { rowRect.origin.y = 0; rowRect.size.height += originY }
+      if row == rowCount - 1 { rowRect.size.height = bounds.maxY - rowRect.minY }
+      NSBezierPath(rect: rowRect).addClip()
+      color(snapshot.frame.background, alpha: preferences.opacity).setFill()
+      rowRect.fill()
+      let cells = snapshot.cells.filter { $0.y == row }
+      drawEdgeColors(cells)
+      for cell in cells { drawBackground(cell) }
+      drawText(cells)
+      for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
+        drawDecorations(cell, rect: cellRect(cell))
+      }
+      drawImages(snapshot.images)
+      drawCursor(snapshot.frame)
+      drawMarkedText(snapshot.frame)
+      if focused {
+        NSColor.keyboardFocusIndicatorColor.setStroke()
+        let path = NSBezierPath(rect: bounds.insetBy(dx: 1.5, dy: 1.5))
+        path.lineWidth = 3
+        path.stroke()
+      }
+      bitmap.restoreGState()
+    }
+    NSGraphicsContext.restoreGraphicsState()
   }
 
   private func drawEdgeColors(_ cells: [TerminalRenderCell]) {

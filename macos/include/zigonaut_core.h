@@ -42,6 +42,8 @@ void zigonaut_core_selection_clear(zigonaut_core *);
 size_t zigonaut_core_copy_selection(zigonaut_core *, uint8_t *output, size_t capacity);
 size_t zigonaut_core_snapshot(zigonaut_core *, uint8_t *output, size_t capacity);
 void zigonaut_core_render_snapshot(zigonaut_core *, zigonaut_render_frame_v1 *, zigonaut_render_cell_v1 *, uint32_t cell_capacity, uint8_t *text_arena, uint32_t text_capacity, zigonaut_render_snapshot_result_v1 *);
+/* Returns the row count and copies hashes only when capacity is sufficient. */
+uint32_t zigonaut_core_render_row_hashes(zigonaut_core *, uint64_t *hashes, uint32_t capacity);
 void zigonaut_core_render_images(zigonaut_core *, zigonaut_render_image_v1 *, uint32_t image_capacity, uint8_t *rgba_arena, uint32_t rgba_capacity, zigonaut_render_images_result_v1 *);
 bool zigonaut_core_set_theme(zigonaut_core *, const zigonaut_terminal_theme_v1 *);
 bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);

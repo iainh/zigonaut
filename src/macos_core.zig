@@ -541,6 +541,32 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, frame: ?*RenderFrame, cell
     output.status = if (collector.truncated) 1 else 0;
 }
 
+/// Returns stable visual row hashes for retained host renderers. The visible
+/// cursor is folded into its row so moving or changing it invalidates both
+/// affected row tiles without requiring a separate overlay pass.
+export fn zigonaut_core_render_row_hashes(self: ?*Core, hashes: ?[*]u64, capacity: u32) u32 {
+    const core = self orelse return 0;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const required: u32 = @intCast(core.render_snapshot.row_hashes.items.len);
+    if (capacity < required) return required;
+    const output = hashes orelse return required;
+    const frame = core.render_snapshot.frame;
+    for (core.render_snapshot.row_hashes.items, 0..) |base, y| {
+        var value = base;
+        if (frame) |current| {
+            if (current.cursor_visible and current.cursor_has_position and current.cursor_y == y) {
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_x));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_columns));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_style));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor));
+            }
+        }
+        output[y] = value;
+    }
+    return required;
+}
+
 const ImageCollector = struct {
     images: []RenderImage,
     rgba: []u8,
@@ -1031,6 +1057,7 @@ test "null ABI handles are safe" {
     var progress = std.mem.zeroes(Progress);
     zigonaut_core_progress(null, &progress);
     try std.testing.expectEqual(@as(u8, 0), progress.active);
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_render_row_hashes(null, null, 0));
     zigonaut_core_destroy(null);
 }
 

@@ -102,6 +102,7 @@ struct TerminalRenderSnapshot {
   var frame = TerminalRenderFrame()
   var cells: [TerminalRenderCell] = []
   var images: [TerminalRenderImage] = []
+  var rowHashes: [UInt64] = []
 }
 
 struct TerminalRenderImage {
@@ -113,6 +114,7 @@ struct TerminalRenderImage {
   let viewportRow: Int
   let xOffset: CGFloat
   let yOffset: CGFloat
+  let signature: String
 }
 
 struct TerminalProgress: Equatable {
@@ -568,6 +570,13 @@ struct TerminalPalette: Equatable {
       )
     }
     let images = retrieveImages(core: core)
+    var rowHashes = retrieveRowHashes(core: core)
+    // Search highlighting is a host overlay rather than libghostty cell state,
+    // so include it in the retained row identity explicitly.
+    for cell in cells where rowHashes.indices.contains(cell.y) {
+      rowHashes[cell.y] = (rowHashes[cell.y] ^ UInt64(cell.x) ^ UInt64(cell.searchHighlight))
+        &* 0x100000001b3
+    }
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -580,8 +589,19 @@ struct TerminalPalette: Equatable {
         cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0
       ),
       cells: cells,
-      images: images
+      images: images,
+      rowHashes: rowHashes
     )
+  }
+
+  private func retrieveRowHashes(core: OpaquePointer) -> [UInt64] {
+    let required = Int(zigonaut_core_render_row_hashes(core, nil, 0))
+    guard required > 0, required <= currentRows else { return [] }
+    var hashes = [UInt64](repeating: 0, count: required)
+    let copied = hashes.withUnsafeMutableBufferPointer {
+      zigonaut_core_render_row_hashes(core, $0.baseAddress, UInt32($0.count))
+    }
+    return copied == required ? hashes : []
   }
 
   private func retrieveImages(core: OpaquePointer, retry: Bool = true) -> [TerminalRenderImage] {
@@ -638,7 +658,13 @@ struct TerminalPalette: Equatable {
         pixelHeight: CGFloat(placement.pixel_height) / currentScale,
         viewportColumn: Int(placement.viewport_column), viewportRow: Int(placement.viewport_row),
         xOffset: CGFloat(placement.x_offset) / currentScale,
-        yOffset: CGFloat(placement.y_offset) / currentScale)
+        yOffset: CGFloat(placement.y_offset) / currentScale,
+        signature: [placement.image_id, UInt32(truncatingIfNeeded: placement.generation),
+          UInt32(truncatingIfNeeded: placement.generation >> 32), placement.source_x,
+          placement.source_y, placement.source_width, placement.source_height,
+          placement.pixel_width, placement.pixel_height, UInt32(bitPattern: placement.viewport_column),
+          UInt32(bitPattern: placement.viewport_row), UInt32(bitPattern: placement.z),
+          placement.x_offset, placement.y_offset].map(String.init).joined(separator: ":"))
     }
     imageCache = imageCache.filter { activeKeys.contains($0.key) }
     return rendered
