@@ -57,11 +57,8 @@ jobs:
             Start-Sleep -Seconds (10 * $attempt)
           }
 
-      - name: Check formatting
-        run: zig fmt --check build.zig src
-
-      - name: Run tests
-        run: zig build test -Dtarget=${{ matrix.target }}
+      - name: Run required checks
+        run: zig build ci -Dtarget=${{ matrix.target }}
 
       - name: Install Windows App Runtime 2.3.1
         shell: pwsh
