@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import ZigonautCore
+import ZigonautRestoration
 
 extension NSColor {
   convenience init(rgb: UInt32) {
@@ -349,7 +350,7 @@ struct TerminalPalette: Equatable {
 }
 
 @MainActor final class TerminalModel: ObservableObject, Identifiable, @unchecked Sendable {
-  let id = UUID()
+  let id: UUID
   @Published private(set) var text = "Starting shell…"
   @Published private(set) var title: String
   @Published private(set) var renderSnapshot = TerminalRenderSnapshot()
@@ -391,7 +392,8 @@ struct TerminalPalette: Equatable {
     let generation: UInt64
   }
 
-  init(shell: String, preferences: Preferences) {
+  init(id: UUID = UUID(), shell: String, workingDirectory: String? = nil, preferences: Preferences) {
+    self.id = id
     self.preferences = preferences
     defaultTitle = URL(fileURLWithPath: shell).lastPathComponent
     title = defaultTitle
@@ -409,7 +411,12 @@ struct TerminalPalette: Equatable {
     box.model = self
     core = helper.path.withCString { helperPath in
       shell.withCString { shellPath in
-        zigonaut_core_create(helperPath, shellPath, terminalWake, callbackBox.toOpaque())
+        if let workingDirectory {
+          return workingDirectory.withCString { directory in
+            zigonaut_core_create(helperPath, shellPath, directory, terminalWake, callbackBox.toOpaque())
+          }
+        }
+        return zigonaut_core_create(helperPath, shellPath, nil, terminalWake, callbackBox.toOpaque())
       }
     }.map(TerminalCoreHandle.init)
     if core == nil {
@@ -846,6 +853,20 @@ struct TerminalPalette: Equatable {
       }
     }
   }
+  func restorationDirectory() -> String? {
+    guard let core else { return nil }
+    let required = Int(zigonaut_core_working_directory(core.pointer, nil, 0))
+    guard required > 0, required <= 16_384 else { return nil }
+    var bytes = [UInt8](repeating: 0, count: required)
+    guard zigonaut_core_working_directory(core.pointer, &bytes, bytes.count) == required,
+      let value = String(bytes: bytes, encoding: .utf8) else { return nil }
+    let url = URL(string: value)
+    let path = url?.isFileURL == true ? url!.path : value
+    var isDirectory: ObjCBool = false
+    guard path.hasPrefix("/"), FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+      isDirectory.boolValue else { return nil }
+    return path
+  }
   func clearSearch() {
     guard let core else { return }
     writer.async { [weak self] in
@@ -912,44 +933,59 @@ struct TerminalPalette: Equatable {
   }
 }
 
-indirect enum PaneNode: Identifiable {
+@MainActor indirect enum PaneNode {
   case leaf(TerminalModel)
-  case split(UUID, Axis, PaneNode, PaneNode)
+  case split(UUID, Axis, Double, PaneNode, PaneNode)
   var id: UUID {
     switch self {
     case .leaf(let pane): pane.id
-    case .split(let id, _, _, _): id
+    case .split(let id, _, _, _, _): id
     }
   }
   func contains(_ id: UUID) -> Bool {
     switch self {
     case .leaf(let p): p.id == id
-    case .split(_, _, let a, let b): a.contains(id) || b.contains(id)
+    case .split(_, _, _, let a, let b): a.contains(id) || b.contains(id)
     }
   }
   func replacing(_ target: UUID, with node: PaneNode) -> PaneNode {
     switch self {
     case .leaf(let p): return p.id == target ? node : self
-    case .split(let id, let axis, let a, let b):
-      return .split(id, axis, a.replacing(target, with: node), b.replacing(target, with: node))
+    case .split(let id, let axis, let ratio, let a, let b):
+      return .split(id, axis, ratio, a.replacing(target, with: node), b.replacing(target, with: node))
     }
   }
   func removing(_ target: UUID) -> PaneNode? {
     switch self {
     case .leaf(let p): return p.id == target ? nil : self
-    case .split(let id, let axis, let a, let b):
+    case .split(let id, let axis, let ratio, let a, let b):
       let na = a.removing(target)
       let nb = b.removing(target)
       if na == nil { return nb }
       if nb == nil { return na }
       guard let na, let nb else { return nil }
-      return .split(id, axis, na, nb)
+      return .split(id, axis, ratio, na, nb)
     }
   }
   var leaves: [TerminalModel] {
     switch self {
     case .leaf(let p): [p]
-    case .split(_, _, let a, let b): a.leaves + b.leaves
+    case .split(_, _, _, let a, let b): a.leaves + b.leaves
+    }
+  }
+  func settingRatio(_ target: UUID, _ ratio: Double) -> PaneNode {
+    switch self {
+    case .leaf: self
+    case .split(let id, let axis, let old, let first, let second):
+      id == target ? .split(id, axis, ratio, first, second)
+        : .split(id, axis, old, first.settingRatio(target, ratio), second.settingRatio(target, ratio))
+    }
+  }
+  var saved: SavedPaneNode {
+    switch self {
+    case .leaf(let pane): .leaf(SavedPane(id: pane.id, directory: pane.restorationDirectory()))
+    case .split(let id, let axis, let ratio, let first, let second):
+      .split(id, axis == .horizontal ? .horizontal : .vertical, ratio, first.saved, second.saved)
     }
   }
 }
@@ -960,6 +996,7 @@ indirect enum PaneNode: Identifiable {
     didSet {
       synchronizeTitleOwner()
       synchronizeFindOwner()
+      stateChanged?()
     }
   }
   @Published private(set) var title: String
@@ -971,6 +1008,7 @@ indirect enum PaneNode: Identifiable {
   private var titleObservation: AnyCancellable?
   private var progressObservation: AnyCancellable?
   let preferences: Preferences
+  var stateChanged: (() -> Void)?
   init(preferences: Preferences) {
     self.preferences = preferences
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
@@ -979,6 +1017,25 @@ indirect enum PaneNode: Identifiable {
     title = pane.title
     synchronizeTitleOwner()
   }
+  init(saved: SavedTab, preferences: Preferences) {
+    self.preferences = preferences
+    func restore(_ node: SavedPaneNode) -> PaneNode {
+      switch node {
+      case .leaf(let pane):
+        return .leaf(TerminalModel(id: pane.id, shell: preferences.validShell,
+          workingDirectory: pane.directory, preferences: preferences))
+      case .split(let id, let axis, let ratio, let first, let second):
+        return .split(id, axis == .horizontal ? .horizontal : .vertical, ratio,
+          restore(first), restore(second))
+      }
+    }
+    let restored = restore(saved.root)
+    root = restored
+    focusedPane = restored.contains(saved.focusedPane) ? saved.focusedPane : restored.leaves[0].id
+    title = restored.leaves.first?.title ?? "Terminal"
+    synchronizeTitleOwner()
+  }
+  var saved: SavedTab { SavedTab(root: root.saved, focusedPane: focusedPane ?? root.leaves[0].id) }
   var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
   func updateFindQuery(_ query: String) {
     findQuery = query
@@ -1012,14 +1069,20 @@ indirect enum PaneNode: Identifiable {
       let existing = root.leaves.first(where: { $0.id == focus })
     else { return }
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
-    root = root.replacing(focus, with: .split(UUID(), axis, .leaf(existing), .leaf(pane)))
+    root = root.replacing(focus, with: .split(UUID(), axis, 0.5, .leaf(existing), .leaf(pane)))
     focusedPane = pane.id
+    stateChanged?()
+  }
+  func setRatio(_ id: UUID, _ ratio: Double) {
+    root = root.settingRatio(id, min(max(ratio, 0.1), 0.9))
+    stateChanged?()
   }
   /// Returns false when the native window tab itself should be closed.
   func closeFocused() -> Bool {
     guard let focus = focusedPane, let remaining = root.removing(focus) else { return false }
     root = remaining
     focusedPane = remaining.leaves.first?.id
+    stateChanged?()
     return true
   }
   func focus(_ delta: Int) {

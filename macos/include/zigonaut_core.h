@@ -20,7 +20,7 @@ typedef struct { uint32_t version, size, matches; int32_t active; uint8_t status
 /* take status: 0 complete and consumed, 1 empty, 2 invalid, 3 insufficient capacity (not consumed). */
 typedef struct { uint32_t version, size, required_title, written_title, required_body, written_body; uint8_t status, reserved[7]; } zigonaut_notification_result_v1;
 typedef struct { uint32_t version, size; uint64_t token; uint32_t required_bytes, written_bytes; uint8_t clear, status, reserved[6]; } zigonaut_clipboard_result_v1;
-zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, zigonaut_wake_fn wake, void *context);
+zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, zigonaut_wake_fn wake, void *context);
 void zigonaut_core_resize(zigonaut_core *, uint16_t columns, uint16_t rows, uint16_t pixel_width, uint16_t pixel_height, uint32_t cell_width, uint32_t cell_height);
 void zigonaut_core_request_stop(zigonaut_core *);
 void zigonaut_core_write(zigonaut_core *, const uint8_t *bytes, size_t length);

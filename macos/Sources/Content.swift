@@ -17,19 +17,61 @@ struct PaneView: View {
         window.focusedPane = pane.id
       }
       .id(pane.id)
-    case .split(_, let axis, let first, let second):
-      if axis == .horizontal {
-        HSplitView {
-          PaneView(node: first, window: window)
-          PaneView(node: second, window: window)
-        }
-      } else {
-        VSplitView {
-          PaneView(node: first, window: window)
-          PaneView(node: second, window: window)
-        }
+    case .split(let id, let axis, let ratio, let first, let second):
+      RestorableSplit(axis: axis, ratio: ratio, ratioChanged: { window.setRatio(id, $0) }) {
+        PaneView(node: first, window: window)
+      } second: {
+        PaneView(node: second, window: window)
       }
     }
+  }
+}
+
+private struct SplitFirstSizeKey: PreferenceKey {
+  static let defaultValue: [UUID: CGFloat] = [:]
+  static func reduce(value: inout [UUID: CGFloat], nextValue: () -> [UUID: CGFloat]) {
+    value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+  }
+}
+
+private struct RestorableSplit<First: View, Second: View>: View {
+  private let observationID = UUID()
+  let axis: Axis
+  let ratio: Double
+  let ratioChanged: (Double) -> Void
+  @ViewBuilder let first: First
+  @ViewBuilder let second: Second
+
+  var body: some View {
+    GeometryReader { geometry in
+      let length = axis == .horizontal ? geometry.size.width : geometry.size.height
+      Group {
+        if axis == .horizontal {
+          HSplitView {
+            measuredFirst(first.frame(idealWidth: max(0, length * ratio)))
+            second
+          }
+        } else {
+          VSplitView {
+            measuredFirst(first.frame(idealHeight: max(0, length * ratio)))
+            second
+          }
+        }
+      }
+      .onPreferenceChange(SplitFirstSizeKey.self) { sizes in
+        guard length > 0, let firstLength = sizes[observationID] else { return }
+        let measured = Double(firstLength / length)
+        guard measured.isFinite, abs(measured - ratio) >= 0.005 else { return }
+        ratioChanged(measured)
+      }
+    }
+  }
+
+  private func measuredFirst<V: View>(_ view: V) -> some View {
+    view.background(GeometryReader { geometry in
+      Color.clear.preference(key: SplitFirstSizeKey.self,
+        value: [observationID: axis == .horizontal ? geometry.size.width : geometry.size.height])
+    })
   }
 }
 

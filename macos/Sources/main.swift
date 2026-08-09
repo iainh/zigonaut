@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import UserNotifications
+import ZigonautRestoration
 
 @MainActor
 final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
@@ -14,6 +15,7 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     var didClose: ((NSWindow) -> Void)?
     var addTab: ((NSWindow) -> Void)?
     var progressChanged: (() -> Void)?
+    var stateChanged: (() -> Void)?
     private var titleObservation: AnyCancellable?
     private var progressObservation: AnyCancellable?
 
@@ -53,7 +55,11 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func windowDidBecomeKey(_ notification: Notification) {
         progressChanged?()
+        stateChanged?()
     }
+
+    func windowDidMove(_ notification: Notification) { stateChanged?() }
+    func windowDidResize(_ notification: Notification) { stateChanged?() }
 
     override func newWindowForTab(_ sender: Any?) {
         guard case .terminal = kind, let window else { return }
@@ -163,6 +169,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var settingsController: ManagedWindowController?
     private var dockProgressView: DockProgressView?
     private var dockProgressTimer: Timer?
+    private var saveWorkItem: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -171,11 +178,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self, selector: #selector(showDesktopNotification(_:)),
             name: .terminalDesktopNotification, object: nil)
         buildMenu()
-        newWindow(nil)
+        if !restoreWindows() { newWindow(nil) }
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        saveState()
         dockProgressTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
@@ -210,8 +218,9 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func makeTerminalWindow() -> ManagedWindowController {
-        let model = WindowModel(preferences: preferences)
+    private func makeTerminalWindow(saved: SavedTab? = nil) -> ManagedWindowController {
+        let model = saved.map { WindowModel(saved: $0, preferences: preferences) }
+          ?? WindowModel(preferences: preferences)
         let font = preferences.terminalFont(size: preferences.fontSize)
         let cellWidth = ceil(("M" as NSString).size(withAttributes: [.font: font]).width)
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
@@ -236,12 +245,85 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.didClose = { [weak self] window in
             self?.terminalWindows.removeValue(forKey: window)
             self?.updateDockProgress()
+            self?.scheduleSave()
         }
         controller.addTab = { [weak self] window in self?.addTab(to: window) }
         controller.progressChanged = { [weak self] in self?.updateDockProgress() }
+        controller.stateChanged = { [weak self] in self?.scheduleSave() }
+        model.stateChanged = { [weak self] in self?.scheduleSave() }
         terminalWindows[window] = controller
         updateDockProgress()
         return controller
+    }
+
+    private func restoreWindows() -> Bool {
+        guard let state = RestorationStore.load() else { return false }
+        var restored = false
+        for group in state.groups {
+            var windows: [NSWindow] = []
+            for tab in group.tabs {
+                let controller = makeTerminalWindow(saved: tab)
+                if let window = controller.window { windows.append(window) }
+            }
+            guard let first = windows.first else { continue }
+            let frame = NSRectFromString(group.frame)
+            if frame.width >= 320, frame.height >= 180 {
+                let bestScreen = NSScreen.screens.max {
+                    let first = $0.visibleFrame.intersection(frame)
+                    let second = $1.visibleFrame.intersection(frame)
+                    return first.width * first.height < second.width * second.height
+                }
+                let overlap = bestScreen?.visibleFrame.intersection(frame) ?? .zero
+                let screen = overlap.width * overlap.height > 0 ? bestScreen : NSScreen.main
+                if let screen {
+                    first.setFrame(first.constrainFrameRect(frame, to: screen), display: false)
+                } else {
+                    first.setFrame(frame, display: false)
+                }
+            } else if !first.setFrameUsingName("ZigonautTerminalWindow") { first.center() }
+            for window in windows.dropFirst() { first.addTabbedWindow(window, ordered: .above) }
+            let selected = windows[min(group.selectedTab, windows.count - 1)]
+            selected.makeKeyAndOrderFront(nil)
+            restored = true
+        }
+        return restored
+    }
+
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.saveState() }
+        saveWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: item)
+    }
+
+    private func saveState() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        var seen = Set<ObjectIdentifier>()
+        var groups: [SavedWindowGroup] = []
+        for candidate in NSApp.orderedWindows where terminalWindows[candidate] != nil {
+            let tabs = candidate.tabbedWindows ?? [candidate]
+            guard let first = tabs.first else { continue }
+            let identities = tabs.map(ObjectIdentifier.init)
+            guard identities.allSatisfy({ !seen.contains($0) }) else { continue }
+            let savedWindows = tabs.compactMap { window -> (NSWindow, SavedTab)? in
+                guard let controller = terminalWindows[window],
+                  case .terminal(let model) = controller.kind else { return nil }
+                return (window, model.saved)
+            }
+            guard !savedWindows.isEmpty else { continue }
+            let selectedWindow = candidate.tabGroup?.selectedWindow ?? candidate
+            let selected = savedWindows.firstIndex { $0.0 === selectedWindow } ?? 0
+            groups.append(SavedWindowGroup(frame: NSStringFromRect(first.frame),
+              tabs: savedWindows.map(\.1),
+              selectedTab: selected))
+            seen.formUnion(identities)
+        }
+        guard !groups.isEmpty else {
+            RestorationStore.clear()
+            return
+        }
+        RestorationStore.save(SavedApplication(groups: groups))
     }
 
     private func updateDockProgress() {

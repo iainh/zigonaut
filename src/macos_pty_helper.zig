@@ -10,7 +10,8 @@ const c = @cImport({
 });
 
 fn validArguments(args: []const []const u8) bool {
-    return args.len == 2 and args[1].len > 0 and args[1][0] == '/';
+    return (args.len == 2 or args.len == 3) and args[1].len > 0 and args[1][0] == '/' and
+        (args.len == 2 or (args[2].len > 0 and args[2][0] == '/'));
 }
 
 fn changeToHomeDirectory() bool {
@@ -37,7 +38,11 @@ pub fn main(init: std.process.Init) u8 {
     if (c.tcsetattr(10, c.TCSANOW, &attributes) != 0) return 71;
     if (c.ioctl(10, c.TIOCSCTTY, @as(c_int, 0)) < 0) return 71;
     inline for (0..3) |fd| if (c.dup2(10, fd) < 0) return 71;
-    if (!changeToHomeDirectory()) return 71;
+    if (args.items.len == 3) {
+        const directory = init.gpa.dupeZ(u8, args.items[2]) catch return 71;
+        defer init.gpa.free(directory);
+        if (c.chdir(directory.ptr) != 0) return 71;
+    } else if (!changeToHomeDirectory()) return 71;
     const descriptor_limit = c.sysconf(c._SC_OPEN_MAX);
     if (descriptor_limit < 0) return 71;
     var fd: c_int = 3;
@@ -55,7 +60,9 @@ pub fn main(init: std.process.Init) u8 {
 
 test "helper accepts exactly one absolute shell path" {
     try std.testing.expect(validArguments(&.{ "helper", "/bin/zsh" }));
+    try std.testing.expect(validArguments(&.{ "helper", "/bin/zsh", "/tmp" }));
     try std.testing.expect(!validArguments(&.{"helper"}));
     try std.testing.expect(!validArguments(&.{ "helper", "zsh" }));
-    try std.testing.expect(!validArguments(&.{ "helper", "/bin/zsh", "extra" }));
+    try std.testing.expect(!validArguments(&.{ "helper", "/bin/zsh", "relative" }));
+    try std.testing.expect(!validArguments(&.{ "helper", "/bin/zsh", "/tmp", "extra" }));
 }
