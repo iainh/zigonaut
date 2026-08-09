@@ -597,7 +597,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         file.addItem(item("New Window", #selector(newWindow), "n"))
         file.addItem(item("Split Right", #selector(splitRight), "o", [.control, .shift]))
         file.addItem(item("Split Down", #selector(splitDown), "e", [.control, .shift]))
-        file.addItem(item("Close Pane or Tab", #selector(closePane), "w"))
+        file.addItem(item("Close", #selector(closePane), "w"))
         let edit = menu("Edit")
         edit.addItem(item("Copy", #selector(NSText.copy(_:)), "c"))
         edit.addItem(item("Paste", #selector(NSText.paste(_:)), "v"))
@@ -638,6 +638,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(NSText.copy(_:)):
+            return current?.focused?.hasSelection == true
+        case #selector(NSText.paste(_:)):
+            return current?.focused?.acceptsPaste == true
+                && !(NSPasteboard.general.string(forType: .string)?.isEmpty ?? true)
         case #selector(splitRight), #selector(splitDown), #selector(find):
             return current != nil
         case #selector(focusLeft): return current?.canFocus(.left) == true
@@ -646,11 +651,18 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         case #selector(focusDown): return current?.canFocus(.down) == true
         case #selector(findNext), #selector(findPrevious):
             return current?.findVisible == true && !(current?.findQuery.isEmpty ?? true)
+                && (current?.focused?.searchMatchCount ?? 0) > 0
         case #selector(previousPrompt), #selector(nextPrompt), #selector(copyCommandOutput):
             return current?.focused != nil
         case #selector(nextTab), #selector(previousTab):
             return (NSApp.keyWindow?.tabbedWindows?.count ?? 0) > 1
         case #selector(closePane):
+            if let model = current {
+                menuItem.title = model.panes.count > 1 ? "Close Pane"
+                    : (NSApp.keyWindow?.tabbedWindows?.count ?? 0) > 1 ? "Close Tab" : "Close Window"
+            } else {
+                menuItem.title = "Close Window"
+            }
             return NSApp.keyWindow != nil
         default:
             return true

@@ -1753,6 +1753,26 @@ pub const Terminal = struct {
         ));
     }
 
+    pub fn hasSelection(self: *Terminal) bool {
+        var selection = std.mem.zeroes(vt.GhosttySelection);
+        selection.size = @sizeOf(vt.GhosttySelection);
+        return vt.ghostty_terminal_get(
+            self.terminal,
+            vt.GHOSTTY_TERMINAL_DATA_SELECTION,
+            &selection,
+        ) == vt.GHOSTTY_SUCCESS;
+    }
+
+    test "selection state query does not format selected text" {
+        var terminal = try Terminal.init(8, 2, theme.rasmus);
+        defer terminal.deinit();
+        try std.testing.expect(!terminal.hasSelection());
+        try terminal.setSelection(.{ .anchor = .{ .x = 0, .y = 0 }, .focus = .{ .x = 1, .y = 0 } });
+        try std.testing.expect(terminal.hasSelection());
+        try terminal.setSelection(null);
+        try std.testing.expect(!terminal.hasSelection());
+    }
+
     pub fn beginSelectionAnchor(self: *Terminal, point: Point) !void {
         if (self.selection_anchor) |anchor| {
             try check(vt.ghostty_tracked_grid_ref_set(anchor, self.terminal, viewportPoint(point)));

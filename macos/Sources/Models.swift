@@ -957,6 +957,8 @@ struct TerminalPalette: Equatable {
   }
   func selectionEnd() { if let core { zigonaut_core_selection_end(core.pointer) } }
   func clearSelection() { if let core { zigonaut_core_selection_clear(core.pointer) } }
+  var hasSelection: Bool { core.map { zigonaut_core_has_selection($0.pointer) } ?? false }
+  var acceptsPaste: Bool { core != nil }
   func copy() {
     guard let core else { return }
     let required = zigonaut_core_copy_selection(core.pointer, nil, 0)

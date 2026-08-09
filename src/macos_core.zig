@@ -1204,6 +1204,13 @@ export fn zigonaut_core_selection_clear(self: ?*Core) void {
     core.terminal.setSelection(null) catch {};
 }
 
+export fn zigonaut_core_has_selection(self: ?*Core) bool {
+    const core = self orelse return false;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    return core.terminal.hasSelection();
+}
+
 export fn zigonaut_core_copy_selection(self: ?*Core, output: ?[*]u8, capacity: usize) usize {
     const core = self orelse return 0;
     if (output == null and capacity != 0) return 0;
@@ -1306,6 +1313,7 @@ test "null ABI handles are safe" {
     zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
     try std.testing.expect(!zigonaut_core_has_foreground_job(null));
+    try std.testing.expect(!zigonaut_core_has_selection(null));
     zigonaut_core_write(null, null, 0);
     zigonaut_core_selection_begin(null, 0, 0, 0, false);
     try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0));

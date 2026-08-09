@@ -43,6 +43,8 @@ void zigonaut_core_selection_begin(zigonaut_core *, uint16_t column, uint16_t ro
 void zigonaut_core_selection_update(zigonaut_core *, uint16_t column, uint16_t row);
 void zigonaut_core_selection_end(zigonaut_core *);
 void zigonaut_core_selection_clear(zigonaut_core *);
+/* Cheap state query; does not format or copy selected text. */
+bool zigonaut_core_has_selection(zigonaut_core *);
 /* Returns required bytes. Null/zero sizes; copying occurs only when the complete value fits. */
 size_t zigonaut_core_copy_selection(zigonaut_core *, uint8_t *output, size_t capacity);
 size_t zigonaut_core_snapshot(zigonaut_core *, uint8_t *output, size_t capacity);

@@ -7,7 +7,7 @@ import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
 
-final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
+final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMenuItemValidation {
   private struct TextStyle: Equatable {
     let rgb: UInt32
     let bold: Bool
@@ -529,6 +529,17 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     model.copy()
   }
 
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    switch menuItem.action {
+    case #selector(copy(_:)):
+      return model.hasSelection
+    case #selector(paste(_:)):
+      return model.acceptsPaste && !(NSPasteboard.general.string(forType: .string)?.isEmpty ?? true)
+    default:
+      return true
+    }
+  }
+
   private func cell(_ event: NSEvent) -> (Int, Int) {
     let point = convert(event.locationInWindow, from: nil)
     let column = min(gridColumns - 1, max(0, Int((point.x - originX) / cellWidth)))
@@ -653,7 +664,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     splitRight.target = NSApp.delegate
     let splitDown = menu.addItem(withTitle: "Split Down", action: #selector(Delegate.splitDown(_:)), keyEquivalent: "")
     splitDown.target = NSApp.delegate
-    let close = menu.addItem(withTitle: "Close Pane or Tab", action: #selector(Delegate.closePane(_:)), keyEquivalent: "")
+    let close = menu.addItem(withTitle: "Close", action: #selector(Delegate.closePane(_:)), keyEquivalent: "")
     close.target = NSApp.delegate
     return menu
   }
