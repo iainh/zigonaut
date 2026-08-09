@@ -162,34 +162,69 @@ private struct NativeSearchField: NSViewRepresentable {
   }
 }
 
+enum SettingsPane: String, CaseIterable {
+  case appearance
+  case terminal
+  case advanced
+
+  var title: String {
+    switch self {
+    case .appearance: "Appearance"
+    case .terminal: "Terminal"
+    case .advanced: "Advanced"
+    }
+  }
+
+  var symbol: String {
+    switch self {
+    case .appearance: "paintbrush"
+    case .terminal: "terminal"
+    case .advanced: "gearshape.2"
+    }
+  }
+
+  var contentSize: NSSize {
+    switch self {
+    case .appearance: NSSize(width: 650, height: 390)
+    case .terminal: NSSize(width: 700, height: 410)
+    case .advanced: NSSize(width: 700, height: 300)
+    }
+  }
+}
+
+@MainActor final class SettingsModel: ObservableObject {
+  @Published var pane: SettingsPane {
+    didSet { UserDefaults.standard.set(pane.rawValue, forKey: "settingsPane") }
+  }
+
+  init() {
+    pane = SettingsPane(rawValue: UserDefaults.standard.string(forKey: "settingsPane") ?? "")
+      ?? .appearance
+  }
+}
+
 struct SettingsView: View {
   @ObservedObject var preferences: Preferences
+  @ObservedObject var model: SettingsModel
   @State private var confirmRestore = false
 
   var body: some View {
-    VStack(spacing: 0) {
-      TabView {
-        appearance
-          .tabItem { Label("Appearance", systemImage: "paintbrush") }
-        terminal
-          .tabItem { Label("Terminal", systemImage: "terminal") }
-        advanced
-          .tabItem { Label("Advanced", systemImage: "gearshape.2") }
+    ScrollView {
+      Group {
+        switch model.pane {
+        case .appearance: appearance
+        case .terminal: terminal
+        case .advanced: advanced
+        }
       }
-      Divider()
-      HStack {
-        Button("Restore Defaults…") { confirmRestore = true }
-        Spacer()
-      }
-      .padding(16)
+      .scenePadding()
     }
-    .frame(width: 620, height: 520)
-    .confirmationDialog(
-      "Restore all settings to their defaults?", isPresented: $confirmRestore,
-      titleVisibility: .visible
-    ) {
+    .frame(width: model.pane.contentSize.width, height: model.pane.contentSize.height)
+    .alert("Restore Defaults?", isPresented: $confirmRestore) {
       Button("Restore Defaults", role: .destructive) { preferences.restoreDefaults() }
       Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("All Zigonaut settings will be returned to their original values.")
     }
   }
 
@@ -215,7 +250,7 @@ struct SettingsView: View {
           }
         }
       }
-      Section("Terminal Themes") {
+      Section("Terminal themes") {
         Picker("Dark appearance", selection: $preferences.darkTerminalTheme) {
           ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
         }
@@ -244,7 +279,7 @@ struct SettingsView: View {
         }
       }
     }
-    .formStyle(.grouped)
+    .formStyle(.columns)
   }
 
   private var terminal: some View {
@@ -257,9 +292,12 @@ struct SettingsView: View {
           }
         }
         if preferences.validShell != preferences.shellPath {
-          Label("New panes will use /bin/zsh until this is an executable absolute path.",
-            systemImage: "exclamationmark.triangle.fill")
-            .foregroundStyle(.orange)
+          Label {
+            Text("New panes will use /bin/zsh until this is an executable absolute path.")
+              .foregroundStyle(.secondary)
+          } icon: {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+          }
         }
       }
       Section("Layout") {
@@ -289,7 +327,7 @@ struct SettingsView: View {
           Text("Always Extend Edge Colours").tag("Always Extend")
         }
       }
-      Section("History and Initial Size") {
+      Section("History and initial size") {
         LabeledContent("Scrollback lines") {
           Stepper(value: $preferences.scrollbackSize, in: 0...1_000_000, step: 1_000) {
             Text(preferences.scrollbackSize.formatted())
@@ -305,19 +343,19 @@ struct SettingsView: View {
           }
         }
       }
-      Section("Palette Overrides") {
+      Section("Palette overrides") {
         PaletteEditor(preferences: preferences)
       }
       Text("Shell changes apply to new tabs and panes. Appearance changes apply immediately.")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
-    .formStyle(.grouped)
+    .formStyle(.columns)
   }
 
   private var advanced: some View {
     Form {
-      Section("Terminal Clipboard") {
+      Section("Terminal clipboard") {
         Toggle("Allow terminal applications to write to the clipboard",
           isOn: $preferences.terminalClipboardWrites)
         LabeledContent("Maximum write") {
@@ -329,19 +367,27 @@ struct SettingsView: View {
           }
         }
         .disabled(!preferences.terminalClipboardWrites)
-        Label("Terminal programs can replace the system clipboard when this is enabled.",
-          systemImage: "exclamationmark.shield.fill")
-          .foregroundStyle(.orange)
+        Label {
+          Text("Terminal programs can replace the system clipboard when this is enabled.")
+            .foregroundStyle(.secondary)
+        } icon: {
+          Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
+        }
       }
-      Section("Shell Integration") {
+      Section("Shell integration") {
         TextField("Pipe command output", text: $preferences.pipeCommandOutput,
           prompt: Text("Copy output to the clipboard"))
         Text("The command receives the latest OSC 133 command output on standard input. Leave empty to copy it.")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
+      Section("Defaults") {
+        LabeledContent("All settings") {
+          Button("Restore Defaults…") { confirmRestore = true }
+        }
+      }
     }
-    .formStyle(.grouped)
+    .formStyle(.columns)
   }
 
   private var fontFamilies: [String] {

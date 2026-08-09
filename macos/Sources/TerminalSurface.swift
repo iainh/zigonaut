@@ -633,12 +633,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     drawCursor(snapshot.frame)
     drawMarkedText(snapshot.frame)
     NSGraphicsContext.current?.restoreGraphicsState()
-    if focused {
-      NSColor.keyboardFocusIndicatorColor.setStroke()
-      let path = NSBezierPath(rect: bounds.insetBy(dx: 1.5, dy: 1.5))
-      path.lineWidth = 3
-      path.stroke()
-    }
   }
 
   private func renderMetal() -> Bool {
@@ -671,7 +665,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
       preferences.intenseFontWeight, String(preferences.paddingHorizontal),
       String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
-      String(preferences.opacity), String(focused), markedText.string,
+      String(preferences.opacity), markedText.string,
       snapshot.images.map(\.signature).joined(separator: ","),
     ].joined(separator: "|")
     let forceAll = retainedAppearance != appearance
@@ -752,12 +746,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       drawImages(snapshot.images)
       drawCursor(snapshot.frame)
       drawMarkedText(snapshot.frame)
-      if focused {
-        NSColor.keyboardFocusIndicatorColor.setStroke()
-        let path = NSBezierPath(rect: bounds.insetBy(dx: 1.5, dy: 1.5))
-        path.lineWidth = 3
-        path.stroke()
-      }
       bitmap.restoreGState()
     }
     NSGraphicsContext.restoreGraphicsState()

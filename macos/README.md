@@ -5,7 +5,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 ## Supported now
 
 - Multiple windows, native title-bar tabs, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
-- New/close/select operations and pane focus cycling; focused panes have a native focus ring.
+- New/close/select operations and pane focus cycling.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
 - Accurate font-derived grid resize and retained Metal presentation. CoreText rasterizes only rows whose core-provided visual hashes changed, preserving native shaping, fallback, colour glyphs, per-cell colours, complete underline variants and terminal cursors; Metal retains and composites the result without an idle display loop.
@@ -18,7 +18,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - Command-hover/click opens only terminal-detected links with schemes accepted by the terminal core.
 - Desktop notifications are queued (32, 4096 combined UTF-8 bytes), delivered only while no terminal window is key, and use unique identifiers. Permission is requested once by macOS.
 - OSC 9;4 progress from the focused terminal is shown with a native determinate or indeterminate Dock progress indicator, including paused and error states; stale reports expire after 15 seconds.
-- A singleton native Settings window with bundled themes, full palette overrides, normal and intense font weights, scrollback limits, initial dimensions, grid alignment, independent padding, edge colours, shell selection, restore defaults, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
+- A singleton native Settings window with a noncustomizable preference toolbar, restored pane selection, pane-specific sizing, aligned macOS forms, bundled themes, full palette overrides, normal and intense font weights, scrollback limits, initial dimensions, grid alignment, independent padding, edge colours, shell selection, restore defaults, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
 - Synchronized, bounded C ABI styled snapshots/copy and OSC terminal titles; nonblocking PTY writes on a serial background writer; callback teardown drains the reader before returning.
 - A bundled high-resolution application icon, dynamic shell/OSC window-tab titles, standard macOS application menus, frame restoration, and reopen-after-last-window behaviour.
 

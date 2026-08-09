@@ -4,10 +4,10 @@ import SwiftUI
 import UserNotifications
 
 @MainActor
-final class ManagedWindowController: NSWindowController, NSWindowDelegate {
+final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     enum Kind {
         case terminal(WindowModel)
-        case settings
+        case settings(SettingsModel)
     }
 
     let kind: Kind
@@ -28,6 +28,17 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
             progressObservation = model.$progress.sink { [weak self] _ in
                 self?.progressChanged?()
             }
+        } else if case .settings(let model) = kind {
+            configureSettingsToolbar(model)
+            titleObservation = model.$pane.sink { [weak self, weak window] pane in
+                window?.title = pane.title
+                // Let NSToolbar complete its native selection tracking before
+                // changing window geometry. The toolbar selects clicked items
+                // automatically via toolbarSelectableItemIdentifiers(_:).
+                DispatchQueue.main.async { [weak self] in
+                    self?.resizeSettingsWindow(to: pane.contentSize)
+                }
+            }
         }
     }
 
@@ -47,6 +58,59 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate {
     override func newWindowForTab(_ sender: Any?) {
         guard case .terminal = kind, let window else { return }
         addTab?(window)
+    }
+
+    private func configureSettingsToolbar(_ model: SettingsModel) {
+        guard let window else { return }
+        let toolbar = NSToolbar(identifier: "ZigonautSettingsToolbar")
+        toolbar.delegate = self
+        toolbar.allowsUserCustomization = false
+        toolbar.autosavesConfiguration = false
+        toolbar.displayMode = .iconAndLabel
+        toolbar.selectedItemIdentifier = NSToolbarItem.Identifier(model.pane.rawValue)
+        window.toolbar = toolbar
+        window.toolbarStyle = .preference
+    }
+
+    private func resizeSettingsWindow(to size: NSSize) {
+        guard let window else { return }
+        let oldFrame = window.frame
+        let newSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
+        guard oldFrame.size != newSize else { return }
+        let frame = NSRect(x: oldFrame.minX, y: oldFrame.maxY - newSize.height,
+            width: newSize.width, height: newSize.height)
+        window.setFrame(frame, display: true, animate: window.isVisible)
+    }
+
+    @objc private func selectSettingsPane(_ sender: NSToolbarItem) {
+        guard case .settings(let model) = kind,
+              let pane = SettingsPane(rawValue: sender.itemIdentifier.rawValue) else { return }
+        model.pane = pane
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        SettingsPane.allCases.map { NSToolbarItem.Identifier($0.rawValue) }
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let pane = SettingsPane(rawValue: itemIdentifier.rawValue) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.label = pane.title
+        item.paletteLabel = pane.title
+        item.toolTip = pane.title
+        item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.title)
+        item.target = self
+        item.action = #selector(selectSettingsPane(_:))
+        return item
     }
 }
 
@@ -267,16 +331,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let hosting = NSHostingController(rootView: SettingsView(preferences: preferences))
+        let model = SettingsModel()
+        let hosting = NSHostingController(rootView: SettingsView(preferences: preferences, model: model))
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Settings"
+        window.title = model.pane.title
         window.styleMask = [.titled, .closable]
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("ZigonautSettingsWindow")
-        let controller = ManagedWindowController(window: window, kind: .settings)
+        let controller = ManagedWindowController(window: window, kind: .settings(model))
         settingsController = controller
-        if !window.setFrameUsingName("ZigonautSettingsWindow") { window.center() }
+        window.center()
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
     }
