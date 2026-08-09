@@ -13,7 +13,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
 - Bounded Kitty graphics snapshots with RGBA image caching, source cropping and Retina-aware placement.
 - Precise local scrolling, copy-on-select cell/word/line selection, Option-drag rectangular selection, drag auto-scroll, shell-quoted Finder file drops, and a native terminal context menu. Terminal mouse press, release, drag, and wheel reporting remain available when requested by applications, with Shift forcing local selection.
-- Basic bounded text-area accessibility value, label, focus state, and value-change notifications.
+- Bounded native text-area accessibility for the visible terminal viewport, including UTF-16 text and line ranges, selection and cursor position, and screen geometry. The snapshot is immutable during VoiceOver queries and does not synchronously query the PTY or terminal core; terminal input remains intentionally non-settable because it cannot truthfully replace arbitrary document text.
 - Command-C copy and bracketed Command-V paste.
 - Command-hover/click opens only terminal-detected links with schemes accepted by the terminal core.
 - Desktop notifications are queued (32, 4096 combined UTF-8 bytes) and delivered only while no terminal window is key. Clicking one activates its live window, native tab, and pane; if that pane has closed, Zigonaut activates without opening a window. Permission is requested once by macOS.
@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include rich accessibility ranges and editable text semantics, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Accessibility covers the current viewport rather than scrollback. Other missing features include advanced keyboard protocol handling, command validation refinements, and release signing and packaging.

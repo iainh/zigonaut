@@ -3,6 +3,7 @@ import CoreText
 import Metal
 import QuartzCore
 import SwiftUI
+import ZigonautAccessibility
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private struct TextStyle: Equatable {
@@ -48,7 +49,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var cachedFontAdvances: [UInt: CGFloat] = [:]
   private var clipboardEnabled: Bool?
   private var clipboardMaximumBytes = 0
-  private var lastAccessibilityValue = ""
+  private var accessibilityLayout = TerminalAccessibilityLayout(
+    columns: 0, rows: 0, cells: [], cursorColumn: 0, cursorRow: 0)
   private var voiceOverObservation: NSKeyValueObservation?
   private var colorCache: [ColorKey: NSColor] = [:]
   private var appliedPalette: TerminalPalette?
@@ -116,16 +118,45 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   func updateAccessibilityValue() {
     guard NSWorkspace.shared.isVoiceOverEnabled else { return }
-    let value = String(model.accessibilityText().prefix(100_000))
-    guard value != lastAccessibilityValue else { return }
-    lastAccessibilityValue = value
-    setAccessibilityValue(value)
-    NSAccessibility.post(element: self, notification: .valueChanged)
+    let previous = accessibilityLayout
+    let next = model.accessibilityLayout()
+    accessibilityLayout = next
+    if next.string != previous.string {
+      NSAccessibility.post(element: self, notification: .valueChanged)
+    }
+    if next.selectedRanges != previous.selectedRanges {
+      NSAccessibility.post(element: self, notification: .selectedTextChanged)
+    }
   }
 
   override func accessibilityValue() -> Any? {
-    if NSWorkspace.shared.isVoiceOverEnabled { return lastAccessibilityValue }
-    return String(model.accessibilityText().prefix(100_000))
+    accessibilityLayout.string
+  }
+
+  override func accessibilityVisibleCharacterRange() -> NSRange { accessibilityLayout.fullRange }
+  override func accessibilityNumberOfCharacters() -> Int { accessibilityLayout.fullRange.length }
+  override func accessibilitySelectedText() -> String? {
+    accessibilityLayout.selectedRanges.isEmpty ? nil : accessibilityLayout.string(for: accessibilityLayout.selectedRange)
+  }
+  override func accessibilitySelectedTextRange() -> NSRange { accessibilityLayout.selectedRange }
+  override func accessibilitySelectedTextRanges() -> [NSValue]? {
+    accessibilityLayout.selectedRanges.map(NSValue.init(range:))
+  }
+  override func accessibilityInsertionPointLineNumber() -> Int {
+    accessibilityLayout.line(for: accessibilityLayout.cursorRange.location)
+  }
+  override func accessibilityString(for range: NSRange) -> String? { accessibilityLayout.string(for: range) }
+  override func accessibilityAttributedString(for range: NSRange) -> NSAttributedString? {
+    accessibilityLayout.string(for: range).map(NSAttributedString.init(string:))
+  }
+  override func accessibilityRange(forLine line: Int) -> NSRange { accessibilityLayout.range(forLine: line) }
+  override func accessibilityLine(for index: Int) -> Int { accessibilityLayout.line(for: index) }
+  override func accessibilityFrame(for range: NSRange) -> NSRect {
+    let grid = accessibilityLayout.gridRect(for: range)
+    guard !grid.isEmpty else { return .zero }
+    let local = NSRect(x: originX + grid.minX * cellWidth, y: originY + grid.minY * lineHeight,
+      width: grid.width * cellWidth, height: grid.height * lineHeight)
+    return window?.convertToScreen(convert(local, to: nil)) ?? convert(local, to: nil)
   }
 
   private var cellWidth: CGFloat {
@@ -187,7 +218,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     ) { [weak self] _, change in
       guard change.newValue == true else { return }
       DispatchQueue.main.async { [weak self] in
-        self?.model.refresh()
         self?.updateAccessibilityValue()
       }
     }

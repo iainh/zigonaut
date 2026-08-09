@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import ZigonautAccessibility
 import ZigonautCore
 import ZigonautPaneLayout
 import ZigonautRestoration
@@ -696,25 +697,19 @@ struct TerminalPalette: Equatable {
     return rendered
   }
 
-  func accessibilityText() -> String {
-    let cells = renderSnapshot.cells
-    guard !cells.isEmpty else { return text }
-    var rows = [Int: [(Int, String)]]()
-    for cell in cells where cell.occupancy != 2 {
-      rows[cell.y, default: []].append((cell.x, cell.text.isEmpty ? " " : cell.text))
-    }
-    return rows.keys.sorted().map { row in
-      var value = ""
-      var column = 0
-      for (x, cellText) in (rows[row] ?? []).sorted(by: { $0.0 < $1.0 }) {
-        if x > column {
-          value += String(repeating: " ", count: x - column)
-        }
-        value += cellText
-        column = x + 1
-      }
-      return value
-    }.joined(separator: "\n")
+  func accessibilityLayout() -> TerminalAccessibilityLayout {
+    let snapshot = renderSnapshot
+    return TerminalAccessibilityLayout(
+      columns: currentColumns,
+      rows: currentRows,
+      cells: snapshot.cells.map {
+        AccessibilityCell(column: $0.x, row: $0.y, text: $0.text,
+          columns: $0.occupancy == 1 ? 2 : 1, continuation: $0.occupancy == 2,
+          selected: $0.selected)
+      },
+      cursorColumn: snapshot.frame.cursorX,
+      cursorRow: snapshot.frame.cursorY
+    )
   }
 
   private func retrieveTitle(core: OpaquePointer) {
