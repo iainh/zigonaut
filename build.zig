@@ -19,11 +19,17 @@ pub fn build(b: *std.Build) void {
         .@"emit-lib-vt" = true,
         .simd = true,
     });
+    const shared_test_step = addSharedTests(b, target, optimize, ghostty);
 
     // Keep native products in separate build graphs: the macOS embedded core
     // must never inherit Win32 resources, C++ sources, or system libraries.
     if (target.result.os.tag == .macos) {
-        buildMacos(b, target, optimize, ghostty);
+        buildMacos(b, target, optimize, ghostty, shared_test_step);
+        return;
+    }
+    if (target.result.os.tag != .windows) {
+        const unsupported = b.addFail("Zigonaut supports only Windows and macOS targets");
+        b.getInstallStep().dependOn(&unsupported.step);
         return;
     }
 
@@ -146,8 +152,11 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("windowscodecs", .{});
     tests.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(tests.root_module, ghostty);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const windows_test_step = b.step("test-windows", "Run Windows client unit tests");
+    windows_test_step.dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run all supported tests");
+    test_step.dependOn(shared_test_step);
+    test_step.dependOn(windows_test_step);
 
     const conpty_test = b.addExecutable(.{
         .name = "conpty-resize-test",
@@ -205,7 +214,20 @@ pub fn build(b: *std.Build) void {
     conpty_benchmark_step.dependOn(&run_conpty_benchmark.step);
 }
 
-fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency) void {
+fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency) *std.Build.Step {
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/shared_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    tests.root_module.link_libc = true;
+    configureGhostty(tests.root_module, ghostty);
+    const test_step = b.step("test-shared", "Run shared terminal kernel tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
+    return test_step;
+}
+
+fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_test_step: *std.Build.Step) void {
     const helper = b.addExecutable(.{
         .name = "zigonaut-pty-helper",
         .root_module = b.createModule(.{
@@ -222,6 +244,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
     });
     module.link_libc = true;
+    module.addIncludePath(b.path("macos/include"));
     configureGhostty(module, ghostty);
     const library = b.addLibrary(.{ .name = "zigonaut-core", .root_module = module, .linkage = .dynamic });
     b.installArtifact(library);
@@ -234,16 +257,35 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
     }) });
     tests.root_module.link_libc = true;
+    tests.root_module.addIncludePath(b.path("macos/include"));
     configureGhostty(tests.root_module, ghostty);
-    const test_step = b.step("test", "Run macOS core tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const core_test_step = b.step("test-macos-core", "Run macOS Zig core and ABI tests");
+    core_test_step.dependOn(&b.addRunArtifact(tests).step);
     const helper_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/macos_pty_helper.zig"),
         .target = target,
         .optimize = optimize,
     }) });
     helper_tests.root_module.link_libc = true;
-    test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+    core_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+    const abi_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/macos_abi_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    abi_tests.root_module.link_libc = true;
+    abi_tests.root_module.addIncludePath(b.path("macos/include"));
+    const run_abi_tests = b.addRunArtifact(abi_tests);
+    run_abi_tests.step.dependOn(b.getInstallStep());
+    core_test_step.dependOn(&run_abi_tests.step);
+
+    const swift_tests = b.addSystemCommand(&.{ "swift", "test", "--package-path", "macos" });
+    const ui_test_step = b.step("test-macos-ui", "Run macOS Swift unit tests");
+    ui_test_step.dependOn(&swift_tests.step);
+    const test_step = b.step("test", "Run all supported tests");
+    test_step.dependOn(shared_test_step);
+    test_step.dependOn(core_test_step);
+    test_step.dependOn(ui_test_step);
 
     const swift = b.addSystemCommand(&.{ "swift", "build", "--package-path", "macos" });
     swift.step.dependOn(b.getInstallStep());

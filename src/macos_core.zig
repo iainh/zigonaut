@@ -14,6 +14,9 @@ const c = @cImport({
 const Terminal = @import("terminal.zig").Terminal;
 const search = @import("search.zig");
 const theme = @import("theme.zig");
+const public_abi = @cImport({
+    @cInclude("zigonaut_core.h");
+});
 extern var environ: [*:null]?[*:0]u8;
 
 const notification_queue_capacity = 32;
@@ -1307,6 +1310,30 @@ fn processGroupExists(pgid: c.pid_t) bool {
 
 fn completeCopyFits(required: usize, has_output: bool, capacity: usize) bool {
     return has_output and capacity >= required;
+}
+
+fn expectAbiCompatible(comptime ZigType: type, comptime CType: type) !void {
+    try std.testing.expectEqual(@sizeOf(CType), @sizeOf(ZigType));
+    try std.testing.expectEqual(@alignOf(CType), @alignOf(ZigType));
+    inline for (@typeInfo(ZigType).@"struct".fields) |field| {
+        if (!@hasField(CType, field.name)) @compileError("public ABI field is missing: " ++ field.name);
+        try std.testing.expectEqual(@offsetOf(CType, field.name), @offsetOf(ZigType, field.name));
+    }
+}
+
+test "Zig ABI records match the public C header" {
+    try expectAbiCompatible(RenderFrame, public_abi.zigonaut_render_frame_v1);
+    try expectAbiCompatible(RenderCell, public_abi.zigonaut_render_cell_v1);
+    try expectAbiCompatible(RenderImage, public_abi.zigonaut_render_image_v1);
+    try expectAbiCompatible(ImageGeneration, public_abi.zigonaut_image_generation_v1);
+    try expectAbiCompatible(RenderSnapshotResult, public_abi.zigonaut_render_snapshot_result_v1);
+    try expectAbiCompatible(RenderImagesResult, public_abi.zigonaut_render_images_result_v1);
+    try expectAbiCompatible(TerminalTheme, public_abi.zigonaut_terminal_theme_v1);
+    try expectAbiCompatible(Progress, public_abi.zigonaut_progress_v1);
+    try expectAbiCompatible(SearchStatus, public_abi.zigonaut_search_status_v1);
+    try expectAbiCompatible(NotificationResult, public_abi.zigonaut_notification_result_v1);
+    try expectAbiCompatible(ClipboardResult, public_abi.zigonaut_clipboard_result_v1);
+    try expectAbiCompatible(KeyEvent, public_abi.zigonaut_key_event_v1);
 }
 
 test "null ABI handles are safe" {

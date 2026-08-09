@@ -86,6 +86,22 @@ Shared code should parse theme files supplied by each host; it should not decide
 
 Configuration persistence should remain native. Windows profiles, ConPTY commands, Mica and Explorer integration do not map cleanly to macOS login shells, materials and `UserDefaults`. Share only explicit terminal-level semantics such as palette values, scrollback limits and clipboard-write policy. Do not introduce one persistence format solely for symmetry.
 
+### Capability ownership matrix
+
+Use this matrix when deciding whether new behaviour belongs in shared Zig or a native client:
+
+| Capability | Shared Zig semantics | Platform host | Native client |
+| --- | --- | --- | --- |
+| VT parsing, terminal state and input encoding | Authoritative | — | — |
+| Search, selection and link safety | Authoritative | Schedules and transports calls | Presents native controls and actions |
+| Theme colours, palette overrides and randomization | Authoritative | Locates packaged resources | Selects themes and stores preferences |
+| PTY lifecycle and process launch | Defines no common policy | POSIX PTY or ConPTY implementation | Supplies native launch choices |
+| Render snapshots and damage | Authoritative data contract | Marshals platform boundary | CoreText/Metal or DirectWrite presentation |
+| Tabs, splits and directional focus | Shares only proven value semantics | Owns session/native-view lifetime | Owns native presentation and restoration |
+| Clipboard, notifications and progress | Emits bounded terminal effects | Queues and transports effects | Applies operating-system policy and UI |
+| Accessibility and IME | Supplies stable terminal data and key encoding | Exposes bounded queries | Implements AppKit or UI Automation protocols |
+| Settings persistence | Shares normalized terminal values only | Validates host-specific values | Uses native storage and settings UI |
+
 ## Recommended target layout
 
 The first useful boundary is `shared`, `windows` and `macos`. Avoid deeper `model`, `service`, `controller` and `adapter` folders until a file has a coherent responsibility to extract.
