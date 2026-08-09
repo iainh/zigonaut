@@ -11,7 +11,7 @@ typedef struct { uint32_t version, size, text_offset, text_length; uint32_t fore
 /* data_offset/data_length reference the caller-owned RGBA arena. */
 typedef struct { uint32_t version, size, image_id; uint64_t generation; uint32_t data_offset, data_length, width, height, source_x, source_y, source_width, source_height, pixel_width, pixel_height; int32_t viewport_column, viewport_row, z; uint32_t x_offset, y_offset; uint8_t reserved[8]; } zigonaut_render_image_v1;
 /* status: 0 complete, 1 truncated, 2 error. */
-typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_snapshot_result_v1;
+typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes, required_rows, written_rows; uint8_t status; uint8_t reserved[7]; } zigonaut_render_snapshot_result_v1;
 typedef struct { uint32_t version, size, required_images, written_images, required_data_bytes, written_data_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_images_result_v1;
 typedef struct { uint32_t version, size, foreground_rgb, background_rgb, cursor_rgb; uint32_t ansi_rgb[16]; uint8_t reserved[8]; } zigonaut_terminal_theme_v1;
 typedef struct { uint32_t version, size; uint64_t generation; uint8_t active, state, value; uint8_t reserved[5]; } zigonaut_progress_v1;
@@ -41,9 +41,8 @@ void zigonaut_core_selection_clear(zigonaut_core *);
 /* Returns required bytes. Null/zero sizes; copying occurs only when the complete value fits. */
 size_t zigonaut_core_copy_selection(zigonaut_core *, uint8_t *output, size_t capacity);
 size_t zigonaut_core_snapshot(zigonaut_core *, uint8_t *output, size_t capacity);
-void zigonaut_core_render_snapshot(zigonaut_core *, zigonaut_render_frame_v1 *, zigonaut_render_cell_v1 *, uint32_t cell_capacity, uint8_t *text_arena, uint32_t text_capacity, zigonaut_render_snapshot_result_v1 *);
-/* Returns the row count and copies hashes only when capacity is sufficient. */
-uint32_t zigonaut_core_render_row_hashes(zigonaut_core *, uint64_t *hashes, uint32_t capacity);
+/* Captures one coherent viewport. Cells/text are emitted only for rows whose current visual hash differs from previous_hashes. Current hashes are copied only when every output fits. */
+void zigonaut_core_render_snapshot(zigonaut_core *, const uint64_t *previous_hashes, uint32_t previous_count, zigonaut_render_frame_v1 *, zigonaut_render_cell_v1 *, uint32_t cell_capacity, uint8_t *text_arena, uint32_t text_capacity, uint64_t *current_hashes, uint32_t hash_capacity, zigonaut_render_snapshot_result_v1 *);
 void zigonaut_core_render_images(zigonaut_core *, zigonaut_render_image_v1 *, uint32_t image_capacity, uint8_t *rgba_arena, uint32_t rgba_capacity, zigonaut_render_images_result_v1 *);
 bool zigonaut_core_set_theme(zigonaut_core *, const zigonaut_terminal_theme_v1 *);
 bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);

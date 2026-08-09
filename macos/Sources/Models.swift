@@ -363,6 +363,8 @@ struct TerminalPalette: Equatable {
   private var cellBuffer = [zigonaut_render_cell_v1](
     repeating: zigonaut_render_cell_v1(), count: 80 * 24)
   private var textBuffer = [UInt8](repeating: 0, count: 80 * 24 * 4)
+  private var hashBuffer = [UInt64](repeating: 0, count: 24)
+  private var retainedCellsByRow = [[TerminalRenderCell]]()
   private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
   private var imageCache: [ImageKey: NSImage] = [:]
@@ -514,17 +516,25 @@ struct TerminalPalette: Equatable {
   private func retrieveSnapshot(core: OpaquePointer, retry: Bool) {
     var frame = zigonaut_render_frame_v1()
     var result = zigonaut_render_snapshot_result_v1()
-    cellBuffer.withUnsafeMutableBufferPointer { cells in
-      textBuffer.withUnsafeMutableBufferPointer { bytes in
-        zigonaut_core_render_snapshot(
-          core,
-          &frame,
-          cells.baseAddress,
-          UInt32(clamping: cells.count),
-          bytes.baseAddress,
-          UInt32(clamping: bytes.count),
-          &result
-        )
+    renderSnapshot.rowHashes.withUnsafeBufferPointer { previous in
+      hashBuffer.withUnsafeMutableBufferPointer { hashes in
+        cellBuffer.withUnsafeMutableBufferPointer { cells in
+          textBuffer.withUnsafeMutableBufferPointer { bytes in
+            zigonaut_core_render_snapshot(
+              core,
+              previous.baseAddress,
+              UInt32(clamping: previous.count),
+              &frame,
+              cells.baseAddress,
+              UInt32(clamping: cells.count),
+              bytes.baseAddress,
+              UInt32(clamping: bytes.count),
+              hashes.baseAddress,
+              UInt32(clamping: hashes.count),
+              &result
+            )
+          }
+        }
       }
     }
     if retry && result.status == 1 {
@@ -537,12 +547,18 @@ struct TerminalPalette: Equatable {
       if requiredText > textBuffer.count {
         textBuffer = [UInt8](repeating: 0, count: requiredText)
       }
-      if requiredCells <= maximumCells && requiredText <= maximumTextBytes {
+      let requiredRows = Int(result.required_rows)
+      if requiredRows > hashBuffer.count {
+        hashBuffer = [UInt64](repeating: 0, count: requiredRows)
+      }
+      if requiredCells <= maximumCells && requiredText <= maximumTextBytes
+        && requiredRows <= currentRows
+      {
         retrieveSnapshot(core: core, retry: false)
         return
       }
     }
-    guard result.status != 2 else {
+    guard result.status == 0 else {
       return
     }
     let count = min(Int(result.written_cells), cellBuffer.count)
@@ -550,7 +566,7 @@ struct TerminalPalette: Equatable {
       let start = min(Int(cell.text_offset), textBuffer.count)
       let end = min(start + Int(cell.text_length), textBuffer.count)
       return TerminalRenderCell(
-        id: index,
+        id: Int(cell.y) * max(currentColumns, 1) + Int(cell.x),
         x: Int(cell.x),
         y: Int(cell.y),
         text: String(decoding: textBuffer[start..<end], as: UTF8.self),
@@ -569,14 +585,21 @@ struct TerminalPalette: Equatable {
         searchHighlight: cell.search_highlight
       )
     }
-    let images = retrieveImages(core: core)
-    var rowHashes = retrieveRowHashes(core: core)
-    // Search highlighting is a host overlay rather than libghostty cell state,
-    // so include it in the retained row identity explicitly.
-    for cell in cells where rowHashes.indices.contains(cell.y) {
-      rowHashes[cell.y] = (rowHashes[cell.y] ^ UInt64(cell.x) ^ UInt64(cell.searchHighlight))
-        &* 0x100000001b3
+    let rowCount = Int(result.written_rows)
+    let rowHashes = Array(hashBuffer.prefix(rowCount))
+    if retainedCellsByRow.count != rowCount {
+      retainedCellsByRow = [[TerminalRenderCell]](repeating: [], count: rowCount)
     }
+    var dirtyCells = [[TerminalRenderCell]](repeating: [], count: rowCount)
+    for cell in cells where dirtyCells.indices.contains(cell.y) {
+      dirtyCells[cell.y].append(cell)
+    }
+    for row in rowHashes.indices
+      where renderSnapshot.rowHashes.count != rowCount || renderSnapshot.rowHashes[row] != rowHashes[row]
+    {
+      retainedCellsByRow[row] = dirtyCells[row]
+    }
+    let images = retrieveImages(core: core)
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -588,20 +611,10 @@ struct TerminalPalette: Equatable {
         cursorStyle: frame.cursor_style,
         cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0
       ),
-      cells: cells,
+      cells: retainedCellsByRow.flatMap { $0 },
       images: images,
       rowHashes: rowHashes
     )
-  }
-
-  private func retrieveRowHashes(core: OpaquePointer) -> [UInt64] {
-    let required = Int(zigonaut_core_render_row_hashes(core, nil, 0))
-    guard required > 0, required <= currentRows else { return [] }
-    var hashes = [UInt64](repeating: 0, count: required)
-    let copied = hashes.withUnsafeMutableBufferPointer {
-      zigonaut_core_render_row_hashes(core, $0.baseAddress, UInt32($0.count))
-    }
-    return copied == required ? hashes : []
   }
 
   private func retrieveImages(core: OpaquePointer, retry: Bool = true) -> [TerminalRenderImage] {

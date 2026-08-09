@@ -139,6 +139,8 @@ pub const RenderSnapshotResult = extern struct {
     written_cells: u32,
     required_text_bytes: u32,
     written_text_bytes: u32,
+    required_rows: u32,
+    written_rows: u32,
     status: u8,
     reserved: [7]u8,
 };
@@ -456,6 +458,8 @@ const SnapshotCollector = struct {
     search_active: ?usize = null,
     viewport_offset: u64 = 0,
     truncated: bool = false,
+    dirty_rows: []const bool = &.{},
+    emit_row: bool = true,
 
     pub fn beginFrame(self: *SnapshotCollector, frame: Terminal.Frame) void {
         self.frame.* = .{
@@ -475,10 +479,13 @@ const SnapshotCollector = struct {
         };
     }
     pub fn endFrame(_: *SnapshotCollector, _: Terminal.Frame) void {}
-    pub fn beginRow(_: *SnapshotCollector, _: u16) void {}
+    pub fn beginRow(self: *SnapshotCollector, row: u16) void {
+        self.emit_row = row >= self.dirty_rows.len or self.dirty_rows[row];
+    }
     pub fn endRow(_: *SnapshotCollector, _: u16) void {}
     pub fn drawImage(_: *SnapshotCollector, _: Terminal.Image) void {}
     pub fn drawCell(self: *SnapshotCollector, cell: Terminal.Cell) void {
+        if (!self.emit_row) return;
         var length: usize = 0;
         for (cell.codepoints) |codepoint| {
             const scalar = std.math.cast(u21, codepoint) orelse {
@@ -530,11 +537,39 @@ const SnapshotCollector = struct {
     }
 };
 
+fn dirtyRows(previous: []const u64, current: []const u64, dirty: []bool) void {
+    std.debug.assert(dirty.len == current.len);
+    for (current, 0..) |hash, row| dirty[row] = previous.len != current.len or previous[row] != hash;
+}
+
+fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, matches: []const search.Match, active: ?usize, viewport_offset: u64, output: []u64) void {
+    const frame = snapshot.frame;
+    for (snapshot.row_hashes.items, 0..) |base, y| {
+        var value = base;
+        if (frame) |current| {
+            if (current.cursor_visible and current.cursor_has_position and current.cursor_y == y) {
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_x));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_columns));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_style));
+                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor));
+            }
+        }
+        const row_matches = search.matchesForRow(matches, viewport_offset + y);
+        for (row_matches.matches, row_matches.start_index..) |match, index| {
+            value = std.hash.Wyhash.hash(value, std.mem.asBytes(&match.start));
+            value = std.hash.Wyhash.hash(value, std.mem.asBytes(&match.end));
+            const highlight: u2 = if (active == index) 2 else 1;
+            value = std.hash.Wyhash.hash(value, std.mem.asBytes(&highlight));
+        }
+        output[y] = value;
+    }
+}
+
 /// Writes one coherent viewport into caller-owned arrays. Cell text refers to
 /// `text_arena` by offset/length and remains valid only while the caller retains it.
-export fn zigonaut_core_render_snapshot(self: ?*Core, frame: ?*RenderFrame, cells: ?[*]RenderCell, cell_capacity: u32, text_arena: ?[*]u8, text_capacity: u32, result: ?*RenderSnapshotResult) void {
+export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const u64, previous_count: u32, frame: ?*RenderFrame, cells: ?[*]RenderCell, cell_capacity: u32, text_arena: ?[*]u8, text_capacity: u32, current_hashes: ?[*]u64, hash_capacity: u32, result: ?*RenderSnapshotResult) void {
     const output = result orelse return;
-    output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .status = 2, .reserved = @splat(0) };
+    output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .required_rows = 0, .written_rows = 0, .status = 2, .reserved = @splat(0) };
     const core = self orelse return;
     const output_frame = frame orelse return;
     var empty_cells: [0]RenderCell = .{};
@@ -548,34 +583,39 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, frame: ?*RenderFrame, cell
     collector.search_active = core.search_active;
     collector.viewport_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
     core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
+    const row_count = core.render_snapshot.row_hashes.items.len;
+    output.required_rows = @intCast(row_count);
+    const visual = std.heap.c_allocator.alloc(u64, row_count) catch return;
+    defer std.heap.c_allocator.free(visual);
+    const dirty = std.heap.c_allocator.alloc(bool, row_count) catch return;
+    defer std.heap.c_allocator.free(dirty);
+    visualRowHashes(&core.render_snapshot, core.search_matches.items, core.search_active, collector.viewport_offset, visual);
+    const previous = if (previous_hashes) |pointer| pointer[0..previous_count] else &.{};
+    dirtyRows(previous, visual, dirty);
+    collector.dirty_rows = dirty;
     core.render_snapshot.replay(&collector);
-    output.status = if (collector.truncated) 1 else 0;
+    if (collector.truncated or hash_capacity < row_count or (row_count != 0 and current_hashes == null)) {
+        output.status = 1;
+        output.written_cells = 0;
+        output.written_text_bytes = 0;
+        return;
+    }
+    if (current_hashes) |destination| @memcpy(destination[0..row_count], visual);
+    output.written_rows = @intCast(row_count);
+    output.status = 0;
 }
 
-/// Returns stable visual row hashes for retained host renderers. The visible
-/// cursor is folded into its row so moving or changing it invalidates both
-/// affected row tiles without requiring a separate overlay pass.
-export fn zigonaut_core_render_row_hashes(self: ?*Core, hashes: ?[*]u64, capacity: u32) u32 {
-    const core = self orelse return 0;
-    core.mutex.lock();
-    defer core.mutex.unlock();
-    const required: u32 = @intCast(core.render_snapshot.row_hashes.items.len);
-    if (capacity < required) return required;
-    const output = hashes orelse return required;
-    const frame = core.render_snapshot.frame;
-    for (core.render_snapshot.row_hashes.items, 0..) |base, y| {
-        var value = base;
-        if (frame) |current| {
-            if (current.cursor_visible and current.cursor_has_position and current.cursor_y == y) {
-                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_x));
-                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_columns));
-                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_style));
-                value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor));
-            }
-        }
-        output[y] = value;
-    }
-    return required;
+test "dirty rows select changes and force a complete snapshot after resize" {
+    const current = [_]u64{ 10, 20, 30 };
+    var dirty: [3]bool = undefined;
+    dirtyRows(&.{ 10, 21, 30 }, &current, &dirty);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, false }, &dirty);
+
+    dirtyRows(&current, &current, &dirty);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, false }, &dirty);
+
+    dirtyRows(&.{ 10, 20 }, &current, &dirty);
+    try std.testing.expectEqualSlices(bool, &.{ true, true, true }, &dirty);
 }
 
 const ImageCollector = struct {
@@ -1087,7 +1127,6 @@ test "null ABI handles are safe" {
     var progress = std.mem.zeroes(Progress);
     zigonaut_core_progress(null, &progress);
     try std.testing.expectEqual(@as(u8, 0), progress.active);
-    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_render_row_hashes(null, null, 0));
     zigonaut_core_destroy(null);
 }
 
