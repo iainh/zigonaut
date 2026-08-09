@@ -226,7 +226,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             defer: false
         )
         window.title = model.title
-        window.titleVisibility = .hidden
+        window.titleVisibility = .visible
         window.titlebarSeparatorStyle = .none
         window.tabbingIdentifier = "dev.zigonaut.terminal"
         window.tabbingMode = .preferred
