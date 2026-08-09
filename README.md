@@ -174,7 +174,7 @@ Each pane owns an isolated ConPTY process and terminal state. Background readers
 
 ## Releases
 
-Portable x64 and ARM64 archives are available from [GitHub Releases](https://github.com/iainh/zigonaut/releases). The matching Windows App Runtime 2.3.1 architecture must be installed before running a release build.
+Windows x64 and ARM64 packages and a macOS ARM64 application archive are available from [GitHub Releases](https://github.com/iainh/zigonaut/releases). The matching Windows App Runtime 2.3.1 architecture must be installed before running a Windows release build. The macOS archive is currently ad-hoc signed rather than Developer ID signed and notarized.
 
 ## License
 

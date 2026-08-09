@@ -320,7 +320,15 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     run_abi_tests.step.dependOn(b.getInstallStep());
     core_test_step.dependOn(&run_abi_tests.step);
 
-    const swift_tests = b.addSystemCommand(&.{ "swift", "test", "--package-path", "macos" });
+    const swift_configuration: []const u8 = if (optimize == .Debug) "debug" else "release";
+    const swift_tests = b.addSystemCommand(&.{
+        "swift",
+        "test",
+        "--package-path",
+        "macos",
+        "--configuration",
+        swift_configuration,
+    });
     const ui_test_step = b.step("test-macos-ui", "Run macOS Swift unit tests");
     ui_test_step.dependOn(&swift_tests.step);
     const test_step = b.step("test", "Run all supported tests");
@@ -329,9 +337,16 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     test_step.dependOn(ui_test_step);
     addCiStep(b, check_step, test_step, fmt_step);
 
-    const swift = b.addSystemCommand(&.{ "swift", "build", "--package-path", "macos" });
+    const swift = b.addSystemCommand(&.{
+        "swift",
+        "build",
+        "--package-path",
+        "macos",
+        "--configuration",
+        swift_configuration,
+    });
     swift.step.dependOn(b.getInstallStep());
-    const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh" });
+    const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh", swift_configuration });
     bundle.step.dependOn(&swift.step);
     const app_step = b.step("macos-app", "Build the native macOS frontend");
     app_step.dependOn(&bundle.step);

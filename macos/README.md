@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Accessibility covers the current viewport rather than scrollback. Keyboard protocol input is routed through the shared encoder, while full IME/protocol interaction remains dependent on AppKit composition behaviour. Release signing and packaging remain outstanding.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Accessibility covers the current viewport rather than scrollback. Keyboard protocol input is routed through the shared encoder, while full IME/protocol interaction remains dependent on AppKit composition behaviour. CI packages an ad-hoc-signed ARM64 application archive; Developer ID signing and notarization remain outstanding.

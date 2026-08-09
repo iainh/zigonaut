@@ -29,6 +29,7 @@ jobs:
           curl --fail --location --retry 3 "$ZIG_URL" --output "$archive"
           echo "$ZIG_SHA256  $archive" | shasum --algorithm 256 --check
           tar -xf "$archive" -C "$RUNNER_TEMP"
+          rm -f "$archive"
           echo "$sdk" >> "$GITHUB_PATH"
           echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
           "$sdk/zig" version
@@ -44,6 +45,22 @@ jobs:
 
       - name: Run required checks
         run: zig build ci -Dtarget=aarch64-macos
+
+      - name: Build complete application bundle
+        run: zig build macos-app -Dtarget=aarch64-macos
+
+      - name: Validate application bundle
+        run: |
+          test -x zig-out/Zigonaut.app/Contents/MacOS/ZigonautMac
+          test -x zig-out/Zigonaut.app/Contents/MacOS/zigonaut-pty-helper
+          test -f zig-out/Zigonaut.app/Contents/Frameworks/libzigonaut-core.dylib
+          plutil -lint zig-out/Zigonaut.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 zig-out/Zigonaut.app
+
+      - name: Remove build caches
+        if: always()
+        run: |
+          rm -rf "$ZIG_GLOBAL_CACHE_DIR" .zig-cache macos/.build
 
   windows:
     name: Windows (${{ matrix.arch }})
