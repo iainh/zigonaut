@@ -16,6 +16,7 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     var addTab: ((NSWindow) -> Void)?
     var progressChanged: (() -> Void)?
     var stateChanged: (() -> Void)?
+    var shouldClose: ((NSWindow) -> Bool)?
     private var titleObservation: AnyCancellable?
     private var progressObservation: AnyCancellable?
 
@@ -51,6 +52,10 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         didClose?(window)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        shouldClose?(sender) ?? true
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -170,6 +175,11 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var dockProgressView: DockProgressView?
     private var dockProgressTimer: Timer?
     private var saveWorkItem: DispatchWorkItem?
+    private var confirmedWindows = Set<ObjectIdentifier>()
+    private var pendingWindows = Set<ObjectIdentifier>()
+    private var pendingPanes = Set<UUID>()
+    private var quitConfirmationPending = false
+    private var quitConfirmed = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -201,6 +211,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if quitConfirmed { return .terminateNow }
+        if quitConfirmationPending { return .terminateLater }
+        let jobs = terminalWindows.values.reduce(0) { count, controller in
+            guard case .terminal(let model) = controller.kind else { return count }
+            return count + model.foregroundJobCount
+        }
+        guard jobs > 0 else { return .terminateNow }
+        quitConfirmationPending = true
+        presentCloseAlert(jobCount: jobs, action: "Quit", window: NSApp.keyWindow) { [weak self] confirmed in
+            guard let self else { return }
+            self.quitConfirmationPending = false
+            self.quitConfirmed = confirmed
+            sender.reply(toApplicationShouldTerminate: confirmed)
+        }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -250,6 +278,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.addTab = { [weak self] window in self?.addTab(to: window) }
         controller.progressChanged = { [weak self] in self?.updateDockProgress() }
         controller.stateChanged = { [weak self] in self?.scheduleSave() }
+        controller.shouldClose = { [weak self] window in self?.shouldClose(window) ?? true }
         model.stateChanged = { [weak self] in self?.scheduleSave() }
         terminalWindows[window] = controller
         updateDockProgress()
@@ -402,8 +431,59 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             window.performClose(sender)
             return
         }
-        if !model.closeFocused() {
-            window.performClose(sender)
+        guard let pane = model.focused else { return }
+        guard !pendingPanes.contains(pane.id) else { return }
+        let close = { [weak self, weak model, weak window] in
+            guard let model else { return }
+            if !model.closePane(pane.id), let window {
+                self?.confirmedWindows.insert(ObjectIdentifier(window))
+                window.performClose(sender)
+            }
+        }
+        guard pane.hasForegroundJob else { close(); return }
+        pendingPanes.insert(pane.id)
+        presentCloseAlert(jobCount: 1, action: "Close Terminal", window: window) {
+            self.pendingPanes.remove(pane.id)
+            if $0 { close() }
+        }
+    }
+
+    private func shouldClose(_ window: NSWindow) -> Bool {
+        if quitConfirmed { return true }
+        let identity = ObjectIdentifier(window)
+        if confirmedWindows.remove(identity) != nil { return true }
+        if pendingWindows.contains(identity) { return false }
+        guard let controller = terminalWindows[window], case .terminal(let model) = controller.kind else {
+            return true
+        }
+        let jobs = model.foregroundJobCount
+        guard jobs > 0 else { return true }
+        pendingWindows.insert(identity)
+        presentCloseAlert(jobCount: jobs, action: "Close Terminal", window: window) { [weak self, weak window] confirmed in
+            guard let self else { return }
+            self.pendingWindows.remove(identity)
+            guard confirmed, let window else { return }
+            self.confirmedWindows.insert(ObjectIdentifier(window))
+            window.performClose(nil)
+        }
+        return false
+    }
+
+    private func presentCloseAlert(jobCount: Int, action: String, window: NSWindow?,
+                                   completion: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = action == "Quit" ? "Quit Zigonaut?" : "Close Terminal?"
+        alert.informativeText = jobCount == 1
+          ? "A foreground job is still running. Closing the terminal will terminate it."
+          : "\(jobCount) foreground jobs are still running. Closing these terminals will terminate them."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: action)
+        alert.buttons[1].hasDestructiveAction = true
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window) { completion($0 == .alertSecondButtonReturn) }
+        } else {
+            completion(alert.runModal() == .alertSecondButtonReturn)
         }
     }
 

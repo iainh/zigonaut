@@ -732,6 +732,20 @@ fn foregroundProcessName(core: *Core, buffer: []u8) []const u8 {
     return if (std.unicode.utf8ValidateSlice(name)) name else &.{};
 }
 
+fn isForegroundJob(shell_process_group: c.pid_t, foreground_process_group: c.pid_t) bool {
+    return shell_process_group > 0 and foreground_process_group > 0 and
+        shell_process_group != foreground_process_group;
+}
+
+/// Returns true only when the PTY foreground process group is not the login
+/// shell's process group. A missing shell or unavailable PTY state is treated
+/// as idle so an already-exited terminal never blocks closing.
+export fn zigonaut_core_has_foreground_job(self: ?*Core) bool {
+    const core = self orelse return false;
+    if (core.master < 0) return false;
+    return isForegroundJob(core.child, c.tcgetpgrp(core.master));
+}
+
 /// Returns an explicit OSC title, or the foreground process name when the
 /// shell/application has not supplied one. Copies at most `capacity` bytes.
 export fn zigonaut_core_title(self: ?*Core, output: ?[*]u8, capacity: u32) u32 {
@@ -1109,6 +1123,7 @@ fn completeCopyFits(required: usize, has_output: bool, capacity: usize) bool {
 test "null ABI handles are safe" {
     zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
+    try std.testing.expect(!zigonaut_core_has_foreground_job(null));
     zigonaut_core_write(null, null, 0);
     zigonaut_core_selection_begin(null, 0, 0, 0, false);
     try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0));
@@ -1129,6 +1144,15 @@ test "null ABI handles are safe" {
     zigonaut_core_progress(null, &progress);
     try std.testing.expectEqual(@as(u8, 0), progress.active);
     zigonaut_core_destroy(null);
+}
+
+test "foreground job classification distinguishes the login shell process group" {
+    try std.testing.expect(!isForegroundJob(42, 42));
+    try std.testing.expect(isForegroundJob(42, 84));
+    try std.testing.expect(!isForegroundJob(42, -1));
+    try std.testing.expect(!isForegroundJob(42, 0));
+    try std.testing.expect(!isForegroundJob(-1, 84));
+    try std.testing.expect(!isForegroundJob(0, 84));
 }
 
 test "notification and clipboard policies are bounded" {

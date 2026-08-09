@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, close confirmation, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.

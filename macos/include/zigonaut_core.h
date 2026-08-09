@@ -47,6 +47,8 @@ void zigonaut_core_render_images(zigonaut_core *, zigonaut_render_image_v1 *, ui
 bool zigonaut_core_set_theme(zigonaut_core *, const zigonaut_terminal_theme_v1 *);
 bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);
 void zigonaut_core_progress(zigonaut_core *, zigonaut_progress_v1 *);
+/* True only while a foreground process group other than the login shell owns the PTY. */
+bool zigonaut_core_has_foreground_job(zigonaut_core *);
 uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity);
 uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity);
 void zigonaut_core_take_notification(zigonaut_core *, uint8_t *title, uint32_t title_capacity, uint8_t *body, uint32_t body_capacity, zigonaut_notification_result_v1 *);

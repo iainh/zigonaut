@@ -456,6 +456,11 @@ struct TerminalPalette: Equatable {
       generation: result.generation, updatedAt: Date())
   }
 
+  var hasForegroundJob: Bool {
+    guard let core else { return false }
+    return zigonaut_core_has_foreground_job(core.pointer)
+  }
+
   func link(column: Int, row: Int) -> URL? {
     guard let core else { return nil }
     var bytes = [UInt8](repeating: 0, count: 2048)
@@ -1037,6 +1042,8 @@ struct TerminalPalette: Equatable {
   }
   var saved: SavedTab { SavedTab(root: root.saved, focusedPane: focusedPane ?? root.leaves[0].id) }
   var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
+  var panes: [TerminalModel] { root.leaves }
+  var foregroundJobCount: Int { panes.filter(\.hasForegroundJob).count }
   func updateFindQuery(_ query: String) {
     findQuery = query
     synchronizeFindOwner()
@@ -1079,7 +1086,12 @@ struct TerminalPalette: Equatable {
   }
   /// Returns false when the native window tab itself should be closed.
   func closeFocused() -> Bool {
-    guard let focus = focusedPane, let remaining = root.removing(focus) else { return false }
+    guard let focus = focusedPane else { return false }
+    return closePane(focus)
+  }
+  /// Returns false when removing this pane means closing the native tab.
+  func closePane(_ pane: UUID) -> Bool {
+    guard root.contains(pane), let remaining = root.removing(pane) else { return false }
     root = remaining
     focusedPane = remaining.leaves.first?.id
     stateChanged?()
