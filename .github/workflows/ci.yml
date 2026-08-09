@@ -8,6 +8,39 @@ permissions:
   contents: read
 
 jobs:
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Zig 0.16.0
+        env:
+          ZIG_URL: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
+          ZIG_SHA256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+        run: |
+          archive="$RUNNER_TEMP/zig-aarch64-macos-0.16.0.tar.xz"
+          sdk="$RUNNER_TEMP/zig-aarch64-macos-0.16.0"
+          curl --fail --location --retry 3 "$ZIG_URL" --output "$archive"
+          echo "$ZIG_SHA256  $archive" | shasum --algorithm 256 --check
+          tar -xf "$archive" -C "$RUNNER_TEMP"
+          echo "$sdk" >> "$GITHUB_PATH"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
+          "$sdk/zig" version
+
+      - name: Fetch Zig dependencies
+        run: |
+          mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
+          for attempt in 1 2 3; do
+            zig build --fetch -Dtarget=aarch64-macos && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep $((10 * attempt))
+          done
+
+      - name: Run required checks
+        run: zig build ci -Dtarget=aarch64-macos
+
   windows:
     name: Windows (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
