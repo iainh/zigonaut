@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 @preconcurrency import UserNotifications
+import ZigonautPaneLayout
 import ZigonautRestoration
 
 @MainActor
@@ -468,8 +469,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
     @objc func copyCommandOutput(_ sender: Any?) { current?.focused?.copyLastCommandOutput() }
     @objc func nextTab(_ sender: Any?) { NSApp.keyWindow?.selectNextTab(sender) }
     @objc func previousTab(_ sender: Any?) { NSApp.keyWindow?.selectPreviousTab(sender) }
-    @objc func focusNext(_ sender: Any?) { current?.focus(1) }
-    @objc func focusPrevious(_ sender: Any?) { current?.focus(-1) }
+    @objc func focusLeft(_ sender: Any?) { current?.focus(.left) }
+    @objc func focusRight(_ sender: Any?) { current?.focus(.right) }
+    @objc func focusUp(_ sender: Any?) { current?.focus(.up) }
+    @objc func focusDown(_ sender: Any?) { current?.focus(.down) }
 
     @objc func closePane(_ sender: Any?) {
         guard let window = NSApp.keyWindow else { return }
@@ -616,8 +619,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         view.addItem(item("Actual Size", #selector(zoomReset), "0"))
         view.addItem(item("Next Tab", #selector(nextTab), "}", [.command, .shift]))
         view.addItem(item("Previous Tab", #selector(previousTab), "{", [.command, .shift]))
-        view.addItem(item("Focus Right/Down", #selector(focusNext), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.control, .option]))
-        view.addItem(item("Focus Left/Up", #selector(focusPrevious), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Left", #selector(focusLeft), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Right", #selector(focusRight), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Up", #selector(focusUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Down", #selector(focusDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.control, .option]))
         view.addItem(.separator())
         view.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
         let window = menu("Window")
@@ -633,9 +638,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(splitRight), #selector(splitDown), #selector(find),
-             #selector(focusNext), #selector(focusPrevious):
+        case #selector(splitRight), #selector(splitDown), #selector(find):
             return current != nil
+        case #selector(focusLeft): return current?.canFocus(.left) == true
+        case #selector(focusRight): return current?.canFocus(.right) == true
+        case #selector(focusUp): return current?.canFocus(.up) == true
+        case #selector(focusDown): return current?.canFocus(.down) == true
         case #selector(findNext), #selector(findPrevious):
             return current?.findVisible == true && !(current?.findQuery.isEmpty ?? true)
         case #selector(previousPrompt), #selector(nextPrompt), #selector(copyCommandOutput):

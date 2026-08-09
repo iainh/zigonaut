@@ -1,6 +1,15 @@
 import AppKit
 import SwiftUI
 
+private let paneCoordinateSpace = "ZigonautContentView"
+
+private struct PaneFrameKey: PreferenceKey {
+  static let defaultValue: [UUID: CGRect] = [:]
+  static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+    value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+  }
+}
+
 struct PaneView: View {
   let node: PaneNode
   @ObservedObject var window: WindowModel
@@ -17,6 +26,10 @@ struct PaneView: View {
         window.focusedPane = pane.id
       }
       .id(pane.id)
+      .background(GeometryReader { geometry in
+        Color.clear.preference(key: PaneFrameKey.self,
+          value: [pane.id: geometry.frame(in: .named(paneCoordinateSpace))])
+      })
     case .split(let id, let axis, let ratio, let first, let second):
       RestorableSplit(axis: axis, ratio: ratio, ratioChanged: { window.setRatio(id, $0) }) {
         PaneView(node: first, window: window)
@@ -94,6 +107,8 @@ struct ContentView: View {
       PaneView(node: window.root, window: window)
     }
     .background(windowBackground)
+    .coordinateSpace(name: paneCoordinateSpace)
+    .onPreferenceChange(PaneFrameKey.self) { window.updatePaneFrames($0) }
     .preferredColorScheme(colourScheme)
     .onExitCommand {
       closeFind()

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import ZigonautCore
+import ZigonautPaneLayout
 import ZigonautRestoration
 
 extension NSColor {
@@ -1012,6 +1013,7 @@ struct TerminalPalette: Equatable {
   private weak var searchOwner: TerminalModel?
   private var titleObservation: AnyCancellable?
   private var progressObservation: AnyCancellable?
+  private var paneFrames: [UUID: CGRect] = [:]
   let preferences: Preferences
   var stateChanged: (() -> Void)?
   init(preferences: Preferences) {
@@ -1097,9 +1099,19 @@ struct TerminalPalette: Equatable {
     stateChanged?()
     return true
   }
-  func focus(_ delta: Int) {
-    let leaves = root.leaves
-    guard let p = leaves.firstIndex(where: { $0.id == focusedPane }) else { return }
-    focusedPane = leaves[(p + delta + leaves.count) % leaves.count].id
+  func updatePaneFrames(_ frames: [UUID: CGRect]) {
+    let visible = Set(root.leaves.map(\.id))
+    paneFrames = frames.filter { visible.contains($0.key) }
+  }
+  func focus(_ direction: PaneFocusDirection) {
+    guard let focusedPane,
+      let destination = DirectionalPaneFocus.destination(from: focusedPane, direction: direction,
+        frames: paneFrames, stableOrder: root.leaves.map(\.id)) else { return }
+    self.focusedPane = destination
+  }
+  func canFocus(_ direction: PaneFocusDirection) -> Bool {
+    guard let focusedPane else { return false }
+    return DirectionalPaneFocus.destination(from: focusedPane, direction: direction,
+      frames: paneFrames, stableOrder: root.leaves.map(\.id)) != nil
   }
 }

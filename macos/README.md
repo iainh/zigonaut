@@ -5,7 +5,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 ## Supported now
 
 - Multiple windows, native title-bar tabs, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
-- New/close/select operations and pane focus cycling.
+- New/close/select operations and geometric directional pane focus.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
 - Accurate font-derived grid resize and retained Metal presentation. CoreText rasterizes only rows whose core-provided visual hashes changed, preserving native shaping, fallback, colour glyphs, per-cell colours, complete underline variants and terminal cursors; Metal retains and composites the result without an idle display loop.
@@ -30,11 +30,11 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 | Split right / down | Control-Shift-O / Control-Shift-E | Matches README |
 | Close focused pane/tab | Command-W | Standard macOS convention (Windows uses Control-Shift-W) |
 | Next / previous tab | Command-Shift-] / Command-Shift-[ | Standard tab convention |
-| Focus right/down or left/up | Control-Option-Arrow | Matches README modifiers; currently presentation-order cycling |
+| Focus left/right/up/down | Control-Option-Arrow | Moves to the nearest pane in that direction |
 | Find / copy / paste | Command-F / Command-C / Command-V | Standard macOS convention |
 | Zoom in/out/reset | Command-Plus / Command-Minus / Command-0 | Standard macOS convention |
 | Settings | Command-Comma | Standard macOS convention |
 
 ## Remaining parity gaps
 
-This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include rich accessibility ranges and editable text semantics, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
