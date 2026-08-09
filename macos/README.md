@@ -16,7 +16,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - Basic bounded text-area accessibility value, label, focus state, and value-change notifications.
 - Command-C copy and bracketed Command-V paste.
 - Command-hover/click opens only terminal-detected links with schemes accepted by the terminal core.
-- Desktop notifications are queued (32, 4096 combined UTF-8 bytes), delivered only while no terminal window is key, and use unique identifiers. Permission is requested once by macOS.
+- Desktop notifications are queued (32, 4096 combined UTF-8 bytes) and delivered only while no terminal window is key. Clicking one activates its live window, native tab, and pane; if that pane has closed, Zigonaut activates without opening a window. Permission is requested once by macOS.
 - OSC 9;4 progress from the focused terminal is shown with a native determinate or indeterminate Dock progress indicator, including paused and error states; stale reports expire after 15 seconds.
 - A singleton native Settings window with a noncustomizable preference toolbar, restored pane selection, pane-specific sizing, aligned macOS forms, bundled themes, full palette overrides, normal and intense font weights, scrollback limits, initial dimensions, grid alignment, independent padding, edge colours, shell selection, restore defaults, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
 - Synchronized, bounded C ABI styled snapshots/copy and OSC terminal titles; nonblocking PTY writes on a serial background writer; callback teardown drains the reader before returning.
@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, per-notification pane focus policy, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Missing features include geometric directional pane focus, rich accessibility ranges and editable text semantics, advanced keyboard protocol handling, command validation refinements, and release signing and packaging.

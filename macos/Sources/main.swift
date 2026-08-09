@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
-import UserNotifications
+@preconcurrency import UserNotifications
 import ZigonautRestoration
 
 @MainActor
@@ -168,7 +168,14 @@ private final class DockProgressView: NSView {
 }
 
 @MainActor
-final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
+                     UNUserNotificationCenterDelegate {
+    private final class NotificationCompletion: @unchecked Sendable {
+        let handler: () -> Void
+        init(_ handler: @escaping () -> Void) { self.handler = handler }
+    }
+
+    nonisolated private static let notificationPaneKey = "paneID"
     let preferences = Preferences()
     private var terminalWindows: [NSWindow: ManagedWindowController] = [:]
     private var settingsController: ManagedWindowController?
@@ -180,6 +187,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var pendingPanes = Set<UUID>()
     private var quitConfirmationPending = false
     private var quitConfirmed = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = true
@@ -200,13 +211,48 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showDesktopNotification(_ notification: Notification) {
         guard terminalWindows.keys.allSatisfy({ !$0.isKeyWindow }),
+              let pane = notification.object as? TerminalModel,
               let title = notification.userInfo?["title"] as? String,
               let body = notification.userInfo?["body"] as? String else { return }
         let content = UNMutableNotificationContent()
         content.title = title.isEmpty ? "Zigonaut" : title
         content.body = body
+        content.userInfo[Self.notificationPaneKey] = pane.id.uuidString
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let request = response.notification.request
+        let paneValue = request.content.userInfo[Self.notificationPaneKey] as? String
+        let paneID = paneValue.flatMap(UUID.init(uuidString:))
+          ?? UUID(uuidString: request.identifier)
+        let completion = NotificationCompletion(completionHandler)
+        Task { @MainActor [weak self] in
+            self?.activate(pane: paneID)
+            center.removeDeliveredNotifications(withIdentifiers: [request.identifier])
+            completion.handler()
+        }
+    }
+
+    private func activate(pane paneID: UUID?) {
+        NSApp.activate(ignoringOtherApps: true)
+        guard let paneID,
+              let match = terminalWindows.first(where: { _, controller in
+                  guard case .terminal(let model) = controller.kind else { return false }
+                  return model.panes.contains { $0.id == paneID }
+              }) else { return }
+        let (window, controller) = match
+        guard case .terminal(let model) = controller.kind else { return }
+        model.focusedPane = paneID
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.tabGroup?.selectedWindow = window
+        controller.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
