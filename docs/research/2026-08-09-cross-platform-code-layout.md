@@ -23,7 +23,7 @@ The goal should be a **shared terminal kernel with two native clients**, not one
 
 This product split is a sound foundation. It should remain explicit rather than being replaced with platform checks scattered through application modules.
 
-One correction is needed before other targets are considered: the current top-level branch is effectively “macOS, otherwise Windows.” It should explicitly accept Windows and macOS, then reject unsupported operating systems.
+The implementation now explicitly accepts Windows and macOS, then rejects unsupported operating systems instead of treating every non-macOS target as Windows.
 
 ### The genuinely portable Zig surface is small and coherent
 
@@ -102,7 +102,7 @@ Use this matrix when deciding whether new behaviour belongs in shared Zig or a n
 | Accessibility and IME | Supplies stable terminal data and key encoding | Exposes bounded queries | Implements AppKit or UI Automation protocols |
 | Settings persistence | Shares normalized terminal values only | Validates host-specific values | Uses native storage and settings UI |
 
-## Recommended target layout
+## Implemented target layout
 
 The first useful boundary is `shared`, `windows` and `macos`. Avoid deeper `model`, `service`, `controller` and `adapter` folders until a file has a coherent responsibility to extract.
 
