@@ -27,7 +27,7 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 
 - GPU-accelerated D3D11, Direct2D, and DirectWrite rendering
 - Unicode shaping, system font fallback, color glyphs, and terminal text styles
-- Kitty graphics protocol support for in-memory PNG images
+- Kitty graphics protocol support for in-memory PNG images, with generation-keyed native image caching
 - Native IME composition and per-monitor DPI awareness
 - Mouse reporting, mode-aware keyboard input, and configurable font zoom
 - High-contrast support and a GDI fallback renderer

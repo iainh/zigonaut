@@ -168,6 +168,12 @@ pub const RenderImage = extern struct {
     reserved: [8]u8,
 };
 
+pub const ImageGeneration = extern struct {
+    image_id: u32,
+    reserved: u32,
+    generation: u64,
+};
+
 pub const RenderImagesResult = extern struct {
     version: u32,
     size: u32,
@@ -622,8 +628,19 @@ test "dirty rows select changes and force a complete snapshot after resize" {
 const ImageCollector = struct {
     images: []RenderImage,
     rgba: []u8,
+    known: []const ImageGeneration,
     result: *RenderImagesResult,
     truncated: bool = false,
+
+    fn needsPayload(self: *const ImageCollector, image_id: u32, generation: u64) bool {
+        for (self.known) |key| {
+            if (key.image_id == image_id and key.generation == generation) return false;
+        }
+        for (self.images[0..self.result.written_images]) |record| {
+            if (record.image_id == image_id and record.generation == generation) return false;
+        }
+        return true;
+    }
 
     pub fn beginFrame(_: *ImageCollector, _: Terminal.Frame) void {}
     pub fn endFrame(_: *ImageCollector, _: Terminal.Frame) void {}
@@ -632,21 +649,23 @@ const ImageCollector = struct {
     pub fn drawCell(_: *ImageCollector, _: Terminal.Cell) void {}
     pub fn drawImage(self: *ImageCollector, image: Terminal.Image) void {
         self.result.required_images +|= 1;
-        self.result.required_data_bytes +|= @intCast(image.pixels.len);
+        const include_payload = self.needsPayload(image.image_id, image.generation);
+        if (include_payload) self.result.required_data_bytes +|= @intCast(image.pixels.len);
         const image_index = self.result.written_images;
         const data_offset = self.result.written_data_bytes;
-        if (image_index >= self.images.len or data_offset + image.pixels.len > self.rgba.len) {
+        const available_data = self.rgba.len -| data_offset;
+        if (image_index >= self.images.len or (include_payload and image.pixels.len > available_data)) {
             self.truncated = true;
             return;
         }
-        @memcpy(self.rgba[data_offset..][0..image.pixels.len], image.pixels);
+        if (include_payload) @memcpy(self.rgba[data_offset..][0..image.pixels.len], image.pixels);
         self.images[image_index] = .{
             .version = 1,
             .size = @sizeOf(RenderImage),
             .image_id = image.image_id,
             .generation = image.generation,
             .data_offset = data_offset,
-            .data_length = @intCast(image.pixels.len),
+            .data_length = if (include_payload) @intCast(image.pixels.len) else 0,
             .width = image.width,
             .height = image.height,
             .source_x = image.source_x,
@@ -663,23 +682,25 @@ const ImageCollector = struct {
             .reserved = @splat(0),
         };
         self.result.written_images += 1;
-        self.result.written_data_bytes += @intCast(image.pixels.len);
+        if (include_payload) self.result.written_data_bytes += @intCast(image.pixels.len);
     }
 };
 
-/// Replays the images from the most recent coherent text snapshot. RGBA data is
-/// bounded by caller-owned storage and is copied only when a full placement fits.
-export fn zigonaut_core_render_images(self: ?*Core, images: ?[*]RenderImage, image_capacity: u32, rgba_arena: ?[*]u8, rgba_capacity: u32, result: ?*RenderImagesResult) void {
+/// Replays current placements and emits one RGBA payload for each generation not
+/// listed by the host. All arrays are bounded and each placement is atomic.
+export fn zigonaut_core_render_images(self: ?*Core, known_generations: ?[*]const ImageGeneration, known_count: u32, images: ?[*]RenderImage, image_capacity: u32, rgba_arena: ?[*]u8, rgba_capacity: u32, result: ?*RenderImagesResult) void {
     const output = result orelse return;
     output.* = .{ .version = 1, .size = @sizeOf(RenderImagesResult), .required_images = 0, .written_images = 0, .required_data_bytes = 0, .written_data_bytes = 0, .status = 2, .reserved = @splat(0) };
     const core = self orelse return;
     var empty_images: [0]RenderImage = .{};
     var empty_rgba: [0]u8 = .{};
+    var empty_known: [0]ImageGeneration = .{};
+    const known_slice = if (known_generations) |pointer| pointer[0..known_count] else if (known_count == 0) empty_known[0..] else return;
     const image_slice = if (images) |pointer| pointer[0..image_capacity] else if (image_capacity == 0) empty_images[0..] else return;
     const rgba_slice = if (rgba_arena) |pointer| pointer[0..rgba_capacity] else if (rgba_capacity == 0) empty_rgba[0..] else return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    var collector = ImageCollector{ .images = image_slice, .rgba = rgba_slice, .result = output };
+    var collector = ImageCollector{ .images = image_slice, .rgba = rgba_slice, .known = known_slice, .result = output };
     core.render_snapshot.replay(&collector);
     output.status = if (collector.truncated) 1 else 0;
 }
@@ -1135,7 +1156,7 @@ test "null ABI handles are safe" {
     zigonaut_core_take_clipboard_write(null, null, 0, &clipboard);
     try std.testing.expectEqual(@as(u8, 2), clipboard.status);
     var images = std.mem.zeroes(RenderImagesResult);
-    zigonaut_core_render_images(null, null, 0, null, 0, &images);
+    zigonaut_core_render_images(null, null, 0, null, 0, null, 0, &images);
     try std.testing.expectEqual(@as(u8, 2), images.status);
     var terminal_theme = std.mem.zeroes(TerminalTheme);
     try std.testing.expect(!zigonaut_core_set_theme(null, &terminal_theme));
@@ -1262,7 +1283,7 @@ test "image collector preserves placements and rejects partial RGBA copies" {
     var records: [1]RenderImage = undefined;
     var short_rgba: [3]u8 = undefined;
     var result = std.mem.zeroes(RenderImagesResult);
-    var collector = ImageCollector{ .images = &records, .rgba = &short_rgba, .result = &result };
+    var collector = ImageCollector{ .images = &records, .rgba = &short_rgba, .known = &.{}, .result = &result };
     collector.drawImage(image);
     try std.testing.expect(collector.truncated);
     try std.testing.expectEqual(@as(u32, 1), result.required_images);
@@ -1271,7 +1292,7 @@ test "image collector preserves placements and rejects partial RGBA copies" {
 
     var rgba: [4]u8 = undefined;
     result = std.mem.zeroes(RenderImagesResult);
-    collector = .{ .images = &records, .rgba = &rgba, .result = &result };
+    collector = .{ .images = &records, .rgba = &rgba, .known = &.{}, .result = &result };
     collector.drawImage(image);
     try std.testing.expectEqualSlices(u8, &pixels, &rgba);
     try std.testing.expectEqual(@as(u32, 7), records[0].image_id);
@@ -1279,6 +1300,29 @@ test "image collector preserves placements and rejects partial RGBA copies" {
     try std.testing.expectEqual(@as(i32, -1), records[0].viewport_column);
     try std.testing.expectEqual(@as(u32, 20), records[0].pixel_width);
     try std.testing.expectEqual(@as(i32, 5), records[0].z);
+}
+
+test "image collector emits unknown generations once and always emits placements" {
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+    const base = Terminal.Image{ .image_id = 7, .generation = 9, .pixels = &pixels, .width = 1, .height = 1, .source_x = 0, .source_y = 0, .source_width = 1, .source_height = 1, .pixel_width = 1, .pixel_height = 1, .viewport_col = 0, .viewport_row = 0, .x_offset = 0, .y_offset = 0, .z = 0 };
+    var records: [3]RenderImage = undefined;
+    var rgba: [8]u8 = undefined;
+    var result = std.mem.zeroes(RenderImagesResult);
+    const known = [_]ImageGeneration{.{ .image_id = 8, .reserved = 0, .generation = 1 }};
+    var collector = ImageCollector{ .images = &records, .rgba = &rgba, .known = &known, .result = &result };
+    collector.drawImage(base);
+    var duplicate = base;
+    duplicate.viewport_col = 2;
+    collector.drawImage(duplicate);
+    var cached = base;
+    cached.image_id = 8;
+    cached.generation = 1;
+    collector.drawImage(cached);
+    try std.testing.expectEqual(@as(u32, 3), result.written_images);
+    try std.testing.expectEqual(@as(u32, 4), result.required_data_bytes);
+    try std.testing.expectEqual(@as(u32, 4), records[0].data_length);
+    try std.testing.expectEqual(@as(u32, 0), records[1].data_length);
+    try std.testing.expectEqual(@as(u32, 0), records[2].data_length);
 }
 
 test "null search and mouse APIs and bounded queries are safe" {

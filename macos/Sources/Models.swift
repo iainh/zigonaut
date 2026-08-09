@@ -633,10 +633,16 @@ struct TerminalPalette: Equatable {
 
   private func retrieveImages(core: OpaquePointer, retry: Bool = true) -> [TerminalRenderImage] {
     var result = zigonaut_render_images_result_v1()
-    imageBuffer.withUnsafeMutableBufferPointer { images in
-      imageData.withUnsafeMutableBufferPointer { bytes in
-        zigonaut_core_render_images(core, images.baseAddress, UInt32(clamping: images.count),
-          bytes.baseAddress, UInt32(clamping: bytes.count), &result)
+    var knownGenerations = imageCache.keys.map {
+      zigonaut_image_generation_v1(image_id: $0.id, reserved: 0, generation: $0.generation)
+    }
+    knownGenerations.withUnsafeMutableBufferPointer { known in
+      imageBuffer.withUnsafeMutableBufferPointer { images in
+        imageData.withUnsafeMutableBufferPointer { bytes in
+          zigonaut_core_render_images(core, known.baseAddress, UInt32(clamping: known.count),
+            images.baseAddress, UInt32(clamping: images.count), bytes.baseAddress,
+            UInt32(clamping: bytes.count), &result)
+        }
       }
     }
     if retry && result.status == 1 {
@@ -652,30 +658,32 @@ struct TerminalPalette: Equatable {
         return retrieveImages(core: core, retry: false)
       }
     }
-    guard result.status != 2 else { return [] }
+    guard result.status == 0 else { return [] }
     var activeKeys = Set<ImageKey>()
-    let rendered = imageBuffer.prefix(min(Int(result.written_images), imageBuffer.count)).compactMap { placement -> TerminalRenderImage? in
+    let placements = imageBuffer.prefix(min(Int(result.written_images), imageBuffer.count))
+    // Install every payload before resolving placements, so duplicate records
+    // remain valid even if the payload-bearing record ordering changes.
+    for placement in placements where placement.data_length > 0 {
+      let key = ImageKey(id: placement.image_id, generation: placement.generation)
+      let start = Int(placement.data_offset)
+      let end = start + Int(placement.data_length)
+      guard start >= 0, end <= imageData.count, placement.width > 0, placement.height > 0,
+        Int(placement.data_length) == Int(placement.width) * Int(placement.height) * 4 else { return [] }
+      let data = Data(imageData[start..<end]) as CFData
+      guard let provider = CGDataProvider(data: data),
+        let value = CGImage(width: Int(placement.width), height: Int(placement.height),
+          bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(placement.width) * 4,
+          space: CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+          provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+      else { return [] }
+      imageCache[key] = NSImage(cgImage: value,
+        size: NSSize(width: Int(placement.width), height: Int(placement.height)))
+    }
+    let rendered = placements.compactMap { placement -> TerminalRenderImage? in
       let key = ImageKey(id: placement.image_id, generation: placement.generation)
       activeKeys.insert(key)
-      let image: NSImage
-      if let cached = imageCache[key] {
-        image = cached
-      } else {
-        let start = Int(placement.data_offset)
-        let end = start + Int(placement.data_length)
-        guard start >= 0, end <= imageData.count, placement.width > 0, placement.height > 0,
-          Int(placement.data_length) == Int(placement.width) * Int(placement.height) * 4 else { return nil }
-        let data = Data(imageData[start..<end]) as CFData
-        guard let provider = CGDataProvider(data: data),
-          let value = CGImage(width: Int(placement.width), height: Int(placement.height),
-            bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(placement.width) * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
-            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
-        else { return nil }
-        image = NSImage(cgImage: value, size: NSSize(width: Int(placement.width), height: Int(placement.height)))
-        imageCache[key] = image
-      }
+      guard let image = imageCache[key] else { return nil }
       return TerminalRenderImage(
         image: image,
         source: NSRect(x: Int(placement.source_x),
@@ -693,6 +701,7 @@ struct TerminalPalette: Equatable {
           UInt32(bitPattern: placement.viewport_row), UInt32(bitPattern: placement.z),
           placement.x_offset, placement.y_offset].map(String.init).joined(separator: ":"))
     }
+    guard rendered.count == placements.count else { return [] }
     imageCache = imageCache.filter { activeKeys.contains($0.key) }
     return rendered
   }
