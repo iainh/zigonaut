@@ -1,9 +1,11 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreText
 import Metal
 import QuartzCore
 import SwiftUI
 import ZigonautAccessibility
+import ZigonautCore
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private struct TextStyle: Equatable {
@@ -63,6 +65,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   private var retainedRowHashes: [UInt64] = []
   private var retainedAppearance = ""
   private var retainedPixelSize = CGSize.zero
+  private var encodedKeys = Set<UInt16>()
+  private var pressedModifiers = Set<UInt16>()
+  private var pendingKeyEvent: NSEvent?
+  private var pendingKeyUsedMarkedText = false
 
   private var font: NSFont {
     styledFont(traits: [])
@@ -280,6 +286,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   override func resignFirstResponder() -> Bool {
+    clearEncodedKeys()
     needsDisplay = true
     return true
   }
@@ -331,6 +338,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   override func flagsChanged(with event: NSEvent) {
     updateLinkCursor(event.modifierFlags)
+    let code = event.keyCode
+    guard Self.modifierKeyCodes.contains(code) else { return }
+    let releasing = pressedModifiers.contains(code)
+    if releasing { pressedModifiers.remove(code) } else { pressedModifiers.insert(code) }
+    sendKey(event, action: releasing ? 2 : 0, text: "")
   }
 
   private func updateLinkCursor(_ flags: NSEvent.ModifierFlags) {
@@ -345,6 +357,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   override func viewDidMoveToWindow() {
     super.viewDidMoveToWindow()
+    clearEncodedKeys()
     resizeTerminal()
     model.refresh()
     needsDisplay = true
@@ -362,30 +375,100 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
   }
 
   override func keyDown(with event: NSEvent) {
-    if !event.modifierFlags.contains(.command),
-      event.modifierFlags.contains(.control),
-      let characters = event.characters,
-      !characters.isEmpty
-    {
-      model.write(characters)
+    // Command equivalents belong to menus and the responder chain. Text input
+    // stays with NSTextInputClient unless it is a physical key we can describe
+    // without pre-empting IME/dead-key composition.
+    if event.modifierFlags.contains(.command) {
+      super.keyDown(with: event)
       return
     }
-    if let sequence = sequence(event) {
-      model.write(sequence)
-    } else {
+    guard Self.supportedKeyCodes.contains(event.keyCode) else {
       interpretKeyEvents([event])
+      return
     }
+    if Self.nonTextKeyCodes.contains(event.keyCode) {
+      sendKey(event, action: event.isARepeat ? 1 : 0, text: event.characters ?? "")
+      encodedKeys.insert(event.keyCode)
+      return
+    }
+    // AppKit calls insertText synchronously for simple committed text. Keeping
+    // this pending only across interpretation lets IME own composition while
+    // still associating ordinary printable commits with their physical key.
+    pendingKeyEvent = event
+    pendingKeyUsedMarkedText = hasMarkedText()
+    interpretKeyEvents([event])
+    pendingKeyEvent = nil
+    pendingKeyUsedMarkedText = false
+  }
+
+  override func keyUp(with event: NSEvent) {
+    guard encodedKeys.remove(event.keyCode) != nil else { return }
+    sendKey(event, action: 2, text: "")
+  }
+
+  private static let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62]
+  private static let nonTextKeyCodes: Set<UInt16> = Set(
+    [36, 48, 51, 53, 71, 76, 114, 115, 116, 117, 119, 121, 123, 124, 125, 126]
+      + Array(96...113) + Array(118...122) + Array(131...134))
+  private static let supportedKeyCodes: Set<UInt16> = Set(0...62).subtracting([52])
+    .union([65, 67, 69, 71, 75, 76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92,
+      93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 109, 111, 113,
+      114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 131, 132, 133, 134])
+
+  private func sendKey(_ event: NSEvent, action: UInt8, text: String) {
+    var modifiers: UInt16 = 0
+    if event.modifierFlags.contains(.shift) { modifiers |= 1 }
+    if event.modifierFlags.contains(.control) { modifiers |= 2 }
+    if event.modifierFlags.contains(.option) { modifiers |= 4 }
+    if event.modifierFlags.contains(.command) { modifiers |= 8 }
+    let unshifted = Self.unshiftedCodepoint(event.keyCode)
+    let bytes = Array(text.utf8.prefix(64))
+    var consumed: UInt16 = 0
+    if let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1, unshifted != 0,
+      scalar.value != unshifted
+    {
+      if event.modifierFlags.contains(.shift) { consumed |= 1 }
+      if event.modifierFlags.contains(.option) { consumed |= 4 }
+    }
+    model.sendKey(keyCode: event.keyCode, modifiers: modifiers, consumedModifiers: consumed,
+      action: action, unshiftedCodepoint: unshifted, utf8: bytes)
+  }
+
+  private static func unshiftedCodepoint(_ keyCode: UInt16) -> UInt32 {
+    guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+      let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return 0 }
+    let data = unsafeBitCast(raw, to: CFData.self)
+    guard let bytes = CFDataGetBytePtr(data) else { return 0 }
+    let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+    var deadKey: UInt32 = 0
+    var length = 0
+    var characters = [UniChar](repeating: 0, count: 4)
+    let status = UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown), 0,
+      UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKey,
+      characters.count, &length, &characters)
+    guard status == noErr, length == 1 else { return 0 }
+    let scalar = UnicodeScalar(characters[0])
+    return scalar.map(\.value) ?? 0
   }
 
   func insertText(_ value: Any, replacementRange: NSRange) {
     let string = (value as? NSAttributedString)?.string ?? (value as? String) ?? ""
+    let wasMarked = hasMarkedText() || pendingKeyUsedMarkedText
     markedText = NSMutableAttributedString()
     markedSelection = NSRange(location: NSNotFound, length: 0)
-    if !string.isEmpty { model.write(string) }
+    if !string.isEmpty, let event = pendingKeyEvent, !wasMarked {
+      let text = event.modifierFlags.contains(.control) && !event.modifierFlags.contains(.option)
+        ? (event.charactersIgnoringModifiers ?? string) : string
+      sendKey(event, action: event.isARepeat ? 1 : 0, text: text)
+      encodedKeys.insert(event.keyCode)
+    } else if !string.isEmpty {
+      model.write(string)
+    }
     needsDisplay = true
   }
 
   func setMarkedText(_ value: Any, selectedRange: NSRange, replacementRange: NSRange) {
+    if pendingKeyEvent != nil { pendingKeyUsedMarkedText = true }
     if let attributed = value as? NSAttributedString {
       markedText = NSMutableAttributedString(attributedString: attributed)
     } else {
@@ -399,6 +482,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     markedText = NSMutableAttributedString()
     markedSelection = NSRange(location: NSNotFound, length: 0)
     needsDisplay = true
+  }
+
+  private func clearEncodedKeys() {
+    encodedKeys.removeAll()
+    pressedModifiers.removeAll()
+    pendingKeyEvent = nil
+    pendingKeyUsedMarkedText = false
   }
 
   func hasMarkedText() -> Bool { markedText.length > 0 }
@@ -609,26 +699,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       paddingLeft: Int(originX),
       paddingRight: Int(max(0, bounds.width - originX - CGFloat(gridColumns) * cellWidth)),
       modifiers: modifiers, pressed: pressed)
-  }
-
-  private func sequence(_ event: NSEvent) -> String? {
-    let final: String
-    switch event.keyCode {
-    case 36, 76: return "\r"
-    case 48: return "\t"
-    case 51: return "\u{7f}"
-    case 53: return "\u{1b}"
-    case 123: final = "D"
-    case 124: final = "C"
-    case 125: final = "B"
-    case 126: final = "A"
-    default: return nil
-    }
-    var modifier = 1
-    if event.modifierFlags.contains(.shift) { modifier += 1 }
-    if event.modifierFlags.contains(.option) { modifier += 2 }
-    if event.modifierFlags.contains(.control) { modifier += 4 }
-    return modifier == 1 ? "\u{1b}[\(final)" : "\u{1b}[1;\(modifier)\(final)"
   }
 
   private func color(_ rgb: UInt32, alpha: CGFloat = 1) -> NSColor {

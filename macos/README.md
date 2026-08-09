@@ -7,7 +7,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - Multiple windows, native title-bar tabs, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
 - New/close/select operations and geometric directional pane focus.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
-- Keyboard terminal input and IME marked-text composition with candidate windows positioned at the terminal cursor.
+- Physical press/repeat/release input through the core terminal key encoder, including enhanced keyboard protocols, Apple ANSI/ISO/JIS keys, navigation, keypad, modifiers, and F1–F20. AppKit still owns menu equivalents, IME/dead-key composition, and committed text, with candidate windows positioned at the terminal cursor.
 - Accurate font-derived grid resize and retained Metal presentation. CoreText rasterizes only rows whose core-provided visual hashes changed, preserving native shaping, fallback, colour glyphs, per-cell colours, complete underline variants and terminal cursors; Metal retains and composites the result without an idle display loop.
 - Full scrollback find with match/active counts, native match highlights, wrapped previous/next navigation, viewport restoration, and Escape-to-close. Scanning runs on the serialized background queue and queries are limited to 256 UTF-8 bytes.
 - OSC 133 prompt navigation and copy-or-pipe command output, with pipe commands started in the OSC 7-reported directory.
@@ -37,4 +37,4 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Remaining parity gaps
 
-This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Accessibility covers the current viewport rather than scrollback. Other missing features include advanced keyboard protocol handling, command validation refinements, and release signing and packaging.
+This is not feature parity. Closing panes, tabs, windows, or the application now uses native confirmation only when foreground jobs would be terminated. Accessibility covers the current viewport rather than scrollback. Keyboard protocol input is routed through the shared encoder, while full IME/protocol interaction remains dependent on AppKit composition behaviour. Other missing features include command validation refinements and release signing and packaging.

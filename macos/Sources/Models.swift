@@ -772,6 +772,26 @@ struct TerminalPalette: Equatable {
   }
   func write(_ value: String) { enqueue(value, paste: false) }
   func paste(_ value: String) { enqueue(value, paste: true) }
+  func sendKey(keyCode: UInt16, modifiers: UInt16, consumedModifiers: UInt16, action: UInt8,
+    unshiftedCodepoint: UInt32, utf8: [UInt8])
+  {
+    guard let core else { return }
+    writer.async {
+      utf8.withUnsafeBufferPointer { buffer in
+        var event = zigonaut_key_event_v1()
+        event.version = 1
+        event.size = UInt32(MemoryLayout<zigonaut_key_event_v1>.size)
+        event.key_code = keyCode
+        event.modifiers = modifiers
+        event.consumed_modifiers = consumedModifiers
+        event.utf8_length = UInt16(buffer.count)
+        event.action = action
+        event.unshifted_codepoint = unshiftedCodepoint
+        event.utf8 = buffer.baseAddress
+        _ = zigonaut_core_key(core.pointer, &event)
+      }
+    }
+  }
   private func enqueue(_ value: String, paste: Bool) {
     guard let core else { return }
     let bytes = Array(value.utf8)

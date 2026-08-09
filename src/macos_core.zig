@@ -20,6 +20,7 @@ const notification_queue_capacity = 32;
 const notification_max_bytes = 4096;
 const clipboard_queue_capacity = 16;
 const clipboard_default_max_bytes: u32 = 1024 * 1024;
+const key_utf8_max_bytes = 64;
 
 const QueuedNotification = struct { payload: []u8, title_len: u16 };
 const QueuedClipboard = struct { payload: []u8, token: u64, clear: bool };
@@ -82,6 +83,20 @@ pub const ClipboardResult = extern struct {
     clear: u8,
     status: u8,
     reserved: [6]u8,
+};
+
+pub const KeyEvent = extern struct {
+    version: u32,
+    size: u32,
+    key_code: u16,
+    modifiers: u16,
+    consumed_modifiers: u16,
+    utf8_length: u16,
+    action: u8,
+    reserved0: [3]u8,
+    unshifted_codepoint: u32,
+    utf8: ?[*]const u8,
+    reserved: [8]u8,
 };
 
 pub const RenderFrame = extern struct {
@@ -416,6 +431,152 @@ export fn zigonaut_core_write(self: ?*Core, bytes: ?[*]const u8, len: usize) voi
     if (len == 0) return;
     const input = bytes orelse return;
     writeSerialized(core, input[0..len]);
+}
+
+fn macKey(key_code: u16) ?Terminal.Key {
+    return switch (key_code) {
+        0 => .a,
+        1 => .s,
+        2 => .d,
+        3 => .f,
+        4 => .h,
+        5 => .g,
+        6 => .z,
+        7 => .x,
+        8 => .c,
+        9 => .v,
+        10 => .intl_backslash,
+        11 => .b,
+        12 => .q,
+        13 => .w,
+        14 => .e,
+        15 => .r,
+        16 => .y,
+        17 => .t,
+        18 => .digit_1,
+        19 => .digit_2,
+        20 => .digit_3,
+        21 => .digit_4,
+        22 => .digit_6,
+        23 => .digit_5,
+        24 => .equal,
+        25 => .digit_9,
+        26 => .digit_7,
+        27 => .minus,
+        28 => .digit_8,
+        29 => .digit_0,
+        30 => .bracket_right,
+        31 => .o,
+        32 => .u,
+        33 => .bracket_left,
+        34 => .i,
+        35 => .p,
+        36 => .enter,
+        37 => .l,
+        38 => .j,
+        39 => .quote,
+        40 => .k,
+        41 => .semicolon,
+        42 => .backslash,
+        43 => .comma,
+        44 => .slash,
+        45 => .n,
+        46 => .m,
+        47 => .period,
+        48 => .tab,
+        49 => .space,
+        50 => .backquote,
+        51 => .backspace,
+        53 => .escape,
+        54 => .meta_right,
+        55 => .meta_left,
+        56 => .shift_left,
+        57 => .caps_lock,
+        58 => .alt_left,
+        59 => .control_left,
+        60 => .shift_right,
+        61 => .alt_right,
+        62 => .control_right,
+        65 => .numpad_decimal,
+        67 => .numpad_multiply,
+        69 => .numpad_add,
+        71 => .num_lock,
+        75 => .numpad_divide,
+        76 => .numpad_enter,
+        78 => .numpad_subtract,
+        81 => .numpad_separator,
+        82 => .numpad_0,
+        83 => .numpad_1,
+        84 => .numpad_2,
+        85 => .numpad_3,
+        86 => .numpad_4,
+        87 => .numpad_5,
+        88 => .numpad_6,
+        89 => .numpad_7,
+        91 => .numpad_8,
+        92 => .numpad_9,
+        93 => .intl_yen,
+        94 => .intl_ro,
+        95 => .numpad_separator,
+        102 => .non_convert,
+        104 => .kana_mode,
+        96 => .f5,
+        97 => .f6,
+        98 => .f7,
+        99 => .f3,
+        100 => .f8,
+        101 => .f9,
+        103 => .f11,
+        105 => .f13,
+        106 => .f16,
+        107 => .f14,
+        109 => .f10,
+        111 => .f12,
+        113 => .f15,
+        114 => .help,
+        115 => .home,
+        116 => .page_up,
+        117 => .delete,
+        118 => .f4,
+        119 => .end,
+        120 => .f2,
+        121 => .page_down,
+        122 => .f1,
+        123 => .arrow_left,
+        124 => .arrow_right,
+        125 => .arrow_down,
+        126 => .arrow_up,
+        131 => .f17,
+        132 => .f18,
+        133 => .f19,
+        134 => .f20,
+        else => null,
+    };
+}
+
+export fn zigonaut_core_key(self: ?*Core, event: ?*const KeyEvent) bool {
+    const core = self orelse return false;
+    const value = event orelse return false;
+    if (value.version != 1 or value.size < @sizeOf(KeyEvent) or value.action > 2 or
+        value.utf8_length > key_utf8_max_bytes or value.modifiers & ~@as(u16, 0xf) != 0 or
+        value.consumed_modifiers & ~@as(u16, 0xf) != 0) return false;
+    const key = macKey(value.key_code) orelse return false;
+    const utf8 = if (value.utf8_length == 0) "" else (value.utf8 orelse return false)[0..value.utf8_length];
+    if (!std.unicode.utf8ValidateSlice(utf8)) return false;
+    var buffer: [128]u8 = undefined;
+    core.mutex.lock();
+    const encoded = core.terminal.encodeKey(key, switch (value.action) {
+        0 => .press,
+        1 => .repeat,
+        2 => .release,
+        else => unreachable,
+    }, value.modifiers, value.consumed_modifiers, utf8, value.unshifted_codepoint, &buffer) catch {
+        core.mutex.unlock();
+        return false;
+    };
+    core.mutex.unlock();
+    writeSerialized(core, encoded);
+    return true;
 }
 
 fn writeSerialized(core: *Core, input: []const u8) void {
@@ -1193,6 +1354,34 @@ test "sized values require a complete destination before copying" {
 test "fd 10 is inherited instead of duplicated onto itself" {
     try std.testing.expectEqual(SlaveAction.inherit, slaveAction(10));
     try std.testing.expectEqual(SlaveAction.duplicate, slaveAction(9));
+}
+
+test "Apple virtual key codes cover ANSI ISO JIS keypad navigation and functions" {
+    try std.testing.expectEqual(Terminal.Key.a, macKey(0).?);
+    try std.testing.expectEqual(Terminal.Key.intl_backslash, macKey(10).?);
+    try std.testing.expectEqual(Terminal.Key.intl_yen, macKey(93).?);
+    try std.testing.expectEqual(Terminal.Key.intl_ro, macKey(94).?);
+    try std.testing.expectEqual(Terminal.Key.numpad_7, macKey(89).?);
+    try std.testing.expectEqual(Terminal.Key.arrow_left, macKey(123).?);
+    try std.testing.expectEqual(Terminal.Key.f20, macKey(134).?);
+    try std.testing.expectEqual(@as(?Terminal.Key, null), macKey(63));
+}
+
+test "mapped Mac keys preserve repeat and protocol release actions" {
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b[>2u");
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .press, 0, 0, "a", 'a', &buffer));
+    try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .repeat, 0, 0, "a", 'a', &buffer));
+    try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(macKey(0).?, .release, 0, 0, "", 'a', &buffer));
+}
+
+test "mapped Mac control key uses logical text rather than AppKit control character" {
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", try terminal.encodeKey(macKey(8).?, .press, 2, 0, "c", 'c', &buffer));
 }
 
 test "snapshot with null handle is bounded" {

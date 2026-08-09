@@ -21,10 +21,14 @@ typedef struct { uint32_t version, size, matches; int32_t active; uint8_t status
 /* take status: 0 complete and consumed, 1 empty, 2 invalid, 3 insufficient capacity (not consumed). */
 typedef struct { uint32_t version, size, required_title, written_title, required_body, written_body; uint8_t status, reserved[7]; } zigonaut_notification_result_v1;
 typedef struct { uint32_t version, size; uint64_t token; uint32_t required_bytes, written_bytes; uint8_t clear, status, reserved[6]; } zigonaut_clipboard_result_v1;
+/* action: 0 press, 1 repeat, 2 release. UTF-8 is optional and limited to 64 bytes. */
+typedef struct { uint32_t version, size; uint16_t key_code, modifiers, consumed_modifiers, utf8_length; uint8_t action, reserved0[3]; uint32_t unshifted_codepoint; const uint8_t *utf8; uint8_t reserved[8]; } zigonaut_key_event_v1;
 zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, zigonaut_wake_fn wake, void *context);
 void zigonaut_core_resize(zigonaut_core *, uint16_t columns, uint16_t rows, uint16_t pixel_width, uint16_t pixel_height, uint32_t cell_width, uint32_t cell_height);
 void zigonaut_core_request_stop(zigonaut_core *);
 void zigonaut_core_write(zigonaut_core *, const uint8_t *bytes, size_t length);
+/* True means the physical key/action was recognized, even when the active protocol emits no bytes. */
+bool zigonaut_core_key(zigonaut_core *, const zigonaut_key_event_v1 *);
 void zigonaut_core_paste(zigonaut_core *, const uint8_t *bytes, size_t length);
 void zigonaut_core_scroll(zigonaut_core *, ptrdiff_t rows);
 void zigonaut_core_search_set(zigonaut_core *, const uint8_t *query, size_t length, zigonaut_search_status_v1 *);
