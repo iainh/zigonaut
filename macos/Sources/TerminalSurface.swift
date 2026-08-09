@@ -175,6 +175,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     self.onFocus = onFocus
     super.init(frame: .zero)
     wantsLayer = true
+    layerContentsRedrawPolicy = .duringViewResize
     configureMetal()
     registerForDraggedTypes([.fileURL])
     setAccessibilityElement(true)
@@ -225,7 +226,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     presentation.device = device
     presentation.pixelFormat = .bgra8Unorm
     presentation.framebufferOnly = true
-    presentation.contentsGravity = .resize
+    presentation.contentsGravity = .topLeft
+    presentation.anchorPoint = .zero
     layer?.addSublayer(presentation)
     metalLayer = presentation
     metalQueue = queue
@@ -252,19 +254,34 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     return true
   }
 
-  func resizeTerminal() {
+  @discardableResult
+  func resizeTerminal() -> Bool {
     let columns = gridColumns
     let rows = gridRows
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-    model.resize(columns: columns, rows: rows,
+    return model.resize(columns: columns, rows: rows,
       pixelWidth: Int(bounds.width * scale), pixelHeight: Int(bounds.height * scale),
       cellWidth: Int(cellWidth * scale), cellHeight: Int(lineHeight * scale), scale: scale)
   }
 
+  private func updateMetalGeometry() -> (scale: CGFloat, width: Int, height: Int)? {
+    guard let presentation = metalLayer else { return nil }
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    let width = max(1, Int((bounds.width * scale).rounded(.up)))
+    let height = max(1, Int((bounds.height * scale).rounded(.up)))
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    presentation.frame = bounds
+    presentation.contentsScale = scale
+    presentation.drawableSize = CGSize(width: width, height: height)
+    CATransaction.commit()
+    return (scale, width, height)
+  }
+
   override func setFrameSize(_ size: NSSize) {
     super.setFrameSize(size)
-    metalLayer?.frame = bounds
-    resizeTerminal()
+    _ = updateMetalGeometry()
+    if resizeTerminal() { model.refresh() }
     needsDisplay = true
   }
 
@@ -626,13 +643,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
 
   private func renderMetal() -> Bool {
     guard let presentation = metalLayer, let queue = metalQueue, let pipeline = metalPipeline,
-      let device = presentation.device else { return false }
-    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-    let pixelWidth = max(1, Int((bounds.width * scale).rounded(.up)))
-    let pixelHeight = max(1, Int((bounds.height * scale).rounded(.up)))
-    presentation.frame = bounds
-    presentation.contentsScale = scale
-    presentation.drawableSize = CGSize(width: pixelWidth, height: pixelHeight)
+      let device = presentation.device, let geometry = updateMetalGeometry() else { return false }
+    let scale = geometry.scale
+    let pixelWidth = geometry.width
+    let pixelHeight = geometry.height
     let pixelSize = CGSize(width: pixelWidth, height: pixelHeight)
     if retainedBitmap == nil || retainedPixelSize != pixelSize {
       let colorSpace = CGColorSpaceCreateDeviceRGB()

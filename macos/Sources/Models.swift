@@ -704,13 +704,15 @@ struct TerminalPalette: Equatable {
     guard title != newTitle else { return }
     title = newTitle
   }
+  @discardableResult
   func resize(columns: Int, rows: Int, pixelWidth: Int, pixelHeight: Int, cellWidth: Int, cellHeight: Int,
     scale: CGFloat)
+    -> Bool
   {
-    guard columns != currentColumns || rows != currentRows || pixelWidth != currentPixelWidth
-      || pixelHeight != currentPixelHeight || cellWidth != currentCellWidth || cellHeight != currentCellHeight
-      || scale != currentScale
-    else { return }
+    let snapshotGeometryChanged = columns != currentColumns || rows != currentRows
+      || cellWidth != currentCellWidth || cellHeight != currentCellHeight || scale != currentScale
+    guard snapshotGeometryChanged || pixelWidth != currentPixelWidth || pixelHeight != currentPixelHeight
+    else { return false }
     currentColumns = columns
     currentRows = rows
     currentPixelWidth = pixelWidth
@@ -723,6 +725,7 @@ struct TerminalPalette: Equatable {
         UInt16(clamping: pixelWidth), UInt16(clamping: pixelHeight),
         UInt32(clamping: cellWidth), UInt32(clamping: cellHeight))
     }
+    return snapshotGeometryChanged
   }
   func write(_ value: String) { enqueue(value, paste: false) }
   func paste(_ value: String) { enqueue(value, paste: true) }
