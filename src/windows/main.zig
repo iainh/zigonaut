@@ -73,11 +73,16 @@ const PaneEventQueue = struct {
 
     const EnqueueResult = enum { appended, replaced, full };
 
+    fn assertValid(self: *const PaneEventQueue) void {
+        std.debug.assert(self.len <= self.items.len);
+    }
+
     fn supersedable(event: chrome.PaneEvent) bool {
         return event.kind == chrome.pane_scroll or event.kind == chrome.pane_committed_ratio;
     }
 
     fn enqueue(self: *PaneEventQueue, event: chrome.PaneEvent) EnqueueResult {
+        self.assertValid();
         if (supersedable(event)) {
             var index = self.len;
             while (index > 0) {
@@ -87,36 +92,45 @@ const PaneEventQueue = struct {
                 if (!supersedable(self.items[index])) break;
                 if (self.items[index].kind == event.kind and self.items[index].target_id == event.target_id) {
                     self.items[index] = event;
+                    self.assertValid();
                     return .replaced;
                 }
             }
         }
         if (self.len == self.items.len) {
+            self.assertValid();
             return .full;
         }
         self.items[self.len] = event;
         self.len += 1;
+        self.assertValid();
         return .appended;
     }
 
     fn pop(self: *PaneEventQueue) ?chrome.PaneEvent {
+        self.assertValid();
         if (self.len == 0) return null;
         const event = self.items[0];
         self.len -= 1;
         self.dequeued_total +%= 1;
         std.mem.copyForwards(chrome.PaneEvent, self.items[0..self.len], self.items[1 .. self.len + 1]);
+        self.assertValid();
         return event;
     }
 
     fn requestWake(self: *PaneEventQueue) bool {
+        self.assertValid();
         if (self.message_pending) return false;
         self.message_pending = true;
+        self.assertValid();
         return true;
     }
 
     fn finishBatch(self: *PaneEventQueue) bool {
+        self.assertValid();
         if (self.len != 0) return true;
         self.message_pending = false;
+        self.assertValid();
         return false;
     }
 };
