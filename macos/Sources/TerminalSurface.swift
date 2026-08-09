@@ -822,6 +822,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       run = nil
     }
     for cell in cells {
+      if let segments = boxSegments(cell.text) {
+        flush()
+        drawBox(segments, cell: cell)
+        continue
+      }
       guard cell.occupancy == 0 else {
         flush()
         if !cell.text.isEmpty && cell.occupancy != 2 {
@@ -842,6 +847,48 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       }
     }
     flush()
+  }
+
+  private func boxSegments(_ text: String) -> (left: Bool, right: Bool, up: Bool, down: Bool)? {
+    guard text.unicodeScalars.count == 1, let value = text.unicodeScalars.first?.value else { return nil }
+    switch value {
+    case 0x2500: return (true, true, false, false) // ─
+    case 0x2502: return (false, false, true, true) // │
+    case 0x250c: return (false, true, false, true) // ┌
+    case 0x2510: return (true, false, false, true) // ┐
+    case 0x2514: return (false, true, true, false) // └
+    case 0x2518: return (true, false, true, false) // ┘
+    case 0x251c: return (false, true, true, true) // ├
+    case 0x2524: return (true, false, true, true) // ┤
+    case 0x252c: return (true, true, false, true) // ┬
+    case 0x2534: return (true, true, true, false) // ┴
+    case 0x253c: return (true, true, true, true) // ┼
+    default: return nil
+    }
+  }
+
+  private func drawBox(_ segments: (left: Bool, right: Bool, up: Bool, down: Bool),
+    cell: TerminalRenderCell)
+  {
+    let rect = cellRect(cell)
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    let pixelWidth = max(1, (preferences.fontSize / 14).rounded())
+    let path = NSBezierPath()
+    let center = NSPoint(x: rect.midX, y: rect.midY)
+    func segment(_ endpoint: NSPoint) {
+      path.move(to: center)
+      path.line(to: endpoint)
+    }
+    if segments.left { segment(NSPoint(x: rect.minX - 1 / scale, y: center.y)) }
+    if segments.right { segment(NSPoint(x: rect.maxX + 1 / scale, y: center.y)) }
+    if segments.up { segment(NSPoint(x: center.x, y: rect.minY - 1 / scale)) }
+    if segments.down { segment(NSPoint(x: center.x, y: rect.maxY + 1 / scale)) }
+    path.lineWidth = pixelWidth / scale
+    path.lineCapStyle = .square
+    path.lineJoinStyle = .miter
+    let style = textStyle(cell)
+    color(style.rgb, alpha: style.faint ? 0.55 : 1).setStroke()
+    path.stroke()
   }
 
   private func textStyle(_ cell: TerminalRenderCell) -> TextStyle {
