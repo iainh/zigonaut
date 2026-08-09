@@ -1,6 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const package = @import("build.zig.zon");
 const app_version = package.version;
+
+comptime {
+    const required_zig_version = std.SemanticVersion.parse(package.minimum_zig_version) catch
+        @compileError("build.zig.zon minimum_zig_version must be valid semantic versioning");
+    if (builtin.zig_version.order(required_zig_version) != .eq) {
+        @compileError(std.fmt.comptimePrint(
+            "unsupported Zig version: expected {}, found {}",
+            .{ required_zig_version, builtin.zig_version },
+        ));
+    }
+}
 
 pub fn build(b: *std.Build) void {
     var target_query = b.standardTargetOptionsQueryOnly(.{});
