@@ -1,7 +1,7 @@
 # Research: Native macOS UI for Zigonaut
 
-**Date**: 2026-08-08  
-**Question**: Which macOS UI framework best preserves Zigonaut's Zig core and existing WinUI frontend while delivering a modern, native Mac experience?  
+**Date**: 2026-08-08
+**Question**: Which macOS UI framework best preserves Zigonaut's Zig core and existing WinUI frontend while delivering a modern, native Mac experience?
 **Status**: Complete; architecture and product-policy decisions remain
 
 ## Context
