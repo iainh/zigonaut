@@ -4,6 +4,7 @@ const c = @cImport({
     @cInclude("errno.h");
     @cInclude("fcntl.h");
     @cInclude("poll.h");
+    @cInclude("libproc.h");
     @cInclude("spawn.h");
     @cInclude("signal.h");
     @cInclude("sys/ioctl.h");
@@ -39,6 +40,9 @@ const Core = struct {
     context: ?*anyopaque,
     title: [4096]u8 = undefined,
     title_len: u32 = 0,
+    title_explicit: bool = false,
+    default_title: [256]u8 = undefined,
+    default_title_len: u16 = 0,
     notifications: std.ArrayList(QueuedNotification) = .empty,
     clipboard_writes: std.ArrayList(QueuedClipboard) = .empty,
     clipboard_enabled: bool = false,
@@ -204,10 +208,16 @@ fn colorFromRgb(value: u32) theme.Color {
 fn titleChanged(context: ?*anyopaque, title: []const u8) void {
     const self: *Core = @ptrCast(@alignCast(context orelse return));
     if (!std.unicode.utf8ValidateSlice(title)) return;
+    if (title.len == 0) {
+        self.title_len = 0;
+        self.title_explicit = false;
+        return;
+    }
     var count = @min(title.len, self.title.len);
     while (count > 0 and !std.unicode.utf8ValidateSlice(title[0..count])) count -= 1;
     @memcpy(self.title[0..count], title[0..count]);
     self.title_len = @intCast(count);
+    self.title_explicit = true;
 }
 
 fn desktopNotification(context: ?*anyopaque, title: []const u8, body: []const u8) void {
@@ -279,7 +289,8 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     }, .master = -1, .cancel_read = -1, .cancel_write = -1, .child = -1, .wake = wake, .context = context };
     const shell_name = std.fs.path.basename(std.mem.span(shell));
     const initial_title = if (shell_name.len == 0) "Terminal" else shell_name;
-    titleChanged(self, initial_title);
+    self.default_title_len = @intCast(@min(initial_title.len, self.default_title.len));
+    @memcpy(self.default_title[0..self.default_title_len], initial_title[0..self.default_title_len]);
     self.terminal.setTitleChanged(titleChanged, self) catch return failCreate(self, -1);
     self.terminal.setWritePty(terminalWritePty, self) catch return failCreate(self, -1);
     self.terminal.setDesktopNotification(desktopNotification, self) catch return failCreate(self, -1);
@@ -670,14 +681,33 @@ export fn zigonaut_core_progress(self: ?*Core, result: ?*Progress) void {
     output.value = core.progress_value;
 }
 
-/// Returns the required title byte count and copies at most `capacity` bytes.
+fn foregroundProcessName(core: *Core, buffer: []u8) []const u8 {
+    if (core.master < 0 or buffer.len == 0) return &.{};
+    const foreground = c.tcgetpgrp(core.master);
+    if (foreground <= 0) return &.{};
+    const length = c.proc_name(foreground, buffer.ptr, @intCast(buffer.len));
+    if (length <= 0) return &.{};
+    const name = buffer[0..@intCast(length)];
+    return if (std.unicode.utf8ValidateSlice(name)) name else &.{};
+}
+
+/// Returns an explicit OSC title, or the foreground process name when the
+/// shell/application has not supplied one. Copies at most `capacity` bytes.
 export fn zigonaut_core_title(self: ?*Core, output: ?[*]u8, capacity: u32) u32 {
     const core = self orelse return 0;
     core.mutex.lock();
     defer core.mutex.unlock();
-    const count = @min(capacity, core.title_len);
-    if (output) |destination| @memcpy(destination[0..count], core.title[0..count]);
-    return core.title_len;
+    var process_name: [256]u8 = undefined;
+    const foreground = foregroundProcessName(core, &process_name);
+    const title = if (core.title_explicit)
+        core.title[0..core.title_len]
+    else if (foreground.len > 0)
+        foreground
+    else
+        core.default_title[0..core.default_title_len];
+    const count = @min(capacity, title.len);
+    if (output) |destination| @memcpy(destination[0..count], title[0..count]);
+    return @intCast(title.len);
 }
 
 /// Returns the required URI length and copies a bounded, allowed-scheme URI.
@@ -1205,8 +1235,13 @@ test "null search and mouse APIs and bounded queries are safe" {
 test "title callback validates and bounds UTF-8 storage" {
     var core: Core = undefined;
     core.title_len = 0;
+    core.title_explicit = false;
     titleChanged(&core, "shell");
     try std.testing.expectEqualStrings("shell", core.title[0..core.title_len]);
+    try std.testing.expect(core.title_explicit);
+    titleChanged(&core, "");
+    try std.testing.expect(!core.title_explicit);
+    titleChanged(&core, "shell");
     var oversized: [5000]u8 = @splat('x');
     titleChanged(&core, &oversized);
     try std.testing.expectEqual(@as(u32, 4096), core.title_len);

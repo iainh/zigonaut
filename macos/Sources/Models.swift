@@ -732,6 +732,14 @@ struct TerminalPalette: Equatable {
   private func enqueue(_ value: String, paste: Bool) {
     guard let core else { return }
     let bytes = Array(value.utf8)
+    if !paste && (value.contains("\r") || value.contains("\n")) {
+      // The foreground process group changes shortly after the shell accepts
+      // Enter. Refresh its fallback title without introducing an idle timer.
+      DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+        guard let self, let core = self.core else { return }
+        self.retrieveTitle(core: core.pointer)
+      }
+    }
     writer.async {
       bytes.withUnsafeBufferPointer {
         if let pointer = $0.baseAddress {

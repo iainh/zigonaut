@@ -20,7 +20,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 - OSC 9;4 progress from the focused terminal is shown with a native determinate or indeterminate Dock progress indicator, including paused and error states; stale reports expire after 15 seconds.
 - A singleton native Settings window with a noncustomizable preference toolbar, restored pane selection, pane-specific sizing, aligned macOS forms, bundled themes, full palette overrides, normal and intense font weights, scrollback limits, initial dimensions, grid alignment, independent padding, edge colours, shell selection, restore defaults, and guarded OSC 52 clipboard settings. Clipboard writes default off, are bounded and only accepted immediately when explicitly enabled; the terminal callback cannot defer a reply for later confirmation.
 - Synchronized, bounded C ABI styled snapshots/copy and OSC terminal titles; nonblocking PTY writes on a serial background writer; callback teardown drains the reader before returning.
-- A bundled high-resolution application icon, dynamic shell/OSC window-tab titles, standard macOS application menus, frame restoration, and reopen-after-last-window behaviour.
+- A bundled high-resolution application icon, dynamic foreground-process and OSC window-tab titles, standard macOS application menus, frame restoration, and reopen-after-last-window behaviour.
 
 ## Shortcuts
 
