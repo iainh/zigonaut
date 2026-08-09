@@ -3,6 +3,7 @@ const app_model = @import("app.zig");
 const build_options = @import("build_options");
 const chrome = @import("chrome_bridge.zig");
 const config = @import("config.zig");
+const directwrite = @import("directwrite_renderer.zig");
 const pane_tree = @import("pane_tree.zig");
 const theme = @import("theme.zig");
 const TerminalView = @import("terminal_view.zig").View;
@@ -482,11 +483,22 @@ const Application = struct {
     }
 };
 
+fn loadThemes(allocator: std.mem.Allocator, io: std.Io) theme.Catalog {
+    const executable_directory = std.process.executableDirPathAlloc(io, allocator) catch return .{};
+    defer allocator.free(executable_directory);
+    const path = std.fs.path.join(allocator, &.{ executable_directory, "themes" }) catch return .{};
+    defer allocator.free(path);
+    var directory = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return .{};
+    defer directory.close(io);
+    return theme.Catalog.loadDirectory(allocator, io, directory);
+}
+
 pub fn main(init: std.process.Init) !void {
+    try directwrite.installPngDecoder();
     var launch_plan = try launchPlanFromArgsAlloc(std.heap.page_allocator, init.minimal.args);
     errdefer launch_plan.deinit();
     var loaded = try config.loadOrCreate(std.heap.page_allocator, init.io);
-    const themes = theme.Catalog.load(std.heap.page_allocator, init.io);
+    const themes = loadThemes(std.heap.page_allocator, init.io);
     const application = std.heap.page_allocator.create(Application) catch |err| {
         loaded.deinit();
         return err;
@@ -1750,7 +1762,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     profiles_committed = true;
     previous.deinit();
 
-    if (changed.theme) self.themes = theme.Catalog.load(std.heap.page_allocator, self.io);
+    if (changed.theme) self.themes = loadThemes(std.heap.page_allocator, self.io);
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);

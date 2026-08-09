@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const link = @import("link.zig");
 const theme = @import("theme.zig");
 const SearchMatch = @import("search.zig").Match;
@@ -8,7 +7,6 @@ const vt = @cImport({
     @cDefine("GHOSTTY_STATIC", "1");
     @cInclude("ghostty/vt.h");
 });
-const image_native = if (builtin.os.tag == .windows) @import("win32.zig").c else struct {};
 
 // Bound both encoded and decoded images. Terminal output is untrusted and can
 // otherwise make the process retain an unbounded amount of image data.
@@ -17,16 +15,6 @@ const kitty_image_limit: usize = 32 * 1024 * 1024;
 // user-configurable line limit. A line limit alone does not bound style,
 // grapheme, hyperlink, and other page-owned allocations.
 const scrollback_byte_limit: usize = 50_000_000;
-var decode_png_mutex: @import("platform_sync.zig").Mutex = .{};
-var decode_png_installed = false;
-
-fn installDecodePng() !void {
-    decode_png_mutex.lock();
-    defer decode_png_mutex.unlock();
-    if (decode_png_installed) return;
-    try check(vt.ghostty_sys_set(vt.GHOSTTY_SYS_OPT_DECODE_PNG, @as(vt.GhosttySysDecodePngFn, decodePng)));
-    decode_png_installed = true;
-}
 
 pub const Terminal = struct {
     terminal: vt.GhosttyTerminal,
@@ -824,7 +812,6 @@ pub const Terminal = struct {
     }
 
     pub fn initWithScrollback(columns: u16, rows: u16, terminal_theme: theme.Theme, max_scrollback: u32) !Terminal {
-        try installDecodePng();
         var terminal: vt.GhosttyTerminal = null;
         try check(vt.ghostty_terminal_new(null, &terminal, columns, rows));
         errdefer vt.ghostty_terminal_free(terminal);
@@ -2059,20 +2046,6 @@ fn check(result: vt.GhosttyResult) !void {
     if (result != vt.GHOSTTY_SUCCESS) return error.LibGhosttyFailure;
 }
 
-fn decodePng(_: ?*anyopaque, allocator: [*c]const vt.GhosttyAllocator, data: [*c]const u8, data_len: usize, out: [*c]vt.GhosttySysImage) callconv(.c) bool {
-    if (comptime builtin.os.tag != .windows) return false;
-    if (allocator == null or data == null or out == null or data_len == 0 or data_len > kitty_image_limit) return false;
-    var decoded: image_native.ZigonautDecodedImage = undefined;
-    if (image_native.zigonaut_decode_png(data, data_len, &decoded) < 0) return false;
-    defer image_native.zigonaut_free_decoded_image(decoded.pixels);
-    if (decoded.pixels == null or decoded.length == 0 or decoded.length > kitty_image_limit) return false;
-    const owned = vt.ghostty_alloc(allocator, decoded.length);
-    if (owned == null) return false;
-    @memcpy(owned[0..decoded.length], decoded.pixels[0..decoded.length]);
-    out.* = .{ .width = decoded.width, .height = decoded.height, .data = owned, .data_len = decoded.length };
-    return true;
-}
-
 test "libghostty reports shell title changes" {
     const Listener = struct {
         value: []const u8 = "",
@@ -2586,79 +2559,6 @@ test "render snapshots own cell graphemes" {
     var renderer = TestRenderer{};
     snapshot.replay(&renderer);
     try std.testing.expectEqual(theme.rasmus.foreground, renderer.x_foreground.?);
-}
-
-test "render snapshots own direct Kitty PNG placements" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var terminal = try Terminal.init(4, 2, theme.rasmus);
-    defer terminal.deinit();
-    try terminal.resize(4, 2, 8, 16);
-    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
-
-    var snapshot = Terminal.RenderSnapshot{};
-    defer snapshot.deinit(std.testing.allocator);
-    try snapshot.capture(std.testing.allocator, &terminal);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.placements.items.len);
-    const owned = snapshot.images.items[0];
-    const placement = snapshot.placements.items[0];
-    const image = Terminal.Image{
-        .image_id = owned.image_id,
-        .generation = owned.generation,
-        .pixels = owned.pixels,
-        .width = owned.width,
-        .height = owned.height,
-        .source_x = placement.source_x,
-        .source_y = placement.source_y,
-        .source_width = placement.source_width,
-        .source_height = placement.source_height,
-        .pixel_width = placement.pixel_width,
-        .pixel_height = placement.pixel_height,
-        .viewport_col = placement.viewport_col,
-        .viewport_row = placement.viewport_row,
-        .x_offset = placement.x_offset,
-        .y_offset = placement.y_offset,
-        .z = placement.z,
-    };
-    try std.testing.expectEqual(@as(u32, 1), image.image_id);
-    try std.testing.expect(image.generation != 0);
-    try std.testing.expectEqual(@as(u32, 1), image.width);
-    try std.testing.expectEqual(@as(u32, 1), image.height);
-    try std.testing.expectEqual(@as(usize, 4), image.pixels.len);
-    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.pixels);
-    try std.testing.expectEqual(@as(i32, 0), image.viewport_col);
-    try std.testing.expectEqual(@as(i32, 0), image.viewport_row);
-    try std.testing.expectEqual(@as(u32, 1), image.source_width);
-    try std.testing.expectEqual(@as(u32, 1), image.source_height);
-
-    const saved_pixels = try std.testing.allocator.dupe(u8, image.pixels);
-    defer std.testing.allocator.free(saved_pixels);
-    const saved_generation = image.generation;
-    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
-    try snapshot.capture(std.testing.allocator, &terminal);
-    try std.testing.expect(snapshot.images.items[0].generation != saved_generation);
-    try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
-    terminal.feed("\x1b_Ga=d,d=I,i=1\x1b\\");
-    try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
-    try snapshot.capture(std.testing.allocator, &terminal);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.images.items.len);
-    try std.testing.expectEqual(@as(usize, 0), snapshot.placements.items.len);
-}
-
-test "Kitty snapshot placements share image storage" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var terminal = try Terminal.init(4, 2, theme.rasmus);
-    defer terminal.deinit();
-    try terminal.resize(4, 2, 8, 16);
-    terminal.feed("\x1b_Gf=100,a=T,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
-    terminal.feed("\x1b_Ga=p,i=7,p=2\x1b\\");
-
-    var snapshot = Terminal.RenderSnapshot{};
-    defer snapshot.deinit(std.testing.allocator);
-    try snapshot.capture(std.testing.allocator, &terminal);
-    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
-    try std.testing.expectEqual(@as(usize, 2), snapshot.placements.items.len);
-    try std.testing.expectEqual(snapshot.placements.items[0].image_index, snapshot.placements.items[1].image_index);
 }
 
 test "Kitty placements sort by z then image ID" {

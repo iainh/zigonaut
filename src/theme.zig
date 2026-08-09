@@ -88,15 +88,9 @@ pub const Catalog = struct {
     entries: [max_themes]Entry = undefined,
     count: usize = 0,
 
-    pub fn load(allocator: std.mem.Allocator, io: std.Io) Catalog {
+    pub fn loadDirectory(allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir) Catalog {
         var result = Catalog{};
-        const executable_directory = std.process.executableDirPathAlloc(io, allocator) catch return result;
-        defer allocator.free(executable_directory);
-        const path = std.fs.path.join(allocator, &.{ executable_directory, "themes" }) catch return result;
-        defer allocator.free(path);
-        var directory = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return result;
-        defer directory.close(io);
-        result.loadDirectory(allocator, io, directory) catch |err| log.warn("unable to load themes: {}", .{err});
+        result.appendDirectory(allocator, io, directory) catch |err| log.warn("unable to load themes: {}", .{err});
         return result;
     }
 
@@ -107,7 +101,7 @@ pub const Catalog = struct {
         return rasmus;
     }
 
-    fn loadDirectory(self: *Catalog, allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir) !void {
+    fn appendDirectory(self: *Catalog, allocator: std.mem.Allocator, io: std.Io, directory: std.Io.Dir) !void {
         var iterator = directory.iterate();
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .file or !std.ascii.endsWithIgnoreCase(entry.name, ".json")) continue;
@@ -201,6 +195,14 @@ test "JSON themes parse complete color palettes" {
     );
     try std.testing.expectEqual(Color{ .red = 1, .green = 2, .blue = 3 }, value.foreground);
     try std.testing.expectEqual(Color{ .red = 0, .green = 0, .blue = 15 }, value.ansi[15]);
+}
+
+test "catalog parses a host-provided resource directory" {
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, "themes", .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    const catalog = Catalog.loadDirectory(std.testing.allocator, std.testing.io, directory);
+    try std.testing.expect(catalog.count >= 5);
+    try std.testing.expectEqual(hex(0xffffff), catalog.find("fluent-light").background);
 }
 
 test "Fluent themes meet WCAG AA contrast against their backgrounds" {

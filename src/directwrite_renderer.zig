@@ -1,4 +1,37 @@
-const native = @import("win32.zig").c;
+const std = @import("std");
+const win32 = @import("win32.zig");
+const native = win32.c;
+const vt = @cImport({
+    @cDefine("GHOSTTY_STATIC", "1");
+    @cInclude("ghostty/vt.h");
+});
+
+const kitty_image_limit: usize = 32 * 1024 * 1024;
+var decode_png_mutex: win32.Mutex = .{};
+var decode_png_installed = false;
+
+pub fn installPngDecoder() !void {
+    decode_png_mutex.lock();
+    defer decode_png_mutex.unlock();
+    if (decode_png_installed) return;
+    if (vt.ghostty_sys_set(vt.GHOSTTY_SYS_OPT_DECODE_PNG, @as(vt.GhosttySysDecodePngFn, decodePng)) != vt.GHOSTTY_SUCCESS) {
+        return error.LibGhosttyFailure;
+    }
+    decode_png_installed = true;
+}
+
+fn decodePng(_: ?*anyopaque, allocator: [*c]const vt.GhosttyAllocator, data: [*c]const u8, data_len: usize, out: [*c]vt.GhosttySysImage) callconv(.c) bool {
+    if (allocator == null or data == null or out == null or data_len == 0 or data_len > kitty_image_limit) return false;
+    var decoded: native.ZigonautDecodedImage = undefined;
+    if (native.zigonaut_decode_png(data, data_len, &decoded) < 0) return false;
+    defer native.zigonaut_free_decoded_image(decoded.pixels);
+    if (decoded.pixels == null or decoded.length == 0 or decoded.length > kitty_image_limit) return false;
+    const owned = vt.ghostty_alloc(allocator, decoded.length);
+    if (owned == null) return false;
+    @memcpy(owned[0..decoded.length], decoded.pixels[0..decoded.length]);
+    out.* = .{ .width = decoded.width, .height = decoded.height, .data = owned, .data_len = decoded.length };
+    return true;
+}
 
 pub const CacheBenchmark = struct {
     layout_creations: u64,
@@ -252,8 +285,79 @@ pub const Engine = struct {
     }
 };
 
+test "Windows PNG decoder produces owned Kitty image snapshots" {
+    const Terminal = @import("terminal.zig").Terminal;
+    const theme = @import("theme.zig");
+    try installPngDecoder();
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(4, 2, 8, 16);
+    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.placements.items.len);
+    const owned = snapshot.images.items[0];
+    const placement = snapshot.placements.items[0];
+    const image = Terminal.Image{
+        .image_id = owned.image_id,
+        .generation = owned.generation,
+        .pixels = owned.pixels,
+        .width = owned.width,
+        .height = owned.height,
+        .source_x = placement.source_x,
+        .source_y = placement.source_y,
+        .source_width = placement.source_width,
+        .source_height = placement.source_height,
+        .pixel_width = placement.pixel_width,
+        .pixel_height = placement.pixel_height,
+        .viewport_col = placement.viewport_col,
+        .viewport_row = placement.viewport_row,
+        .x_offset = placement.x_offset,
+        .y_offset = placement.y_offset,
+        .z = placement.z,
+    };
+    try std.testing.expectEqual(@as(u32, 1), image.image_id);
+    try std.testing.expect(image.generation != 0);
+    try std.testing.expectEqual(@as(u32, 1), image.width);
+    try std.testing.expectEqual(@as(u32, 1), image.height);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.pixels);
+
+    const saved_pixels = try std.testing.allocator.dupe(u8, image.pixels);
+    defer std.testing.allocator.free(saved_pixels);
+    const saved_generation = image.generation;
+    terminal.feed("\x1b_Gf=100,a=T,i=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expect(snapshot.images.items[0].generation != saved_generation);
+    try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
+    terminal.feed("\x1b_Ga=d,d=I,i=1\x1b\\");
+    try std.testing.expectEqualSlices(u8, saved_pixels, snapshot.images.items[0].pixels);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.placements.items.len);
+}
+
+test "Windows PNG decoder shares image storage between placements" {
+    const Terminal = @import("terminal.zig").Terminal;
+    const theme = @import("theme.zig");
+    try installPngDecoder();
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(4, 2, 8, 16);
+    terminal.feed("\x1b_Gf=100,a=T,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+    terminal.feed("\x1b_Ga=p,i=7,p=2\x1b\\");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.placements.items.len);
+    try std.testing.expectEqual(snapshot.placements.items[0].image_index, snapshot.placements.items[1].image_index);
+}
+
 test "cluster advances fit exact terminal spans" {
-    const std = @import("std");
     var ligature = [_]f32{ 3.0, 4.0, 2.0 };
     zigonaut_fit_cluster_advances(&ligature, ligature.len, 20.0);
     try std.testing.expectApproxEqAbs(@as(f32, 20.0), sum(&ligature), 0.001);
@@ -264,12 +368,10 @@ test "cluster advances fit exact terminal spans" {
 }
 
 test "fixed glyph atlas allocator is deterministic and transactional" {
-    const std = @import("std");
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_allocator());
 }
 
 test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
-    const std = @import("std");
     var result: native.ZigonautGlyphAtlasPixelsTest = undefined;
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_pixels(&result));
     try std.testing.expectEqual(@as(u64, 1), result.first_sprite_batches);
@@ -287,12 +389,10 @@ test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
 }
 
 test "atlas AA policy, lifecycle, and deterministic fault fallbacks" {
-    const std = @import("std");
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_atlas_policy_and_faults());
 }
 
 test "damage-aware transfer stays coherent across rotating buffers" {
-    const std = @import("std");
     var result: native.ZigonautDamageTransferTest = undefined;
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_damage_aware_transfer(&result));
     try std.testing.expectEqual(@as(u32, 10), result.compared_frames);
@@ -302,13 +402,11 @@ test "damage-aware transfer stays coherent across rotating buffers" {
 }
 
 test "invalid numeric antialias policy is rejected before enum conversion" {
-    const std = @import("std");
     try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, 2));
     try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, std.math.maxInt(u32)));
 }
 
 test "layout cache retains hot entries when crossing capacity" {
-    const std = @import("std");
     const result = try benchmarkLayoutCache(1);
     try std.testing.expectEqual(@as(u64, 2348), result.layout_creations);
     try std.testing.expectEqual(@as(u64, 0), result.hot_reuse_creations);
@@ -316,7 +414,6 @@ test "layout cache retains hot entries when crossing capacity" {
 }
 
 test "resolved draw plan is reused by the warm-row benchmark" {
-    const std = @import("std");
     const result = try benchmarkPipeline();
     try std.testing.expect(result.resolved_plan_hits >= result.warm_row_iterations);
     try std.testing.expectEqual(result.resolved_plan_misses, result.layout_draws);
@@ -324,7 +421,6 @@ test "resolved draw plan is reused by the warm-row benchmark" {
 }
 
 test "fragmented rows reuse plans across absolute columns" {
-    const std = @import("std");
     const result = try benchmarkPipeline();
     const expected = @as(u64, result.fragmented_row_iterations) * 120;
     try std.testing.expectEqual(expected, result.fragmented_plan_hits);

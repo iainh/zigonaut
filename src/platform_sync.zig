@@ -1,13 +1,13 @@
 const std = @import("std");
 
 pub const Mutex = if (@import("builtin").os.tag == .windows) @import("win32.zig").Mutex else struct {
-    value: std.atomic.Mutex = .unlocked,
+    value: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
 
     pub fn lock(self: *@This()) void {
-        while (!self.value.tryLock()) std.atomic.spinLoopHint();
+        std.debug.assert(std.c.pthread_mutex_lock(&self.value) == .SUCCESS);
     }
 
     pub fn unlock(self: *@This()) void {
-        self.value.unlock();
+        std.debug.assert(std.c.pthread_mutex_unlock(&self.value) == .SUCCESS);
     }
 };

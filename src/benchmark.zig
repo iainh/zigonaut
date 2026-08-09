@@ -19,6 +19,7 @@ const line = "\x1b[38;2;120;180;255mcompile\x1b[0m src/terminal_view.zig:123:45 
     "abcdefghijklmnopqrstuvwxyz 0123456789\r\n";
 
 pub fn main(init: std.process.Init) !void {
+    try directwrite.installPngDecoder();
     var arguments: std.ArrayList([]const u8) = .empty;
     defer arguments.deinit(std.heap.page_allocator);
     var iterator = try std.process.Args.Iterator.initAllocator(init.minimal.args, std.heap.page_allocator);
