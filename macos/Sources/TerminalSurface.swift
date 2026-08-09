@@ -701,17 +701,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     let forceAll = retainedAppearance != appearance
       || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
     let rowCount = snapshot.rowHashes.isEmpty ? gridRows : snapshot.rowHashes.count
-    let dirtyRows = forceAll ? Array(0..<rowCount) : snapshot.rowHashes.indices.filter {
+    let dirtyRows = forceAll ? [] : snapshot.rowHashes.indices.filter {
       retainedRowHashes[$0] != snapshot.rowHashes[$0]
     }
     if forceAll || !dirtyRows.isEmpty {
-      rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : Set(dirtyRows), in: bitmap)
-      let rowsToUpload = forceAll ? Array(0..<rowCount) : dirtyRows
-      if forceAll || rowsToUpload.isEmpty {
+      rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : dirtyRows, in: bitmap)
+      if forceAll {
         texture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
           withBytes: data, bytesPerRow: bitmap.bytesPerRow)
       } else {
-        for row in rowsToUpload {
+        for row in dirtyRows {
           let visualMin = row == 0 ? 0
             : max(0, Int(floor((originY + CGFloat(row) * lineHeight) * scale)))
           let visualMax = row == rowCount - 1 ? pixelHeight
@@ -750,14 +749,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
     return false
   }
 
-  private func rasterize(snapshot: TerminalRenderSnapshot, rowCount: Int, rows: Set<Int>?,
+  private func rasterize(snapshot: TerminalRenderSnapshot, rowCount: Int, rows: [Int]?,
     in bitmap: CGContext)
   {
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
-    let renderRows = rows ?? Set(0..<rowCount)
-    for row in renderRows {
+    func drawRow(_ row: Int) {
       bitmap.saveGState()
       var rowRect = NSRect(x: 0, y: originY + CGFloat(row) * lineHeight,
         width: bounds.width, height: lineHeight)
@@ -766,17 +764,23 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient {
       NSBezierPath(rect: rowRect).addClip()
       color(snapshot.frame.background, alpha: preferences.opacity).setFill()
       rowRect.fill()
-      let cells = snapshot.cells.filter { $0.y == row }
+      let cells = snapshot.cellsByRow.indices.contains(row) ? snapshot.cellsByRow[row] : []
       drawEdgeColors(cells)
       for cell in cells { drawBackground(cell) }
       drawText(cells)
       for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
         drawDecorations(cell, rect: cellRect(cell))
       }
-      drawImages(snapshot.images)
+      let images = snapshot.imagesByRow.indices.contains(row) ? snapshot.imagesByRow[row] : []
+      drawImages(images)
       drawCursor(snapshot.frame)
       drawMarkedText(snapshot.frame)
       bitmap.restoreGState()
+    }
+    if let rows {
+      for row in rows { drawRow(row) }
+    } else {
+      for row in 0..<rowCount { drawRow(row) }
     }
     NSGraphicsContext.restoreGraphicsState()
   }

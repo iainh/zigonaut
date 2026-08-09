@@ -4,6 +4,7 @@ import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
 import ZigonautPaneLayout
+import ZigonautRenderSupport
 import ZigonautRestoration
 
 extension NSColor {
@@ -104,7 +105,9 @@ struct TerminalRenderCell: Identifiable {
 struct TerminalRenderSnapshot {
   var frame = TerminalRenderFrame()
   var cells: [TerminalRenderCell] = []
+  var cellsByRow: [[TerminalRenderCell]] = []
   var images: [TerminalRenderImage] = []
+  var imagesByRow: [[TerminalRenderImage]] = []
   var rowHashes: [UInt64] = []
 }
 
@@ -614,6 +617,14 @@ struct TerminalPalette: Equatable {
       retainedCellsByRow[row] = dirtyCells[row]
     }
     let images = retrieveImages(core: core)
+    var imagesByRow = [[TerminalRenderImage]](repeating: [], count: rowCount)
+    let lineHeight = CGFloat(currentCellHeight) / max(currentScale, 1)
+    for image in images {
+      let rows = RowBucketing.overlappingRows(
+        viewportRow: image.viewportRow, yOffset: Double(image.yOffset),
+        height: Double(image.pixelHeight), lineHeight: Double(lineHeight), rowCount: rowCount)
+      for row in rows { imagesByRow[row].append(image) }
+    }
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -626,7 +637,9 @@ struct TerminalPalette: Equatable {
         cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0
       ),
       cells: retainedCellsByRow.flatMap { $0 },
+      cellsByRow: retainedCellsByRow,
       images: images,
+      imagesByRow: imagesByRow,
       rowHashes: rowHashes
     )
   }
