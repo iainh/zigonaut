@@ -34,6 +34,8 @@ const present_retry_timer = 5;
 const frame_wait_fallback_timer = 6;
 const present_retry_initial_ms = 1;
 const present_retry_max_ms = 250;
+const present_retry_timeout_ms = 5_000;
+const frame_wait_timeout_ms = 1_000;
 const search_refresh_interval_ms = 33;
 const process_exit_refresh_interval_ms = 50;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
@@ -65,44 +67,52 @@ const FrameWaitContext = struct {
     epoch: u32,
 };
 
-fn frameWaitCallback(raw: ?*anyopaque, _: win.BOOLEAN) callconv(.winapi) void {
-    const context: *const FrameWaitContext = @ptrCast(@alignCast(raw orelse return));
-    const view = context.view orelse return;
-    const request_id = view.render_request_id.load(.acquire);
-    var outcome: u8 = 1; // no runtime is a successfully prepared empty view
-    var generation: u64 = 0;
-    if (context.runtime) |runtime| switch (runtime.captureRender() catch {
-        outcome = 3;
-        view.completion_request_id = request_id;
-        view.completion_generation = generation;
-        view.completion_outcome = outcome;
-        view.completion_epoch = context.epoch;
-        view.completion_runtime = context.runtime;
-        view.completion_wait_id.store(context.wait_id, .release);
-        if (win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0) == 0 and
-            win.SetTimer(view.hwnd, frame_wait_fallback_timer, 1, null) == 0)
-        {
-            // Do not unregister from this callback: that can deadlock. Allow a
-            // later UI-thread scheduling attempt to recover the completion.
-            view.frame_wait_pending.store(false, .release);
-        }
-        return;
-    }) {
-        .prepared => |prepared| generation = prepared.content_generation,
-        .synchronized_output => outcome = 2,
-    };
+const FrameWaitOutcome = enum(u8) {
+    prepared,
+    synchronized_output,
+    failed,
+    timed_out,
+};
+
+fn publishFrameWaitCompletion(view: *View, context: *const FrameWaitContext, request_id: u64, generation: u64, outcome: FrameWaitOutcome) void {
     view.completion_request_id = request_id;
     view.completion_generation = generation;
     view.completion_outcome = outcome;
     view.completion_epoch = context.epoch;
     view.completion_runtime = context.runtime;
+    // Publish this last: the UI thread uses it as the acquire barrier for all
+    // of the non-atomic completion fields above.
     view.completion_wait_id.store(context.wait_id, .release);
     if (win.PostMessageW(view.hwnd, render_message, @intCast(context.wait_id), 0) == 0 and
         win.SetTimer(view.hwnd, frame_wait_fallback_timer, 1, null) == 0)
     {
-        // See the error path above. UnregisterWaitEx is UI-thread-only here.
+        // Do not unregister from this callback: that can deadlock. Allow a
+        // later UI-thread scheduling attempt to recover the completion.
         view.frame_wait_pending.store(false, .release);
     }
+}
+
+fn frameWaitCallback(raw: ?*anyopaque, timed_out: win.BOOLEAN) callconv(.winapi) void {
+    const context: *const FrameWaitContext = @ptrCast(@alignCast(raw orelse return));
+    const view = context.view orelse return;
+    const request_id = view.render_request_id.load(.acquire);
+    if (timed_out != 0) {
+        // A disconnected compositor can stop signaling the latency object.
+        // Do not borrow the runtime on this watchdog path; just let the UI
+        // thread reap and re-arm the wait so a reconnect cannot strand it.
+        publishFrameWaitCompletion(view, context, request_id, 0, .timed_out);
+        return;
+    }
+    var outcome: FrameWaitOutcome = .prepared;
+    var generation: u64 = 0;
+    if (context.runtime) |runtime| switch (runtime.captureRender() catch {
+        publishFrameWaitCompletion(view, context, request_id, generation, .failed);
+        return;
+    }) {
+        .prepared => |prepared| generation = prepared.content_generation,
+        .synchronized_output => outcome = .synchronized_output,
+    };
+    publishFrameWaitCompletion(view, context, request_id, generation, outcome);
 }
 
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
@@ -306,10 +316,12 @@ pub const View = struct {
     completion_generation: u64 = 0,
     completion_epoch: u32 = 0,
     completion_runtime: ?*SessionRuntime = null,
-    completion_outcome: u8 = 0,
+    completion_outcome: FrameWaitOutcome = .failed,
     prepared_available: bool = false,
     present_pending: bool = false,
     present_retry_delay_ms: u32 = present_retry_initial_ms,
+    present_retry_started_tick: u64 = 0,
+    present_stall_recovery_attempted: bool = false,
     resize_render_pending: bool = false,
     scene_has_images: bool = false,
     retained_scroll_offset: ?usize = null,
@@ -788,7 +800,7 @@ pub const View = struct {
         if (self.next_wait_id == 0) self.next_wait_id = 1;
         self.frame_wait_context = .{ .view = self, .runtime = self.boundRuntime(), .wait_id = self.next_wait_id, .epoch = epoch };
         self.active_wait_id = self.frame_wait_context.wait_id;
-        if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, &self.frame_wait_context, win.INFINITE, win.WT_EXECUTEONLYONCE) == 0) {
+        if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, &self.frame_wait_context, frame_wait_timeout_ms, win.WT_EXECUTEONLYONCE) == 0) {
             self.frame_wait = null;
             self.frame_wait_pending.store(false, .release);
             self.active_wait_id = 0;
@@ -813,6 +825,7 @@ pub const View = struct {
         if (self.present_pending) if (self.text_engine) |*engine| engine.abandonPendingPresent();
         self.present_pending = false;
         self.present_retry_delay_ms = present_retry_initial_ms;
+        self.present_retry_started_tick = 0;
     }
 
     fn clearFrameWait(self: *View) void {
@@ -833,16 +846,20 @@ pub const View = struct {
         const runtime_matches = self.completion_runtime == self.boundRuntime();
         const epoch_matches = self.completion_epoch == self.frame_epoch.load(.acquire);
         const outcome = self.completion_outcome;
-        const generation_matches = outcome != 1 or self.completion_runtime == null or
+        const generation_matches = outcome != .prepared or self.completion_runtime == null or
             self.completion_generation == self.completion_runtime.?.contentGeneration();
         self.clearFrameWait();
-        if (!runtime_matches or !epoch_matches or outcome == 3) {
+        if (outcome == .timed_out) {
+            self.full_rebuild_required.store(true, .release);
+            self.render_dirty.store(true, .release);
+            self.armFrameWait();
+        } else if (!runtime_matches or !epoch_matches or outcome == .failed) {
             // captureRender may have advanced RenderSnapshot dirty/hash
             // history even when this completion can no longer be used.
             self.full_rebuild_required.store(true, .release);
             self.render_dirty.store(true, .release);
             self.armFrameWait();
-        } else if (outcome == 2) {
+        } else if (outcome == .synchronized_output) {
             self.render_dirty.store(true, .release);
             _ = self.deferSynchronizedOutput();
         } else if (self.resize_render_pending) {
@@ -1193,8 +1210,12 @@ pub const View = struct {
         if (result == .retry) {
             self.present_pending = true;
             self.present_retry_delay_ms = present_retry_initial_ms;
+            self.present_retry_started_tick = win.GetTickCount64();
             if (!self.armPresentRetry()) return true;
-        } else if (self.render_dirty.load(.acquire)) self.armFrameWait();
+        } else {
+            self.present_stall_recovery_attempted = false;
+            if (self.render_dirty.load(.acquire)) self.armFrameWait();
+        }
         return true;
     }
 
@@ -1291,11 +1312,30 @@ pub const View = struct {
             return;
         };
         if (result == .retry) {
+            if (win.GetTickCount64() -% self.present_retry_started_tick >= present_retry_timeout_ms) {
+                log.warn("terminal presentation remained blocked for {d} ms", .{present_retry_timeout_ms});
+                self.cancelPendingPresent();
+                self.full_rebuild_required.store(true, .release);
+                self.render_dirty.store(true, .release);
+                if (!self.present_stall_recovery_attempted) {
+                    self.present_stall_recovery_attempted = true;
+                    self.renderer_failed = true;
+                    _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
+                } else {
+                    // Do not recreate every renderer every five seconds for the
+                    // duration of an RDP disconnect. A successful Present resets
+                    // the guard; until then the finite frame wait remains a wakeup.
+                    self.armFrameWait();
+                }
+                return;
+            }
             _ = self.armPresentRetry();
             return;
         }
         self.present_pending = false;
         self.present_retry_delay_ms = present_retry_initial_ms;
+        self.present_retry_started_tick = 0;
+        self.present_stall_recovery_attempted = false;
         if (self.resize_render_pending) {
             self.paintPendingResize();
             return;

@@ -14,6 +14,8 @@ const synchronized_output_timeout_ms = 1000;
 const notification_max_bytes = 4096;
 const retirement_retry_initial_ms = 1;
 const retirement_retry_max_ms = 250;
+const retirement_timeout_ms = 10_000;
+const writer_idle_timeout_100ns: std.os.windows.LARGE_INTEGER = -10_000_000;
 
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `retire` only after no caller can submit input or rendering work.
@@ -330,10 +332,18 @@ pub const SessionRuntime = struct {
     fn destroy(self: *SessionRuntime) void {
         if (self.pty) |*pty| {
             var retry_delay_ms: u32 = retirement_retry_initial_ms;
+            const retirement_started = win.GetTickCount64();
             while (!workersStopped(self.reader_thread, self.writer_thread)) {
                 // Cancellation can race with a worker entering synchronous I/O,
                 // so keep retrying without polling a stuck worker at 1 kHz.
                 pty.cancelIo(self.reader_thread, self.writer_thread);
+                if (win.GetTickCount64() -% retirement_started >= retirement_timeout_ms) {
+                    // A worker may still dereference any part of this runtime.
+                    // Leak it intact rather than retain this reaper forever or
+                    // partially tear down storage that remains in use.
+                    log.err("session workers did not stop within {d} ms; retaining runtime", .{retirement_timeout_ms});
+                    return;
+                }
                 win.Sleep(retry_delay_ms);
                 retry_delay_ms = @min(retry_delay_ms * 2, retirement_retry_max_ms);
             }
@@ -935,11 +945,12 @@ pub const SessionRuntime = struct {
 
             if (operations.items.len == 0) {
                 var expected = generation;
+                var timeout = writer_idle_timeout_100ns;
                 _ = std.os.windows.ntdll.RtlWaitOnAddress(
                     @ptrCast(&self.pty_writer_generation),
                     @ptrCast(&expected),
                     @sizeOf(u32),
-                    null,
+                    &timeout,
                 );
                 continue;
             }

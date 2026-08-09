@@ -206,6 +206,7 @@ const Application = struct {
     dark_theme: bool = false,
     high_contrast: bool = false,
     zoomed_font_size: u16,
+    ui_thread_id: win.DWORD = 0,
     window_subclassed: bool = false,
     taskbar_button_created_message: win.UINT = 0,
     taskbar_ready: bool = false,
@@ -307,6 +308,17 @@ const Application = struct {
         self.pane_events_mutex.lock();
         defer self.pane_events_mutex.unlock();
         return self.pane_events.finishBatch();
+    }
+
+    fn repairPaneEventWake(self: *Application, hwnd: win.HWND) void {
+        self.pane_events_mutex.lock();
+        defer self.pane_events_mutex.unlock();
+        // Keep token ownership and posting atomic with respect to producers.
+        // PostMessage does not dispatch synchronously, so it is safe under the
+        // mutex. A future producer can retry if this final post also fails.
+        self.pane_events.message_pending = self.pane_events.len != 0;
+        if (self.pane_events.message_pending and win.PostMessageW(hwnd, pane_event_message, 0, 0) == 0)
+            self.pane_events.message_pending = false;
     }
 
     fn viewFor(self: *Application, id: u64) ?*TerminalView {
@@ -554,6 +566,7 @@ fn windowStarted(context: ?*anyopaque, native_bridge: ?*anyopaque, hwnd: win.HWN
 
 fn initializeWindowImpl(self: *Application) !void {
     const hwnd = self.hwnd orelse return error.WindowUnavailable;
+    self.ui_thread_id = win.GetCurrentThreadId();
     self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
     // WinUI activates the window before its Loaded callback invokes us, so the
     // initial TaskbarButtonCreated message may already have been delivered.
@@ -976,6 +989,9 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         renderer_failed_message => {
+            var failed = false;
+            for (self.views.items) |entry| failed = failed or entry.view.renderer_failed;
+            if (!failed) return 0;
             self.recoverTerminalRenderer();
             return 0;
         },
@@ -1168,6 +1184,9 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
     if (event.kind == chrome.pane_ime_preedit or event.kind == chrome.pane_ime_commit or
         event.kind == chrome.pane_ime_clear or event.kind == chrome.pane_find_query)
     {
+        // These events borrow UTF-16 storage owned by the bridge callback and
+        // therefore must remain on the shared WinUI/application STA.
+        if (win.GetCurrentThreadId() != self.ui_thread_id) return;
         const view = self.viewFor(event.target_id) orelse return;
         const text: []const u16 = if (event.text_length == 0) &.{} else if (event.text) |ptr| ptr[0..event.text_length] else return;
         switch (event.kind) {
@@ -1189,25 +1208,30 @@ fn paneEvent(context: ?*anyopaque, source: *const chrome.PaneEvent) callconv(.c)
         self.pane_events_mutex.unlock();
         if (result != .full) {
             if (wake_needed and win.PostMessageW(hwnd, pane_event_message, 0, 0) == 0) {
-                // SendMessageW either drains the queue before returning or is
-                // harmless during window teardown.
-                _ = win.SendMessageW(hwnd, pane_event_message, 0, 0);
+                if (win.GetCurrentThreadId() == self.ui_thread_id) {
+                    _ = paneEventMessageImpl(self, hwnd, false);
+                } else {
+                    // Repair token ownership under the mutex and make one
+                    // atomic repost attempt before allowing later producers.
+                    self.repairPaneEventWake(hwnd);
+                }
             }
             return;
         }
-        // Preserve FIFO semantics under overload by making room before
-        // admitting the new event rather than dropping unique state.
-        self.pane_events_mutex.lock();
-        const dequeued_before = self.pane_events.dequeued_total;
-        self.pane_events_mutex.unlock();
-        _ = win.SendMessageW(hwnd, pane_event_message, pane_event_saturation_drain, 0);
-        self.pane_events_mutex.lock();
-        const made_progress = self.pane_events.dequeued_total != dequeued_before;
-        self.pane_events_mutex.unlock();
-        if (!made_progress) {
-            log.err("unable to drain saturated pane event queue during window teardown", .{});
+        if (win.GetCurrentThreadId() != self.ui_thread_id) {
+            // An unexpected producer must never wait synchronously for a hung
+            // UI thread. The admitted queue remains FIFO; drop only this event.
+            self.pane_events_mutex.lock();
+            const post_wake = self.pane_events.requestWake();
+            if (post_wake and win.PostMessageW(hwnd, pane_event_message, 0, 0) == 0) {
+                self.pane_events.message_pending = false;
+            }
+            self.pane_events_mutex.unlock();
             return;
         }
+        // The bridge and application share an STA. Drain directly rather than
+        // using an unbounded synchronous window message, then retry admission.
+        _ = paneEventMessageImpl(self, hwnd, true);
     }
 }
 
