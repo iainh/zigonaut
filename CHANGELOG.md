@@ -2,6 +2,16 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.6.1] - 2026-08-10
+
+### Fixed
+
+- Suspended Windows rendering while panes, windows, displays, or desktop sessions
+  are unavailable, preventing sustained CPU use after RDP disconnects and display
+  sleep without reintroducing recurring compositor wakeups.
+- Restored terminal keyboard focus and immediate rendering after tab switches, so
+  returning to an older tab reliably displays and accepts input.
+
 ## [0.6.0] - 2026-08-10
 
 ### Added
@@ -184,6 +194,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.6.1]: https://github.com/iainh/zigonaut/releases/tag/v0.6.1
 [0.6.0]: https://github.com/iainh/zigonaut/releases/tag/v0.6.0
 [0.5.0]: https://github.com/iainh/zigonaut/releases/tag/v0.5.0
 [0.4.1]: https://github.com/iainh/zigonaut/releases/tag/v0.4.1
