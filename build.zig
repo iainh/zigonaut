@@ -329,6 +329,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         "--configuration",
         swift_configuration,
     });
+    swift_tests.step.dependOn(b.getInstallStep());
     const ui_test_step = b.step("test-macos-ui", "Run macOS Swift unit tests");
     ui_test_step.dependOn(&swift_tests.step);
     const test_step = b.step("test", "Run all supported tests");
