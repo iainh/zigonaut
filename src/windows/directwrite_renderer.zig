@@ -372,6 +372,10 @@ test "fixed glyph atlas allocator is deterministic and transactional" {
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_allocator());
 }
 
+test "DXGI successful presentation statuses are not renderer failures" {
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_present_status_classification());
+}
+
 test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
     var result: native.ZigonautGlyphAtlasPixelsTest = undefined;
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_glyph_atlas_pixels(&result));

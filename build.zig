@@ -113,6 +113,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("advapi32", .{});
     exe.root_module.linkSystemLibrary("kernel32", .{});
     exe.root_module.linkSystemLibrary("shell32", .{});
+    exe.root_module.linkSystemLibrary("wtsapi32", .{});
     exe.root_module.linkSystemLibrary("windowscodecs", .{});
     exe.root_module.linkSystemLibrary("ole32", .{});
     const check_step = b.step("check", "Compile Zigonaut without installing it");
@@ -174,6 +175,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("dwrite", .{});
     tests.root_module.linkSystemLibrary("dxgi", .{});
     tests.root_module.linkSystemLibrary("kernel32", .{});
+    tests.root_module.linkSystemLibrary("wtsapi32", .{});
     tests.root_module.linkSystemLibrary("windowscodecs", .{});
     tests.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(tests.root_module, ghostty);

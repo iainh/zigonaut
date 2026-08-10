@@ -8,6 +8,7 @@ pub const c = @cImport({
     @cInclude("commctrl.h");
     @cInclude("dwmapi.h");
     @cInclude("shellapi.h");
+    @cInclude("wtsapi32.h");
     @cInclude("bridge.h");
     @cInclude("directwrite_renderer.h");
 });

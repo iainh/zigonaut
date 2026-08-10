@@ -36,6 +36,11 @@ void release(T*& value) {
 constexpr wchar_t fallback_family[] = L"Consolas";
 constexpr size_t max_layout_cache_entries = 2048;
 
+HRESULT classifyPresentResult(HRESULT result) {
+    if (result == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
+    return FAILED(result) ? result : S_OK;
+}
+
 struct LayoutKey {
     std::u16string text;
     uint32_t width;
@@ -326,6 +331,14 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_allocator() {
     GlyphAtlasAllocator::Rect large{};
     if (!full.reserve(2046, 2046, large) || large.x != 1 || large.y != 1 ||
         full.reserve(1, 1, failed)) return E_FAIL;
+    return S_OK;
+}
+
+extern "C" HRESULT zigonaut_test_present_status_classification() {
+    if (classifyPresentResult(S_OK) != S_OK ||
+        classifyPresentResult(DXGI_ERROR_WAS_STILL_DRAWING) != S_FALSE ||
+        classifyPresentResult(DXGI_STATUS_OCCLUDED) != S_OK ||
+        classifyPresentResult(E_FAIL) != E_FAIL) return E_FAIL;
     return S_OK;
 }
 
@@ -3738,8 +3751,9 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
         engine->discardTargetBitmap();
         return copy_hr;
     }
-    const HRESULT present = engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
-    if (present == DXGI_ERROR_WAS_STILL_DRAWING) {
+    const HRESULT present = classifyPresentResult(
+        engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT));
+    if (present == S_FALSE) {
         engine->present_pending = true;
         return S_FALSE;
     }
@@ -3748,13 +3762,14 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
         return S_OK;
     }
     engine->discardTargetBitmap();
-    return FAILED(present) ? present : E_UNEXPECTED;
+    return present;
 }
 
 extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine) {
     if (engine == nullptr || !engine->present_pending) return E_INVALIDARG;
-    const HRESULT present = engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
-    if (present == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
+    const HRESULT present = classifyPresentResult(
+        engine->swap_chain->Present(0, DXGI_PRESENT_DO_NOT_WAIT));
+    if (present == S_FALSE) return S_FALSE;
     if (present == S_OK) {
         engine->present_pending = false;
         engine->commitPresentedDamage();
@@ -3762,7 +3777,7 @@ extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine
     }
     engine->present_pending = false;
     engine->discardTargetBitmap();
-    return FAILED(present) ? present : E_UNEXPECTED;
+    return present;
 }
 
 extern "C" void zigonaut_text_engine_abandon_pending_present(

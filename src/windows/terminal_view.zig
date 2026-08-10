@@ -74,6 +74,19 @@ const FrameWaitOutcome = enum(u8) {
     timed_out,
 };
 
+fn frameWaitOutcomeCanRetry(outcome: FrameWaitOutcome) bool {
+    return outcome != .failed and outcome != .timed_out;
+}
+
+const RenderGate = struct {
+    presentation_visible: bool = false,
+    environment_available: bool = true,
+
+    fn enabled(self: RenderGate) bool {
+        return self.presentation_visible and self.environment_available;
+    }
+};
+
 fn publishFrameWaitCompletion(view: *View, context: *const FrameWaitContext, request_id: u64, generation: u64, outcome: FrameWaitOutcome) void {
     view.completion_request_id = request_id;
     view.completion_generation = generation;
@@ -99,7 +112,7 @@ fn frameWaitCallback(raw: ?*anyopaque, timed_out: win.BOOLEAN) callconv(.winapi)
     if (timed_out != 0) {
         // A disconnected compositor can stop signaling the latency object.
         // Do not borrow the runtime on this watchdog path; just let the UI
-        // thread reap and re-arm the wait so a reconnect cannot strand it.
+        // thread reap the wait and retain one dirty frame for explicit resume.
         publishFrameWaitCompletion(view, context, request_id, 0, .timed_out);
         return;
     }
@@ -302,6 +315,7 @@ fn accessibilitySelect(view: *View, action: *const win.zigonaut_accessibility_ac
 
 pub const View = struct {
     hwnd: win.HWND = null,
+    render_gate: RenderGate = .{},
     render_dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     full_rebuild_required: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     frame_wait_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -497,6 +511,44 @@ pub const View = struct {
 
     pub fn move(self: *View, x: i32, y: i32, width: i32, height: i32) void {
         _ = win.MoveWindow(self.hwnd, x, y, @max(width, 1), @max(height, 1), 1);
+    }
+
+    pub fn setPresentationVisible(self: *View, visible: bool) void {
+        const was_enabled = self.render_gate.enabled();
+        self.render_gate.presentation_visible = visible;
+        self.renderAvailabilityChanged(was_enabled);
+    }
+
+    pub fn setEnvironmentAvailable(self: *View, available: bool) void {
+        const was_enabled = self.render_gate.enabled();
+        self.render_gate.environment_available = available;
+        self.renderAvailabilityChanged(was_enabled);
+    }
+
+    pub fn requestPendingRender(self: *View) void {
+        if (self.render_gate.enabled() and self.render_dirty.load(.acquire)) self.armFrameWait();
+    }
+
+    fn renderAvailabilityChanged(self: *View, was_enabled: bool) void {
+        const enabled = self.render_gate.enabled();
+        if (was_enabled == enabled) return;
+        if (!enabled) {
+            self.setRefreshInterval(0);
+            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+            self.cancelSelectionDrag();
+            self.stopFrameScheduling();
+            self.full_rebuild_required.store(true, .release);
+            self.render_dirty.store(true, .release);
+            return;
+        }
+        self.full_rebuild_required.store(true, .release);
+        self.render_dirty.store(true, .release);
+        self.present_stall_recovery_attempted = false;
+        self.refreshIfNeeded();
+        if (self.text_engine != null)
+            self.armFrameWait()
+        else if (self.hwnd != null)
+            _ = win.InvalidateRect(self.hwnd, null, 0);
     }
 
     pub fn swapChain(self: *const View) ?*anyopaque {
@@ -793,7 +845,7 @@ pub const View = struct {
             self.completeFrameWait(completed_wait_id);
             return;
         }
-        if (self.hwnd == null or self.text_engine == null or self.renderer_failed or self.present_pending or
+        if (!self.render_gate.enabled() or self.hwnd == null or self.text_engine == null or self.renderer_failed or self.present_pending or
             self.frame_wait_pending.swap(true, .acq_rel)) return;
         const epoch = self.frame_epoch.load(.acquire);
         self.next_wait_id +%= 1;
@@ -849,11 +901,13 @@ pub const View = struct {
         const generation_matches = outcome != .prepared or self.completion_runtime == null or
             self.completion_generation == self.completion_runtime.?.contentGeneration();
         self.clearFrameWait();
-        if (outcome == .timed_out) {
+        if (!frameWaitOutcomeCanRetry(outcome)) {
+            // A failed capture or unavailable compositor must not manufacture
+            // another render request. Keep one dirty catch-up frame; terminal
+            // output or an explicit native resume will schedule it.
             self.full_rebuild_required.store(true, .release);
             self.render_dirty.store(true, .release);
-            self.armFrameWait();
-        } else if (!runtime_matches or !epoch_matches or outcome == .failed) {
+        } else if (!runtime_matches or !epoch_matches) {
             // captureRender may have advanced RenderSnapshot dirty/hash
             // history even when this completion can no longer be used.
             self.full_rebuild_required.store(true, .release);
@@ -897,7 +951,7 @@ pub const View = struct {
     }
 
     fn paintPendingResize(self: *View) void {
-        if (!self.resize_render_pending or self.present_pending or self.text_engine == null or self.renderer_failed) return;
+        if (!self.render_gate.enabled() or !self.resize_render_pending or self.present_pending or self.text_engine == null or self.renderer_failed) return;
         self.clearFrameWait();
         if (!self.render_dirty.swap(false, .acq_rel)) return;
         if (self.paintSwapChain()) {
@@ -912,7 +966,8 @@ pub const View = struct {
         self.refreshIfNeeded();
     }
 
-    fn setRefreshInterval(self: *View, interval_ms: u32) void {
+    fn setRefreshInterval(self: *View, requested_interval_ms: u32) void {
+        const interval_ms = if (self.render_gate.enabled()) requested_interval_ms else 0;
         if (self.refresh_interval_ms == interval_ms or self.hwnd == null) return;
         self.refresh_interval_ms = interval_ms;
         if (interval_ms == 0) {
@@ -931,6 +986,10 @@ pub const View = struct {
             _ = win.KillTimer(self.hwnd, synchronized_output_timer);
             return false;
         };
+        if (!self.render_gate.enabled()) {
+            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+            return true;
+        }
         if (win.SetTimer(self.hwnd, synchronized_output_timer, @max(delay, 1), null) == 0) {
             // End synchronized output if the watchdog cannot run. Otherwise,
             // one terminal mode can suppress all later rendering.
@@ -992,6 +1051,11 @@ pub const View = struct {
             self.last_progress_runtime = runtime;
             self.last_progress_generation = progress_generation;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.progress_changed_message, 0, 0);
+        }
+        if (!self.render_gate.enabled()) {
+            self.setRefreshInterval(0);
+            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+            return;
         }
         const search_tick = runtime.searchTick(search_time_budget_ns);
         self.setRefreshInterval(if (search_tick.scanning)
@@ -1191,7 +1255,7 @@ pub const View = struct {
     }
 
     fn paintSwapChain(self: *View) bool {
-        if (self.text_engine == null or self.renderer_failed or self.present_pending) return false;
+        if (!self.render_gate.enabled() or self.text_engine == null or self.renderer_failed or self.present_pending) return false;
         var client: win.RECT = undefined;
         _ = win.GetClientRect(self.hwnd, &client);
         const width = client.right - client.left;
@@ -1303,6 +1367,12 @@ pub const View = struct {
 
     fn retryPresent(self: *View) void {
         if (!self.present_pending or self.text_engine == null) return;
+        if (!self.render_gate.enabled()) {
+            self.cancelPendingPresent();
+            self.full_rebuild_required.store(true, .release);
+            self.render_dirty.store(true, .release);
+            return;
+        }
         _ = win.KillTimer(self.hwnd, present_retry_timer);
         const result = self.text_engine.?.retryPresent() catch |err| {
             log.warn("terminal renderer present retry failed: {}", .{err});
@@ -1344,6 +1414,7 @@ pub const View = struct {
     }
 
     fn armPresentRetry(self: *View) bool {
+        if (!self.render_gate.enabled()) return false;
         if (win.SetTimer(self.hwnd, present_retry_timer, self.present_retry_delay_ms, null) != 0) {
             self.present_retry_delay_ms = @min(self.present_retry_delay_ms * 2, present_retry_max_ms);
             return true;
@@ -2748,4 +2819,23 @@ test "grid geometry clips an oversized mandatory cell without negative padding" 
     try std.testing.expectEqual(@as(i32, 0), geometry.right);
     try std.testing.expectEqual(@as(i32, 0), geometry.top);
     try std.testing.expectEqual(@as(i32, 0), geometry.bottom);
+}
+
+test "render gate requires both a presented pane and an available environment" {
+    var gate = RenderGate{};
+    try std.testing.expect(!gate.enabled());
+    gate.presentation_visible = true;
+    try std.testing.expect(gate.enabled());
+    gate.environment_available = false;
+    try std.testing.expect(!gate.enabled());
+    gate.presentation_visible = false;
+    gate.environment_available = true;
+    try std.testing.expect(!gate.enabled());
+}
+
+test "failed and timed-out frame waits retain dirt without self-scheduling" {
+    try std.testing.expect(!frameWaitOutcomeCanRetry(.failed));
+    try std.testing.expect(!frameWaitOutcomeCanRetry(.timed_out));
+    try std.testing.expect(frameWaitOutcomeCanRetry(.prepared));
+    try std.testing.expect(frameWaitOutcomeCanRetry(.synchronized_output));
 }

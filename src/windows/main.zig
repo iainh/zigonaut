@@ -35,6 +35,12 @@ const pane_event_saturation_drain = 1;
 const taskbar_progress_timer = 1;
 const taskbar_progress_timeout_ms = 15_000;
 const window_subclass_id: win.UINT_PTR = 1;
+const session_display_status_guid = win.GUID{
+    .Data1 = 0x2b84c20e,
+    .Data2 = 0xad23,
+    .Data3 = 0x4ddf,
+    .Data4 = .{ 0x93, 0xdb, 0x05, 0xff, 0xbd, 0x7e, 0xfc, 0xa5 },
+};
 // Serialize process creation while temporary inheritable handles are open.
 // Without this lock, an unrelated child can inherit a staging or NUL handle.
 var process_spawn_mutex: @import("win32.zig").Mutex = .{};
@@ -135,6 +141,51 @@ const PaneEventQueue = struct {
     }
 };
 
+const RenderAvailability = struct {
+    window_shown: bool = true,
+    window_not_minimized: bool = true,
+    display_on: bool = true,
+    session_connected: bool = true,
+    session_logged_on: bool = true,
+    session_unlocked: bool = true,
+
+    fn enabled(self: RenderAvailability) bool {
+        return self.window_shown and self.window_not_minimized and self.display_on and
+            self.session_connected and self.session_logged_on and self.session_unlocked;
+    }
+
+    fn applySessionChange(self: *RenderAvailability, event: usize) void {
+        switch (event) {
+            win.WTS_CONSOLE_CONNECT, win.WTS_REMOTE_CONNECT => self.session_connected = true,
+            win.WTS_CONSOLE_DISCONNECT, win.WTS_REMOTE_DISCONNECT => self.session_connected = false,
+            win.WTS_SESSION_LOGON => self.session_logged_on = true,
+            win.WTS_SESSION_LOGOFF => self.session_logged_on = false,
+            win.WTS_SESSION_LOCK => self.session_unlocked = false,
+            win.WTS_SESSION_UNLOCK => self.session_unlocked = true,
+            else => {},
+        }
+    }
+};
+
+fn guidEqual(left: win.GUID, right: win.GUID) bool {
+    return std.mem.eql(u8, std.mem.asBytes(&left), std.mem.asBytes(&right));
+}
+
+fn displayStateFromPowerBroadcast(lparam: win.LPARAM) ?win.DWORD {
+    if (lparam == 0) return null;
+    const setting: *const win.POWERBROADCAST_SETTING = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    if (!guidEqual(setting.PowerSetting, session_display_status_guid) or
+        setting.DataLength != @sizeOf(win.DWORD)) return null;
+    const data: *align(1) const win.DWORD = @ptrFromInt(
+        @intFromPtr(setting) + @offsetOf(win.POWERBROADCAST_SETTING, "Data"),
+    );
+    return if (data.* <= @as(win.DWORD, @intCast(win.PowerMonitorDim))) data.* else null;
+}
+
+fn displayStateAllowsRendering(state: win.DWORD) bool {
+    return state == @as(win.DWORD, @intCast(win.PowerMonitorOn));
+}
+
 fn testPaneEvent(kind: u32, target_id: u64, value: u32) chrome.PaneEvent {
     var event = std.mem.zeroes(chrome.PaneEvent);
     event.size = @sizeOf(chrome.PaneEvent);
@@ -206,6 +257,59 @@ test "pane event queue maintains one wake token until drained" {
     try std.testing.expect(queue.requestWake());
 }
 
+test "render availability requires a visible connected session with its display on" {
+    var state = RenderAvailability{};
+    try std.testing.expect(state.enabled());
+    state.window_shown = false;
+    state.window_not_minimized = false;
+    state.applySessionChange(win.WTS_REMOTE_DISCONNECT);
+    state.display_on = false;
+    state.applySessionChange(win.WTS_REMOTE_CONNECT);
+    try std.testing.expect(!state.enabled());
+    state.window_shown = true;
+    try std.testing.expect(!state.enabled());
+    state.window_not_minimized = true;
+    try std.testing.expect(!state.enabled());
+    state.display_on = true;
+    try std.testing.expect(state.enabled());
+    state.applySessionChange(win.WTS_SESSION_LOCK);
+    try std.testing.expect(!state.enabled());
+    state.applySessionChange(win.WTS_REMOTE_DISCONNECT);
+    state.applySessionChange(win.WTS_REMOTE_CONNECT);
+    try std.testing.expect(!state.enabled());
+    state.applySessionChange(win.WTS_SESSION_UNLOCK);
+    try std.testing.expect(state.enabled());
+}
+
+test "session display power broadcasts reject other settings and decode monitor state" {
+    const Packet = extern struct {
+        setting: win.GUID,
+        data_length: win.DWORD,
+        data: win.DWORD,
+    };
+    var packet = Packet{
+        .setting = session_display_status_guid,
+        .data_length = @sizeOf(win.DWORD),
+        .data = @intCast(win.PowerMonitorOff),
+    };
+    try std.testing.expectEqual(@as(win.DWORD, @intCast(win.PowerMonitorOff)), displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))).?);
+    try std.testing.expect(!displayStateAllowsRendering(packet.data));
+    packet.data = @intCast(win.PowerMonitorDim);
+    try std.testing.expectEqual(@as(win.DWORD, @intCast(win.PowerMonitorDim)), displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))).?);
+    try std.testing.expect(!displayStateAllowsRendering(packet.data));
+    packet.data = @intCast(win.PowerMonitorOn);
+    try std.testing.expectEqual(@as(win.DWORD, @intCast(win.PowerMonitorOn)), displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))).?);
+    try std.testing.expect(displayStateAllowsRendering(packet.data));
+    packet.data = 3;
+    try std.testing.expect(displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))) == null);
+    packet.data_length = 0;
+    try std.testing.expect(displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))) == null);
+    packet.data_length = @sizeOf(win.DWORD);
+    packet.setting.Data1 +%= 1;
+    try std.testing.expect(displayStateFromPowerBroadcast(@bitCast(@intFromPtr(&packet))) == null);
+    try std.testing.expect(displayStateFromPowerBroadcast(0) == null);
+}
+
 const Application = struct {
     const ViewEntry = struct { pane_id: u64, view: *TerminalView };
     io: std.Io,
@@ -222,6 +326,9 @@ const Application = struct {
     zoomed_font_size: u16,
     ui_thread_id: win.DWORD = 0,
     window_subclassed: bool = false,
+    display_power_notification: win.HPOWERNOTIFY = null,
+    session_notifications_registered: bool = false,
+    render_availability: RenderAvailability = .{},
     taskbar_button_created_message: win.UINT = 0,
     taskbar_ready: bool = false,
     terminal_ready: bool = false,
@@ -344,6 +451,30 @@ const Application = struct {
         return self.viewFor((self.model.activePane() orelse return null).id);
     }
 
+    fn syncRenderAvailability(self: *Application, restart: bool) void {
+        const available = self.render_availability.enabled();
+        var renderer_failed = false;
+        for (self.views.items) |entry| {
+            entry.view.setEnvironmentAvailable(available);
+            if (restart and available) entry.view.requestPendingRender();
+            renderer_failed = renderer_failed or entry.view.renderer_failed;
+        }
+        if (restart and available and renderer_failed) {
+            if (self.hwnd) |hwnd| _ = win.PostMessageW(hwnd, renderer_failed_message, 0, 0);
+        }
+    }
+
+    fn unregisterRenderNotifications(self: *Application, hwnd: win.HWND) void {
+        if (self.session_notifications_registered) {
+            _ = win.WTSUnRegisterSessionNotification(hwnd);
+            self.session_notifications_registered = false;
+        }
+        if (self.display_power_notification != null) {
+            _ = win.UnregisterPowerSettingNotification(self.display_power_notification);
+            self.display_power_notification = null;
+        }
+    }
+
     fn ensureView(self: *Application, id: u64) !*TerminalView {
         if (self.viewFor(id)) |view| return view;
         const hwnd = self.hwnd orelse return error.WindowUnavailable;
@@ -356,6 +487,7 @@ const Application = struct {
             if (!view.destroy()) may_free = false;
             return err;
         };
+        view.setEnvironmentAvailable(self.render_availability.enabled());
         if (view.swapChain() == null) {
             if (!view.destroy()) {
                 may_free = false;
@@ -375,7 +507,12 @@ const Application = struct {
         const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
         while (self.attached_panes.items.len != 0) {
             const id = self.attached_panes.items[self.attached_panes.items.len - 1];
-            if (!bridge.detachPane(id)) return error.DetachPaneFailed;
+            const view = self.viewFor(id);
+            if (view) |value| value.setPresentationVisible(false);
+            if (!bridge.detachPane(id)) {
+                if (view) |value| value.setPresentationVisible(true);
+                return error.DetachPaneFailed;
+            }
             _ = self.attached_panes.pop();
         }
     }
@@ -405,6 +542,7 @@ const Application = struct {
                     view.heightForRows(self.application.settings.initial_rows),
                 )) return error.AttachPaneFailed;
                 self.application.attached_panes.appendAssumeCapacity(id);
+                view.setPresentationVisible(true);
             }
             self.output[self.index] = .{
                 .size = @sizeOf(chrome.LayoutNode),
@@ -465,7 +603,12 @@ const Application = struct {
                 }
             }
             if (!present) {
-                if (!bridge.detachPane(id)) return error.DetachPaneFailed;
+                const view = self.viewFor(id);
+                if (view) |value| value.setPresentationVisible(false);
+                if (!bridge.detachPane(id)) {
+                    if (view) |value| value.setPresentationVisible(true);
+                    return error.DetachPaneFailed;
+                }
                 _ = self.attached_panes.swapRemove(attached_index);
             }
         }
@@ -581,6 +724,19 @@ fn windowStarted(context: ?*anyopaque, native_bridge: ?*anyopaque, hwnd: win.HWN
 fn initializeWindowImpl(self: *Application) !void {
     const hwnd = self.hwnd orelse return error.WindowUnavailable;
     self.ui_thread_id = win.GetCurrentThreadId();
+    self.display_power_notification = win.RegisterPowerSettingNotification(
+        @ptrCast(hwnd),
+        &session_display_status_guid,
+        win.DEVICE_NOTIFY_WINDOW_HANDLE,
+    );
+    if (self.display_power_notification == null)
+        log.warn("unable to observe session display power state: {d}", .{win.GetLastError()});
+    self.session_notifications_registered = win.WTSRegisterSessionNotification(
+        hwnd,
+        win.NOTIFY_FOR_THIS_SESSION,
+    ) != 0;
+    if (!self.session_notifications_registered)
+        log.warn("unable to observe desktop session connectivity: {d}", .{win.GetLastError()});
     self.taskbar_button_created_message = win.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
     // WinUI activates the window before its Loaded callback invokes us, so the
     // initial TaskbarButtonCreated message may already have been delivered.
@@ -617,6 +773,7 @@ fn setWindowIcons(hwnd: win.HWND) void {
 
 fn windowSubclassProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win.LPARAM, _: win.UINT_PTR, reference: win.DWORD_PTR) callconv(.c) win.LRESULT {
     const self: *Application = @ptrFromInt(reference);
+    if (message == win.WM_NCDESTROY) self.unregisterRenderNotifications(hwnd);
     const result = self.windowMessage(message, wparam, lparam);
     if (message == win.WM_NCDESTROY) {
         self.refresh_hwnd.store(0, .release);
@@ -634,6 +791,9 @@ fn shutdownWindowImpl(self: *Application) void {
     self.refresh_hwnd.store(0, .release);
     self.model.setRefresh(.{});
     _ = win.KillTimer(hwnd, taskbar_progress_timer);
+    self.render_availability.window_shown = false;
+    self.syncRenderAvailability(false);
+    self.unregisterRenderNotifications(hwnd);
     if (self.taskbar_ready) {
         if (self.chrome) |*bridge| _ = bridge.updateTaskbarProgress(win.ZIGONAUT_TASKBAR_PROGRESS_NONE, 0);
     }
@@ -819,7 +979,10 @@ fn chromeMessageImpl(self: *Application, hwnd: win.HWND, wparam: win.WPARAM, lpa
         .close_pane => {
             const pane_id = (self.model.activePane() orelse return 0).id;
             const bridge = if (self.chrome) |*value| value else return 0;
+            const view = self.viewFor(pane_id);
+            if (view) |value| value.setPresentationVisible(false);
             if (!bridge.detachPane(pane_id)) {
+                if (view) |value| value.setPresentationVisible(true);
                 log.err("unable to detach focused pane before close", .{});
                 _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
                 return 0;
@@ -1003,11 +1166,43 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
             return 0;
         },
         renderer_failed_message => {
+            if (!self.render_availability.enabled()) return 0;
             var failed = false;
             for (self.views.items) |entry| failed = failed or entry.view.renderer_failed;
             if (!failed) return 0;
             self.recoverTerminalRenderer();
             return 0;
+        },
+        win.WM_SIZE => {
+            self.render_availability.window_not_minimized = wparam != win.SIZE_MINIMIZED;
+            self.syncRenderAvailability(wparam != win.SIZE_MINIMIZED);
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
+        },
+        win.WM_SHOWWINDOW => {
+            self.render_availability.window_shown = wparam != 0;
+            self.syncRenderAvailability(wparam != 0);
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
+        },
+        win.WM_WTSSESSION_CHANGE => {
+            self.render_availability.applySessionChange(wparam);
+            self.syncRenderAvailability(true);
+            return 0;
+        },
+        win.WM_POWERBROADCAST => {
+            if (wparam == win.PBT_POWERSETTINGCHANGE) if (displayStateFromPowerBroadcast(lparam)) |state| {
+                const display_on = displayStateAllowsRendering(state);
+                self.render_availability.display_on = display_on;
+                self.syncRenderAvailability(display_on);
+                return 1;
+            };
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
+        },
+        win.WM_DISPLAYCHANGE => {
+            // Display topology changes and RDP graphics-device replacement can
+            // invalidate a previously timed-out frame-latency object. Retry the
+            // one retained dirty frame, but only if all native gates are open.
+            self.syncRenderAvailability(true);
+            return win.DefSubclassProc(hwnd, message, wparam, lparam);
         },
         win.WM_TIMER => {
             if (wparam == taskbar_progress_timer) {

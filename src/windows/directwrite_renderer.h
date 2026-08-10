@@ -134,6 +134,7 @@ HRESULT zigonaut_benchmark_layout_cache(
 
 HRESULT zigonaut_benchmark_directwrite_pipeline(ZigonautDirectWriteBenchmark* result);
 HRESULT zigonaut_test_glyph_atlas_allocator(void);
+HRESULT zigonaut_test_present_status_classification(void);
 HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest* result);
 HRESULT zigonaut_test_atlas_policy_and_faults(void);
 HRESULT zigonaut_test_damage_aware_transfer(ZigonautDamageTransferTest* result);
