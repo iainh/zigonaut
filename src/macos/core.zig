@@ -1,11 +1,8 @@
 const std = @import("std");
 const c = @cImport({
-    @cInclude("util.h");
     @cInclude("errno.h");
     @cInclude("fcntl.h");
     @cInclude("poll.h");
-    @cInclude("libproc.h");
-    @cInclude("spawn.h");
     @cInclude("signal.h");
     @cInclude("sys/ioctl.h");
     @cInclude("sys/wait.h");
@@ -20,6 +17,8 @@ const public_abi = @cImport({
     @cInclude("zigonaut_core.h");
 });
 extern var environ: [*:null]?[*:0]u8;
+extern fn openpty(amaster: *c_int, aslave: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*c.winsize) c_int;
+extern fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
 
 const notification_queue_capacity = 32;
 const notification_max_bytes = 4096;
@@ -326,7 +325,7 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     self.terminal.setProgressReport(progressReport, self) catch return failCreate(self, -1);
     var slave: c_int = -1;
     var size = c.winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
-    if (c.openpty(&self.master, &slave, null, null, &size) != 0) {
+    if (openpty(&self.master, &slave, null, null, &size) != 0) {
         self.terminal.deinit();
         allocator.destroy(self);
         return null;
@@ -336,17 +335,17 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     self.cancel_read = cancel[0];
     self.cancel_write = cancel[1];
     if (!setCloexec(self.master) or !setCloexec(slave) or !setCloexec(cancel[0]) or !setCloexec(cancel[1])) return failCreate(self, slave);
-    var actions: c.posix_spawn_file_actions_t = undefined;
-    if (c.posix_spawn_file_actions_init(&actions) != 0) return failCreate(self, slave);
-    defer _ = c.posix_spawn_file_actions_destroy(&actions);
+    var actions: std.c.posix_spawn_file_actions_t = undefined;
+    if (std.c.posix_spawn_file_actions_init(&actions) != 0) return failCreate(self, slave);
+    defer _ = std.c.posix_spawn_file_actions_destroy(&actions);
     if (addSlaveAction(&actions, slave) != 0) return failCreate(self, slave);
     // A source descriptor may itself be 10. Closing it after dup2 would close
     // the child-side PTY target rather than the original descriptor.
     const close_fds = [_]c_int{ slave, self.master, self.cancel_read, self.cancel_write };
-    for (close_fds) |fd| if (fd != 10 and c.posix_spawn_file_actions_addclose(&actions, fd) != 0) return failCreate(self, slave);
+    for (close_fds) |fd| if (fd != 10 and std.c.posix_spawn_file_actions_addclose(&actions, fd) != 0) return failCreate(self, slave);
     if (working_directory) |directory| if (directory[0] != '/') return failCreate(self, slave);
     var argv = [_:null]?[*:0]u8{ @constCast(helper), @constCast(shell), @constCast(working_directory) };
-    if (c.posix_spawn(&self.child, helper, &actions, null, &argv, environ) != 0) return failCreate(self, slave);
+    if (std.c.posix_spawn(&self.child, helper, &actions, null, &argv, environ) != 0) return failCreate(self, slave);
     _ = c.close(slave);
     const flags = c.fcntl(self.master, c.F_GETFL);
     if (flags >= 0) _ = c.fcntl(self.master, c.F_SETFL, flags | c.O_NONBLOCK);
@@ -363,10 +362,10 @@ fn slaveAction(fd: c_int) SlaveAction {
     return if (fd == 10) .inherit else .duplicate;
 }
 
-fn addSlaveAction(actions: *c.posix_spawn_file_actions_t, slave: c_int) c_int {
+fn addSlaveAction(actions: *std.c.posix_spawn_file_actions_t, slave: c_int) c_int {
     return switch (slaveAction(slave)) {
-        .inherit => c.posix_spawn_file_actions_addinherit_np(actions, slave),
-        .duplicate => c.posix_spawn_file_actions_adddup2(actions, slave, 10),
+        .inherit => std.c.posix_spawn_file_actions_addinherit_np(actions, slave),
+        .duplicate => std.c.posix_spawn_file_actions_adddup2(actions, slave, 10),
     };
 }
 
@@ -913,7 +912,7 @@ fn foregroundProcessName(core: *Core, buffer: []u8) []const u8 {
     if (core.master < 0 or buffer.len == 0) return &.{};
     const foreground = c.tcgetpgrp(core.master);
     if (foreground <= 0) return &.{};
-    const length = c.proc_name(foreground, buffer.ptr, @intCast(buffer.len));
+    const length = proc_name(foreground, buffer.ptr, @intCast(buffer.len));
     if (length <= 0) return &.{};
     const name = buffer[0..@intCast(length)];
     return if (std.unicode.utf8ValidateSlice(name)) name else &.{};
