@@ -680,7 +680,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let rows = Int(scrollRemainder)
     if rows != 0 {
       scrollRemainder -= CGFloat(rows)
-      model.scroll(rows)
+      model.scroll(-rows)
     }
   }
 
