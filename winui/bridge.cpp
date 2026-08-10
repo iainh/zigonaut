@@ -286,6 +286,8 @@ struct Bridge {
     bool updating = false;
     uint32_t dragged_tab_index = UINT32_MAX;
     bool appearance_initialized = false;
+    bool pane_focus_dispatch_pending = false;
+    uint64_t pending_pane_focus{};
     bool layout_pending = false;
     uint8_t layout_retry_count = 0;
     Microsoft::UI::Dispatching::DispatcherQueueTimer layout_retry_timer{nullptr};
@@ -793,10 +795,37 @@ struct Bridge {
         auto it = pane_hosts.find(id); if (it == pane_hosts.end()) throw hresult_invalid_argument();
         if (find_pane && find_pane != id) closeFind(true);
         setFocusedPane(id);
+        focusPaneControl(id);
+        schedulePaneFocus(id);
+    }
+
+    void focusPaneControl(uint64_t id) {
+        auto it = pane_hosts.find(id); if (it == pane_hosts.end()) return;
         if (find_pane == id && find_border.Visibility() == Visibility::Visible) {
             find_box.Focus(FocusState::Programmatic);
         } else {
             it->second->input.Focus(FocusState::Programmatic);
+        }
+    }
+
+    void schedulePaneFocus(uint64_t id) {
+        if (closed) return;
+        pending_pane_focus = id;
+        if (pane_focus_dispatch_pending) return;
+        pane_focus_dispatch_pending = true;
+        auto const state = layout_dispatch;
+        if (!notification_activation->queue.TryEnqueue(
+                Microsoft::UI::Dispatching::DispatcherQueuePriority::Normal,
+                [state] {
+                    if (!state->active.load(std::memory_order_acquire)) return;
+                    auto* bridge = state->bridge;
+                    bridge->pane_focus_dispatch_pending = false;
+                    auto const requested = bridge->pending_pane_focus;
+                    bridge->pending_pane_focus = 0;
+                    bridge->focusPaneControl(requested);
+                })) {
+            pane_focus_dispatch_pending = false;
+            pending_pane_focus = 0;
         }
     }
 
