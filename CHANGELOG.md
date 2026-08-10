@@ -2,6 +2,40 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.6.0] - 2026-08-10
+
+### Added
+
+- A native macOS terminal client with tabs, split panes, native settings, rich
+  selection, Kitty graphics, OSC 133 workflows, directional pane focus, workspace
+  restoration, notifications, Dock progress, and expanded accessibility.
+- macOS validation and release packaging alongside the existing Windows builds.
+- Production-paced DirectComposition benchmarks for comparing Windows glyph
+  submission backends under real frame presentation.
+
+### Changed
+
+- Separated the shared terminal kernel from the Windows and macOS hosts and added
+  platform-specific build and test boundaries.
+- Added retained Metal rendering, changed-row updates, row-local render reuse, and
+  cached Kitty image payloads to reduce macOS rendering work.
+- Reused Windows glyph submission scratch storage, reducing paced D3D11 instancing
+  below one millisecond in the benchmark workload.
+- Updated libghostty and made the supported Zig version an explicit build
+  requirement.
+- Consolidated CI validation, pinned external actions, and cancelled superseded
+  workflow runs.
+
+### Fixed
+
+- Prevented unattended Windows rendering hangs by bounding presentation retries,
+  recovering dropped frame-wait completions, and backing off stalled teardown.
+- Made Windows session shutdown more robust after PTY failures and partial pane
+  detach, while bounding clipboard, command-worker, scrollback, and search-cache
+  resource use.
+- Corrected macOS title-bar appearance, natural scrolling, resize anchoring,
+  box-drawing joins, shell startup directories, and theme tint lightness.
+
 ## [0.5.0] - 2026-08-05
 
 ### Added
@@ -150,6 +184,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.6.0]: https://github.com/iainh/zigonaut/releases/tag/v0.6.0
 [0.5.0]: https://github.com/iainh/zigonaut/releases/tag/v0.5.0
 [0.4.1]: https://github.com/iainh/zigonaut/releases/tag/v0.4.1
 [0.4.0]: https://github.com/iainh/zigonaut/releases/tag/v0.4.0
