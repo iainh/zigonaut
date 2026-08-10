@@ -7,6 +7,9 @@
 #include <d2d1_3.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#if defined(ZIGONAUT_BENCHMARK_PRESENT)
+#include <dcomp.h>
+#endif
 #include <dwrite.h>
 #include <dwrite_2.h>
 #include <dxgi1_3.h>
@@ -403,6 +406,10 @@ struct ZigonautTextEngine {
     std::vector<RowCell> row_cells;
     std::u16string row_text;
     RowSegment row_segment;
+    std::vector<RowSegment> row_segments;
+    std::vector<D2D1_RECT_F> glyph_destinations;
+    std::vector<D2D1_RECT_U> glyph_sources;
+    std::vector<D2D1_COLOR_F> glyph_colors;
     GridTextRenderer* grid_renderer = nullptr;
     std::wstring family;
     std::wstring locale;
@@ -1840,12 +1847,16 @@ HRESULT ZigonautTextEngine::endRow() {
         }
     } clip_guard{this};
 
-    std::vector<RowSegment> segments;
+    auto& segments = row_segments;
+    size_t segment_count = 0;
     auto& segment = row_segment; segment.clear();
     bool has_segment = false;
     const auto flush = [&]() -> HRESULT {
         HRESULT hr = S_OK;
-        if (has_segment) try { segments.push_back(segment); } catch (...) { hr = E_OUTOFMEMORY; }
+        if (has_segment) try {
+            if (segment_count == segments.size()) segments.emplace_back();
+            std::swap(segment, segments[segment_count++]);
+        } catch (...) { hr = E_OUTOFMEMORY; }
         segment.clear();
         has_segment = false;
         return hr;
@@ -1883,23 +1894,30 @@ HRESULT ZigonautTextEngine::endRow() {
     }
     HRESULT hr = flush();
     if (FAILED(hr)) return hr;
-    const bool atlas_eligible = segments.size() >= 8 &&
+    const bool atlas_eligible = segment_count >= 8 &&
         text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE;
     if (atlas_eligible && !atlas_disabled_for_frame && !atlas_allocator)
         initializeAtlas();
     bool batched = text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE &&
-        !atlas_disabled_for_frame && segments.size() >= 8 && target3 && sprite_batch &&
+        !atlas_disabled_for_frame && segment_count >= 8 && target3 && sprite_batch &&
         atlas_bitmap && atlas_allocator;
     if (batched && FAILED(initializeGlyphPipeline())) {
         batched = false;
         atlas_disabled_for_frame = true;
     }
     if (atlas_eligible && benchmark_active) ++benchmark.atlas_eligible_rows;
-    std::vector<D2D1_RECT_F> destinations;
-    std::vector<D2D1_RECT_U> sources;
-    std::vector<D2D1_COLOR_F> colors;
+    auto& destinations = glyph_destinations;
+    auto& sources = glyph_sources;
+    auto& colors = glyph_colors;
+    destinations.clear();
+    sources.clear();
+    colors.clear();
     if (batched) try {
-        for (auto& item : segments) {
+        destinations.reserve(segment_count);
+        sources.reserve(segment_count);
+        colors.reserve(segment_count);
+        for (size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
+            auto& item = segments[segment_index];
             uint32_t start = UINT32_MAX, end = 0;
             for (uint32_t packed : item.columns) { start=std::min(start,startColumn(packed)); end=std::max(end,endColumn(packed)); }
             const uint32_t width = static_cast<uint32_t>(std::lround((end-start)*row_cell_width));
@@ -1983,7 +2001,10 @@ native_fallback:
         if (FAILED(hr)) return hr;
         if (atlas_eligible && benchmark_active) ++benchmark.atlas_fallback_rows;
         clip_guard.push();
-        for (const auto& item : segments) { hr = drawSegment(item); if (FAILED(hr)) return hr; }
+        for (size_t index = 0; index < segment_count; ++index) {
+            hr = drawSegment(segments[index]);
+            if (FAILED(hr)) return hr;
+        }
         clip_guard.pop();
     }
 row_complete:
@@ -2341,6 +2362,159 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     engine->benchmark.atlas_warm_frame_nanoseconds=engine->benchmark.instanced_fragmented_frame_nanoseconds/frame_iterations;
     engine->benchmark.fragmented_frame_iterations=frame_iterations;
     engine->benchmark.atlas_warm_frame_rows = frame_rows;
+
+#if defined(ZIGONAUT_BENCHMARK_PRESENT)
+    // Exercise both glyph backends through the production frame-latency wait,
+    // retained-scene transfer, nonblocking Present, and retry path. A real
+    // DirectComposition target is required: an unattached composition swap chain
+    // is not consumed by DWM and therefore cannot provide representative pacing.
+    // Keep this on a separate engine so its paced GPU/resource state cannot
+    // perturb the deterministic unpaced baselines that follow it.
+    ZigonautTextEngine* pipeline_engine = engine;
+    ZigonautTextEngine* paced_engine = nullptr;
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_create(L"Consolas", 18,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &paced_engine);
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(paced_engine,
+        reinterpret_cast<uintptr_t>(window));
+    if (SUCCEEDED(hr)) engine = paced_engine;
+    IDCompositionDevice* composition_device = nullptr;
+    IDCompositionTarget* composition_target = nullptr;
+    IDCompositionVisual* composition_visual = nullptr;
+    IDXGIDevice* composition_dxgi_device = nullptr;
+    if (SUCCEEDED(hr)) hr = engine->d3d_device->QueryInterface(
+        IID_PPV_ARGS(&composition_dxgi_device));
+    if (SUCCEEDED(hr)) hr = DCompositionCreateDevice(composition_dxgi_device,
+        IID_PPV_ARGS(&composition_device));
+    if (SUCCEEDED(hr)) hr = composition_device->CreateTargetForHwnd(window, TRUE,
+        &composition_target);
+    if (SUCCEEDED(hr)) hr = composition_device->CreateVisual(&composition_visual);
+    if (SUCCEEDED(hr)) hr = composition_visual->SetContent(engine->swap_chain);
+    if (SUCCEEDED(hr)) hr = composition_target->SetRoot(composition_visual);
+    if (SUCCEEDED(hr)) hr = composition_device->Commit();
+    if (SUCCEEDED(hr)) hr = composition_device->WaitForCommitCompletion();
+    if (SUCCEEDED(hr)) ShowWindow(window, SW_SHOWNOACTIVATE);
+
+    constexpr uint32_t paced_warm_frames = 3;
+    constexpr uint32_t paced_frame_iterations = 30;
+    std::vector<uint64_t> legacy_paced_samples;
+    std::vector<uint64_t> instanced_paced_samples;
+    try {
+        legacy_paced_samples.reserve(paced_frame_iterations);
+        instanced_paced_samples.reserve(paced_frame_iterations);
+    } catch (...) {
+        hr = E_OUTOFMEMORY;
+    }
+    bool pending_backend_valid = false;
+    bool pending_backend_legacy = false;
+    bool pending_backend_measured = false;
+    const auto waitForPacedFrame = [&]() {
+        const uint64_t wait_start = now();
+        const DWORD wait = WaitForSingleObject(engine->frame_latency_waitable_object, 5000);
+        const uint64_t wait_elapsed = nanoseconds(now() - wait_start);
+        if (wait != WAIT_OBJECT_0) {
+            hr = wait == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            return;
+        }
+        // This signal releases the previously presented frame, not the frame
+        // about to be rendered. Attribute its wait to that preceding backend.
+        if (pending_backend_valid && pending_backend_measured) {
+            if (pending_backend_legacy)
+                engine->benchmark.paced_legacy_wait_nanoseconds += wait_elapsed;
+            else
+                engine->benchmark.paced_instanced_wait_nanoseconds += wait_elapsed;
+        }
+        pending_backend_valid = false;
+    };
+    const auto pacedFrame = [&](bool legacy, bool measured) {
+        waitForPacedFrame();
+        if (FAILED(hr)) return;
+        engine->benchmark_legacy_sprite_batch = legacy;
+        const uint64_t submit_start = now();
+        hr = zigonaut_text_engine_begin_frame(engine, width, height, 0x181818,
+            TRUE, &rebuild);
+        for (uint32_t index = 0; index < frame_rows && SUCCEEDED(hr); ++index)
+            hr = row(true, static_cast<float>(index * engine->metrics.height));
+        if (SUCCEEDED(hr)) hr = zigonaut_text_engine_end_frame(engine);
+        uint32_t retries = 0;
+        const uint64_t retry_deadline = now() + static_cast<uint64_t>(frequency.QuadPart) * 5;
+        while (hr == S_FALSE && now() < retry_deadline) {
+            ++retries;
+            SwitchToThread();
+            hr = zigonaut_text_engine_retry_present(engine);
+        }
+        if (hr == S_FALSE) hr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        const uint64_t submit_elapsed = nanoseconds(now() - submit_start);
+        if (!measured || FAILED(hr)) return;
+        auto& samples = legacy ? legacy_paced_samples : instanced_paced_samples;
+        samples.push_back(submit_elapsed);
+        pending_backend_valid = true;
+        pending_backend_legacy = legacy;
+        pending_backend_measured = measured;
+        if (legacy) {
+            engine->benchmark.paced_legacy_present_retries += retries;
+        } else {
+            engine->benchmark.paced_instanced_present_retries += retries;
+        }
+    };
+    for (uint32_t iteration = 0; iteration < paced_warm_frames && SUCCEEDED(hr); ++iteration) {
+        pacedFrame(true, false);
+        if (SUCCEEDED(hr)) pacedFrame(false, false);
+    }
+    // Alternate first backend so thermal/transient load is distributed evenly.
+    for (uint32_t iteration = 0; iteration < paced_frame_iterations && SUCCEEDED(hr); ++iteration) {
+        const bool legacy_first = (iteration & 1) == 0;
+        pacedFrame(legacy_first, true);
+        if (SUCCEEDED(hr)) pacedFrame(!legacy_first, true);
+    }
+    // Drain and attribute the last measured Present before detaching the visual
+    // or allowing later unpaced benchmarks to submit more GPU work.
+    if (SUCCEEDED(hr) && pending_backend_valid) waitForPacedFrame();
+    const auto summarizePaced = [&](std::vector<uint64_t>& samples,
+            uint64_t* total, uint64_t* p95) {
+        for (const uint64_t sample : samples) *total += sample;
+        std::sort(samples.begin(), samples.end());
+        if (!samples.empty()) {
+            const size_t index = (samples.size() * 95 + 99) / 100 - 1;
+            *p95 = samples[std::min(index, samples.size() - 1)];
+        }
+    };
+    summarizePaced(legacy_paced_samples,
+        &engine->benchmark.paced_legacy_submit_nanoseconds,
+        &engine->benchmark.paced_legacy_submit_p95_nanoseconds);
+    summarizePaced(instanced_paced_samples,
+        &engine->benchmark.paced_instanced_submit_nanoseconds,
+        &engine->benchmark.paced_instanced_submit_p95_nanoseconds);
+    engine->benchmark.paced_frame_iterations = static_cast<uint32_t>(
+        std::min(legacy_paced_samples.size(), instanced_paced_samples.size()));
+    engine->benchmark_legacy_sprite_batch = false;
+    HRESULT detach_hr = S_OK;
+    if (composition_target != nullptr) detach_hr = composition_target->SetRoot(nullptr);
+    if (SUCCEEDED(detach_hr) && composition_device != nullptr)
+        detach_hr = composition_device->Commit();
+    if (SUCCEEDED(detach_hr) && composition_device != nullptr)
+        detach_hr = composition_device->WaitForCommitCompletion();
+    if (SUCCEEDED(hr) && FAILED(detach_hr)) hr = detach_hr;
+    release(composition_visual);
+    release(composition_target);
+    release(composition_device);
+    release(composition_dxgi_device);
+    ShowWindow(window, SW_HIDE);
+    const ZigonautDirectWriteBenchmark paced_result = paced_engine != nullptr
+        ? paced_engine->benchmark : ZigonautDirectWriteBenchmark{};
+    zigonaut_text_engine_destroy(paced_engine);
+    engine = pipeline_engine;
+    engine->benchmark.paced_legacy_submit_nanoseconds = paced_result.paced_legacy_submit_nanoseconds;
+    engine->benchmark.paced_instanced_submit_nanoseconds = paced_result.paced_instanced_submit_nanoseconds;
+    engine->benchmark.paced_legacy_submit_p95_nanoseconds = paced_result.paced_legacy_submit_p95_nanoseconds;
+    engine->benchmark.paced_instanced_submit_p95_nanoseconds = paced_result.paced_instanced_submit_p95_nanoseconds;
+    engine->benchmark.paced_legacy_wait_nanoseconds = paced_result.paced_legacy_wait_nanoseconds;
+    engine->benchmark.paced_instanced_wait_nanoseconds = paced_result.paced_instanced_wait_nanoseconds;
+    engine->benchmark.paced_legacy_present_retries = paced_result.paced_legacy_present_retries;
+    engine->benchmark.paced_instanced_present_retries = paced_result.paced_instanced_present_retries;
+    engine->benchmark.paced_frame_iterations = paced_result.paced_frame_iterations;
+#endif
+
     constexpr uint32_t scroll_iterations = 30;
     const auto scrollCase = [&](bool shifted, uint32_t count, uint64_t* elapsed) {
         const uint64_t start = now();

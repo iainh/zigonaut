@@ -64,6 +64,14 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t instanced_fragmented_frame_nanoseconds;
     uint64_t immutable_instance_frame_nanoseconds;
     uint64_t dynamic_instance_frame_nanoseconds;
+    uint64_t paced_legacy_submit_nanoseconds;
+    uint64_t paced_instanced_submit_nanoseconds;
+    uint64_t paced_legacy_submit_p95_nanoseconds;
+    uint64_t paced_instanced_submit_p95_nanoseconds;
+    uint64_t paced_legacy_wait_nanoseconds;
+    uint64_t paced_instanced_wait_nanoseconds;
+    uint64_t paced_legacy_present_retries;
+    uint64_t paced_instanced_present_retries;
     uint64_t glyph_slot_uses;
     uint64_t glyph_slot_wraps;
     uint64_t glyph_buffer_creations;
@@ -76,6 +84,7 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t fragmented_row_iterations;
     uint32_t atlas_warm_frame_rows;
     uint32_t fragmented_frame_iterations;
+    uint32_t paced_frame_iterations;
     uint32_t atlas_cold_resource_allocations;
     uint32_t scene_copy_iterations;
     uint32_t scene_copy_d3d11_copies;

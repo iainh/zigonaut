@@ -218,13 +218,14 @@ pub fn build(b: *std.Build) void {
     benchmark.root_module.addIncludePath(b.path("winui"));
     benchmark.root_module.addCSourceFile(.{
         .file = b.path("src/windows/directwrite_renderer.cpp"),
-        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN", "-DZIGONAUT_BENCHMARK_PRESENT" },
     });
     benchmark.root_module.linkSystemLibrary("user32", .{});
     benchmark.root_module.linkSystemLibrary("gdi32", .{});
     benchmark.root_module.linkSystemLibrary("d2d1", .{});
     benchmark.root_module.linkSystemLibrary("d3d11", .{});
     benchmark.root_module.linkSystemLibrary("d3dcompiler_47", .{});
+    benchmark.root_module.linkSystemLibrary("dcomp", .{});
     benchmark.root_module.linkSystemLibrary("dwrite", .{});
     benchmark.root_module.linkSystemLibrary("dxgi", .{});
     benchmark.root_module.linkSystemLibrary("kernel32", .{});

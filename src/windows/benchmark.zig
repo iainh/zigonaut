@@ -207,6 +207,22 @@ pub fn main(init: std.process.Init) !void {
         .{ perIterationUs(dwrite.immutable_instance_frame_nanoseconds, dwrite.fragmented_frame_iterations), perIterationUs(dwrite.dynamic_instance_frame_nanoseconds, dwrite.fragmented_frame_iterations), improvement(dwrite.immutable_instance_frame_nanoseconds, dwrite.dynamic_instance_frame_nanoseconds), dwrite.glyph_slot_uses, dwrite.glyph_slot_wraps, dwrite.glyph_buffer_creations, dwrite.glyph_capacity_growths },
     );
     std.debug.print(
+        "  production-paced glyph A/B (DirectComposition target, frame-latency wait, retained transfer, nonblocking Present; {d} frames/backend): legacy Direct2D SpriteBatch {d:.2} us average / {d:.2} us p95 submission; D3D11 instancing {d:.2} us average / {d:.2} us p95; {d:.2}% change\n" ++
+            "    pacing wait: legacy {d:.2} ms/frame, instanced {d:.2} ms/frame; Present retries: legacy {d}, instanced {d}\n",
+        .{
+            dwrite.paced_frame_iterations,
+            perIterationUs(dwrite.paced_legacy_submit_nanoseconds, dwrite.paced_frame_iterations),
+            @as(f64, @floatFromInt(dwrite.paced_legacy_submit_p95_nanoseconds)) / 1_000.0,
+            perIterationUs(dwrite.paced_instanced_submit_nanoseconds, dwrite.paced_frame_iterations),
+            @as(f64, @floatFromInt(dwrite.paced_instanced_submit_p95_nanoseconds)) / 1_000.0,
+            improvement(dwrite.paced_legacy_submit_nanoseconds, dwrite.paced_instanced_submit_nanoseconds),
+            @as(f64, @floatFromInt(dwrite.paced_legacy_wait_nanoseconds)) / @as(f64, @floatFromInt(dwrite.paced_frame_iterations)) / 1_000_000.0,
+            @as(f64, @floatFromInt(dwrite.paced_instanced_wait_nanoseconds)) / @as(f64, @floatFromInt(dwrite.paced_frame_iterations)) / 1_000_000.0,
+            dwrite.paced_legacy_present_retries,
+            dwrite.paced_instanced_present_retries,
+        },
+    );
+    std.debug.print(
         "  estimated snapshot-stage UI component cost (one-row update): synchronous capture + dirty replay {d:.2} us/frame; dirty replay after callback preparation {d:.2} us/frame; {d:.2}% change (excludes wait/message handoff)\n",
         .{ @as(f64, @floatFromInt(one_row_capture_ns + replay_ns)) / @as(f64, render_iterations) / 1_000.0, @as(f64, @floatFromInt(replay_ns)) / @as(f64, render_iterations) / 1_000.0, improvement(one_row_capture_ns + replay_ns, replay_ns) },
     );
