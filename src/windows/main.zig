@@ -542,7 +542,6 @@ const Application = struct {
                     view.heightForRows(self.application.settings.initial_rows),
                 )) return error.AttachPaneFailed;
                 self.application.attached_panes.appendAssumeCapacity(id);
-                view.setPresentationVisible(true);
             }
             self.output[self.index] = .{
                 .size = @sizeOf(chrome.LayoutNode),
@@ -591,6 +590,12 @@ const Application = struct {
         try tab.tree.writePreorder(&writer);
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
+        // updateLayout attaches each swap chain to its WinUI panel. Open the
+        // native render gate only after that presentation surface exists, so a
+        // returning tab cannot consume its resume draw while still detached.
+        for (layout) |item| if (item.kind == chrome.layout_leaf) {
+            if (self.viewFor(item.id)) |view| view.setPresentationVisible(true);
+        };
         var attached_index = self.attached_panes.items.len;
         while (attached_index != 0) {
             attached_index -= 1;

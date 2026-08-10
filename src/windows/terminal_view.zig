@@ -78,12 +78,35 @@ fn frameWaitOutcomeCanRetry(outcome: FrameWaitOutcome) bool {
     return outcome != .failed and outcome != .timed_out;
 }
 
+const RenderGateChange = enum {
+    unchanged,
+    pause,
+    resume_immediately,
+};
+
 const RenderGate = struct {
     presentation_visible: bool = false,
     environment_available: bool = true,
 
     fn enabled(self: RenderGate) bool {
         return self.presentation_visible and self.environment_available;
+    }
+
+    fn setPresentationVisible(self: *RenderGate, visible: bool) RenderGateChange {
+        const was_enabled = self.enabled();
+        self.presentation_visible = visible;
+        return change(was_enabled, self.enabled());
+    }
+
+    fn setEnvironmentAvailable(self: *RenderGate, available: bool) RenderGateChange {
+        const was_enabled = self.enabled();
+        self.environment_available = available;
+        return change(was_enabled, self.enabled());
+    }
+
+    fn change(was_enabled: bool, enabled_now: bool) RenderGateChange {
+        if (was_enabled == enabled_now) return .unchanged;
+        return if (enabled_now) .resume_immediately else .pause;
     }
 };
 
@@ -514,39 +537,42 @@ pub const View = struct {
     }
 
     pub fn setPresentationVisible(self: *View, visible: bool) void {
-        const was_enabled = self.render_gate.enabled();
-        self.render_gate.presentation_visible = visible;
-        self.renderAvailabilityChanged(was_enabled);
+        self.renderAvailabilityChanged(self.render_gate.setPresentationVisible(visible));
     }
 
     pub fn setEnvironmentAvailable(self: *View, available: bool) void {
-        const was_enabled = self.render_gate.enabled();
-        self.render_gate.environment_available = available;
-        self.renderAvailabilityChanged(was_enabled);
+        self.renderAvailabilityChanged(self.render_gate.setEnvironmentAvailable(available));
     }
 
     pub fn requestPendingRender(self: *View) void {
         if (self.render_gate.enabled() and self.render_dirty.load(.acquire)) self.armFrameWait();
     }
 
-    fn renderAvailabilityChanged(self: *View, was_enabled: bool) void {
-        const enabled = self.render_gate.enabled();
-        if (was_enabled == enabled) return;
-        if (!enabled) {
-            self.setRefreshInterval(0);
-            _ = win.KillTimer(self.hwnd, synchronized_output_timer);
-            self.cancelSelectionDrag();
-            self.stopFrameScheduling();
-            self.full_rebuild_required.store(true, .release);
-            self.render_dirty.store(true, .release);
-            return;
+    fn renderAvailabilityChanged(self: *View, change: RenderGateChange) void {
+        switch (change) {
+            .unchanged => return,
+            .pause => {
+                self.setRefreshInterval(0);
+                _ = win.KillTimer(self.hwnd, synchronized_output_timer);
+                self.cancelSelectionDrag();
+                self.stopFrameScheduling();
+                self.full_rebuild_required.store(true, .release);
+                self.render_dirty.store(true, .release);
+                return;
+            },
+            .resume_immediately => {},
         }
         self.full_rebuild_required.store(true, .release);
         self.render_dirty.store(true, .release);
         self.present_stall_recovery_attempted = false;
         self.refreshIfNeeded();
         if (self.text_engine != null)
-            self.armFrameWait()
+            // A swap chain returning from a detached or unavailable compositor
+            // may not signal its frame-latency object until another frame is
+            // presented. Draw the catch-up frame now instead of waiting on that
+            // circular dependency. The gate still prevents this path while the
+            // pane, display, or desktop session is unavailable.
+            self.renderResize()
         else if (self.hwnd != null)
             _ = win.InvalidateRect(self.hwnd, null, 0);
     }
@@ -2824,13 +2850,16 @@ test "grid geometry clips an oversized mandatory cell without negative padding" 
 test "render gate requires both a presented pane and an available environment" {
     var gate = RenderGate{};
     try std.testing.expect(!gate.enabled());
-    gate.presentation_visible = true;
+    try std.testing.expectEqual(RenderGateChange.resume_immediately, gate.setPresentationVisible(true));
     try std.testing.expect(gate.enabled());
-    gate.environment_available = false;
+    try std.testing.expectEqual(RenderGateChange.unchanged, gate.setPresentationVisible(true));
+    try std.testing.expectEqual(RenderGateChange.pause, gate.setEnvironmentAvailable(false));
     try std.testing.expect(!gate.enabled());
-    gate.presentation_visible = false;
-    gate.environment_available = true;
+    try std.testing.expectEqual(RenderGateChange.unchanged, gate.setPresentationVisible(false));
+    try std.testing.expectEqual(RenderGateChange.unchanged, gate.setEnvironmentAvailable(true));
     try std.testing.expect(!gate.enabled());
+    try std.testing.expectEqual(RenderGateChange.resume_immediately, gate.setPresentationVisible(true));
+    try std.testing.expect(gate.enabled());
 }
 
 test "failed and timed-out frame waits retain dirt without self-scheduling" {

@@ -150,6 +150,13 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&unsupported.step);
     }
 
+    const tab_rendering_test = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
+    tab_rendering_test.addFileArg(b.path("winui/test-tab-rendering.ps1"));
+    tab_rendering_test.addArgs(&.{ "-Executable", b.getInstallPath(.bin, "zigonaut.exe") });
+    tab_rendering_test.step.dependOn(winui_step);
+    const tab_rendering_test_step = b.step("test-winui-tabs", "Verify terminal rendering and input after changing tabs");
+    tab_rendering_test_step.dependOn(&tab_rendering_test.step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/windows/tests.zig"),
