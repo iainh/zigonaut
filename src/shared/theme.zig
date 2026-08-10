@@ -43,11 +43,12 @@ pub fn parseColor(text: []const u8) ?Color {
 pub fn randomizedBackground(value: Theme, random: u16) Theme {
     var result = value;
     const vivid = randomAccent(random);
-    result.background = .{
+    const tinted: Color = .{
         .red = tintChannel(value.background.red, vivid.red),
         .green = tintChannel(value.background.green, vivid.green),
         .blue = tintChannel(value.background.blue, vivid.blue),
     };
+    result.background = withLightness(tinted, value.background);
     return result;
 }
 
@@ -69,6 +70,37 @@ pub fn randomAccent(random: u16) Color {
 
 fn tintChannel(background: u8, tint: u8) u8 {
     return @intCast((@as(u16, background) * 7 + tint + 4) / 8);
+}
+
+fn withLightness(color: Color, reference: Color) Color {
+    const source_min = @min(color.red, color.green, color.blue);
+    const source_max = @max(color.red, color.green, color.blue);
+    const source_sum: u16 = @as(u16, source_min) + source_max;
+    const source_range: u16 = source_max - source_min;
+    const source_limit = @min(source_sum, 510 - source_sum);
+
+    const target_min = @min(reference.red, reference.green, reference.blue);
+    const target_max = @max(reference.red, reference.green, reference.blue);
+    const target_sum: u16 = @as(u16, target_min) + target_max;
+    const target_limit = @min(target_sum, 510 - target_sum);
+    if (source_range == 0 or source_limit == 0 or target_limit == 0) return reference;
+
+    var target_range = (source_range * target_limit + source_limit / 2) / source_limit;
+    if (target_range % 2 != target_sum % 2) {
+        target_range = if (target_range < target_limit) target_range + 1 else target_range - 1;
+    }
+    const offset = (target_sum - target_range) / 2;
+
+    return .{
+        .red = rescaleChannel(color.red, source_min, source_range, offset, target_range),
+        .green = rescaleChannel(color.green, source_min, source_range, offset, target_range),
+        .blue = rescaleChannel(color.blue, source_min, source_range, offset, target_range),
+    };
+}
+
+fn rescaleChannel(channel: u8, source_min: u8, source_range: u16, offset: u16, target_range: u16) u8 {
+    const position: u16 = channel - source_min;
+    return @intCast(offset + (position * target_range + source_range / 2) / source_range);
 }
 
 const max_themes = 64;
@@ -257,22 +289,29 @@ test "random backgrounds remain close to the theme background" {
     try std.testing.expectEqual(rasmus.ansi, first.ansi);
 }
 
-test "random backgrounds tint white and black" {
+test "random backgrounds preserve lightness at white and black" {
     var value = rasmus;
     value.background = hex(0xffffff);
-    try std.testing.expectEqual(hex(0xffe3e3), randomizedBackground(value, 0).background);
-    try std.testing.expectEqual(hex(0xe3ffe3), randomizedBackground(value, 512).background);
-    try std.testing.expectEqual(hex(0xe3e3ff), randomizedBackground(value, 1024).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 0).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 512).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 1024).background);
 
     value.background = hex(0x000000);
-    try std.testing.expectEqual(hex(0x200404), randomizedBackground(value, 0).background);
-    try std.testing.expectEqual(hex(0x042004), randomizedBackground(value, 512).background);
-    try std.testing.expectEqual(hex(0x040420), randomizedBackground(value, 1024).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 0).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 512).background);
+    try std.testing.expectEqual(value.background, randomizedBackground(value, 1024).background);
 }
 
-test "random backgrounds gently tint existing colors" {
+test "random backgrounds gently tint existing colors without changing lightness" {
     var value = rasmus;
     value.background = hex(0x336699);
+    const tinted = randomizedBackground(value, 0).background;
 
-    try std.testing.expectEqual(hex(0x4d5d8a), randomizedBackground(value, 0).background);
+    try std.testing.expect(!std.meta.eql(value.background, tinted));
+    try std.testing.expectEqual(
+        @as(u16, @min(value.background.red, value.background.green, value.background.blue)) +
+            @max(value.background.red, value.background.green, value.background.blue),
+        @as(u16, @min(tinted.red, tinted.green, tinted.blue)) +
+            @max(tinted.red, tinted.green, tinted.blue),
+    );
 }
