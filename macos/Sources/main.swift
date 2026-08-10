@@ -5,6 +5,39 @@ import SwiftUI
 import ZigonautPaneLayout
 import ZigonautRestoration
 
+private extension NSView {
+    func firstDescendant(named className: String) -> NSView? {
+        if NSStringFromClass(type(of: self)).hasSuffix(className) { return self }
+        for subview in subviews {
+            if let match = subview.firstDescendant(named: className) { return match }
+        }
+        return nil
+    }
+}
+
+private final class TerminalWindow: NSWindow {
+    var terminalBackgroundColor: (() -> NSColor?)?
+
+    func updateTitlebarColor() {
+        guard let color = terminalBackgroundColor?() else { return }
+        backgroundColor = color
+        titlebarAppearsTransparent = true
+
+        guard let frameView = contentView?.superview,
+              let container = frameView.firstDescendant(named: "NSTitlebarContainerView") else { return }
+        let target = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+            ? container.firstDescendant(named: "NSTitlebarView") ?? container
+            : container
+        target.wantsLayer = true
+        target.layer?.backgroundColor = color.cgColor
+    }
+
+    override func update() {
+        super.update()
+        updateTitlebarColor()
+    }
+}
+
 @MainActor
 final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     enum Kind {
@@ -20,6 +53,7 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     var shouldClose: ((NSWindow) -> Bool)?
     private var titleObservation: AnyCancellable?
     private var progressObservation: AnyCancellable?
+    private var backgroundObservations = Set<AnyCancellable>()
 
     init(window: NSWindow, kind: Kind) {
         self.kind = kind
@@ -32,6 +66,14 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
             progressObservation = model.$progress.sink { [weak self] _ in
                 self?.progressChanged?()
             }
+            model.$focusedPane.sink { [weak window] _ in
+                (window as? TerminalWindow)?.updateTitlebarColor()
+            }.store(in: &backgroundObservations)
+            model.preferences.objectWillChange.sink { [weak window] _ in
+                DispatchQueue.main.async {
+                    (window as? TerminalWindow)?.updateTitlebarColor()
+                }
+            }.store(in: &backgroundObservations)
         } else if case .settings(let model) = kind {
             configureSettingsToolbar(model)
             titleObservation = model.$pane.sink { [weak self, weak window] pane in
@@ -303,12 +345,24 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
             width: max(320, CGFloat(preferences.initialColumns) * cellWidth + 2 * preferences.paddingHorizontal),
             height: max(180, CGFloat(preferences.initialRows) * lineHeight + 2 * preferences.paddingVertical)
         )
-        let window = NSWindow(
+        let window = TerminalWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
+        window.terminalBackgroundColor = { [weak window, weak model] in
+            guard let window, let model else { return nil }
+            let dark = switch model.preferences.colourScheme {
+            case "Dark": true
+            case "Light": false
+            default: window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            }
+            let pane = model.focused ?? model.panes.first
+            return pane.map {
+                NSColor(rgb: model.preferences.terminalPalette(dark: dark, seed: $0.themeSeed).background)
+            }
+        }
         window.title = model.title
         window.titleVisibility = .visible
         window.titlebarSeparatorStyle = .none
@@ -316,6 +370,7 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         window.tabbingMode = .preferred
         window.setFrameAutosaveName("ZigonautTerminalWindow")
         window.contentView = NSHostingView(rootView: ContentView(window: model))
+        window.updateTitlebarColor()
         let controller = ManagedWindowController(window: window, kind: .terminal(model))
         controller.didClose = { [weak self] window in
             self?.terminalWindows.removeValue(forKey: window)
