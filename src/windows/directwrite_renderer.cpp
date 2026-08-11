@@ -429,6 +429,9 @@ struct ZigonautTextEngine {
     std::list<const LayoutKey*> layout_recency;
     std::map<uint32_t, ImageCacheEntry> images;
     std::map<BuiltinKey, BuiltinPlacement> builtin_placements;
+    std::map<BuiltinKey, ID2D1Bitmap*> builtin_bitmaps;
+    uint64_t builtin_generation = 1;
+    uint64_t builtin_bitmap_creations = 0;
     uint64_t layout_creation_count = 0;
     ZigonautDirectWriteBenchmark benchmark{};
     bool benchmark_active = false;
@@ -1073,6 +1076,37 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         resetDamageHistory();
     }
 
+    void clearBuiltinBitmaps() {
+        for (auto& entry : builtin_bitmaps) release(entry.second);
+        builtin_bitmaps.clear();
+    }
+
+    HRESULT getBuiltinBitmap(uint32_t codepoint, uint32_t width, uint32_t height,
+        uint32_t span, const uint8_t* mask, uint32_t stride, ID2D1Bitmap** result) {
+        if (!result || !mask || !width || !height || stride < width) return E_INVALIDARG;
+        const BuiltinKey key{codepoint, width, height, span, builtin_generation};
+        const auto found = builtin_bitmaps.find(key);
+        if (found != builtin_bitmaps.end()) {
+            *result = found->second;
+            return S_OK;
+        }
+        ID2D1Bitmap* bitmap = nullptr;
+        const auto properties = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_A8_UNORM, D2D1_ALPHA_MODE_STRAIGHT), 96, 96);
+        HRESULT hr = target->CreateBitmap(D2D1::SizeU(width, height), mask,
+            stride, properties, &bitmap);
+        if (FAILED(hr)) return hr;
+        try {
+            builtin_bitmaps.emplace(key, bitmap);
+        } catch (...) {
+            release(bitmap);
+            return E_OUTOFMEMORY;
+        }
+        ++builtin_bitmap_creations;
+        *result = bitmap;
+        return S_OK;
+    }
+
     HRESULT transferSceneTo(ID3D11Texture2D* destination, bool force_full = false) {
         if (target == nullptr || d3d_context == nullptr || scene_texture == nullptr ||
             destination == nullptr) return E_HANDLE;
@@ -1269,6 +1303,8 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     }
 
     void updateMetrics() {
+        clearBuiltinBitmaps();
+        if (++builtin_generation == 0) ++builtin_generation;
         DWRITE_FONT_METRICS font_metrics{};
         normal_face->GetMetrics(&font_metrics);
         const float em_pixels = static_cast<float>(font_size) *
@@ -1757,6 +1793,7 @@ ZigonautTextEngine::~ZigonautTextEngine() {
     delete grid_renderer;
     invalidateAtlas();
     discardTargetBitmap();
+    clearBuiltinBitmaps();
     for (auto& slot : glyph_slots) { release(slot.view); release(slot.buffer); }
     release(glyph_sampler);
     release(glyph_blend); release(glyph_ps); release(glyph_vs);
@@ -2094,9 +2131,9 @@ native_fallback:
             else {
                 const auto& cell=row_cells[static_cast<size_t>(-1-ordered)];
                 ID2D1Bitmap* bitmap=nullptr;
-                const auto props=D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_A8_UNORM,D2D1_ALPHA_MODE_STRAIGHT),96,96);
-                hr=target->CreateBitmap(D2D1::SizeU(cell.builtin_width,cell.builtin_height),cell.builtin_mask,
-                    cell.builtin_stride,props,&bitmap);
+                const uint32_t span=cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
+                hr=getBuiltinBitmap(cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,
+                    span,cell.builtin_mask,cell.builtin_stride,&bitmap);
                 if (SUCCEEDED(hr)) {
                     brush->SetColor(color(cell.foreground));
                     const float left=row_origin_x+cell.column*row_cell_width;
@@ -2107,7 +2144,6 @@ native_fallback:
                         D2D1::RectF(0,0,static_cast<float>(cell.builtin_width),static_cast<float>(cell.builtin_height)));
                     target->SetAntialiasMode(aa);
                 }
-                release(bitmap);
             }
             if (FAILED(hr)) return hr;
         }
@@ -3117,12 +3153,25 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
         engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
         if (SUCCEEDED(hr)) hr = row(engine, 0);
         if (SUCCEEDED(hr)) hr = row(engine, static_cast<float>(engine->metrics.height));
+        std::vector<uint8_t> mask(SUCCEEDED(hr)
+            ? engine->metrics.width * engine->metrics.height
+            : 1, 255);
+        const uint64_t bitmap_creations = engine ? engine->builtin_bitmap_creations : 0;
+        for (uint32_t column = 0; column < 2 && SUCCEEDED(hr); ++column) {
+            hr = zigonaut_text_engine_draw_builtin_cell(engine, 0x2588, mask.data(),
+                engine->metrics.width, engine->metrics.height, engine->metrics.width,
+                static_cast<float>(column * engine->metrics.width), 0,
+                static_cast<float>(engine->metrics.width), static_cast<float>(engine->metrics.height),
+                0x20ff20);
+        }
         engine->benchmark_active = false;
         if (SUCCEEDED(hr) && (engine->target->GetTextAntialiasMode() != D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE ||
                 engine->atlas_allocator || engine->atlas_bitmap || engine->atlas_texture || engine->atlas_context ||
                 engine->atlas_brush || engine->sprite_batch || engine->target3 ||
                 engine->benchmark.atlas_eligible_rows || engine->benchmark.atlas_fallback_rows ||
-                engine->benchmark.atlas_sprite_batches || engine->benchmark.atlas_sprites)) hr = E_FAIL;
+                engine->benchmark.atlas_sprite_batches || engine->benchmark.atlas_sprites ||
+                engine->builtin_bitmap_creations != bitmap_creations + 1 ||
+                engine->builtin_bitmaps.size() != 1)) hr = E_FAIL;
         if (SUCCEEDED(hr)) hr = finish(engine);
         uint64_t changed = 0;
         if (SUCCEEDED(hr)) hr = ink(engine, 0, engine->metrics.height * 2, 0x18, &changed);
@@ -3721,10 +3770,9 @@ extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
     // A8 opacity masks are supported in every text AA policy and provide the
     // deterministic fallback when the glyph atlas is unavailable.
     ID2D1Bitmap* bitmap = nullptr;
-    const auto properties = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_A8_UNORM, D2D1_ALPHA_MODE_STRAIGHT), 96, 96);
-    HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(mask_width, mask_height), mask,
-        mask_stride, properties, &bitmap);
+    const uint32_t span = width > static_cast<float>(engine->metrics.width) ? 2u : 1u;
+    HRESULT hr = engine->getBuiltinBitmap(codepoint, mask_width, mask_height,
+        span, mask, mask_stride, &bitmap);
     if (FAILED(hr)) return hr;
     engine->brush->SetColor(color(foreground));
     const auto destination = D2D1::RectF(left, top, left + width, top + height);
@@ -3734,7 +3782,6 @@ extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
         D2D1_OPACITY_MASK_CONTENT_GRAPHICS, destination,
         D2D1::RectF(0, 0, static_cast<float>(mask_width), static_cast<float>(mask_height)));
     engine->target->SetAntialiasMode(aa);
-    bitmap->Release();
     return S_OK;
 }
 
