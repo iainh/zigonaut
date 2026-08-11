@@ -1275,7 +1275,7 @@ struct Bridge {
             }
             auto title = std::wstring{L"Pane"};
             auto const tab_title = tabTitle(presented_tab_id);
-            if (!tab_title.empty()) title += L" — " + std::wstring{tab_title};
+            if (!tab_title.empty()) title += L" \u2014 " + std::wstring{tab_title};
             beginDragFeedback(position, hstring{title}, true);
         }
         clearDragFeedback();
