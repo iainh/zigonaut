@@ -63,7 +63,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var voiceOverObservation: NSKeyValueObservation?
   private var colorCache: [ColorKey: NSColor] = [:]
   private var pseudographicsCache: [PseudographicsKey: CGImage] = [:]
-  private var pseudographicsMetrics: (width: Int, height: Int, thickness: Int)?
+  private var pseudographicsMetrics: (cellWidth: Int, height: Int, thickness: Int)?
   private var appliedPalette: TerminalPalette?
   private var appliedScrollback = -1
   private var metalLayer: CAMetalLayer?
@@ -985,14 +985,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func pseudographicsMask(codepoint: UInt32, columns: Int) -> CGImage? {
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    let baseWidth = max(1, Int((cellWidth * scale).rounded()))
     let width = max(1, Int((cellWidth * CGFloat(columns) * scale).rounded()))
     let height = max(1, Int((lineHeight * scale).rounded()))
     let underline = font.underlineThickness
     let underlineThickness = underline > 0 ? Int((underline * scale).rounded()) : 0
     let thickness = max(1, max(underlineThickness, (height + 8) / 16))
-    let metrics = (width, height, thickness)
+    let metrics = (baseWidth, height, thickness)
     if let previous = pseudographicsMetrics,
-      previous.width != width || previous.height != height || previous.thickness != thickness
+      previous.cellWidth != baseWidth || previous.height != height || previous.thickness != thickness
     {
       pseudographicsCache.removeAll(keepingCapacity: true)
     }
