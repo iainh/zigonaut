@@ -398,7 +398,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       return
     }
     if Self.nonTextKeyCodes.contains(event.keyCode) {
-      sendKey(event, action: event.isARepeat ? 1 : 0, text: event.characters ?? "")
+      // AppKit represents arrows and other function keys as private-use
+      // Unicode characters. Only forward the physical key so the terminal
+      // encoder emits the corresponding escape sequence instead of that text.
+      sendKey(event, action: event.isARepeat ? 1 : 0, text: "")
       encodedKeys.insert(event.keyCode)
       return
     }
