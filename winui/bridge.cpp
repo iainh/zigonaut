@@ -1418,10 +1418,16 @@ struct Bridge {
         p->drop_label=TextBlock{}; p->drop_label.HorizontalAlignment(HorizontalAlignment::Center); p->drop_label.VerticalAlignment(VerticalAlignment::Center); p->drop_label.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
         p->drop_label.Foreground(application.Resources().Lookup(box_value(L"TextOnAccentFillColorPrimaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
         p->drop_preview.Child(p->drop_label);
-        p->drag_handle=Border{}; p->drag_handle.Width(30); p->drag_handle.Height(24); p->drag_handle.HorizontalAlignment(HorizontalAlignment::Right); p->drag_handle.VerticalAlignment(VerticalAlignment::Top); p->drag_handle.CornerRadius(CornerRadius{0,0,0,4});
+        p->drag_handle=Border{}; p->drag_handle.Width(22); p->drag_handle.Height(18); p->drag_handle.HorizontalAlignment(HorizontalAlignment::Right); p->drag_handle.VerticalAlignment(VerticalAlignment::Top); p->drag_handle.CornerRadius(CornerRadius{0,0,0,4});
         p->drag_handle.Background(application.Resources().Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
         p->drag_handle.CanDrag(false); p->drag_handle.Visibility(Visibility::Collapsed);
-        auto const grip=FontIcon{}; grip.Glyph(L"\xE700"); grip.FontSize(12); p->drag_handle.Child(grip);
+        // Fluent UI System Icons: Re Order Dots Horizontal 16 Regular.
+        auto const grip=PathIcon{}; grip.Width(16); grip.Height(16);
+        auto const dots=Microsoft::UI::Xaml::Media::GeometryGroup{};
+        constexpr float centers[][2]={{4,6},{8,6},{12,6},{4,10},{8,10},{12,10}};
+        for(auto const& center:centers){auto const dot=Microsoft::UI::Xaml::Media::EllipseGeometry{};dot.Center({center[0],center[1]});dot.RadiusX(1);dot.RadiusY(1);dots.Children().Append(dot);}
+        grip.Data(dots);
+        auto const grip_view=Viewbox{}; grip_view.Width(12); grip_view.Height(12); grip_view.Child(grip); p->drag_handle.Child(grip_view);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
             p->drag_handle, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Control);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(p->drag_handle, L"Move pane");
