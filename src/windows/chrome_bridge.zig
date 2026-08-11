@@ -57,6 +57,11 @@ pub const pane_find_query: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_QUERY);
 pub const pane_find_next: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_NEXT);
 pub const pane_find_previous: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_PREVIOUS);
 pub const pane_find_close: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_FIND_CLOSE);
+pub const pane_merge_tab: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_MERGE_TAB);
+pub const pane_to_tab: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_PANE_TO_TAB);
+pub const pane_reorder_tab: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_REORDER_TAB);
+pub const pane_restore_drag_destination: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_RESTORE_DRAG_DESTINATION);
+pub const pane_move_pane: u32 = @intCast(win.ZIGONAUT_PANE_EVENT_MOVE_PANE);
 pub const layout_leaf: u32 = @intCast(win.ZIGONAUT_LAYOUT_LEAF);
 pub const layout_split: u32 = @intCast(win.ZIGONAUT_LAYOUT_SPLIT);
 pub const axis_left_right: u32 = @intCast(win.ZIGONAUT_AXIS_LEFT_RIGHT);
@@ -65,11 +70,12 @@ pub const axis_top_bottom: u32 = @intCast(win.ZIGONAUT_AXIS_TOP_BOTTOM);
 comptime {
     // These types cross GetProcAddress boundaries and must stay identical to
     // bridge.h on both supported 64-bit architectures.
-    std.debug.assert(@sizeOf(PaneEvent) == 48);
+    std.debug.assert(@sizeOf(PaneEvent) == 56);
     std.debug.assert(@alignOf(PaneEvent) == 8);
     std.debug.assert(@offsetOf(PaneEvent, "target_id") == 8);
     std.debug.assert(@offsetOf(PaneEvent, "text") == 24);
     std.debug.assert(@offsetOf(PaneEvent, "attributes") == 44);
+    std.debug.assert(@offsetOf(PaneEvent, "secondary_id") == 48);
     std.debug.assert(@sizeOf(LayoutNode) == 32);
     std.debug.assert(@alignOf(LayoutNode) == 8);
     std.debug.assert(@offsetOf(LayoutNode, "id") == 8);
@@ -83,7 +89,7 @@ const AttachPane = *const fn (?*anyopaque, u64, win.HWND, ?*anyopaque, u32, u32,
 const DetachPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const FocusPane = *const fn (?*anyopaque, u64) callconv(.c) win.HRESULT;
 const UpdateLayout = *const fn (?*anyopaque, [*]const LayoutNode, u32, u64) callconv(.c) win.HRESULT;
-const Update = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, [*]const u32, [*]const u8, u32, i32, win.BOOL) callconv(.c) win.HRESULT;
+const Update = *const fn (?*anyopaque, [*]const u64, [*]const [*]const u8, [*]const u32, [*]const u32, [*]const u8, u32, i32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateProfiles = *const fn (?*anyopaque, [*]const [*]const u8, [*]const u32, u32) callconv(.c) win.HRESULT;
 const UpdateScrollbar = *const fn (?*anyopaque, u64, u32, u32, u32, win.BOOL) callconv(.c) win.HRESULT;
 const UpdateTaskbarProgress = *const fn (?*anyopaque, u32, u32) callconv(.c) win.HRESULT;
@@ -210,13 +216,13 @@ pub const Bridge = struct {
         return succeeded(self.update_layout_fn(instance, nodes.ptr, count, focused));
     }
 
-    pub fn update(self: *Bridge, titles: []const [*]const u8, title_lengths: []const u32, colors: []const u32, activity: []const u8, active: ?usize, show_colors: bool) bool {
+    pub fn update(self: *Bridge, tab_ids: []const u64, titles: []const [*]const u8, title_lengths: []const u32, colors: []const u32, activity: []const u8, active: ?usize, show_colors: bool) bool {
         const instance = self.instance orelse return false;
-        if (titles.len != title_lengths.len or titles.len != colors.len or titles.len != activity.len) return false;
+        if (tab_ids.len != titles.len or titles.len != title_lengths.len or titles.len != colors.len or titles.len != activity.len) return false;
         const count = std.math.cast(u32, titles.len) orelse return false;
         const active_index = if (active) |index| std.math.cast(i32, index) orelse return false else -1;
         for (title_lengths) |length| if (length > std.math.maxInt(i32)) return false;
-        return succeeded(self.update_fn(instance, titles.ptr, title_lengths.ptr, colors.ptr, activity.ptr, count, active_index, @intFromBool(show_colors)));
+        return succeeded(self.update_fn(instance, tab_ids.ptr, titles.ptr, title_lengths.ptr, colors.ptr, activity.ptr, count, active_index, @intFromBool(show_colors)));
     }
 
     pub fn updateProfiles(self: *Bridge, names: []const [*]const u8, name_lengths: []const u32) bool {

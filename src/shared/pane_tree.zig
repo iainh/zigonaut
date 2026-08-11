@@ -27,6 +27,7 @@ pub const Error = error{
     SplitNotFound,
     InvalidRatio,
     TreeFull,
+    AllocatorMismatch,
 };
 
 const Node = union(enum) {
@@ -81,6 +82,68 @@ pub const Tree = struct {
             .first = first,
             .second = second,
         } };
+        self.assertValid();
+    }
+
+    /// Transfers every node owned by `source` into this tree at `target`.
+    /// Only the new joining split's target child is allocated; the incoming
+    /// subtree itself is never copied. On success `source` is empty and may be
+    /// safely deinitialized.
+    pub fn graft(self: *Tree, target: PaneId, source: *Tree, split_id: SplitId, direction: Direction) (Error || std.mem.Allocator.Error)!void {
+        if (!std.meta.eql(self.allocator, source.allocator)) return error.AllocatorMismatch;
+        if (split_id == 0) return error.InvalidId;
+        const target_leaf = findPane(self.root, target) orelse return error.PaneNotFound;
+        const incoming = source.root orelse return error.PaneNotFound;
+        if (self.nodeCount() + source.nodeCount() + 1 > max_nodes) return error.TreeFull;
+        if (findPane(self.root, split_id) != null or findSplit(self.root, split_id) != null or
+            findPane(source.root, split_id) != null or findSplit(source.root, split_id) != null or
+            hasAnyCollision(self.root.?, incoming)) return error.DuplicateId;
+
+        // This is the only fallible operation. Everything below is pointer
+        // ownership transfer and therefore transactional with respect to OOM.
+        const old_target = try self.allocator.create(Node);
+        old_target.* = target_leaf.*;
+        const before = direction == .left or direction == .up;
+        target_leaf.* = .{ .split = .{
+            .id = split_id,
+            .axis = if (direction == .left or direction == .right) .left_right else .top_bottom,
+            .ratio = 32768,
+            .first = if (before) incoming else old_target,
+            .second = if (before) old_target else incoming,
+        } };
+        self.focused = source.focused;
+        source.root = null;
+        source.focused = null;
+        self.assertValid();
+        source.assertValid();
+    }
+
+    /// Moves one existing leaf beside another without changing pane identity.
+    /// Both replacement nodes are allocated before the original tree is changed.
+    pub fn movePane(self: *Tree, source: PaneId, target: PaneId, split_id: SplitId, direction: Direction) (Error || std.mem.Allocator.Error)!void {
+        if (source == target) return error.DuplicateId;
+        if (split_id == 0) return error.InvalidId;
+        if (findPane(self.root, source) == null or findPane(self.root, target) == null) return error.PaneNotFound;
+        if (findPane(self.root, split_id) != null or findSplit(self.root, split_id) != null) return error.DuplicateId;
+
+        const incoming = try self.allocator.create(Node);
+        errdefer self.allocator.destroy(incoming);
+        const old_target = try self.allocator.create(Node);
+        errdefer self.allocator.destroy(old_target);
+        incoming.* = .{ .leaf = source };
+
+        std.debug.assert(self.close(source));
+        const target_leaf = findPane(self.root, target) orelse unreachable;
+        old_target.* = target_leaf.*;
+        const before = direction == .left or direction == .up;
+        target_leaf.* = .{ .split = .{
+            .id = split_id,
+            .axis = if (direction == .left or direction == .right) .left_right else .top_bottom,
+            .ratio = 32768,
+            .first = if (before) incoming else old_target,
+            .second = if (before) old_target else incoming,
+        } };
+        self.focused = source;
         self.assertValid();
     }
 
@@ -274,6 +337,15 @@ fn countSplit(node: *const Node, id: SplitId) usize {
     };
 }
 
+fn hasAnyCollision(existing: *const Node, incoming: *const Node) bool {
+    return switch (incoming.*) {
+        .leaf => |id| findPane(@constCast(existing), id) != null or findSplit(@constCast(existing), id) != null,
+        .split => |split| findPane(@constCast(existing), split.id) != null or
+            findSplit(@constCast(existing), split.id) != null or
+            hasAnyCollision(existing, split.first) or hasAnyCollision(existing, split.second),
+    };
+}
+
 fn writeNode(node: *const Node, writer: anytype) !u32 {
     return switch (node.*) {
         .leaf => |id| {
@@ -434,4 +506,54 @@ test "tree capacity bounds recursive traversal depth" {
     }
     try std.testing.expectEqual(@as(usize, max_nodes), tree.nodeCount());
     try std.testing.expectError(error.TreeFull, tree.split(max_panes, max_panes + 1, 20_000, .top_bottom));
+}
+
+test "graft transfers nested subtree with directional ordering and focus" {
+    var destination = try Tree.init(std.testing.allocator, 1);
+    defer destination.deinit();
+    var incoming = try Tree.init(std.testing.allocator, 2);
+    defer incoming.deinit();
+    try incoming.split(2, 3, 20, .top_bottom);
+    try std.testing.expect(incoming.focus(3));
+
+    try destination.graft(1, &incoming, 10, .left);
+    try std.testing.expectEqual(@as(?PaneId, 3), destination.focused);
+    try std.testing.expectEqual(@as(usize, 0), incoming.nodeCount());
+    const items = try destination.flatten(std.testing.allocator);
+    defer std.testing.allocator.free(items);
+    try std.testing.expectEqual(@as(SplitId, 10), items[0].split.id);
+    try std.testing.expectEqual(@as(SplitId, 20), items[1].split.id);
+    try std.testing.expectEqual(@as(PaneId, 2), items[2].leaf.id);
+    try std.testing.expectEqual(@as(PaneId, 3), items[3].leaf.id);
+    try std.testing.expectEqual(@as(PaneId, 1), items[4].leaf.id);
+}
+
+test "graft right places incoming tree after target" {
+    var destination = try Tree.init(std.testing.allocator, 1);
+    defer destination.deinit();
+    var incoming = try Tree.init(std.testing.allocator, 2);
+    defer incoming.deinit();
+    try destination.graft(1, &incoming, 10, .right);
+    const items = try destination.flatten(std.testing.allocator);
+    defer std.testing.allocator.free(items);
+    try std.testing.expectEqual(@as(PaneId, 1), items[1].leaf.id);
+    try std.testing.expectEqual(@as(PaneId, 2), items[2].leaf.id);
+}
+
+test "moving a pane changes its split position and preserves focus" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    try tree.split(1, 2, 10, .left_right);
+    try tree.split(2, 3, 11, .top_bottom);
+
+    try tree.movePane(1, 3, 12, .down);
+    try std.testing.expectEqual(@as(?PaneId, 1), tree.focused);
+    try std.testing.expectEqual(@as(usize, 5), tree.nodeCount());
+    const items = try tree.flatten(std.testing.allocator);
+    defer std.testing.allocator.free(items);
+    try std.testing.expectEqual(@as(PaneId, 2), items[1].leaf.id);
+    try std.testing.expectEqual(@as(SplitId, 12), items[2].split.id);
+    try std.testing.expectEqual(Axis.top_bottom, items[2].split.axis);
+    try std.testing.expectEqual(@as(PaneId, 3), items[3].leaf.id);
+    try std.testing.expectEqual(@as(PaneId, 1), items[4].leaf.id);
 }

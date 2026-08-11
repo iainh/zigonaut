@@ -315,6 +315,11 @@ pub const App = struct {
         return null;
     }
 
+    pub fn tabIndexById(self: *const App, id: u64) ?usize {
+        for (self.tabs.items, 0..) |tab, index| if (tab.id == id) return index;
+        return null;
+    }
+
     pub fn runtimeForPane(self: *App, id: pane_tree.PaneId) ?*SessionRuntime {
         return (self.paneById(id) orelse return null).session.runtime;
     }
@@ -457,11 +462,117 @@ pub const App = struct {
         if (from >= self.tabs.items.len or to >= self.tabs.items.len or from == to) return;
         const active_id = if (self.active_tab) |index| self.tabs.items[index].id else null;
         const moved = self.tabs.orderedRemove(from);
-        try self.tabs.insert(self.allocator, to, moved);
+        self.tabs.insertAssumeCapacity(to, moved);
         if (active_id) |id| for (self.tabs.items, 0..) |tab, index| if (tab.id == id) {
             self.active_tab = index;
             break;
         };
+    }
+
+    /// Transfers a complete source tab into the target tab. The joining split
+    /// and all ArrayList capacity are allocated before either tab is changed.
+    pub fn mergeTabOntoPane(self: *App, source_tab_index: usize, target_pane_id: pane_tree.PaneId, direction: pane_tree.Direction) !void {
+        if (source_tab_index >= self.tabs.items.len) return error.TabNotFound;
+        var target_tab_index: ?usize = null;
+        for (self.tabs.items, 0..) |*tab, index| if (tab.pane(target_pane_id) != null) {
+            target_tab_index = index;
+            break;
+        };
+        const target_index = target_tab_index orelse return error.PaneNotFound;
+        if (target_index == source_tab_index) return error.SameTab;
+        const source_count = self.tabs.items[source_tab_index].panes.items.len;
+        if (self.tabs.items[target_index].panes.items.len + source_count > pane_tree.max_panes)
+            return error.PaneLimitReached;
+
+        try self.tabs.items[target_index].panes.ensureUnusedCapacity(self.allocator, source_count);
+        const split_id = self.next_object_id;
+        try self.tabs.items[target_index].tree.graft(
+            target_pane_id,
+            &self.tabs.items[source_tab_index].tree,
+            split_id,
+            direction,
+        );
+        self.next_object_id += 1;
+        for (self.tabs.items[source_tab_index].panes.items) |pane|
+            self.tabs.items[target_index].panes.appendAssumeCapacity(pane);
+        self.tabs.items[source_tab_index].panes.clearRetainingCapacity();
+        self.tabs.items[target_index].has_unread_output = self.tabs.items[target_index].has_unread_output or
+            self.tabs.items[source_tab_index].has_unread_output;
+
+        var source = self.tabs.orderedRemove(source_tab_index);
+        source.panes.deinit(self.allocator);
+        source.tree.deinit();
+        const final_target = if (source_tab_index < target_index) target_index - 1 else target_index;
+        self.setActiveTab(final_target);
+        self.resizeActiveSession();
+    }
+
+    /// Repositions one live pane beside another pane in the same tab.
+    pub fn movePaneOntoPane(self: *App, source_pane_id: pane_tree.PaneId, target_pane_id: pane_tree.PaneId, direction: pane_tree.Direction) !void {
+        if (source_pane_id == target_pane_id) return error.SamePane;
+        var source_tab_index: ?usize = null;
+        var target_tab_index: ?usize = null;
+        for (self.tabs.items, 0..) |*tab, index| {
+            if (tab.pane(source_pane_id) != null) source_tab_index = index;
+            if (tab.pane(target_pane_id) != null) target_tab_index = index;
+        }
+        const tab_index = source_tab_index orelse return error.PaneNotFound;
+        const target_index = target_tab_index orelse return error.PaneNotFound;
+        if (target_index != tab_index) return error.DifferentTab;
+        if (self.tabs.items[tab_index].panes.items.len < 2) return error.SamePane;
+
+        try self.tabs.items[tab_index].tree.movePane(
+            source_pane_id,
+            target_pane_id,
+            self.next_object_id,
+            direction,
+        );
+        self.next_object_id += 1;
+        self.setActiveTab(tab_index);
+        self.resizeActiveSession();
+    }
+
+    /// Moves a live pane into a newly inserted tab. If the pane already owns
+    /// its tab, this is only a tab reorder and performs no tree/session rebuild.
+    pub fn movePaneToNewTab(self: *App, pane_id: pane_tree.PaneId, insertion_index: usize) !void {
+        if (insertion_index > self.tabs.items.len) return error.InvalidTabIndex;
+        var source_tab_index: ?usize = null;
+        var source_pane_index: ?usize = null;
+        for (self.tabs.items, 0..) |tab, ti| for (tab.panes.items, 0..) |pane, pi| if (pane.id == pane_id) {
+            source_tab_index = ti;
+            source_pane_index = pi;
+        };
+        const source_index = source_tab_index orelse return error.PaneNotFound;
+        if (self.tabs.items[source_index].panes.items.len == 1) {
+            // `insertion_index` names the gap in the current strip. Removing a
+            // tab before that gap shifts the final item index left by one.
+            const destination = @min(
+                insertion_index - @intFromBool(source_index < insertion_index),
+                self.tabs.items.len - 1,
+            );
+            try self.moveTab(source_index, destination);
+            self.setActiveTab(destination);
+            self.resizeActiveSession();
+            return;
+        }
+        if (self.tabs.items.len >= max_tabs) return error.TabLimitReached;
+
+        // Build the detached destination completely before touching the source.
+        try self.tabs.ensureUnusedCapacity(self.allocator, 1);
+        var tree = try pane_tree.Tree.init(self.allocator, pane_id);
+        errdefer tree.deinit();
+        var panes: std.ArrayList(Pane) = .empty;
+        errdefer panes.deinit(self.allocator);
+        try panes.ensureUnusedCapacity(self.allocator, 1);
+
+        const pane = self.tabs.items[source_index].panes.orderedRemove(source_pane_index.?);
+        std.debug.assert(self.tabs.items[source_index].tree.close(pane_id));
+        panes.appendAssumeCapacity(pane);
+        const tab_id = self.next_object_id;
+        self.next_object_id += 1;
+        self.tabs.insertAssumeCapacity(insertion_index, .{ .id = tab_id, .tree = tree, .panes = panes });
+        self.setActiveTab(insertion_index);
+        self.resizeActiveSession();
     }
 
     fn observeTabOutput(tab: *Tab) void {
@@ -800,4 +911,84 @@ test "tab and pane limits reject work before model mutation" {
         app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 0, null),
     );
     try std.testing.expectEqual(@as(usize, pane_tree.max_panes), app.activeTab().?.panes.items.len);
+}
+
+test "merge tab grafts nested tree and keeps incoming focus" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "target", "", "", null, theme.rasmus.background, 1);
+    const target = app.activePane().?.id;
+    _ = try app.addSessionRecord(.wsl, "source", "", "", null, theme.rasmus.background, 2);
+    const source_first = app.activePane().?.id;
+    const source_focused = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background, 3, null);
+    const focused_session_id = app.activeSession().?.id;
+
+    try app.mergeTabOntoPane(1, target, .left);
+    try std.testing.expectEqual(@as(usize, 1), app.tabCount());
+    try std.testing.expectEqual(source_focused, app.activePane().?.id);
+    try std.testing.expectEqual(focused_session_id, app.activeSession().?.id);
+    const layout = try app.activeLayout(std.testing.allocator);
+    defer std.testing.allocator.free(layout);
+    try std.testing.expectEqual(pane_tree.Axis.left_right, layout[0].split.axis);
+    try std.testing.expectEqual(pane_tree.Axis.top_bottom, layout[1].split.axis);
+    try std.testing.expectEqual(source_first, layout[2].leaf.id);
+    try std.testing.expectEqual(source_focused, layout[3].leaf.id);
+    try std.testing.expectEqual(target, layout[4].leaf.id);
+}
+
+test "moving pane creates inserted tab without replacing session ownership" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background, 1);
+    const moved = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 2, null);
+    const metadata = app.activeSession().?.metadata;
+    const session_id = app.activeSession().?.id;
+
+    try app.movePaneToNewTab(moved, 0);
+    try std.testing.expectEqual(@as(usize, 2), app.tabCount());
+    try std.testing.expectEqual(@as(?usize, 0), app.activeTabIndex());
+    try std.testing.expectEqual(moved, app.activePane().?.id);
+    try std.testing.expectEqual(session_id, app.activeSession().?.id);
+    try std.testing.expect(metadata == app.activeSession().?.metadata);
+    try std.testing.expectEqual(@as(usize, 1), app.tabs.items[1].panes.items.len);
+}
+
+test "moving pane onto pane rearranges the split without replacing sessions" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background, 1);
+    const first = app.activePane().?.id;
+    const second = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 2, null);
+    const third = try app.splitFocusedRecord(.top_bottom, null, theme.rasmus.background, 3, null);
+    const first_session = app.tabs.items[0].pane(first).?.session.id;
+
+    try app.movePaneOntoPane(first, third, .down);
+    try std.testing.expectEqual(@as(usize, 1), app.tabCount());
+    try std.testing.expectEqual(first, app.activePane().?.id);
+    try std.testing.expectEqual(first_session, app.activeSession().?.id);
+    try std.testing.expectEqual(@as(usize, 3), app.activeTab().?.panes.items.len);
+    const layout = try app.activeLayout(std.testing.allocator);
+    defer std.testing.allocator.free(layout);
+    try std.testing.expectEqual(second, layout[1].leaf.id);
+    try std.testing.expectEqual(pane_tree.Axis.top_bottom, layout[2].split.axis);
+    try std.testing.expectEqual(third, layout[3].leaf.id);
+    try std.testing.expectEqual(first, layout[4].leaf.id);
+}
+
+test "moving a sole pane only reorders its tab and activates it" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "one", "", "", null, theme.rasmus.background, 1);
+    const pane = app.activePane().?.id;
+    const tab_id = app.activeTab().?.id;
+    const metadata = app.activeSession().?.metadata;
+    _ = try app.addSessionRecord(.wsl, "two", "", "", null, theme.rasmus.background, 2);
+    _ = try app.addSessionRecord(.windows, "three", "", "", null, theme.rasmus.background, 3);
+
+    try app.movePaneToNewTab(pane, 3);
+    try std.testing.expectEqual(@as(usize, 3), app.tabCount());
+    try std.testing.expectEqualStrings("two", app.tabs.items[0].displayTitle());
+    try std.testing.expectEqual(@as(?usize, 2), app.activeTabIndex());
+    try std.testing.expectEqual(tab_id, app.activeTab().?.id);
+    try std.testing.expect(metadata == app.activeSession().?.metadata);
 }

@@ -19,6 +19,7 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Text.h>
@@ -57,6 +58,10 @@ namespace Microsoft = winrt::Microsoft;
 constexpr wchar_t placement_key[] = L"Software\\Zigonaut";
 constexpr wchar_t placement_value[] = L"WindowPlacement";
 constexpr uint32_t placement_version = 1;
+constexpr wchar_t tab_drag_property[] = L"Zigonaut.TabIndex";
+constexpr wchar_t pane_drag_property[] = L"Zigonaut.PaneId";
+
+enum class DropDirection : uint32_t { left = 1, right = 2, up = 3, down = 4 };
 
 struct SavedWindowPlacement {
     uint32_t version{};
@@ -186,6 +191,7 @@ struct Bridge {
         uint64_t pane_id{}; HWND window{}; com_ptr<IDXGISwapChain> swap_chain;
         uint32_t cell_width{}, cell_height{}, minimum_width{}, minimum_height{};
         Border frame{nullptr}; Grid grid{nullptr}; SwapChainPanel panel{nullptr}; ZigonautWinUIBridge::TerminalControl input{nullptr}; Border focus_indicator{nullptr};
+        Border drag_handle{nullptr}; Border drop_preview{nullptr}; TextBlock drop_label{nullptr};
         Microsoft::UI::Xaml::Controls::Primitives::ScrollBar scrollbar{nullptr};
         Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
         RECT bounds{-1,-1,-1,-1}; std::wstring translated_characters;
@@ -200,6 +206,10 @@ struct Bridge {
         Microsoft::UI::Xaml::Controls::Primitives::ScrollBar::Scroll_revoker scroll{};
         UIElement::PointerEntered_revoker scrollbar_entered{}; UIElement::PointerExited_revoker scrollbar_exited{};
         UIElement::PointerWheelChanged_revoker scrollbar_wheel{};
+        UIElement::PointerPressed_revoker drag_pressed{};
+        UIElement::DragStarting_revoker drag_starting{};
+        UIElement::DropCompleted_revoker drag_completed{};
+        UIElement::DragOver_revoker drag_over{}; UIElement::DragLeave_revoker drag_leave{}; UIElement::Drop_revoker drop{};
         Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker tick{};
     };
     struct SplitHost {
@@ -239,6 +249,7 @@ struct Bridge {
     uint64_t find_pane{};
     bool updating_find = false;
     TabView tabs{nullptr};
+    Border tab_drop_indicator{nullptr};
     StackPanel new_tab_controls{nullptr};
     SplitButton new_tab_button{nullptr};
     Button menu_button{nullptr};
@@ -269,6 +280,16 @@ struct Bridge {
     TabView::TabCloseRequested_revoker close_tab_revoker{};
     TabView::TabDragStarting_revoker tab_drag_starting_revoker{};
     TabView::TabDragCompleted_revoker tab_drag_completed_revoker{};
+    TabView::TabStripDragOver_revoker tab_strip_drag_over_revoker{};
+    UIElement::DragLeave_revoker tab_strip_drag_leave_revoker{};
+    TabView::TabStripDrop_revoker tab_strip_drop_revoker{};
+    Windows::Foundation::IInspectable tab_pointer_pressed_handler{nullptr};
+    Windows::Foundation::IInspectable tab_pointer_moved_handler{nullptr};
+    Windows::Foundation::IInspectable tab_pointer_released_handler{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer tab_pointer_timer{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker tab_pointer_tick{};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer pane_pointer_timer{nullptr};
+    Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker pane_pointer_tick{};
     MenuFlyoutItem::Click_revoker new_tab_item_revoker{};
     MenuFlyoutItem::Click_revoker new_window_revoker{};
     MenuFlyoutItem::Click_revoker increase_font_size_revoker{};
@@ -284,7 +305,24 @@ struct Bridge {
     Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker find_query_tick{};
     bool handlers_detached = false;
     bool updating = false;
-    uint32_t dragged_tab_index = UINT32_MAX;
+    uint64_t presented_tab_id{};
+    uint64_t pressed_tab_id{};
+    uint64_t dragged_tab_id{};
+    uint64_t drag_destination_tab_id{};
+    uint64_t drag_destination_pane_id{};
+    Windows::Foundation::Point tab_drag_origin{};
+    TabViewItem tab_pointer_capture{nullptr};
+    uint32_t tab_pointer_id{};
+    bool tab_pointer_pressed = false;
+    bool tab_pointer_dragging = false;
+    uint64_t dragged_pane_id{};
+    Windows::Foundation::Point pane_drag_origin{};
+    bool pane_pointer_pressed = false;
+    bool pane_pointer_dragging = false;
+    uint64_t pending_reorder_tab_id{};
+    uint32_t pending_reorder_index = UINT32_MAX;
+    uint32_t pane_tab_insertion = UINT32_MAX;
+    bool tab_drop_committed = false;
     bool appearance_initialized = false;
     bool pane_focus_dispatch_pending = false;
     uint64_t pending_pane_focus{};
@@ -475,7 +513,12 @@ struct Bridge {
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
-        tabs.CanReorderTabs(true);
+        // TabView's built-in ListView reorder does not initiate reliably inside
+        // a custom non-client title bar. Individual TabViewItems start the drag;
+        // the strip handlers below commit the stable-ID reorder explicitly.
+        tabs.CanReorderTabs(false);
+        tabs.CanDragTabs(false);
+        tabs.AllowDropTabs(true);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_controls = StackPanel{};
         new_tab_controls.Orientation(Orientation::Horizontal);
@@ -500,7 +543,7 @@ struct Bridge {
         new_tab_controls.Children().Append(new_tab_button);
         tabs.TabStripFooter(new_tab_controls);
         selection_revoker = tabs.SelectionChanged(auto_revoke, [this](auto&&, auto&&) {
-            if (!updating && tabs.SelectedIndex() >= 0) {
+            if (!updating && !dragged_tab_id && tabs.SelectedIndex() >= 0) {
                 notify(ZIGONAUT_CHROME_SELECT, static_cast<uint32_t>(tabs.SelectedIndex()));
                 focusTerminal();
             }
@@ -513,18 +556,183 @@ struct Bridge {
             }
         });
         tab_drag_starting_revoker = tabs.TabDragStarting(auto_revoke, [this](TabView const& sender, TabViewTabDragStartingEventArgs const& args) {
-            dragged_tab_index = UINT32_MAX;
+            dragged_tab_id = 0;
+            tab_drop_committed = false;
             uint32_t index{};
-            if (sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) dragged_tab_index = index;
+            if (sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) {
+                dragged_tab_id = tabId(args.Item().try_as<TabViewItem>());
+                if (!dragged_tab_id) return;
+                args.Data().Properties().Insert(tab_drag_property, box_value(dragged_tab_id));
+                args.Data().RequestedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+                if (pressed_tab_id == dragged_tab_id && drag_destination_tab_id &&
+                    drag_destination_tab_id != dragged_tab_id && drag_destination_pane_id) {
+                    if (auto const destination = tabItemById(drag_destination_tab_id)) {
+                        sender.SelectedItem(destination);
+                    }
+                    paneEvent(ZIGONAUT_PANE_EVENT_RESTORE_DRAG_DESTINATION, drag_destination_pane_id, 0);
+                }
+            }
         });
         tab_drag_completed_revoker = tabs.TabDragCompleted(auto_revoke, [this](TabView const& sender, TabViewTabDragCompletedEventArgs const& args) {
             uint32_t index{};
-            if (dragged_tab_index != UINT32_MAX && sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff && index != dragged_tab_index) {
-                notify(ZIGONAUT_CHROME_REORDER_TAB, (dragged_tab_index << 16) | index);
+            if (!tab_drop_committed && dragged_tab_id && sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) {
+                pending_reorder_tab_id = dragged_tab_id;
+                pending_reorder_index = index;
+                paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, dragged_tab_id, index);
             }
-            dragged_tab_index = UINT32_MAX;
+            dragged_tab_id = 0;
+            pressed_tab_id = 0;
+            drag_destination_tab_id = 0;
+            drag_destination_pane_id = 0;
+            tab_drop_committed = false;
+            clearDragFeedback();
         });
-
+        tab_strip_drag_over_revoker = tabs.TabStripDragOver(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args) {
+            uint64_t tab{};
+            if (dragUInt64(args, tab_drag_property, tab) && tab) {
+                pane_tab_insertion = tabInsertionIndex(args.GetPosition(tabs).X);
+                showTabDropIndicator(pane_tab_insertion);
+                args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+                args.DragUIOverride().Caption(L"Move tab");
+                args.DragUIOverride().IsCaptionVisible(true);
+                return;
+            }
+            uint64_t pane{};
+            if (!dragUInt64(args, pane_drag_property, pane) || !pane) return;
+            pane_tab_insertion = tabInsertionIndex(args.GetPosition(tabs).X);
+            showTabDropIndicator(pane_tab_insertion);
+            args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+            args.DragUIOverride().Caption(L"Move pane to new tab");
+            args.DragUIOverride().IsCaptionVisible(true);
+        });
+        tab_strip_drag_leave_revoker = tabs.DragLeave(auto_revoke, [this](auto&&, auto&&) { clearTabDropIndicator(); });
+        tab_strip_drop_revoker = tabs.TabStripDrop(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args) {
+            uint64_t tab{};
+            if (dragUInt64(args, tab_drag_property, tab) && tab) {
+                auto const items = tabs.TabItems();
+                uint32_t source = UINT32_MAX;
+                for (uint32_t index = 0; index < items.Size(); ++index) {
+                    if (tabId(items.GetAt(index).try_as<TabViewItem>()) == tab) {
+                        source = index;
+                        break;
+                    }
+                }
+                auto const insertion = pane_tab_insertion == UINT32_MAX
+                    ? tabInsertionIndex(args.GetPosition(tabs).X)
+                    : pane_tab_insertion;
+                clearTabDropIndicator();
+                if (source == UINT32_MAX || !items.Size()) return;
+                auto const destination = std::min(
+                    insertion - static_cast<uint32_t>(source < insertion),
+                    items.Size() - 1);
+                pending_reorder_tab_id = tab;
+                pending_reorder_index = destination;
+                tab_drop_committed = true;
+                paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, tab, destination);
+                return;
+            }
+            uint64_t pane{};
+            if (!dragUInt64(args, pane_drag_property, pane) || !pane) return;
+            auto const insertion = pane_tab_insertion == UINT32_MAX
+                ? tabInsertionIndex(args.GetPosition(tabs).X)
+                : pane_tab_insertion;
+            clearTabDropIndicator();
+            paneEvent(ZIGONAUT_PANE_EVENT_PANE_TO_TAB, pane, insertion);
+        });
+        tab_pointer_pressed_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
+            [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+                auto const item = tabAtPoint(args.GetCurrentPoint(root).Position());
+                if (!item) return;
+                auto const point = args.GetCurrentPoint(item);
+                switch (point.Properties().PointerUpdateKind()) {
+                case Microsoft::UI::Input::PointerUpdateKind::LeftButtonPressed:
+                    pressed_tab_id = tabId(item);
+                    drag_destination_tab_id = presented_tab_id;
+                    drag_destination_pane_id = active_pane;
+                    tab_drag_origin = args.GetCurrentPoint(root).Position();
+                    tab_pointer_pressed = pressed_tab_id != 0;
+                    if (tab_pointer_pressed && item.CapturePointer(args.Pointer())) {
+                        tab_pointer_capture = item;
+                        tab_pointer_id = args.Pointer().PointerId();
+                    }
+                    if (tab_pointer_pressed) tab_pointer_timer.Start();
+                    break;
+                case Microsoft::UI::Input::PointerUpdateKind::MiddleButtonPressed:
+                    notifyForTab(item, ZIGONAUT_CHROME_CLOSE);
+                    args.Handled(true);
+                    break;
+                default:
+                    break;
+                }
+            }});
+        tab_pointer_moved_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
+            [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+                if (!tab_pointer_pressed || !pressed_tab_id) return;
+                if (tab_pointer_id && args.Pointer().PointerId() != tab_pointer_id) return;
+                auto const point = args.GetCurrentPoint(root);
+                if (!point.Properties().IsLeftButtonPressed()) return;
+                auto const position = point.Position();
+                moveManualTabDrag(position);
+                args.Handled(true);
+            }});
+        tab_pointer_released_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
+            [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+                if (!tab_pointer_pressed) return;
+                if (tab_pointer_id && args.Pointer().PointerId() != tab_pointer_id) return;
+                if (tab_pointer_dragging) {
+                    finishManualTabDrag(args.GetCurrentPoint(root).Position());
+                    args.Handled(true);
+                }
+                resetManualTabDrag();
+            }});
+        tab_pointer_timer = root.DispatcherQueue().CreateTimer();
+        tab_pointer_timer.Interval(std::chrono::milliseconds(16));
+        tab_pointer_timer.IsRepeating(true);
+        tab_pointer_tick = tab_pointer_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
+            if (!tab_pointer_pressed) {
+                tab_pointer_timer.Stop();
+                return;
+            }
+            POINT cursor{};
+            if (!GetCursorPos(&cursor) || !ScreenToClient(parent, &cursor)) {
+                resetManualTabDrag();
+                return;
+            }
+            auto const scale = std::max(rasterization_scale, 0.01);
+            Windows::Foundation::Point const position{
+                static_cast<float>(cursor.x / scale),
+                static_cast<float>(cursor.y / scale)};
+            if (GetAsyncKeyState(VK_LBUTTON) >= 0) {
+                if (tab_pointer_dragging) finishManualTabDrag(position);
+                resetManualTabDrag();
+                return;
+            }
+            moveManualTabDrag(position);
+        });
+        pane_pointer_timer = root.DispatcherQueue().CreateTimer();
+        pane_pointer_timer.Interval(std::chrono::milliseconds(16));
+        pane_pointer_timer.IsRepeating(true);
+        pane_pointer_tick = pane_pointer_timer.Tick(auto_revoke, [this](auto&&, auto&&) {
+            if (!pane_pointer_pressed) {
+                pane_pointer_timer.Stop();
+                return;
+            }
+            POINT cursor{};
+            if (!GetCursorPos(&cursor) || !ScreenToClient(parent, &cursor)) {
+                resetManualPaneDrag();
+                return;
+            }
+            auto const scale = std::max(rasterization_scale, 0.01);
+            Windows::Foundation::Point const position{
+                static_cast<float>(cursor.x / scale),
+                static_cast<float>(cursor.y / scale)};
+            if (GetAsyncKeyState(VK_LBUTTON) >= 0) {
+                if (pane_pointer_dragging) finishManualPaneDrag(position);
+                resetManualPaneDrag();
+                return;
+            }
+            moveManualPaneDrag(position);
+        });
         menu_button = Button{};
         menu_button.Style(resources.Lookup(box_value(L"ZigonautTitleBarButtonStyle")).as<Style>());
         menu_button.HorizontalAlignment(HorizontalAlignment::Left);
@@ -629,8 +837,19 @@ struct Bridge {
 
         tabs.HorizontalAlignment(HorizontalAlignment::Left);
         tabs.Margin(Thickness{40, 0, 0, 0});
+        tab_drop_indicator = Border{};
+        tab_drop_indicator.Width(3);
+        tab_drop_indicator.Height(32);
+        tab_drop_indicator.HorizontalAlignment(HorizontalAlignment::Left);
+        tab_drop_indicator.VerticalAlignment(VerticalAlignment::Bottom);
+        tab_drop_indicator.Background(resources.Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        tab_drop_indicator.CornerRadius(CornerRadius{1.5, 1.5, 1.5, 1.5});
+        tab_drop_indicator.IsHitTestVisible(false);
+        tab_drop_indicator.Visibility(Visibility::Collapsed);
+        Canvas::SetZIndex(tab_drop_indicator, 10);
         app_title_bar.Children().Append(tabs);
         app_title_bar.Children().Append(menu_button);
+        app_title_bar.Children().Append(tab_drop_indicator);
         root.Children().Append(content_root);
         root.Children().Append(app_title_bar);
         root.Children().Append(bottom_border);
@@ -829,8 +1048,8 @@ struct Bridge {
         }
     }
 
-    void paneEvent(uint32_t kind, uint64_t id, uint32_t value) {
-        if (!closed && pane_callback) { zigonaut_pane_event e{}; e.size=sizeof(e); e.kind=kind; e.target_id=id; e.value=value; pane_callback(context, &e); }
+    void paneEvent(uint32_t kind, uint64_t id, uint32_t value, uint64_t secondary_id = 0) {
+        if (!closed && pane_callback) { zigonaut_pane_event e{}; e.size=sizeof(e); e.kind=kind; e.target_id=id; e.value=value; e.secondary_id=secondary_id; pane_callback(context, &e); }
     }
     void imeEvent(uint32_t kind, uint64_t id, std::wstring_view text = {}, uint32_t start = 0, uint32_t length = 0) {
         if (!closed && pane_callback) { zigonaut_pane_event e{}; e.size=sizeof(e); e.kind=kind; e.target_id=id; e.text=reinterpret_cast<uint16_t const*>(text.data()); e.text_length=static_cast<uint32_t>(text.size()); e.selection_start=start; e.selection_length=length; pane_callback(context, &e); }
@@ -849,7 +1068,269 @@ struct Bridge {
             .as<Microsoft::UI::Xaml::Media::Brush>();
         for (auto& [id, pane] : pane_hosts) {
             pane->focus_indicator.Background(show && id == active_pane ? accent : nullptr);
+            pane->drag_handle.Visibility(show ? Visibility::Visible : Visibility::Collapsed);
         }
+    }
+
+    static bool dragUInt64(Microsoft::UI::Xaml::DragEventArgs const& args, wchar_t const* key, uint64_t& value) {
+        try {
+            auto const properties = args.DataView().Properties();
+            if (!properties.HasKey(key)) return false;
+            value = unbox_value<uint64_t>(properties.Lookup(key));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    static uint64_t tabId(TabViewItem const& item) noexcept {
+        try {
+            return item && item.Tag() ? unbox_value<uint64_t>(item.Tag()) : 0;
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    uint64_t selectedTabId() const noexcept {
+        auto const selected = tabs.SelectedItem().try_as<TabViewItem>();
+        return tabId(selected);
+    }
+
+    TabViewItem tabItemById(uint64_t id) const noexcept {
+        try {
+            auto const items = tabs.TabItems();
+            for (uint32_t index = 0; index < items.Size(); ++index) {
+                auto const item = items.GetAt(index).try_as<TabViewItem>();
+                if (tabId(item) == id) return item;
+            }
+        } catch (...) {
+        }
+        return nullptr;
+    }
+
+    static DropDirection directionAt(Windows::Foundation::Point const& point, double width, double height) noexcept {
+        auto const x = std::clamp(point.X / std::max(width, 1.0), 0.0, 1.0);
+        auto const y = std::clamp(point.Y / std::max(height, 1.0), 0.0, 1.0);
+        auto const horizontal = std::min(x, 1.0 - x);
+        auto const vertical = std::min(y, 1.0 - y);
+        if (horizontal < vertical) return x < 0.5 ? DropDirection::left : DropDirection::right;
+        return y < 0.5 ? DropDirection::up : DropDirection::down;
+    }
+
+    void showPaneDropPreview(PaneHost& pane, DropDirection direction) {
+        auto const width = std::max(pane.grid.ActualWidth(), 0.0);
+        auto const height = std::max(pane.grid.ActualHeight(), 0.0);
+        pane.drop_preview.Width(direction == DropDirection::left || direction == DropDirection::right ? width / 2 : width);
+        pane.drop_preview.Height(direction == DropDirection::up || direction == DropDirection::down ? height / 2 : height);
+        pane.drop_preview.HorizontalAlignment(direction == DropDirection::right ? HorizontalAlignment::Right : HorizontalAlignment::Left);
+        pane.drop_preview.VerticalAlignment(direction == DropDirection::down ? VerticalAlignment::Bottom : VerticalAlignment::Top);
+        switch (direction) {
+        case DropDirection::left: pane.drop_label.Text(L"Split left"); break;
+        case DropDirection::right: pane.drop_label.Text(L"Split right"); break;
+        case DropDirection::up: pane.drop_label.Text(L"Split above"); break;
+        case DropDirection::down: pane.drop_label.Text(L"Split below"); break;
+        }
+        pane.drop_preview.Visibility(Visibility::Visible);
+    }
+
+    bool pointInElement(Windows::Foundation::Point const& point, FrameworkElement const& element) const {
+        if (!element || element.ActualWidth() <= 0 || element.ActualHeight() <= 0) return false;
+        auto const origin = element.TransformToVisual(root).TransformPoint({0, 0});
+        return point.X >= origin.X && point.Y >= origin.Y &&
+            point.X < origin.X + element.ActualWidth() && point.Y < origin.Y + element.ActualHeight();
+    }
+
+    bool pointInTabStrip(Windows::Foundation::Point const& point) const {
+        if (!tabs || !app_title_bar || tabs.ActualHeight() <= 0 || app_title_bar.ActualWidth() <= 0) return false;
+        auto const tab_origin = tabs.TransformToVisual(root).TransformPoint({0, 0});
+        auto const title_origin = app_title_bar.TransformToVisual(root).TransformPoint({0, 0});
+        return point.X >= tab_origin.X && point.X < title_origin.X + app_title_bar.ActualWidth() &&
+            point.Y >= tab_origin.Y && point.Y < tab_origin.Y + tabs.ActualHeight();
+    }
+
+    PaneHost* paneAtPoint(Windows::Foundation::Point const& point, Windows::Foundation::Point& local) const {
+        for (auto const& [_, pane] : pane_hosts) {
+            if (!pointInElement(point, pane->frame)) continue;
+            local = root.TransformToVisual(pane->grid).TransformPoint(point);
+            return pane.get();
+        }
+        return nullptr;
+    }
+
+    TabViewItem tabAtPoint(Windows::Foundation::Point const& point) const {
+        auto const items = tabs.TabItems();
+        for (uint32_t index = 0; index < items.Size(); ++index) {
+            auto const item = items.GetAt(index).try_as<TabViewItem>();
+            if (item && pointInElement(point, item)) return item;
+        }
+        return nullptr;
+    }
+
+    void updateManualTabDrag(Windows::Foundation::Point const& point) {
+        clearDragFeedback();
+        if (pointInTabStrip(point)) {
+            auto const local = root.TransformToVisual(tabs).TransformPoint(point);
+            pane_tab_insertion = tabInsertionIndex(local.X);
+            showTabDropIndicator(pane_tab_insertion);
+            return;
+        }
+        // The presented panes already belong to this tab, so splitting onto
+        // them would be a no-op. Do not advertise an unavailable operation.
+        if (dragged_tab_id == drag_destination_tab_id) return;
+        Windows::Foundation::Point local{};
+        if (auto* pane = paneAtPoint(point, local)) {
+            showPaneDropPreview(*pane, directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight()));
+        }
+    }
+
+    void moveManualTabDrag(Windows::Foundation::Point const& position) {
+        if (!tab_pointer_dragging) {
+            auto const dx = position.X - tab_drag_origin.X;
+            auto const dy = position.Y - tab_drag_origin.Y;
+            if (dx * dx + dy * dy < 36) return;
+            dragged_tab_id = pressed_tab_id;
+            tab_pointer_dragging = true;
+            tab_drop_committed = false;
+            if (drag_destination_tab_id && drag_destination_tab_id != dragged_tab_id && drag_destination_pane_id) {
+                if (auto const destination = tabItemById(drag_destination_tab_id)) {
+                    tabs.SelectedItem(destination);
+                }
+                paneEvent(ZIGONAUT_PANE_EVENT_RESTORE_DRAG_DESTINATION, drag_destination_pane_id, 0);
+            }
+        }
+        updateManualTabDrag(position);
+    }
+
+    void finishManualTabDrag(Windows::Foundation::Point const& point) {
+        auto const source_id = dragged_tab_id;
+        if (!source_id) return;
+        Windows::Foundation::Point local{};
+        if (auto* pane = paneAtPoint(point, local)) {
+            if (source_id != drag_destination_tab_id) {
+                auto const direction = directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight());
+                tab_drop_committed = true;
+                paneEvent(ZIGONAUT_PANE_EVENT_MERGE_TAB, pane->pane_id, static_cast<uint32_t>(direction), source_id);
+            }
+            return;
+        }
+        if (!pointInTabStrip(point)) return;
+        auto const items = tabs.TabItems();
+        uint32_t source = UINT32_MAX;
+        for (uint32_t index = 0; index < items.Size(); ++index) {
+            if (tabId(items.GetAt(index).try_as<TabViewItem>()) == source_id) {
+                source = index;
+                break;
+            }
+        }
+        if (source == UINT32_MAX || !items.Size()) return;
+        auto const local_tab = root.TransformToVisual(tabs).TransformPoint(point);
+        auto const insertion = tabInsertionIndex(local_tab.X);
+        auto const destination = std::min(
+            insertion - static_cast<uint32_t>(source < insertion),
+            items.Size() - 1);
+        pending_reorder_tab_id = source_id;
+        pending_reorder_index = destination;
+        tab_drop_committed = true;
+        paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, source_id, destination);
+    }
+
+    void resetManualTabDrag() {
+        if (tab_pointer_timer) tab_pointer_timer.Stop();
+        if (tab_pointer_capture) tab_pointer_capture.ReleasePointerCaptures();
+        tab_pointer_capture = nullptr;
+        tab_pointer_id = 0;
+        tab_pointer_pressed = false;
+        tab_pointer_dragging = false;
+        dragged_tab_id = 0;
+        pressed_tab_id = 0;
+        drag_destination_tab_id = 0;
+        drag_destination_pane_id = 0;
+        tab_drop_committed = false;
+        clearDragFeedback();
+    }
+
+    void moveManualPaneDrag(Windows::Foundation::Point const& position) {
+        if (!pane_pointer_dragging) {
+            auto const dx = position.X - pane_drag_origin.X;
+            auto const dy = position.Y - pane_drag_origin.Y;
+            if (dx * dx + dy * dy < 36) return;
+            pane_pointer_dragging = true;
+        }
+        clearDragFeedback();
+        if (pointInTabStrip(position)) {
+            auto const local = root.TransformToVisual(tabs).TransformPoint(position);
+            pane_tab_insertion = tabInsertionIndex(local.X);
+            showTabDropIndicator(pane_tab_insertion);
+            return;
+        }
+        Windows::Foundation::Point local{};
+        if (auto* pane = paneAtPoint(position, local); pane && pane->pane_id != dragged_pane_id) {
+            showPaneDropPreview(*pane, directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight()));
+        }
+    }
+
+    void finishManualPaneDrag(Windows::Foundation::Point const& position) {
+        if (!dragged_pane_id) return;
+        if (pointInTabStrip(position)) {
+            auto const local = root.TransformToVisual(tabs).TransformPoint(position);
+            paneEvent(ZIGONAUT_PANE_EVENT_PANE_TO_TAB, dragged_pane_id, tabInsertionIndex(local.X));
+            return;
+        }
+        Windows::Foundation::Point local{};
+        if (auto* pane = paneAtPoint(position, local); pane && pane->pane_id != dragged_pane_id) {
+            paneEvent(
+                ZIGONAUT_PANE_EVENT_MOVE_PANE,
+                pane->pane_id,
+                static_cast<uint32_t>(directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight())),
+                dragged_pane_id);
+        }
+    }
+
+    void resetManualPaneDrag() {
+        if (pane_pointer_timer) pane_pointer_timer.Stop();
+        if (auto const pane = pane_hosts.find(dragged_pane_id); pane != pane_hosts.end()) {
+            pane->second->drag_handle.Opacity(1);
+        }
+        dragged_pane_id = 0;
+        pane_pointer_pressed = false;
+        pane_pointer_dragging = false;
+        clearDragFeedback();
+    }
+
+    uint32_t tabInsertionIndex(double x) const {
+        auto const items = tabs.TabItems();
+        for (uint32_t index = 0; index < items.Size(); ++index) {
+            auto const item = items.GetAt(index).try_as<TabViewItem>();
+            if (!item) continue;
+            auto const origin = item.TransformToVisual(tabs).TransformPoint({0, 0});
+            if (x < origin.X + item.ActualWidth() / 2) return index;
+        }
+        return items.Size();
+    }
+
+    void showTabDropIndicator(uint32_t insertion) {
+        auto const items = tabs.TabItems();
+        auto x = 0.0;
+        if (items.Size()) {
+            auto const item_index = std::min(insertion, items.Size() - 1);
+            auto const item = items.GetAt(item_index).as<TabViewItem>();
+            auto const origin = item.TransformToVisual(app_title_bar).TransformPoint({0, 0});
+            x = origin.X + (insertion >= items.Size() ? item.ActualWidth() : 0);
+        } else {
+            x = tabs.TransformToVisual(app_title_bar).TransformPoint({0, 0}).X;
+        }
+        tab_drop_indicator.Margin(Thickness{x - 1.5, 0, 0, 4});
+        tab_drop_indicator.Visibility(Visibility::Visible);
+    }
+
+    void clearTabDropIndicator() {
+        pane_tab_insertion = UINT32_MAX;
+        tab_drop_indicator.Visibility(Visibility::Collapsed);
+    }
+
+    void clearDragFeedback() {
+        if (tab_drop_indicator) clearTabDropIndicator();
+        for (auto& [_, pane] : pane_hosts) pane->drop_preview.Visibility(Visibility::Collapsed);
     }
 
     std::unique_ptr<PaneHost> makePane(uint64_t id, Attachment const& attachment) {
@@ -863,7 +1344,34 @@ struct Bridge {
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetAutomationId(p->input, L"ZigonautTerminalPane");
         p->focus_indicator=Border{}; p->focus_indicator.Height(2); p->focus_indicator.VerticalAlignment(VerticalAlignment::Top); p->focus_indicator.IsHitTestVisible(false);
         p->scrollbar=Microsoft::UI::Xaml::Controls::Primitives::ScrollBar{}; p->scrollbar.Orientation(Orientation::Vertical); p->scrollbar.HorizontalAlignment(HorizontalAlignment::Right); p->scrollbar.Width(12); p->scrollbar.Opacity(0); p->scrollbar.Visibility(Visibility::Collapsed);
-        p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->grid.Children().Append(p->focus_indicator); p->frame.Child(p->grid);
+        p->drop_preview=Border{};
+        p->drop_preview.Background(application.Resources().Lookup(box_value(L"AccentFillColorSecondaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        p->drop_preview.BorderBrush(application.Resources().Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        p->drop_preview.BorderThickness(Thickness{2}); p->drop_preview.Opacity(0.86); p->drop_preview.IsHitTestVisible(false); p->drop_preview.Visibility(Visibility::Collapsed);
+        p->drop_label=TextBlock{}; p->drop_label.HorizontalAlignment(HorizontalAlignment::Center); p->drop_label.VerticalAlignment(VerticalAlignment::Center); p->drop_label.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+        p->drop_preview.Child(p->drop_label);
+        p->drag_handle=Border{}; p->drag_handle.Width(30); p->drag_handle.Height(24); p->drag_handle.HorizontalAlignment(HorizontalAlignment::Right); p->drag_handle.VerticalAlignment(VerticalAlignment::Top); p->drag_handle.CornerRadius(CornerRadius{0,0,0,4});
+        p->drag_handle.Background(application.Resources().Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        p->drag_handle.CanDrag(false); p->drag_handle.Visibility(Visibility::Collapsed);
+        auto const grip=FontIcon{}; grip.Glyph(L"\xE700"); grip.FontSize(12); p->drag_handle.Child(grip);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+            p->drag_handle, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Control);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(p->drag_handle, L"Move pane");
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(p->drag_handle, L"Drag to the tab strip to move this pane into a tab");
+        ToolTipService::SetToolTip(p->drag_handle, box_value(L"Drag pane to tab bar"));
+        p->drag_pressed = p->drag_handle.PointerPressed(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            auto const point = args.GetCurrentPoint(root);
+            if (point.Properties().PointerUpdateKind() != Microsoft::UI::Input::PointerUpdateKind::LeftButtonPressed) return;
+            dragged_pane_id = p->pane_id;
+            pane_drag_origin = point.Position();
+            pane_pointer_pressed = true;
+            pane_pointer_dragging = false;
+            p->drag_handle.Opacity(0.7);
+            pane_pointer_timer.Start();
+            args.Handled(true);
+        });
+        p->frame.AllowDrop(true);
+        p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->grid.Children().Append(p->focus_indicator); p->grid.Children().Append(p->drop_preview); p->grid.Children().Append(p->drag_handle); p->frame.Child(p->grid);
         check_hresult(p->panel.as<ISwapChainPanelNative>()->SetSwapChain(p->swap_chain.get()));
         // LayoutUpdated is intentionally coalesced for general XAML churn, but a
         // pane size is presentation-critical. Resize the native render surface in
@@ -942,6 +1450,32 @@ struct Bridge {
         p->exited=p->panel.PointerExited(auto_revoke,[p](auto&&, auto const& a){SendMessageW(p->window,WM_MOUSELEAVE,0,0);a.Handled(true);});
         p->canceled=p->panel.PointerCanceled(auto_revoke,[p](auto&&, auto const& a){SendMessageW(p->window,WM_CANCELMODE,0,0);a.Handled(true);});
         p->capture_lost=p->panel.PointerCaptureLost(auto_revoke,[p](auto&&, auto&&){SendMessageW(p->window,WM_CAPTURECHANGED,0,0);});
+        p->drag_starting=p->drag_handle.DragStarting(auto_revoke,[p](auto&&, Microsoft::UI::Xaml::DragStartingEventArgs const& args){
+            args.Data().Properties().Insert(pane_drag_property, box_value(p->pane_id));
+            args.Data().RequestedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+        });
+        p->drag_completed=p->drag_handle.DropCompleted(auto_revoke,[this](auto&&, auto&&){ clearDragFeedback(); });
+        p->drag_over=p->frame.DragOver(auto_revoke,[this,p](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args){
+            uint64_t source{};
+            if (!dragUInt64(args, tab_drag_property, source) || !source || source == selectedTabId()) {
+                p->drop_preview.Visibility(Visibility::Collapsed);
+                return;
+            }
+            auto const direction=directionAt(args.GetPosition(p->grid), p->grid.ActualWidth(), p->grid.ActualHeight());
+            showPaneDropPreview(*p, direction);
+            args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+            args.DragUIOverride().Caption(p->drop_label.Text());
+            args.DragUIOverride().IsCaptionVisible(true);
+        });
+        p->drag_leave=p->frame.DragLeave(auto_revoke,[p](auto&&, auto&&){ p->drop_preview.Visibility(Visibility::Collapsed); });
+        p->drop=p->frame.Drop(auto_revoke,[this,p](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args){
+            p->drop_preview.Visibility(Visibility::Collapsed);
+            uint64_t source{};
+            if (!dragUInt64(args, tab_drag_property, source) || !source || source == selectedTabId()) return;
+            auto const direction=directionAt(args.GetPosition(p->grid), p->grid.ActualWidth(), p->grid.ActualHeight());
+            tab_drop_committed = true;
+            paneEvent(ZIGONAUT_PANE_EVENT_MERGE_TAB, p->pane_id, static_cast<uint32_t>(direction), source);
+        });
         p->scroll = p->scrollbar.Scroll(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Controls::Primitives::ScrollEventArgs const& args) {
             if (p->updating_scrollbar) return;
             showPaneScrollbar(*p);
@@ -968,6 +1502,7 @@ struct Bridge {
 
     void updateLayout(zigonaut_layout_node const* nodes, uint32_t count, uint64_t focused) {
         if (!nodes || !count || !focused) throw hresult_invalid_argument();
+        clearDragFeedback();
         if (auto const xaml_root = content_root.XamlRoot()) rasterization_scale = xaml_root.RasterizationScale();
         std::unordered_set<uint64_t> ids;
         for (uint32_t i = 0; i < count; ++i) {
@@ -1433,18 +1968,20 @@ struct Bridge {
             iterations = 1000;
             constexpr uint32_t tab_count = 50;
             std::vector<std::string> storage(tab_count, "terminal");
+            std::vector<uint64_t> tab_ids(tab_count);
             std::vector<char const*> titles(tab_count);
             std::vector<uint32_t> lengths(tab_count);
             std::vector<uint32_t> colors(tab_count, 0x202020);
             std::vector<uint8_t> activity(tab_count);
             for (uint32_t index = 0; index < tab_count; ++index) {
+                tab_ids[index] = index + 1;
                 storage[index] += std::to_string(index);
                 titles[index] = storage[index].data();
                 lengths[index] = static_cast<uint32_t>(storage[index].size());
             }
             for (uint32_t index = 0; index < iterations; ++index) {
                 storage[0].back() = index % 2 ? 'A' : 'B';
-                update(titles.data(), lengths.data(), colors.data(), activity.data(), tab_count, 0, true);
+                update(tab_ids.data(), titles.data(), lengths.data(), colors.data(), activity.data(), tab_count, 0, true);
             }
         } else if (operation == L"scrollbar") {
             iterations = 100000;
@@ -1675,16 +2212,9 @@ struct Bridge {
 
     void configureTabItem(TabViewItem const& item) {
         auto const weak = make_weak(item);
-        item.PointerPressed([this, weak](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
-            auto const current = weak.get();
-            if (!current) return;
-            auto const point = args.GetCurrentPoint(current);
-            if (point.Properties().PointerUpdateKind() == Microsoft::UI::Input::PointerUpdateKind::MiddleButtonPressed) {
-                notifyForTab(current, ZIGONAUT_CHROME_CLOSE);
-                args.Handled(true);
-            }
-        });
-
+        item.AddHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler, true);
+        item.AddHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler, true);
+        item.AddHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler, true);
         auto flyout = MenuFlyout{};
         auto append = [this, weak, &flyout](wchar_t const* text, zigonaut_chrome_command_id command) {
             auto menu_item = MenuFlyoutItem{};
@@ -1702,7 +2232,7 @@ struct Bridge {
         item.ContextFlyout(flyout);
     }
 
-    void update(char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint8_t const* activity, uint32_t count, int32_t active, bool show_colors) {
+    void update(uint64_t const* tab_ids, char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint8_t const* activity, uint32_t count, int32_t active, bool show_colors) {
         updating = true;
         struct ResetUpdating {
             bool& value;
@@ -1710,12 +2240,14 @@ struct Bridge {
         } reset{updating};
         auto items = tabs.TabItems();
         auto changed = false;
+        if (pending_reorder_tab_id && pending_reorder_index < count &&
+            tab_ids[pending_reorder_index] == pending_reorder_tab_id) {
+            pending_reorder_tab_id = 0;
+            pending_reorder_index = UINT32_MAX;
+        }
+        auto const rearranging = dragged_tab_id != 0 || pending_reorder_tab_id != 0;
         show_tab_colors = show_colors;
         auto const marker_visibility = show_colors && !high_contrast ? Visibility::Visible : Visibility::Collapsed;
-        while (items.Size() > count) {
-            items.RemoveAtEnd();
-            changed = true;
-        }
         for (uint32_t i = 0; i < count; ++i) {
             auto const title = to_hstring(std::string_view{titles[i] ? titles[i] : "", title_lengths[i]});
             auto const has_activity = activity[i] != 0 && static_cast<int32_t>(i) != active;
@@ -1726,8 +2258,34 @@ struct Bridge {
                 static_cast<uint8_t>(colors[i] >> 8),
                 static_cast<uint8_t>(colors[i]),
             };
-            if (i == items.Size()) {
-                auto item = TabViewItem{};
+            TabViewItem item{nullptr};
+            if (rearranging) {
+                for (uint32_t existing = 0; existing < items.Size(); ++existing) {
+                    auto const candidate = items.GetAt(existing).try_as<TabViewItem>();
+                    if (tabId(candidate) == tab_ids[i]) {
+                        item = candidate;
+                        break;
+                    }
+                }
+            } else if (i < items.Size()) {
+                auto const candidate = items.GetAt(i).try_as<TabViewItem>();
+                if (tabId(candidate) == tab_ids[i]) item = candidate;
+            }
+            if (!item && !rearranging) {
+                for (auto existing = i + 1; existing < items.Size(); ++existing) {
+                    auto const candidate = items.GetAt(existing).try_as<TabViewItem>();
+                    if (tabId(candidate) != tab_ids[i]) continue;
+                    auto const moved = items.GetAt(existing);
+                    items.RemoveAt(existing);
+                    items.InsertAt(i, moved);
+                    item = candidate;
+                    changed = true;
+                    break;
+                }
+            }
+            if (!item && rearranging) continue;
+            if (!item) {
+                item = TabViewItem{};
                 auto header = StackPanel{};
                 header.Orientation(Orientation::Horizontal);
                 header.Spacing(marker_visibility == Visibility::Visible ? 6 : 0);
@@ -1745,16 +2303,21 @@ struct Bridge {
                 header.Children().Append(marker);
                 header.Children().Append(text);
                 item.Header(header);
+                item.Tag(box_value(tab_ids[i]));
+                // TabView resolves a dragged item through its Content. Distinct,
+                // non-null content prevents WinUI from falling back to the first
+                // tab when every item hosts presentation elsewhere.
+                item.Content(Border{});
                 item.Height(40);
                 item.IsClosable(true);
+                item.CanDrag(false);
                 configureTabItem(item);
                 Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
                 Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(item, has_activity ? L"New terminal output" : L"");
                 ToolTipService::SetToolTip(item, box_value(title));
-                items.Append(item);
+                items.InsertAt(i, item);
                 changed = true;
             } else {
-                auto item = items.GetAt(i).as<TabViewItem>();
                 auto header = item.Header().as<StackPanel>();
                 auto marker = header.Children().GetAt(0).as<Border>();
                 auto text = header.Children().GetAt(1).as<TextBlock>();
@@ -1782,8 +2345,15 @@ struct Bridge {
                 }
             }
         }
+        if (!rearranging) {
+            while (items.Size() > count) {
+                items.RemoveAtEnd();
+                changed = true;
+            }
+        }
         auto const selected = active >= 0 && active < static_cast<int32_t>(count) ? active : -1;
-        if (tabs.SelectedIndex() != selected) {
+        presented_tab_id = selected >= 0 ? tab_ids[selected] : 0;
+        if (!rearranging && tabs.SelectedIndex() != selected) {
             tabs.SelectedIndex(selected);
             changed = true;
         }
@@ -1864,6 +2434,26 @@ struct Bridge {
         close_tab_revoker.revoke();
         tab_drag_starting_revoker.revoke();
         tab_drag_completed_revoker.revoke();
+        tab_strip_drag_over_revoker.revoke();
+        tab_strip_drag_leave_revoker.revoke();
+        tab_strip_drop_revoker.revoke();
+        tab_pointer_timer.Stop();
+        tab_pointer_tick.revoke();
+        pane_pointer_timer.Stop();
+        pane_pointer_tick.revoke();
+        cleanup(L"remove tab pointer handlers", [&] {
+            auto const items = tabs.TabItems();
+            for (uint32_t index = 0; index < items.Size(); ++index) {
+                auto const item = items.GetAt(index).try_as<TabViewItem>();
+                if (!item) continue;
+                item.RemoveHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler);
+                item.RemoveHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler);
+                item.RemoveHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler);
+            }
+            tab_pointer_pressed_handler = nullptr;
+            tab_pointer_moved_handler = nullptr;
+            tab_pointer_released_handler = nullptr;
+        }, result);
         layout_revoker.revoke();
         layout_retry_timer.Stop();
         layout_retry_tick.revoke();
@@ -1893,6 +2483,7 @@ struct Bridge {
         cleanup(L"clear new-tab controls", [&] { new_tab_controls.Children().Clear(); }, result);
         new_tab_button = nullptr;
         new_tab_controls = nullptr;
+        tab_drop_indicator = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
@@ -2049,14 +2640,20 @@ extern "C" HRESULT __cdecl zigonaut_chrome_update_layout(void* value, const zigo
     try { bridge->updateLayout(nodes, count, focused_pane); return S_OK; } catch (...) { return reportCurrentException(L"update layout"); }
 }
 
-extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, const uint8_t* activity, uint32_t count, int32_t active, BOOL show_colors) noexcept {
+extern "C" HRESULT __cdecl zigonaut_chrome_update(void* value, const uint64_t* tab_ids, const char* const* titles, const uint32_t* title_lengths, const uint32_t* colors, const uint8_t* activity, uint32_t count, int32_t active, BOOL show_colors) noexcept {
     auto bridge = static_cast<Bridge*>(value);
     auto const validation = validate(bridge); if (FAILED(validation)) return validation;
-    if (count && (!titles || !title_lengths || !colors || !activity)) return E_INVALIDARG;
-    for (uint32_t index = 0; index < count; ++index) {
-        if (!validString(titles[index], title_lengths[index])) return E_INVALIDARG;
+    if (count && (!tab_ids || !titles || !title_lengths || !colors || !activity)) return E_INVALIDARG;
+    try {
+        std::unordered_set<uint64_t> ids;
+        for (uint32_t index = 0; index < count; ++index) {
+            if (!tab_ids[index] || !ids.insert(tab_ids[index]).second || !validString(titles[index], title_lengths[index])) return E_INVALIDARG;
+        }
+        bridge->update(tab_ids, titles, title_lengths, colors, activity, count, active, show_colors != FALSE);
+        return S_OK;
+    } catch (...) {
+        return reportCurrentException(L"update");
     }
-    try { bridge->update(titles, title_lengths, colors, activity, count, active, show_colors != FALSE); return S_OK; } catch (...) { return reportCurrentException(L"update"); }
 }
 
 extern "C" HRESULT __cdecl zigonaut_chrome_update_profiles(void* value, const char* const* names, const uint32_t* name_lengths, uint32_t count) noexcept {

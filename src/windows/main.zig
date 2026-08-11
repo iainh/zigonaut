@@ -339,6 +339,7 @@ const Application = struct {
     attached_panes: std.ArrayList(u64) = .empty,
     pane_events_mutex: @import("win32.zig").Mutex = .{},
     pane_events: PaneEventQueue = .{},
+    chrome_tab_ids: std.ArrayList(u64) = .empty,
     chrome_titles: std.ArrayList([*]const u8) = .empty,
     chrome_title_lengths: std.ArrayList(u32) = .empty,
     chrome_colors: std.ArrayList(u32) = .empty,
@@ -370,6 +371,7 @@ const Application = struct {
         self.model.deinit();
         self.views.deinit(std.heap.page_allocator);
         self.attached_panes.deinit(std.heap.page_allocator);
+        self.chrome_tab_ids.deinit(std.heap.page_allocator);
         self.chrome_titles.deinit(std.heap.page_allocator);
         self.chrome_title_lengths.deinit(std.heap.page_allocator);
         self.chrome_colors.deinit(std.heap.page_allocator);
@@ -620,6 +622,16 @@ const Application = struct {
         _ = bridge.focusPane(focused);
     }
 
+    fn restorePresentationOrClose(self: *Application, hwnd: win.HWND, operation: []const u8) bool {
+        self.syncPresentation() catch |err| {
+            log.err("unable to restore presentation after {s}: {}", .{ operation, err });
+            _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+            return false;
+        };
+        self.syncChrome();
+        return true;
+    }
+
     fn destroyView(self: *Application, id: u64) bool {
         for (self.views.items, 0..) |entry, index| if (entry.pane_id == id) {
             entry.view.resetInteraction();
@@ -836,6 +848,95 @@ fn paneEventMessageImpl(self: *Application, hwnd: win.HWND, saturation_drain: bo
                 chrome.pane_find_next => if (self.viewFor(current.target_id)) |view| view.navigateSearch(true),
                 chrome.pane_find_previous => if (self.viewFor(current.target_id)) |view| view.navigateSearch(false),
                 chrome.pane_find_close => if (self.viewFor(current.target_id)) |view| view.cancelSearch(),
+                chrome.pane_merge_tab => {
+                    const source_tab = self.model.tabIndexById(current.secondary_id) orelse continue;
+                    const direction: pane_tree.Direction = switch (current.value) {
+                        1 => .left,
+                        2 => .right,
+                        3 => .up,
+                        4 => .down,
+                        else => continue,
+                    };
+                    if (source_tab >= self.model.tabs.items.len or self.model.paneById(current.target_id) == null) continue;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch |err| {
+                        log.err("unable to detach panes before merging tab: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "tab merge detach failure");
+                        continue;
+                    };
+                    self.model.mergeTabOntoPane(source_tab, current.target_id, direction) catch |err| {
+                        log.err("unable to merge tab into split: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "rejected tab merge");
+                        continue;
+                    };
+                    _ = self.restorePresentationOrClose(hwnd, "tab merge");
+                },
+                chrome.pane_to_tab => {
+                    if (current.value > self.model.tabs.items.len or self.model.paneById(current.target_id) == null) continue;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch |err| {
+                        log.err("unable to detach pane before moving it to a tab: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "pane-to-tab detach failure");
+                        continue;
+                    };
+                    self.model.movePaneToNewTab(current.target_id, current.value) catch |err| {
+                        log.err("unable to move pane to tab strip: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "rejected pane-to-tab move");
+                        continue;
+                    };
+                    _ = self.restorePresentationOrClose(hwnd, "pane-to-tab move");
+                },
+                chrome.pane_move_pane => {
+                    const direction: pane_tree.Direction = switch (current.value) {
+                        1 => .left,
+                        2 => .right,
+                        3 => .up,
+                        4 => .down,
+                        else => continue,
+                    };
+                    if (current.target_id == current.secondary_id or
+                        self.model.paneById(current.target_id) == null or
+                        self.model.paneById(current.secondary_id) == null) continue;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch |err| {
+                        log.err("unable to detach panes before rearranging split: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "pane rearrange detach failure");
+                        continue;
+                    };
+                    self.model.movePaneOntoPane(current.secondary_id, current.target_id, direction) catch |err| {
+                        log.err("unable to rearrange pane split: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "rejected pane rearrange");
+                        continue;
+                    };
+                    _ = self.restorePresentationOrClose(hwnd, "pane rearrange");
+                },
+                chrome.pane_reorder_tab => {
+                    const from = self.model.tabIndexById(current.target_id) orelse continue;
+                    const to: usize = current.value;
+                    if (to >= self.model.tabs.items.len or from == to) continue;
+                    self.model.moveTab(from, to) catch |err| {
+                        log.err("unable to reorder tab: {}", .{err});
+                        self.syncChrome();
+                        continue;
+                    };
+                    self.syncChrome();
+                },
+                chrome.pane_restore_drag_destination => {
+                    const active = self.model.activePane() orelse continue;
+                    if (active.id == current.target_id) continue;
+                    if (self.model.paneById(current.target_id) == null) continue;
+                    if (self.activeView()) |view| view.resetInteraction();
+                    self.detachPresentation() catch |err| {
+                        log.err("unable to detach panes before restoring drag destination: {}", .{err});
+                        _ = self.restorePresentationOrClose(hwnd, "drag destination detach failure");
+                        continue;
+                    };
+                    if (!self.model.focusPane(current.target_id)) {
+                        _ = self.restorePresentationOrClose(hwnd, "missing drag destination");
+                        continue;
+                    }
+                    _ = self.restorePresentationOrClose(hwnd, "drag destination restore");
+                },
                 else => {},
             }
         }
@@ -945,13 +1046,13 @@ fn chromeMessageImpl(self: *Application, hwnd: win.HWND, wparam: win.WPARAM, lpa
             const from: usize = argument >> 16;
             const to: usize = argument & 0xffff;
             if (from >= self.model.tabs.items.len or to >= self.model.tabs.items.len or from == to) return 0;
-            if (self.activeView()) |view| view.resetInteraction();
-            self.detachPresentation() catch return 0;
             self.model.moveTab(from, to) catch |err| {
                 log.err("unable to reorder tab: {}", .{err});
+                self.syncChrome();
                 return 0;
             };
-            self.syncPresentation() catch |err| log.err("unable to present reordered tabs: {}", .{err});
+            self.syncChrome();
+            return 0;
         },
         .split_right, .split_down => {
             if (self.activeView()) |view| view.resetInteraction();
@@ -1278,6 +1379,10 @@ fn confirmCloseTabs(hwnd: win.HWND, tab_count: usize) bool {
 fn syncChromeImpl(self: *Application) void {
     const bridge = if (self.chrome) |*value| value else return;
     const count = self.model.tabCount();
+    self.chrome_tab_ids.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
+        log.err("unable to allocate chrome tab identities: {}", .{err});
+        return;
+    };
     self.chrome_titles.ensureTotalCapacity(std.heap.page_allocator, count) catch |err| {
         log.err("unable to allocate chrome title pointers: {}", .{err});
         return;
@@ -1294,11 +1399,13 @@ fn syncChromeImpl(self: *Application) void {
         log.err("unable to allocate chrome activity states: {}", .{err});
         return;
     };
+    self.chrome_tab_ids.items.len = count;
     self.chrome_titles.items.len = count;
     self.chrome_title_lengths.items.len = count;
     self.chrome_colors.items.len = count;
     self.chrome_activity.items.len = count;
     for (self.model.tabs.items, 0..) |*tab, index| {
+        self.chrome_tab_ids.items[index] = tab.id;
         const title = tab.displayTitle();
         if (title.len > std.math.maxInt(i32)) {
             log.err("terminal title exceeds the WinUI bridge limit", .{});
@@ -1313,7 +1420,7 @@ fn syncChromeImpl(self: *Application) void {
             color.blue;
         self.chrome_activity.items[index] = @intFromBool(tab.has_unread_output);
     }
-    if (!bridge.update(self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.chrome_activity.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
+    if (!bridge.update(self.chrome_tab_ids.items, self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.chrome_activity.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);
         return;
     }
