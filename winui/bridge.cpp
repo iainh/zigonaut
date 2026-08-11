@@ -250,6 +250,10 @@ struct Bridge {
     bool updating_find = false;
     TabView tabs{nullptr};
     Border tab_drop_indicator{nullptr};
+    Border drag_adorner{nullptr};
+    FontIcon drag_adorner_icon{nullptr};
+    TextBlock drag_adorner_title{nullptr};
+    TextBlock drag_adorner_action{nullptr};
     StackPanel new_tab_controls{nullptr};
     SplitButton new_tab_button{nullptr};
     Button menu_button{nullptr};
@@ -319,6 +323,7 @@ struct Bridge {
     Windows::Foundation::Point pane_drag_origin{};
     bool pane_pointer_pressed = false;
     bool pane_pointer_dragging = false;
+    std::wstring drag_feedback_action;
     uint64_t pending_reorder_tab_id{};
     uint32_t pending_reorder_index = UINT32_MAX;
     uint32_t pane_tab_insertion = UINT32_MAX;
@@ -847,12 +852,53 @@ struct Bridge {
         tab_drop_indicator.IsHitTestVisible(false);
         tab_drop_indicator.Visibility(Visibility::Collapsed);
         Canvas::SetZIndex(tab_drop_indicator, 10);
+        drag_adorner = Border{};
+        drag_adorner.Padding(Thickness{10, 8, 12, 8});
+        drag_adorner.MaxWidth(300);
+        drag_adorner.HorizontalAlignment(HorizontalAlignment::Left);
+        drag_adorner.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRowSpan(drag_adorner, 2);
+        drag_adorner.CornerRadius(CornerRadius{8, 8, 8, 8});
+        drag_adorner.Background(resources.Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        drag_adorner.BorderBrush(resources.Lookup(box_value(L"CardStrokeColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
+        drag_adorner.BorderThickness(Thickness{1});
+        drag_adorner.IsHitTestVisible(false);
+        drag_adorner.Visibility(Visibility::Collapsed);
+        drag_adorner.RenderTransform(Microsoft::UI::Xaml::Media::CompositeTransform{});
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetAccessibilityView(
+            drag_adorner, Microsoft::UI::Xaml::Automation::Peers::AccessibilityView::Control);
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetLiveSetting(
+            drag_adorner,
+            Microsoft::UI::Xaml::Automation::Peers::AutomationLiveSetting::Polite);
+        Canvas::SetZIndex(drag_adorner, 100);
+        auto const drag_content = StackPanel{};
+        drag_content.Orientation(Orientation::Horizontal);
+        drag_content.Spacing(10);
+        drag_adorner_icon = FontIcon{};
+        drag_adorner_icon.Glyph(L"\xE756");
+        drag_adorner_icon.FontSize(18);
+        drag_adorner_icon.VerticalAlignment(VerticalAlignment::Center);
+        auto const drag_text = StackPanel{};
+        drag_text.Spacing(1);
+        drag_adorner_title = TextBlock{};
+        drag_adorner_title.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+        drag_adorner_title.MaxWidth(230);
+        drag_adorner_title.TextTrimming(TextTrimming::CharacterEllipsis);
+        drag_adorner_action = TextBlock{};
+        drag_adorner_action.FontSize(12);
+        drag_adorner_action.Opacity(0.72);
+        drag_text.Children().Append(drag_adorner_title);
+        drag_text.Children().Append(drag_adorner_action);
+        drag_content.Children().Append(drag_adorner_icon);
+        drag_content.Children().Append(drag_text);
+        drag_adorner.Child(drag_content);
         app_title_bar.Children().Append(tabs);
         app_title_bar.Children().Append(menu_button);
         app_title_bar.Children().Append(tab_drop_indicator);
         root.Children().Append(content_root);
         root.Children().Append(app_title_bar);
         root.Children().Append(bottom_border);
+        root.Children().Append(drag_adorner);
         window.Content(root);
         window.ExtendsContentIntoTitleBar(true);
         window.SetTitleBar(app_title_bar);
@@ -1117,19 +1163,14 @@ struct Bridge {
         return y < 0.5 ? DropDirection::up : DropDirection::down;
     }
 
-    void showPaneDropPreview(PaneHost& pane, DropDirection direction) {
+    void showPaneDropPreview(PaneHost& pane, DropDirection direction, bool moving_pane = false) {
         auto const width = std::max(pane.grid.ActualWidth(), 0.0);
         auto const height = std::max(pane.grid.ActualHeight(), 0.0);
         pane.drop_preview.Width(direction == DropDirection::left || direction == DropDirection::right ? width / 2 : width);
         pane.drop_preview.Height(direction == DropDirection::up || direction == DropDirection::down ? height / 2 : height);
         pane.drop_preview.HorizontalAlignment(direction == DropDirection::right ? HorizontalAlignment::Right : HorizontalAlignment::Left);
         pane.drop_preview.VerticalAlignment(direction == DropDirection::down ? VerticalAlignment::Bottom : VerticalAlignment::Top);
-        switch (direction) {
-        case DropDirection::left: pane.drop_label.Text(L"Split left"); break;
-        case DropDirection::right: pane.drop_label.Text(L"Split right"); break;
-        case DropDirection::up: pane.drop_label.Text(L"Split above"); break;
-        case DropDirection::down: pane.drop_label.Text(L"Split below"); break;
-        }
+        pane.drop_label.Text(directionAction(direction, !moving_pane));
         pane.drop_preview.Visibility(Visibility::Visible);
     }
 
@@ -1166,21 +1207,86 @@ struct Bridge {
         return nullptr;
     }
 
+    hstring tabTitle(uint64_t id) const {
+        if (auto const item = tabItemById(id)) {
+            auto const header = item.Header().try_as<StackPanel>();
+            if (header && header.Children().Size() > 1) {
+                if (auto const text = header.Children().GetAt(1).try_as<TextBlock>()) return text.Text();
+            }
+        }
+        return L"Terminal";
+    }
+
+    static std::wstring directionAction(DropDirection direction, bool split) {
+        std::wstring action = split ? L"Split " : L"Move pane ";
+        switch (direction) {
+        case DropDirection::left: return action + L"left";
+        case DropDirection::right: return action + L"right";
+        case DropDirection::up: return action + (split ? L"above" : L"up");
+        case DropDirection::down: return action + (split ? L"below" : L"down");
+        }
+        return action;
+    }
+
+    void updateDragAdorner(Windows::Foundation::Point const& point, std::wstring const& action) {
+        if (!drag_adorner || drag_adorner.Visibility() != Visibility::Visible) return;
+        auto const width = std::max(drag_adorner.ActualWidth(), 210.0);
+        auto const height = std::max(drag_adorner.ActualHeight(), 54.0);
+        auto x = static_cast<double>(point.X) + 16;
+        auto y = static_cast<double>(point.Y) + 16;
+        if (x + width > root.ActualWidth() - 8) x = static_cast<double>(point.X) - width - 16;
+        if (y + height > root.ActualHeight() - 8) y = static_cast<double>(point.Y) - height - 16;
+        auto const transform = drag_adorner.RenderTransform().as<Microsoft::UI::Xaml::Media::CompositeTransform>();
+        transform.TranslateX(std::max(8.0, x));
+        transform.TranslateY(std::max(8.0, y));
+        if (drag_feedback_action == action) return;
+        drag_feedback_action = action;
+        drag_adorner_action.Text(hstring{action});
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(drag_adorner, hstring{action});
+    }
+
+    void beginDragFeedback(Windows::Foundation::Point const& point, hstring const& title, bool pane) {
+        drag_feedback_action.clear();
+        drag_adorner_title.Text(title);
+        drag_adorner_icon.Glyph(pane ? L"\xE8A7" : L"\xE8A5");
+        drag_adorner.Visibility(Visibility::Visible);
+        updateDragAdorner(point, pane ? L"Moving pane" : L"Moving tab");
+    }
+
+    void endDragFeedback() {
+        if (!drag_adorner) return;
+        drag_adorner.Visibility(Visibility::Collapsed);
+        drag_feedback_action.clear();
+        drag_adorner_title.Text(L"");
+        drag_adorner_action.Text(L"");
+    }
+
     void updateManualTabDrag(Windows::Foundation::Point const& point) {
         clearDragFeedback();
         if (pointInTabStrip(point)) {
             auto const local = root.TransformToVisual(tabs).TransformPoint(point);
             pane_tab_insertion = tabInsertionIndex(local.X);
             showTabDropIndicator(pane_tab_insertion);
+            auto const destination = tabReorderIndex(dragged_tab_id, pane_tab_insertion);
+            if (destination != UINT32_MAX) {
+                updateDragAdorner(point, L"Move tab to position " + std::to_wstring(destination + 1));
+            }
             return;
         }
         // The presented panes already belong to this tab, so splitting onto
         // them would be a no-op. Do not advertise an unavailable operation.
-        if (dragged_tab_id == drag_destination_tab_id) return;
+        if (dragged_tab_id == drag_destination_tab_id) {
+            updateDragAdorner(point, L"Moving tab");
+            return;
+        }
         Windows::Foundation::Point local{};
         if (auto* pane = paneAtPoint(point, local)) {
-            showPaneDropPreview(*pane, directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight()));
+            auto const direction = directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight());
+            showPaneDropPreview(*pane, direction);
+            updateDragAdorner(point, directionAction(direction, true));
+            return;
         }
+        updateDragAdorner(point, L"Moving tab");
     }
 
     void moveManualTabDrag(Windows::Foundation::Point const& position) {
@@ -1191,6 +1297,8 @@ struct Bridge {
             dragged_tab_id = pressed_tab_id;
             tab_pointer_dragging = true;
             tab_drop_committed = false;
+            if (auto const source = tabItemById(dragged_tab_id)) source.Opacity(0.65);
+            beginDragFeedback(position, tabTitle(dragged_tab_id), false);
             if (drag_destination_tab_id && drag_destination_tab_id != dragged_tab_id && drag_destination_pane_id) {
                 if (auto const destination = tabItemById(drag_destination_tab_id)) {
                     tabs.SelectedItem(destination);
@@ -1214,20 +1322,10 @@ struct Bridge {
             return;
         }
         if (!pointInTabStrip(point)) return;
-        auto const items = tabs.TabItems();
-        uint32_t source = UINT32_MAX;
-        for (uint32_t index = 0; index < items.Size(); ++index) {
-            if (tabId(items.GetAt(index).try_as<TabViewItem>()) == source_id) {
-                source = index;
-                break;
-            }
-        }
-        if (source == UINT32_MAX || !items.Size()) return;
         auto const local_tab = root.TransformToVisual(tabs).TransformPoint(point);
         auto const insertion = tabInsertionIndex(local_tab.X);
-        auto const destination = std::min(
-            insertion - static_cast<uint32_t>(source < insertion),
-            items.Size() - 1);
+        auto const destination = tabReorderIndex(source_id, insertion);
+        if (destination == UINT32_MAX) return;
         pending_reorder_tab_id = source_id;
         pending_reorder_index = destination;
         tab_drop_committed = true;
@@ -1237,6 +1335,8 @@ struct Bridge {
     void resetManualTabDrag() {
         if (tab_pointer_timer) tab_pointer_timer.Stop();
         if (tab_pointer_capture) tab_pointer_capture.ReleasePointerCaptures();
+        if (auto const source = tabItemById(dragged_tab_id ? dragged_tab_id : pressed_tab_id)) source.Opacity(1);
+        endDragFeedback();
         tab_pointer_capture = nullptr;
         tab_pointer_id = 0;
         tab_pointer_pressed = false;
@@ -1255,18 +1355,30 @@ struct Bridge {
             auto const dy = position.Y - pane_drag_origin.Y;
             if (dx * dx + dy * dy < 36) return;
             pane_pointer_dragging = true;
+            if (auto const pane = pane_hosts.find(dragged_pane_id); pane != pane_hosts.end()) {
+                pane->second->drag_handle.Opacity(0.55);
+            }
+            auto title = std::wstring{L"Pane"};
+            auto const tab_title = tabTitle(presented_tab_id);
+            if (!tab_title.empty()) title += L" — " + std::wstring{tab_title};
+            beginDragFeedback(position, hstring{title}, true);
         }
         clearDragFeedback();
         if (pointInTabStrip(position)) {
             auto const local = root.TransformToVisual(tabs).TransformPoint(position);
             pane_tab_insertion = tabInsertionIndex(local.X);
             showTabDropIndicator(pane_tab_insertion);
+            updateDragAdorner(position, L"Move pane to new tab at position " + std::to_wstring(pane_tab_insertion + 1));
             return;
         }
         Windows::Foundation::Point local{};
         if (auto* pane = paneAtPoint(position, local); pane && pane->pane_id != dragged_pane_id) {
-            showPaneDropPreview(*pane, directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight()));
+            auto const direction = directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight());
+            showPaneDropPreview(*pane, direction, true);
+            updateDragAdorner(position, directionAction(direction, false));
+            return;
         }
+        updateDragAdorner(position, L"Moving pane");
     }
 
     void finishManualPaneDrag(Windows::Foundation::Point const& position) {
@@ -1291,6 +1403,7 @@ struct Bridge {
         if (auto const pane = pane_hosts.find(dragged_pane_id); pane != pane_hosts.end()) {
             pane->second->drag_handle.Opacity(1);
         }
+        endDragFeedback();
         dragged_pane_id = 0;
         pane_pointer_pressed = false;
         pane_pointer_dragging = false;
@@ -1306,6 +1419,18 @@ struct Bridge {
             if (x < origin.X + item.ActualWidth() / 2) return index;
         }
         return items.Size();
+    }
+
+    uint32_t tabReorderIndex(uint64_t source_id, uint32_t insertion) const {
+        auto const items = tabs.TabItems();
+        if (!items.Size()) return UINT32_MAX;
+        for (uint32_t source = 0; source < items.Size(); ++source) {
+            if (tabId(items.GetAt(source).try_as<TabViewItem>()) != source_id) continue;
+            return std::min(
+                insertion - static_cast<uint32_t>(source < insertion),
+                items.Size() - 1);
+        }
+        return UINT32_MAX;
     }
 
     void showTabDropIndicator(uint32_t insertion) {
@@ -1347,8 +1472,9 @@ struct Bridge {
         p->drop_preview=Border{};
         p->drop_preview.Background(application.Resources().Lookup(box_value(L"AccentFillColorSecondaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
         p->drop_preview.BorderBrush(application.Resources().Lookup(box_value(L"AccentFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
-        p->drop_preview.BorderThickness(Thickness{2}); p->drop_preview.Opacity(0.86); p->drop_preview.IsHitTestVisible(false); p->drop_preview.Visibility(Visibility::Collapsed);
+        p->drop_preview.BorderThickness(Thickness{2}); p->drop_preview.Opacity(0.78); p->drop_preview.IsHitTestVisible(false); p->drop_preview.Visibility(Visibility::Collapsed);
         p->drop_label=TextBlock{}; p->drop_label.HorizontalAlignment(HorizontalAlignment::Center); p->drop_label.VerticalAlignment(VerticalAlignment::Center); p->drop_label.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+        p->drop_label.Foreground(application.Resources().Lookup(box_value(L"TextOnAccentFillColorPrimaryBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
         p->drop_preview.Child(p->drop_label);
         p->drag_handle=Border{}; p->drag_handle.Width(30); p->drag_handle.Height(24); p->drag_handle.HorizontalAlignment(HorizontalAlignment::Right); p->drag_handle.VerticalAlignment(VerticalAlignment::Top); p->drag_handle.CornerRadius(CornerRadius{0,0,0,4});
         p->drag_handle.Background(application.Resources().Lookup(box_value(L"CardBackgroundFillColorDefaultBrush")).as<Microsoft::UI::Xaml::Media::Brush>());
@@ -1366,7 +1492,6 @@ struct Bridge {
             pane_drag_origin = point.Position();
             pane_pointer_pressed = true;
             pane_pointer_dragging = false;
-            p->drag_handle.Opacity(0.7);
             pane_pointer_timer.Start();
             args.Handled(true);
         });
@@ -2484,6 +2609,10 @@ struct Bridge {
         new_tab_button = nullptr;
         new_tab_controls = nullptr;
         tab_drop_indicator = nullptr;
+        drag_adorner = nullptr;
+        drag_adorner_icon = nullptr;
+        drag_adorner_title = nullptr;
+        drag_adorner_action = nullptr;
         cleanup(L"clear tabs", [&] { tabs.TabItems().Clear(); }, result);
         cleanup(L"clear title bar content", [&] { app_title_bar.Children().Clear(); }, result);
         cleanup(L"clear keyboard accelerators", [&] { root.KeyboardAccelerators().Clear(); }, result);
