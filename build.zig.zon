@@ -1,6 +1,6 @@
 .{
     .name = .zigonaut,
-    .version = "0.6.1",
+    .version = "0.7.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xdfc39dc8b860abe1,
     .dependencies = .{

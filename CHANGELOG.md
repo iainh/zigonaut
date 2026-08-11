@@ -2,6 +2,27 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.7.0] - 2026-08-11
+
+### Added
+
+- Drag-and-drop reordering for Windows tabs and panes, with Fluent visual feedback
+  for available drop targets and the active destination.
+
+### Changed
+
+- Rendered box-drawing and block-element characters procedurally on Windows and
+  macOS for consistent joins and cell coverage across fonts.
+- Cached Windows pseudographic masks and reused row-ordering storage to reduce
+  per-frame rendering work.
+
+### Fixed
+
+- Preserved macOS pseudographic masks across narrow and wide cell spans and
+  corrected mask polarity so foreground strokes render instead of backgrounds.
+- Encoded macOS arrow and function keys as terminal input instead of forwarding
+  AppKit's private-use Unicode characters.
+
 ## [0.6.1] - 2026-08-10
 
 ### Fixed
@@ -194,6 +215,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.7.0]: https://github.com/iainh/zigonaut/releases/tag/v0.7.0
 [0.6.1]: https://github.com/iainh/zigonaut/releases/tag/v0.6.1
 [0.6.0]: https://github.com/iainh/zigonaut/releases/tag/v0.6.0
 [0.5.0]: https://github.com/iainh/zigonaut/releases/tag/v0.5.0
