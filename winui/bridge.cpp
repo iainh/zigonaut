@@ -19,7 +19,6 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.UI.Text.h>
@@ -58,8 +57,6 @@ namespace Microsoft = winrt::Microsoft;
 constexpr wchar_t placement_key[] = L"Software\\Zigonaut";
 constexpr wchar_t placement_value[] = L"WindowPlacement";
 constexpr uint32_t placement_version = 1;
-constexpr wchar_t tab_drag_property[] = L"Zigonaut.TabIndex";
-constexpr wchar_t pane_drag_property[] = L"Zigonaut.PaneId";
 
 enum class DropDirection : uint32_t { left = 1, right = 2, up = 3, down = 4 };
 
@@ -207,9 +204,9 @@ struct Bridge {
         UIElement::PointerEntered_revoker scrollbar_entered{}; UIElement::PointerExited_revoker scrollbar_exited{};
         UIElement::PointerWheelChanged_revoker scrollbar_wheel{};
         UIElement::PointerPressed_revoker drag_pressed{};
-        UIElement::DragStarting_revoker drag_starting{};
-        UIElement::DropCompleted_revoker drag_completed{};
-        UIElement::DragOver_revoker drag_over{}; UIElement::DragLeave_revoker drag_leave{}; UIElement::Drop_revoker drop{};
+        UIElement::PointerReleased_revoker drag_released{};
+        UIElement::PointerCanceled_revoker drag_canceled{};
+        UIElement::PointerCaptureLost_revoker drag_capture_lost{};
         Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker tick{};
     };
     struct SplitHost {
@@ -282,14 +279,11 @@ struct Bridge {
     SplitButton::Click_revoker new_tab_revoker{};
     TabView::SelectionChanged_revoker selection_revoker{};
     TabView::TabCloseRequested_revoker close_tab_revoker{};
-    TabView::TabDragStarting_revoker tab_drag_starting_revoker{};
-    TabView::TabDragCompleted_revoker tab_drag_completed_revoker{};
-    TabView::TabStripDragOver_revoker tab_strip_drag_over_revoker{};
-    UIElement::DragLeave_revoker tab_strip_drag_leave_revoker{};
-    TabView::TabStripDrop_revoker tab_strip_drop_revoker{};
     Windows::Foundation::IInspectable tab_pointer_pressed_handler{nullptr};
     Windows::Foundation::IInspectable tab_pointer_moved_handler{nullptr};
     Windows::Foundation::IInspectable tab_pointer_released_handler{nullptr};
+    Windows::Foundation::IInspectable tab_pointer_canceled_handler{nullptr};
+    Windows::Foundation::IInspectable tab_pointer_capture_lost_handler{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer tab_pointer_timer{nullptr};
     Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker tab_pointer_tick{};
     Microsoft::UI::Dispatching::DispatcherQueueTimer pane_pointer_timer{nullptr};
@@ -321,13 +315,12 @@ struct Bridge {
     bool tab_pointer_dragging = false;
     uint64_t dragged_pane_id{};
     Windows::Foundation::Point pane_drag_origin{};
+    Border pane_pointer_capture{nullptr};
+    uint32_t pane_pointer_id{};
     bool pane_pointer_pressed = false;
     bool pane_pointer_dragging = false;
     std::wstring drag_feedback_action;
-    uint64_t pending_reorder_tab_id{};
-    uint32_t pending_reorder_index = UINT32_MAX;
     uint32_t pane_tab_insertion = UINT32_MAX;
-    bool tab_drop_committed = false;
     bool appearance_initialized = false;
     bool pane_focus_dispatch_pending = false;
     uint64_t pending_pane_focus{};
@@ -518,12 +511,10 @@ struct Bridge {
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
         tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
-        // TabView's built-in ListView reorder does not initiate reliably inside
-        // a custom non-client title bar. Individual TabViewItems start the drag;
-        // the strip handlers below commit the stable-ID reorder explicitly.
+        // Native TabView dragging does not initiate reliably inside a custom
+        // non-client title bar, so pointer handlers below own the interaction.
         tabs.CanReorderTabs(false);
         tabs.CanDragTabs(false);
-        tabs.AllowDropTabs(true);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(tabs, L"Terminal tabs");
         new_tab_controls = StackPanel{};
         new_tab_controls.Orientation(Orientation::Horizontal);
@@ -559,90 +550,6 @@ struct Bridge {
                 notify(ZIGONAUT_CHROME_CLOSE, index);
                 focusTerminal();
             }
-        });
-        tab_drag_starting_revoker = tabs.TabDragStarting(auto_revoke, [this](TabView const& sender, TabViewTabDragStartingEventArgs const& args) {
-            dragged_tab_id = 0;
-            tab_drop_committed = false;
-            uint32_t index{};
-            if (sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) {
-                dragged_tab_id = tabId(args.Item().try_as<TabViewItem>());
-                if (!dragged_tab_id) return;
-                args.Data().Properties().Insert(tab_drag_property, box_value(dragged_tab_id));
-                args.Data().RequestedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
-                if (pressed_tab_id == dragged_tab_id && drag_destination_tab_id &&
-                    drag_destination_tab_id != dragged_tab_id && drag_destination_pane_id) {
-                    if (auto const destination = tabItemById(drag_destination_tab_id)) {
-                        sender.SelectedItem(destination);
-                    }
-                    paneEvent(ZIGONAUT_PANE_EVENT_RESTORE_DRAG_DESTINATION, drag_destination_pane_id, 0);
-                }
-            }
-        });
-        tab_drag_completed_revoker = tabs.TabDragCompleted(auto_revoke, [this](TabView const& sender, TabViewTabDragCompletedEventArgs const& args) {
-            uint32_t index{};
-            if (!tab_drop_committed && dragged_tab_id && sender.TabItems().IndexOf(args.Item(), index) && index <= 0xffff) {
-                pending_reorder_tab_id = dragged_tab_id;
-                pending_reorder_index = index;
-                paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, dragged_tab_id, index);
-            }
-            dragged_tab_id = 0;
-            pressed_tab_id = 0;
-            drag_destination_tab_id = 0;
-            drag_destination_pane_id = 0;
-            tab_drop_committed = false;
-            clearDragFeedback();
-        });
-        tab_strip_drag_over_revoker = tabs.TabStripDragOver(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args) {
-            uint64_t tab{};
-            if (dragUInt64(args, tab_drag_property, tab) && tab) {
-                pane_tab_insertion = tabInsertionIndex(args.GetPosition(tabs).X);
-                showTabDropIndicator(pane_tab_insertion);
-                args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
-                args.DragUIOverride().Caption(L"Move tab");
-                args.DragUIOverride().IsCaptionVisible(true);
-                return;
-            }
-            uint64_t pane{};
-            if (!dragUInt64(args, pane_drag_property, pane) || !pane) return;
-            pane_tab_insertion = tabInsertionIndex(args.GetPosition(tabs).X);
-            showTabDropIndicator(pane_tab_insertion);
-            args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
-            args.DragUIOverride().Caption(L"Move pane to new tab");
-            args.DragUIOverride().IsCaptionVisible(true);
-        });
-        tab_strip_drag_leave_revoker = tabs.DragLeave(auto_revoke, [this](auto&&, auto&&) { clearTabDropIndicator(); });
-        tab_strip_drop_revoker = tabs.TabStripDrop(auto_revoke, [this](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args) {
-            uint64_t tab{};
-            if (dragUInt64(args, tab_drag_property, tab) && tab) {
-                auto const items = tabs.TabItems();
-                uint32_t source = UINT32_MAX;
-                for (uint32_t index = 0; index < items.Size(); ++index) {
-                    if (tabId(items.GetAt(index).try_as<TabViewItem>()) == tab) {
-                        source = index;
-                        break;
-                    }
-                }
-                auto const insertion = pane_tab_insertion == UINT32_MAX
-                    ? tabInsertionIndex(args.GetPosition(tabs).X)
-                    : pane_tab_insertion;
-                clearTabDropIndicator();
-                if (source == UINT32_MAX || !items.Size()) return;
-                auto const destination = std::min(
-                    insertion - static_cast<uint32_t>(source < insertion),
-                    items.Size() - 1);
-                pending_reorder_tab_id = tab;
-                pending_reorder_index = destination;
-                tab_drop_committed = true;
-                paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, tab, destination);
-                return;
-            }
-            uint64_t pane{};
-            if (!dragUInt64(args, pane_drag_property, pane) || !pane) return;
-            auto const insertion = pane_tab_insertion == UINT32_MAX
-                ? tabInsertionIndex(args.GetPosition(tabs).X)
-                : pane_tab_insertion;
-            clearTabDropIndicator();
-            paneEvent(ZIGONAUT_PANE_EVENT_PANE_TO_TAB, pane, insertion);
         });
         tab_pointer_pressed_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
             [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
@@ -689,6 +596,14 @@ struct Bridge {
                     args.Handled(true);
                 }
                 resetManualTabDrag();
+            }});
+        tab_pointer_canceled_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
+            [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+                if (tab_pointer_pressed) resetManualTabDrag();
+            }});
+        tab_pointer_capture_lost_handler = box_value<Microsoft::UI::Xaml::Input::PointerEventHandler>({
+            [this](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&) {
+                if (tab_pointer_pressed) resetManualTabDrag();
             }});
         tab_pointer_timer = root.DispatcherQueue().CreateTimer();
         tab_pointer_timer.Interval(std::chrono::milliseconds(16));
@@ -918,11 +833,16 @@ struct Bridge {
             Application::Current().Exit();
         });
         window_activated_revoker = window.Activated(auto_revoke, [this](auto&&, WindowActivatedEventArgs const& args) {
-            auto const active = pane_hosts.find(active_pane);
-            if (active == pane_hosts.end()) return;
             if (args.WindowActivationState() == WindowActivationState::Deactivated) {
+                if (tab_pointer_pressed) resetManualTabDrag();
+                if (pane_pointer_pressed) resetManualPaneDrag();
+                auto const active = pane_hosts.find(active_pane);
+                if (active == pane_hosts.end()) return;
                 SendMessageW(active->second->window, WM_KILLFOCUS, 0, 0);
-            } else if (active->second->input.FocusState() != FocusState::Unfocused) {
+                return;
+            }
+            auto const active = pane_hosts.find(active_pane);
+            if (active != pane_hosts.end() && active->second->input.FocusState() != FocusState::Unfocused) {
                 SendMessageW(active->second->window, WM_SETFOCUS, 0, 0);
             }
         });
@@ -1118,28 +1038,12 @@ struct Bridge {
         }
     }
 
-    static bool dragUInt64(Microsoft::UI::Xaml::DragEventArgs const& args, wchar_t const* key, uint64_t& value) {
-        try {
-            auto const properties = args.DataView().Properties();
-            if (!properties.HasKey(key)) return false;
-            value = unbox_value<uint64_t>(properties.Lookup(key));
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
     static uint64_t tabId(TabViewItem const& item) noexcept {
         try {
             return item && item.Tag() ? unbox_value<uint64_t>(item.Tag()) : 0;
         } catch (...) {
             return 0;
         }
-    }
-
-    uint64_t selectedTabId() const noexcept {
-        auto const selected = tabs.SelectedItem().try_as<TabViewItem>();
-        return tabId(selected);
     }
 
     TabViewItem tabItemById(uint64_t id) const noexcept {
@@ -1185,7 +1089,8 @@ struct Bridge {
         if (!tabs || !app_title_bar || tabs.ActualHeight() <= 0 || app_title_bar.ActualWidth() <= 0) return false;
         auto const tab_origin = tabs.TransformToVisual(root).TransformPoint({0, 0});
         auto const title_origin = app_title_bar.TransformToVisual(root).TransformPoint({0, 0});
-        return point.X >= tab_origin.X && point.X < title_origin.X + app_title_bar.ActualWidth() &&
+        auto const right = title_origin.X + app_title_bar.ActualWidth() - app_title_bar.Padding().Right;
+        return point.X >= tab_origin.X && point.X < right &&
             point.Y >= tab_origin.Y && point.Y < tab_origin.Y + tabs.ActualHeight();
     }
 
@@ -1279,6 +1184,14 @@ struct Bridge {
             updateDragAdorner(point, L"Moving tab");
             return;
         }
+        // Selecting an inactive source tab and restoring the original pane are
+        // asynchronous model operations. Never preview or commit against the
+        // source pane tree while the saved destination is still being restored.
+        if (presented_tab_id != drag_destination_tab_id ||
+            !drag_destination_pane_id || !pane_hosts.count(drag_destination_pane_id)) {
+            updateDragAdorner(point, L"Moving tab");
+            return;
+        }
         Windows::Foundation::Point local{};
         if (auto* pane = paneAtPoint(point, local)) {
             auto const direction = directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight());
@@ -1296,7 +1209,6 @@ struct Bridge {
             if (dx * dx + dy * dy < 36) return;
             dragged_tab_id = pressed_tab_id;
             tab_pointer_dragging = true;
-            tab_drop_committed = false;
             if (auto const source = tabItemById(dragged_tab_id)) source.Opacity(0.65);
             beginDragFeedback(position, tabTitle(dragged_tab_id), false);
             if (drag_destination_tab_id && drag_destination_tab_id != dragged_tab_id && drag_destination_pane_id) {
@@ -1313,30 +1225,27 @@ struct Bridge {
         auto const source_id = dragged_tab_id;
         if (!source_id) return;
         Windows::Foundation::Point local{};
-        if (auto* pane = paneAtPoint(point, local)) {
-            if (source_id != drag_destination_tab_id) {
+        if (source_id != drag_destination_tab_id &&
+            presented_tab_id == drag_destination_tab_id &&
+            drag_destination_pane_id && pane_hosts.count(drag_destination_pane_id)) {
+            if (auto* pane = paneAtPoint(point, local)) {
                 auto const direction = directionAt(local, pane->grid.ActualWidth(), pane->grid.ActualHeight());
-                tab_drop_committed = true;
                 paneEvent(ZIGONAUT_PANE_EVENT_MERGE_TAB, pane->pane_id, static_cast<uint32_t>(direction), source_id);
+                return;
             }
-            return;
         }
         if (!pointInTabStrip(point)) return;
         auto const local_tab = root.TransformToVisual(tabs).TransformPoint(point);
         auto const insertion = tabInsertionIndex(local_tab.X);
         auto const destination = tabReorderIndex(source_id, insertion);
         if (destination == UINT32_MAX) return;
-        pending_reorder_tab_id = source_id;
-        pending_reorder_index = destination;
-        tab_drop_committed = true;
-        paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, source_id, destination);
+        paneEvent(ZIGONAUT_PANE_EVENT_REORDER_TAB, source_id, 0, tabReorderAnchor(source_id, destination));
     }
 
     void resetManualTabDrag() {
         if (tab_pointer_timer) tab_pointer_timer.Stop();
-        if (tab_pointer_capture) tab_pointer_capture.ReleasePointerCaptures();
-        if (auto const source = tabItemById(dragged_tab_id ? dragged_tab_id : pressed_tab_id)) source.Opacity(1);
-        endDragFeedback();
+        auto const capture = tab_pointer_capture;
+        auto const source_id = dragged_tab_id ? dragged_tab_id : pressed_tab_id;
         tab_pointer_capture = nullptr;
         tab_pointer_id = 0;
         tab_pointer_pressed = false;
@@ -1345,7 +1254,9 @@ struct Bridge {
         pressed_tab_id = 0;
         drag_destination_tab_id = 0;
         drag_destination_pane_id = 0;
-        tab_drop_committed = false;
+        if (capture) capture.ReleasePointerCaptures();
+        if (auto const source = tabItemById(source_id)) source.Opacity(1);
+        endDragFeedback();
         clearDragFeedback();
     }
 
@@ -1385,7 +1296,11 @@ struct Bridge {
         if (!dragged_pane_id) return;
         if (pointInTabStrip(position)) {
             auto const local = root.TransformToVisual(tabs).TransformPoint(position);
-            paneEvent(ZIGONAUT_PANE_EVENT_PANE_TO_TAB, dragged_pane_id, tabInsertionIndex(local.X));
+            paneEvent(
+                ZIGONAUT_PANE_EVENT_PANE_TO_TAB,
+                dragged_pane_id,
+                0,
+                tabInsertionAnchor(tabInsertionIndex(local.X)));
             return;
         }
         Windows::Foundation::Point local{};
@@ -1400,13 +1315,18 @@ struct Bridge {
 
     void resetManualPaneDrag() {
         if (pane_pointer_timer) pane_pointer_timer.Stop();
-        if (auto const pane = pane_hosts.find(dragged_pane_id); pane != pane_hosts.end()) {
-            pane->second->drag_handle.Opacity(1);
-        }
-        endDragFeedback();
+        auto const capture = pane_pointer_capture;
+        auto const source_id = dragged_pane_id;
+        pane_pointer_capture = nullptr;
+        pane_pointer_id = 0;
         dragged_pane_id = 0;
         pane_pointer_pressed = false;
         pane_pointer_dragging = false;
+        if (capture) capture.ReleasePointerCaptures();
+        if (auto const pane = pane_hosts.find(source_id); pane != pane_hosts.end()) {
+            pane->second->drag_handle.Opacity(1);
+        }
+        endDragFeedback();
         clearDragFeedback();
     }
 
@@ -1431,6 +1351,24 @@ struct Bridge {
                 items.Size() - 1);
         }
         return UINT32_MAX;
+    }
+
+    uint64_t tabInsertionAnchor(uint32_t insertion) const {
+        auto const items = tabs.TabItems();
+        if (insertion >= items.Size()) return 0;
+        return tabId(items.GetAt(insertion).try_as<TabViewItem>());
+    }
+
+    uint64_t tabReorderAnchor(uint64_t source_id, uint32_t destination) const {
+        auto const items = tabs.TabItems();
+        uint32_t remaining_index = 0;
+        for (uint32_t index = 0; index < items.Size(); ++index) {
+            auto const id = tabId(items.GetAt(index).try_as<TabViewItem>());
+            if (id == source_id) continue;
+            if (remaining_index == destination) return id;
+            ++remaining_index;
+        }
+        return 0;
     }
 
     void showTabDropIndicator(uint32_t insertion) {
@@ -1488,14 +1426,31 @@ struct Bridge {
         p->drag_pressed = p->drag_handle.PointerPressed(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
             auto const point = args.GetCurrentPoint(root);
             if (point.Properties().PointerUpdateKind() != Microsoft::UI::Input::PointerUpdateKind::LeftButtonPressed) return;
+            if (pane_pointer_pressed) resetManualPaneDrag();
             dragged_pane_id = p->pane_id;
             pane_drag_origin = point.Position();
             pane_pointer_pressed = true;
             pane_pointer_dragging = false;
+            if (p->drag_handle.CapturePointer(args.Pointer())) {
+                pane_pointer_capture = p->drag_handle;
+                pane_pointer_id = args.Pointer().PointerId();
+            }
             pane_pointer_timer.Start();
             args.Handled(true);
         });
-        p->frame.AllowDrop(true);
+        p->drag_released = p->drag_handle.PointerReleased(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& args) {
+            if (!pane_pointer_pressed || dragged_pane_id != p->pane_id) return;
+            if (pane_pointer_id && args.Pointer().PointerId() != pane_pointer_id) return;
+            if (pane_pointer_dragging) finishManualPaneDrag(args.GetCurrentPoint(root).Position());
+            resetManualPaneDrag();
+            args.Handled(true);
+        });
+        p->drag_canceled = p->drag_handle.PointerCanceled(auto_revoke, [this, p](auto&&, auto&&) {
+            if (pane_pointer_pressed && dragged_pane_id == p->pane_id) resetManualPaneDrag();
+        });
+        p->drag_capture_lost = p->drag_handle.PointerCaptureLost(auto_revoke, [this, p](auto&&, auto&&) {
+            if (pane_pointer_pressed && dragged_pane_id == p->pane_id) resetManualPaneDrag();
+        });
         p->grid.Children().Append(p->panel); p->grid.Children().Append(p->input); p->grid.Children().Append(p->scrollbar); p->grid.Children().Append(p->focus_indicator); p->grid.Children().Append(p->drop_preview); p->grid.Children().Append(p->drag_handle); p->frame.Child(p->grid);
         check_hresult(p->panel.as<ISwapChainPanelNative>()->SetSwapChain(p->swap_chain.get()));
         // LayoutUpdated is intentionally coalesced for general XAML churn, but a
@@ -1575,32 +1530,6 @@ struct Bridge {
         p->exited=p->panel.PointerExited(auto_revoke,[p](auto&&, auto const& a){SendMessageW(p->window,WM_MOUSELEAVE,0,0);a.Handled(true);});
         p->canceled=p->panel.PointerCanceled(auto_revoke,[p](auto&&, auto const& a){SendMessageW(p->window,WM_CANCELMODE,0,0);a.Handled(true);});
         p->capture_lost=p->panel.PointerCaptureLost(auto_revoke,[p](auto&&, auto&&){SendMessageW(p->window,WM_CAPTURECHANGED,0,0);});
-        p->drag_starting=p->drag_handle.DragStarting(auto_revoke,[p](auto&&, Microsoft::UI::Xaml::DragStartingEventArgs const& args){
-            args.Data().Properties().Insert(pane_drag_property, box_value(p->pane_id));
-            args.Data().RequestedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
-        });
-        p->drag_completed=p->drag_handle.DropCompleted(auto_revoke,[this](auto&&, auto&&){ clearDragFeedback(); });
-        p->drag_over=p->frame.DragOver(auto_revoke,[this,p](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args){
-            uint64_t source{};
-            if (!dragUInt64(args, tab_drag_property, source) || !source || source == selectedTabId()) {
-                p->drop_preview.Visibility(Visibility::Collapsed);
-                return;
-            }
-            auto const direction=directionAt(args.GetPosition(p->grid), p->grid.ActualWidth(), p->grid.ActualHeight());
-            showPaneDropPreview(*p, direction);
-            args.AcceptedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
-            args.DragUIOverride().Caption(p->drop_label.Text());
-            args.DragUIOverride().IsCaptionVisible(true);
-        });
-        p->drag_leave=p->frame.DragLeave(auto_revoke,[p](auto&&, auto&&){ p->drop_preview.Visibility(Visibility::Collapsed); });
-        p->drop=p->frame.Drop(auto_revoke,[this,p](auto&&, Microsoft::UI::Xaml::DragEventArgs const& args){
-            p->drop_preview.Visibility(Visibility::Collapsed);
-            uint64_t source{};
-            if (!dragUInt64(args, tab_drag_property, source) || !source || source == selectedTabId()) return;
-            auto const direction=directionAt(args.GetPosition(p->grid), p->grid.ActualWidth(), p->grid.ActualHeight());
-            tab_drop_committed = true;
-            paneEvent(ZIGONAUT_PANE_EVENT_MERGE_TAB, p->pane_id, static_cast<uint32_t>(direction), source);
-        });
         p->scroll = p->scrollbar.Scroll(auto_revoke, [this, p](auto&&, Microsoft::UI::Xaml::Controls::Primitives::ScrollEventArgs const& args) {
             if (p->updating_scrollbar) return;
             showPaneScrollbar(*p);
@@ -2340,6 +2269,8 @@ struct Bridge {
         item.AddHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler, true);
         item.AddHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler, true);
         item.AddHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler, true);
+        item.AddHandler(UIElement::PointerCanceledEvent(), tab_pointer_canceled_handler, true);
+        item.AddHandler(UIElement::PointerCaptureLostEvent(), tab_pointer_capture_lost_handler, true);
         auto flyout = MenuFlyout{};
         auto append = [this, weak, &flyout](wchar_t const* text, zigonaut_chrome_command_id command) {
             auto menu_item = MenuFlyoutItem{};
@@ -2365,12 +2296,20 @@ struct Bridge {
         } reset{updating};
         auto items = tabs.TabItems();
         auto changed = false;
-        if (pending_reorder_tab_id && pending_reorder_index < count &&
-            tab_ids[pending_reorder_index] == pending_reorder_tab_id) {
-            pending_reorder_tab_id = 0;
-            pending_reorder_index = UINT32_MAX;
+        auto rearranging = dragged_tab_id != 0;
+        if (rearranging) {
+            auto sequence_matches = items.Size() == count;
+            for (uint32_t index = 0; sequence_matches && index < count; ++index) {
+                sequence_matches = tabId(items.GetAt(index).try_as<TabViewItem>()) == tab_ids[index];
+            }
+            if (!sequence_matches) {
+                // The model changed independently while this pointer operation
+                // was active. Cancel it so obsolete items cannot survive after
+                // the authoritative update has already been consumed.
+                resetManualTabDrag();
+                rearranging = false;
+            }
         }
-        auto const rearranging = dragged_tab_id != 0 || pending_reorder_tab_id != 0;
         show_tab_colors = show_colors;
         auto const marker_visibility = show_colors && !high_contrast ? Visibility::Visible : Visibility::Collapsed;
         for (uint32_t i = 0; i < count; ++i) {
@@ -2557,11 +2496,8 @@ struct Bridge {
         new_tab_revoker.revoke();
         selection_revoker.revoke();
         close_tab_revoker.revoke();
-        tab_drag_starting_revoker.revoke();
-        tab_drag_completed_revoker.revoke();
-        tab_strip_drag_over_revoker.revoke();
-        tab_strip_drag_leave_revoker.revoke();
-        tab_strip_drop_revoker.revoke();
+        if (tab_pointer_pressed) resetManualTabDrag();
+        if (pane_pointer_pressed) resetManualPaneDrag();
         tab_pointer_timer.Stop();
         tab_pointer_tick.revoke();
         pane_pointer_timer.Stop();
@@ -2574,10 +2510,14 @@ struct Bridge {
                 item.RemoveHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler);
                 item.RemoveHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler);
                 item.RemoveHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler);
+                item.RemoveHandler(UIElement::PointerCanceledEvent(), tab_pointer_canceled_handler);
+                item.RemoveHandler(UIElement::PointerCaptureLostEvent(), tab_pointer_capture_lost_handler);
             }
             tab_pointer_pressed_handler = nullptr;
             tab_pointer_moved_handler = nullptr;
             tab_pointer_released_handler = nullptr;
+            tab_pointer_canceled_handler = nullptr;
+            tab_pointer_capture_lost_handler = nullptr;
         }, result);
         layout_revoker.revoke();
         layout_retry_timer.Stop();

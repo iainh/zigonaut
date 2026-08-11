@@ -872,14 +872,19 @@ fn paneEventMessageImpl(self: *Application, hwnd: win.HWND, saturation_drain: bo
                     _ = self.restorePresentationOrClose(hwnd, "tab merge");
                 },
                 chrome.pane_to_tab => {
-                    if (current.value > self.model.tabs.items.len or self.model.paneById(current.target_id) == null) continue;
+                    if (self.model.paneById(current.target_id) == null or
+                        (current.secondary_id != 0 and self.model.tabIndexById(current.secondary_id) == null))
+                    {
+                        self.syncChrome();
+                        continue;
+                    }
                     if (self.activeView()) |view| view.resetInteraction();
                     self.detachPresentation() catch |err| {
                         log.err("unable to detach pane before moving it to a tab: {}", .{err});
                         _ = self.restorePresentationOrClose(hwnd, "pane-to-tab detach failure");
                         continue;
                     };
-                    self.model.movePaneToNewTab(current.target_id, current.value) catch |err| {
+                    self.model.movePaneToNewTabBefore(current.target_id, current.secondary_id) catch |err| {
                         log.err("unable to move pane to tab strip: {}", .{err});
                         _ = self.restorePresentationOrClose(hwnd, "rejected pane-to-tab move");
                         continue;
@@ -911,10 +916,13 @@ fn paneEventMessageImpl(self: *Application, hwnd: win.HWND, saturation_drain: bo
                     _ = self.restorePresentationOrClose(hwnd, "pane rearrange");
                 },
                 chrome.pane_reorder_tab => {
-                    const from = self.model.tabIndexById(current.target_id) orelse continue;
-                    const to: usize = current.value;
-                    if (to >= self.model.tabs.items.len or from == to) continue;
-                    self.model.moveTab(from, to) catch |err| {
+                    if (self.model.tabIndexById(current.target_id) == null or
+                        (current.secondary_id != 0 and self.model.tabIndexById(current.secondary_id) == null))
+                    {
+                        self.syncChrome();
+                        continue;
+                    }
+                    self.model.moveTabBefore(current.target_id, current.secondary_id) catch |err| {
                         log.err("unable to reorder tab: {}", .{err});
                         self.syncChrome();
                         continue;

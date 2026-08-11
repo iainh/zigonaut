@@ -75,6 +75,8 @@ typedef struct zigonaut_pane_event {
     uint32_t selection_start;
     uint32_t selection_length;
     uint32_t attributes;
+    /* For REORDER_TAB and PANE_TO_TAB, the stable ID of the tab immediately
+       after the drop gap; zero means the end of the strip. */
     uint64_t secondary_id;
 } zigonaut_pane_event;
 typedef void (__cdecl *zigonaut_pane_event_callback)(void* context, const zigonaut_pane_event* event);

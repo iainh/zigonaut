@@ -469,6 +469,21 @@ pub const App = struct {
         };
     }
 
+    /// Moves `source_tab_id` immediately before `before_tab_id`. A zero anchor
+    /// means the end of the strip. Stable anchors keep queued drag events valid
+    /// when unrelated tabs are inserted or removed before the drop is handled.
+    pub fn moveTabBefore(self: *App, source_tab_id: u64, before_tab_id: u64) !void {
+        const source = self.tabIndexById(source_tab_id) orelse return error.TabNotFound;
+        const destination = if (before_tab_id == 0)
+            self.tabs.items.len - 1
+        else blk: {
+            const before = self.tabIndexById(before_tab_id) orelse return error.TabNotFound;
+            if (source == before) return;
+            break :blk before - @intFromBool(source < before);
+        };
+        try self.moveTab(source, destination);
+    }
+
     /// Transfers a complete source tab into the target tab. The joining split
     /// and all ArrayList capacity are allocated before either tab is changed.
     pub fn mergeTabOntoPane(self: *App, source_tab_index: usize, target_pane_id: pane_tree.PaneId, direction: pane_tree.Direction) !void {
@@ -534,6 +549,14 @@ pub const App = struct {
 
     /// Moves a live pane into a newly inserted tab. If the pane already owns
     /// its tab, this is only a tab reorder and performs no tree/session rebuild.
+    pub fn movePaneToNewTabBefore(self: *App, pane_id: pane_tree.PaneId, before_tab_id: u64) !void {
+        const insertion_index = if (before_tab_id == 0)
+            self.tabs.items.len
+        else
+            self.tabIndexById(before_tab_id) orelse return error.TabNotFound;
+        try self.movePaneToNewTab(pane_id, insertion_index);
+    }
+
     pub fn movePaneToNewTab(self: *App, pane_id: pane_tree.PaneId, insertion_index: usize) !void {
         if (insertion_index > self.tabs.items.len) return error.InvalidTabIndex;
         var source_tab_index: ?usize = null;
@@ -771,6 +794,30 @@ test "moving tabs preserves the active tab identity" {
     try std.testing.expectEqualStrings("One", app.tabs.items[2].displayTitle());
 }
 
+test "stable tab drop anchors survive intervening tab removal" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "One", "", "", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.powershell, "Two", "", "", null, theme.rasmus.background, 2);
+    _ = try app.addSessionRecord(.powershell, "Three", "", "", null, theme.rasmus.background, 3);
+    _ = try app.addSessionRecord(.powershell, "Four", "", "", null, theme.rasmus.background, 4);
+    const two = app.tabs.items[1].id;
+    const three = app.tabs.items[2].id;
+    const four = app.tabs.items[3].id;
+
+    app.closeTab(0);
+    try app.moveTabBefore(four, three);
+    try std.testing.expectEqualStrings("Two", app.tabs.items[0].displayTitle());
+    try std.testing.expectEqualStrings("Four", app.tabs.items[1].displayTitle());
+    try std.testing.expectEqualStrings("Three", app.tabs.items[2].displayTitle());
+    try std.testing.expectEqual(four, app.activeTab().?.id);
+
+    try std.testing.expectError(error.TabNotFound, app.moveTabBefore(two, 999_999));
+    try std.testing.expectEqual(two, app.tabs.items[0].id);
+    try std.testing.expectEqual(four, app.tabs.items[1].id);
+    try std.testing.expectEqual(three, app.tabs.items[2].id);
+}
+
 test "notification identity selects its tab and pane" {
     var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, true);
     defer app.deinit();
@@ -951,6 +998,28 @@ test "moving pane creates inserted tab without replacing session ownership" {
     try std.testing.expectEqual(session_id, app.activeSession().?.id);
     try std.testing.expect(metadata == app.activeSession().?.metadata);
     try std.testing.expectEqual(@as(usize, 1), app.tabs.items[1].panes.items.len);
+}
+
+test "stable pane-to-tab anchor survives intervening tab removal" {
+    var app = App.init(std.testing.allocator, std.testing.io, theme.rasmus, false);
+    defer app.deinit();
+    _ = try app.addSessionRecord(.powershell, "first", "", "", null, theme.rasmus.background, 1);
+    _ = try app.addSessionRecord(.powershell, "source", "", "", null, theme.rasmus.background, 2);
+    const moved = try app.splitFocusedRecord(.left_right, null, theme.rasmus.background, 3, null);
+    const moved_session = app.activeSession().?.id;
+    _ = try app.addSessionRecord(.powershell, "anchor", "", "", null, theme.rasmus.background, 4);
+    const anchor = app.activeTab().?.id;
+
+    app.closeTab(0);
+    try app.movePaneToNewTabBefore(moved, anchor);
+    try std.testing.expectEqual(@as(usize, 3), app.tabCount());
+    try std.testing.expectEqualStrings("source", app.tabs.items[0].displayTitle());
+    try std.testing.expectEqual(moved, app.tabs.items[1].tree.focused.?);
+    try std.testing.expectEqual(anchor, app.tabs.items[2].id);
+    try std.testing.expectEqual(moved_session, app.activeSession().?.id);
+
+    try std.testing.expectError(error.TabNotFound, app.movePaneToNewTabBefore(moved, 999_999));
+    try std.testing.expectEqual(@as(usize, 3), app.tabCount());
 }
 
 test "moving pane onto pane rearranges the split without replacing sessions" {
