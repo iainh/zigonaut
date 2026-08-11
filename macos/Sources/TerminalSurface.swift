@@ -980,7 +980,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func proceduralScalar(_ text: String) -> UInt32? {
     guard text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first else { return nil }
-    return zigonaut_pseudographics_covers(scalar.value) ? scalar.value : nil
+    return scalar.value >= 0x2500 && scalar.value <= 0x259F ? scalar.value : nil
   }
 
   private func pseudographicsMask(codepoint: UInt32, columns: Int) -> CGImage? {
