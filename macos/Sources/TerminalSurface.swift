@@ -1025,7 +1025,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     guard
       let provider = CGDataProvider(data: bytes as CFData),
       let image = CGImage(maskWidth: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8,
-        bytesPerRow: width, provider: provider, decode: nil, shouldInterpolate: false)
+        // CGImage masks use inverse alpha by default. Reverse their decode range
+        // so the shared A8 contract remains 0 = transparent, 255 = foreground.
+        bytesPerRow: width, provider: provider, decode: [1, 0], shouldInterpolate: false)
     else { return nil }
     pseudographicsCache[key] = image
     return image
