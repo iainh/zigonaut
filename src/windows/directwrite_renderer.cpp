@@ -21,6 +21,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -147,7 +148,22 @@ struct RowCell {
     bool italic;
     bool strikethrough;
     ZigonautCellOccupancy occupancy;
+    enum class Kind : uint8_t { font, builtin } kind = Kind::font;
+    uint32_t builtin_codepoint = 0;
+    const uint8_t* builtin_mask = nullptr;
+    uint32_t builtin_width = 0, builtin_height = 0, builtin_stride = 0;
 };
+
+struct BuiltinKey {
+    uint32_t codepoint, width, height, span;
+    uint64_t generation;
+    bool operator<(const BuiltinKey& other) const {
+        return std::tie(codepoint,width,height,span,generation) <
+            std::tie(other.codepoint,other.width,other.height,other.span,other.generation);
+    }
+};
+
+struct BuiltinPlacement { D2D1_RECT_U source{}; };
 
 struct OwnedColorLayer {
     IDWriteFontFace* font_face = nullptr;
@@ -412,6 +428,7 @@ struct ZigonautTextEngine {
     std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
     std::list<const LayoutKey*> layout_recency;
     std::map<uint32_t, ImageCacheEntry> images;
+    std::map<BuiltinKey, BuiltinPlacement> builtin_placements;
     uint64_t layout_creation_count = 0;
     ZigonautDirectWriteBenchmark benchmark{};
     bool benchmark_active = false;
@@ -431,7 +448,7 @@ struct ZigonautTextEngine {
     DWRITE_FONT_WEIGHT font_weight = DWRITE_FONT_WEIGHT_NORMAL;
     DWRITE_FONT_WEIGHT intense_font_weight = DWRITE_FONT_WEIGHT_BOLD;
     uint32_t dpi = 96;
-    ZigonautCellMetrics metrics = {9, 18, 14};
+    ZigonautCellMetrics metrics = {9, 18, 14, 1};
     float row_origin_x = 0.0f;
     float row_top = 0.0f;
     float row_cell_width = 0.0f;
@@ -681,6 +698,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         atlas_allocator.reset();
         atlas_reset_pending = false; atlas_invalidation_pending = false;
         atlas_reserved_area = 0; sprite_count = 0;
+        builtin_placements.clear();
         if (++atlas_generation == 0) ++atlas_generation;
     }
 
@@ -1282,6 +1300,11 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             metrics.height,
             static_cast<uint32_t>(std::lround(
                 static_cast<float>(font_metrics.ascent) * scale)));
+        const uint32_t underline_thickness = static_cast<uint32_t>(std::lround(
+            static_cast<float>(font_metrics.underlineThickness) * scale));
+        const uint32_t proportional_thickness = (metrics.height + 8) / 16;
+        metrics.builtin_thickness = std::max(1u, std::min(std::min(metrics.width, metrics.height),
+            std::max(underline_thickness, proportional_thickness)));
     }
 
 
@@ -1862,6 +1885,7 @@ HRESULT ZigonautTextEngine::endRow() {
 
     auto& segments = row_segments;
     size_t segment_count = 0;
+    std::vector<int64_t> row_order;
     auto& segment = row_segment; segment.clear();
     bool has_segment = false;
     const auto flush = [&]() -> HRESULT {
@@ -1869,14 +1893,23 @@ HRESULT ZigonautTextEngine::endRow() {
         if (has_segment) try {
             if (segment_count == segments.size()) segments.emplace_back();
             std::swap(segment, segments[segment_count++]);
+            row_order.push_back(static_cast<int64_t>(segment_count - 1));
         } catch (...) { hr = E_OUTOFMEMORY; }
         segment.clear();
         has_segment = false;
         return hr;
     };
 
-    for (const auto& cell : row_cells) {
+    for (size_t cell_index = 0; cell_index < row_cells.size(); ++cell_index) {
+        const auto& cell = row_cells[cell_index];
         if (cell.occupancy == ZIGONAUT_CELL_WIDE_TAIL) continue;
+        if (cell.kind == RowCell::Kind::builtin) {
+            const HRESULT boundary = flush();
+            if (FAILED(boundary)) return boundary;
+            try { row_order.push_back(-1 - static_cast<int64_t>(cell_index)); }
+            catch (...) { return E_OUTOFMEMORY; }
+            continue;
+        }
         const std::u16string_view cell_text = cell.text_length == 0
             ? std::u16string_view{}
             : std::u16string_view(row_text.data() + cell.text_offset, cell.text_length);
@@ -1907,12 +1940,12 @@ HRESULT ZigonautTextEngine::endRow() {
     }
     HRESULT hr = flush();
     if (FAILED(hr)) return hr;
-    const bool atlas_eligible = segment_count >= 8 &&
-        text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE;
+    const bool has_builtins = row_order.size() != segment_count;
+    const bool atlas_eligible = text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE &&
+        (has_builtins || segment_count >= 8);
     if (atlas_eligible && !atlas_disabled_for_frame && !atlas_allocator)
         initializeAtlas();
-    bool batched = text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE &&
-        !atlas_disabled_for_frame && segment_count >= 8 && target3 && sprite_batch &&
+    bool batched = !atlas_disabled_for_frame && atlas_eligible && target3 && sprite_batch &&
         atlas_bitmap && atlas_allocator;
     if (batched && FAILED(initializeGlyphPipeline())) {
         batched = false;
@@ -1926,10 +1959,50 @@ HRESULT ZigonautTextEngine::endRow() {
     sources.clear();
     colors.clear();
     if (batched) try {
-        destinations.reserve(segment_count);
-        sources.reserve(segment_count);
-        colors.reserve(segment_count);
-        for (size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
+        destinations.reserve(row_order.size());
+        sources.reserve(row_order.size());
+        colors.reserve(row_order.size());
+        for (const int64_t ordered : row_order) {
+            if (ordered < 0) {
+                const auto& cell = row_cells[static_cast<size_t>(-1 - ordered)];
+                const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
+                const BuiltinKey key{cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,span,atlas_generation};
+                auto found = builtin_placements.find(key);
+                if (found == builtin_placements.end()) {
+                    if (!cell.builtin_mask || !cell.builtin_width || !cell.builtin_height ||
+                        cell.builtin_stride < cell.builtin_width) { batched=false; break; }
+                    GlyphAtlasAllocator::Rect slot{};
+                    if (!atlas_allocator->reserve(cell.builtin_width,cell.builtin_height,slot)) {
+                        rejectAtlasReservation(cell.builtin_width,cell.builtin_height,true); batched=false; break;
+                    }
+                    ID2D1Bitmap* mask = nullptr;
+                    const auto props=D2D1::BitmapProperties(D2D1::PixelFormat(
+                        DXGI_FORMAT_A8_UNORM,D2D1_ALPHA_MODE_STRAIGHT),96,96);
+                    HRESULT upload=atlas_context->CreateBitmap(D2D1::SizeU(cell.builtin_width,cell.builtin_height),
+                        cell.builtin_mask,cell.builtin_stride,props,&mask);
+                    if (SUCCEEDED(upload)) upload=beginAtlasDraw();
+                    if (SUCCEEDED(upload)) {
+                        const auto destination=D2D1::RectF(static_cast<float>(slot.x),static_cast<float>(slot.y),
+                            static_cast<float>(slot.x+cell.builtin_width),static_cast<float>(slot.y+cell.builtin_height));
+                        const auto aa=atlas_context->GetAntialiasMode();
+                        atlas_context->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                        atlas_context->FillOpacityMask(mask,atlas_brush,destination,
+                            D2D1::RectF(0,0,static_cast<float>(cell.builtin_width),static_cast<float>(cell.builtin_height)));
+                        atlas_context->SetAntialiasMode(aa);
+                    }
+                    release(mask);
+                    if (FAILED(upload)) { batched=false; break; }
+                    found=builtin_placements.emplace(key,BuiltinPlacement{{slot.x,slot.y,
+                        slot.x+cell.builtin_width,slot.y+cell.builtin_height}}).first;
+                    if (benchmark_active) { ++benchmark.atlas_placement_misses; ++benchmark.atlas_rasterizations; }
+                } else if (benchmark_active) ++benchmark.atlas_placement_hits;
+                const float left=row_origin_x+cell.column*row_cell_width;
+                destinations.push_back({left,row_top,left+cell.builtin_width,row_top+cell.builtin_height});
+                sources.push_back(found->second.source); colors.push_back(color(cell.foreground));
+                continue;
+            }
+            if (text_antialiasing != ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE) { batched=false; break; }
+            const size_t segment_index=static_cast<size_t>(ordered);
             auto& item = segments[segment_index];
             uint32_t start = UINT32_MAX, end = 0;
             for (uint32_t packed : item.columns) { start=std::min(start,startColumn(packed)); end=std::max(end,endColumn(packed)); }
@@ -2014,8 +2087,26 @@ native_fallback:
         if (FAILED(hr)) return hr;
         if (atlas_eligible && benchmark_active) ++benchmark.atlas_fallback_rows;
         clip_guard.push();
-        for (size_t index = 0; index < segment_count; ++index) {
-            hr = drawSegment(segments[index]);
+        for (const int64_t ordered : row_order) {
+            if (ordered >= 0) hr = drawSegment(segments[static_cast<size_t>(ordered)]);
+            else {
+                const auto& cell=row_cells[static_cast<size_t>(-1-ordered)];
+                ID2D1Bitmap* bitmap=nullptr;
+                const auto props=D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_A8_UNORM,D2D1_ALPHA_MODE_STRAIGHT),96,96);
+                hr=target->CreateBitmap(D2D1::SizeU(cell.builtin_width,cell.builtin_height),cell.builtin_mask,
+                    cell.builtin_stride,props,&bitmap);
+                if (SUCCEEDED(hr)) {
+                    brush->SetColor(color(cell.foreground));
+                    const float left=row_origin_x+cell.column*row_cell_width;
+                    const auto aa=target->GetAntialiasMode();
+                    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                    target->FillOpacityMask(bitmap,brush,
+                        D2D1::RectF(left,row_top,left+cell.builtin_width,row_top+cell.builtin_height),
+                        D2D1::RectF(0,0,static_cast<float>(cell.builtin_width),static_cast<float>(cell.builtin_height)));
+                    target->SetAntialiasMode(aa);
+                }
+                release(bitmap);
+            }
             if (FAILED(hr)) return hr;
         }
         clip_guard.pop();
@@ -3302,18 +3393,29 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
         reinterpret_cast<uintptr_t>(window));
     const uint32_t width = SUCCEEDED(hr) ? columns * engine->metrics.width : 1;
     const uint32_t height = SUCCEEDED(hr) ? engine->metrics.height : 1;
+    std::vector<uint8_t> builtin_mask(SUCCEEDED(hr) ? engine->metrics.width * height : 1, 255);
     const auto row = [&](bool spaces) -> HRESULT {
         engine->beginRow(0, 0, static_cast<float>(engine->metrics.width),
             static_cast<float>(engine->metrics.height));
         for (uint32_t column = 0; column < columns; ++column) {
             const uint16_t character = spaces ? u' ' : static_cast<uint16_t>(u'A' + column % 26);
-            const uint32_t foreground = column % 2 ? 0x20ff20 : 0x2020ff;
+            const uint32_t foreground = 0x2020ff;
             const HRESULT draw = engine->drawCell(&character, 1,
                 static_cast<float>(column * engine->metrics.width), 0,
                 static_cast<float>(engine->metrics.width), static_cast<float>(engine->metrics.height),
                 foreground, background, foreground, false, false, false, false, false, 0,
                 ZIGONAUT_CELL_NARROW);
             if (FAILED(draw)) return draw;
+            // Exercise procedural placement beside shaped segments. The repeated
+            // key proves one upload followed by warm placement hits without
+            // manufacturing a glyph id for U+2588.
+            if (!spaces && column % 4 == 1) {
+                const HRESULT builtin=zigonaut_text_engine_draw_builtin_cell(engine,0x2588,
+                    builtin_mask.data(),engine->metrics.width,height,engine->metrics.width,
+                    static_cast<float>(column*engine->metrics.width),0,
+                    static_cast<float>(engine->metrics.width),static_cast<float>(height),0x20ff20);
+                if (FAILED(builtin)) return builtin;
+            }
         }
         return engine->endRow();
     };
@@ -3364,6 +3466,8 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     engine->benchmark_active = false;
     result->first_sprite_batches = engine->benchmark.atlas_sprite_batches;
     result->first_sprites = engine->benchmark.atlas_sprites;
+    result->first_uploads = engine->benchmark.atlas_uploads;
+    result->first_rasterizations = engine->benchmark.atlas_rasterizations;
     if (SUCCEEDED(hr)) hr = inspect(&result->first_changed_pixels,
         &result->first_red_dominant_pixels, &result->first_green_dominant_pixels);
 
@@ -3385,6 +3489,8 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     result->second_sprite_batches = engine->benchmark.atlas_sprite_batches;
     result->second_sprites = engine->benchmark.atlas_sprites;
     result->second_placement_hits = engine->benchmark.atlas_placement_hits;
+    result->second_uploads = engine->benchmark.atlas_uploads;
+    result->second_rasterizations = engine->benchmark.atlas_rasterizations;
     if (SUCCEEDED(hr)) hr = inspect(&result->second_changed_pixels, nullptr, nullptr);
     zigonaut_text_engine_destroy(engine);
     DestroyWindow(window);
@@ -3414,7 +3520,7 @@ extern "C" HRESULT zigonaut_text_engine_refresh_rendering_params(
 
 extern "C" ZigonautCellMetrics zigonaut_text_engine_get_cell_metrics(
     const ZigonautTextEngine* engine) {
-    if (engine == nullptr) return {9, 18, 14};
+    if (engine == nullptr) return {9, 18, 14, 1};
     return engine->metrics;
 }
 
@@ -3592,6 +3698,42 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
         overline != FALSE,
         underline,
         occupancy);
+}
+
+extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
+    ZigonautTextEngine* engine, uint32_t codepoint, const uint8_t* mask,
+    uint32_t mask_width, uint32_t mask_height, uint32_t mask_stride,
+    float left, float top, float width, float height, uint32_t foreground) {
+    if (!engine || !mask || codepoint < 0x2500 || codepoint > 0x259f ||
+        !mask_width || !mask_height || mask_stride < mask_width || !engine->target || !engine->brush)
+        return E_INVALIDARG;
+    if (engine->row_active) {
+        if (engine->row_cells.empty()) return E_UNEXPECTED;
+        auto& cell=engine->row_cells.back();
+        cell.kind=RowCell::Kind::builtin;
+        cell.foreground=foreground;
+        cell.builtin_codepoint=codepoint; cell.builtin_mask=mask;
+        cell.builtin_width=mask_width; cell.builtin_height=mask_height; cell.builtin_stride=mask_stride;
+        return S_OK;
+    }
+    // A8 opacity masks are supported in every text AA policy and provide the
+    // deterministic fallback when the glyph atlas is unavailable.
+    ID2D1Bitmap* bitmap = nullptr;
+    const auto properties = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_A8_UNORM, D2D1_ALPHA_MODE_STRAIGHT), 96, 96);
+    HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(mask_width, mask_height), mask,
+        mask_stride, properties, &bitmap);
+    if (FAILED(hr)) return hr;
+    engine->brush->SetColor(color(foreground));
+    const auto destination = D2D1::RectF(left, top, left + width, top + height);
+    const auto aa=engine->target->GetAntialiasMode();
+    engine->target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    engine->target->FillOpacityMask(bitmap, engine->brush,
+        D2D1_OPACITY_MASK_CONTENT_GRAPHICS, destination,
+        D2D1::RectF(0, 0, static_cast<float>(mask_width), static_cast<float>(mask_height)));
+    engine->target->SetAntialiasMode(aa);
+    bitmap->Release();
+    return S_OK;
 }
 
 extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,

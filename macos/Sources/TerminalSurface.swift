@@ -28,6 +28,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let alpha: UInt64
   }
 
+  private struct PseudographicsKey: Hashable {
+    let codepoint: UInt32
+    let width: Int
+    let height: Int
+    let thickness: Int
+  }
+
   let model: TerminalModel
   var preferences: Preferences
   var focused = false
@@ -55,6 +62,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     columns: 0, rows: 0, cells: [], cursorColumn: 0, cursorRow: 0)
   private var voiceOverObservation: NSKeyValueObservation?
   private var colorCache: [ColorKey: NSColor] = [:]
+  private var pseudographicsCache: [PseudographicsKey: CGImage] = [:]
+  private var pseudographicsMetrics: (width: Int, height: Int, thickness: Int)?
   private var appliedPalette: TerminalPalette?
   private var appliedScrollback = -1
   private var metalLayer: CAMetalLayer?
@@ -86,6 +95,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     cachedIntenseFontWeight = preferences.intenseFontWeight
     cachedFonts.removeAll(keepingCapacity: true)
     cachedFontAdvances.removeAll(keepingCapacity: true)
+    pseudographicsCache.removeAll(keepingCapacity: true)
+    pseudographicsMetrics = nil
     let base = preferences.terminalFont(size: preferences.fontSize)
     cachedFonts[0] = base
     cachedCellWidth = ceil(("M" as NSString).size(withAttributes: [.font: base]).width)
@@ -937,15 +948,18 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       run = nil
     }
     for cell in cells {
-      if let segments = boxSegments(cell.text) {
+      let columns = cell.occupancy == 1 ? 2 : 1
+      if let scalar = proceduralScalar(cell.text),
+        let mask = pseudographicsMask(codepoint: scalar, columns: columns)
+      {
         flush()
-        drawBox(segments, cell: cell)
+        drawPseudographics(mask, cell: cell)
         continue
       }
       guard cell.occupancy == 0 else {
         flush()
         if !cell.text.isEmpty && cell.occupancy != 2 {
-          drawText(cell.text, x: cell.x, y: cell.y, columns: cell.occupancy == 1 ? 2 : 1,
+          drawText(cell.text, x: cell.x, y: cell.y, columns: columns,
             style: textStyle(cell), batched: false)
         }
         continue
@@ -964,46 +978,68 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     flush()
   }
 
-  private func boxSegments(_ text: String) -> (left: Bool, right: Bool, up: Bool, down: Bool)? {
-    guard text.unicodeScalars.count == 1, let value = text.unicodeScalars.first?.value else { return nil }
-    switch value {
-    case 0x2500: return (true, true, false, false) // ─
-    case 0x2502: return (false, false, true, true) // │
-    case 0x250c: return (false, true, false, true) // ┌
-    case 0x2510: return (true, false, false, true) // ┐
-    case 0x2514: return (false, true, true, false) // └
-    case 0x2518: return (true, false, true, false) // ┘
-    case 0x251c: return (false, true, true, true) // ├
-    case 0x2524: return (true, false, true, true) // ┤
-    case 0x252c: return (true, true, false, true) // ┬
-    case 0x2534: return (true, true, true, false) // ┴
-    case 0x253c: return (true, true, true, true) // ┼
-    default: return nil
-    }
+  private func proceduralScalar(_ text: String) -> UInt32? {
+    guard text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first else { return nil }
+    return zigonaut_pseudographics_covers(scalar.value) ? scalar.value : nil
   }
 
-  private func drawBox(_ segments: (left: Bool, right: Bool, up: Bool, down: Bool),
-    cell: TerminalRenderCell)
-  {
-    let rect = cellRect(cell)
+  private func pseudographicsMask(codepoint: UInt32, columns: Int) -> CGImage? {
     let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
-    let pixelWidth = max(1, (preferences.fontSize / 14).rounded())
-    let path = NSBezierPath()
-    let center = NSPoint(x: rect.midX, y: rect.midY)
-    func segment(_ endpoint: NSPoint) {
-      path.move(to: center)
-      path.line(to: endpoint)
+    let width = max(1, Int((cellWidth * CGFloat(columns) * scale).rounded()))
+    let height = max(1, Int((lineHeight * scale).rounded()))
+    let underline = font.underlineThickness
+    let underlineThickness = underline > 0 ? Int((underline * scale).rounded()) : 0
+    let thickness = max(1, max(underlineThickness, (height + 8) / 16))
+    let metrics = (width, height, thickness)
+    if let previous = pseudographicsMetrics,
+      previous.width != width || previous.height != height || previous.thickness != thickness
+    {
+      pseudographicsCache.removeAll(keepingCapacity: true)
     }
-    if segments.left { segment(NSPoint(x: rect.minX - 1 / scale, y: center.y)) }
-    if segments.right { segment(NSPoint(x: rect.maxX + 1 / scale, y: center.y)) }
-    if segments.up { segment(NSPoint(x: center.x, y: rect.minY - 1 / scale)) }
-    if segments.down { segment(NSPoint(x: center.x, y: rect.maxY + 1 / scale)) }
-    path.lineWidth = pixelWidth / scale
-    path.lineCapStyle = .square
-    path.lineJoinStyle = .miter
+    pseudographicsMetrics = metrics
+    let key = PseudographicsKey(codepoint: codepoint, width: width, height: height,
+      thickness: thickness)
+    if let image = pseudographicsCache[key] { return image }
+    var bytes = Data(count: width * height)
+    var result = zigonaut_pseudographics_result_v1()
+    result.version = 1
+    result.size = UInt16(MemoryLayout<zigonaut_pseudographics_result_v1>.size)
+    let status = bytes.withUnsafeMutableBytes { storage in
+      zigonaut_pseudographics_render(codepoint, UInt32(width), UInt32(height), UInt32(thickness),
+        UInt32(width), storage.bindMemory(to: UInt8.self).baseAddress, storage.count, &result)
+    }
+    guard status == 0, result.status == 0, result.written_bytes == bytes.count else { return nil }
+    // The shared A8 contract is top-down. Core Graphics maps a raw mask using
+    // image coordinates even in this view's flipped AppKit context, so store
+    // the cached image bottom-up to keep asymmetric blocks and diagonals upright.
+    bytes.withUnsafeMutableBytes { storage in
+      let pixels = storage.bindMemory(to: UInt8.self)
+      for y in 0..<(height / 2) {
+        let opposite = height - 1 - y
+        for x in 0..<width {
+          pixels.swapAt(y * width + x, opposite * width + x)
+        }
+      }
+    }
+    guard
+      let provider = CGDataProvider(data: bytes as CFData),
+      let image = CGImage(maskWidth: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8,
+        bytesPerRow: width, provider: provider, decode: nil, shouldInterpolate: false)
+    else { return nil }
+    pseudographicsCache[key] = image
+    return image
+  }
+
+  private func drawPseudographics(_ mask: CGImage, cell: TerminalRenderCell) {
+    guard let context = NSGraphicsContext.current?.cgContext else { return }
+    let rect = cellRect(cell)
     let style = textStyle(cell)
-    color(style.rgb, alpha: style.faint ? 0.55 : 1).setStroke()
-    path.stroke()
+    context.saveGState()
+    context.interpolationQuality = .none
+    context.clip(to: rect, mask: mask)
+    context.setFillColor(color(style.rgb, alpha: style.faint ? 0.55 : 1).cgColor)
+    context.fill(rect)
+    context.restoreGState()
   }
 
   private func textStyle(_ cell: TerminalRenderCell) -> TextStyle {

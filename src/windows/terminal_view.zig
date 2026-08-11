@@ -2191,10 +2191,14 @@ const DirectWriteCellRenderer = struct {
             value.link.row == cell.y and cell.x >= value.link.start_column and cell.x < value.link.end_column
         else
             false;
+        // Keep this decision narrow so a future preference can replace the
+        // default without changing terminal traversal or renderer APIs.
+        const builtin = cell.codepoints.len == 1 and cell.codepoints[0] <= std.math.maxInt(u21) and
+            shared.pseudographics.covers(@intCast(cell.codepoints[0]));
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
         self.engine.drawCell(
-            wide[0..length],
+            if (builtin) &.{} else wide[0..length],
             @floatFromInt(left),
             @floatFromInt(top),
             @floatFromInt(span * self.view.cell_width),
@@ -2209,6 +2213,16 @@ const DirectWriteCellRenderer = struct {
             cell.overline,
             if (hovered) @max(cell.underline, 1) else cell.underline,
             @intFromEnum(cell.occupancy),
+        ) catch |err| {
+            self.draw_error = err;
+        };
+        if (builtin and self.draw_error == null) self.engine.drawBuiltinCell(
+            @intCast(cell.codepoints[0]),
+            @floatFromInt(left),
+            @floatFromInt(top),
+            span * self.view.cell_width,
+            self.view.cell_height,
+            if (cell.faint and !self.view.high_contrast) blendColorRef(foreground, background) else foreground,
         ) catch |err| {
             self.draw_error = err;
         };

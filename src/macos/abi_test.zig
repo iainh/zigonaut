@@ -40,10 +40,13 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_mouse_tracking",
     "zigonaut_core_mouse",
     "zigonaut_core_destroy",
+    "zigonaut_pseudographics_covers",
+    "zigonaut_pseudographics_render",
 };
 
 test "public header compiles and dylib exports its contract" {
     try std.testing.expect(@sizeOf(abi.zigonaut_render_frame_v1) > 0);
+    try std.testing.expect(@sizeOf(abi.zigonaut_pseudographics_result_v1) > 0);
     var library = try std.DynLib.open("zig-out/lib/libzigonaut-core.dylib");
     defer library.close();
     inline for (symbols) |symbol| {

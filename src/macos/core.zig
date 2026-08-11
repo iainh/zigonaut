@@ -9,6 +9,7 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 const shared = @import("shared");
+const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;
 const search = shared.search;
 const theme = shared.theme;
@@ -1335,6 +1336,7 @@ test "Zig ABI records match the public C header" {
     try expectAbiCompatible(NotificationResult, public_abi.zigonaut_notification_result_v1);
     try expectAbiCompatible(ClipboardResult, public_abi.zigonaut_clipboard_result_v1);
     try expectAbiCompatible(KeyEvent, public_abi.zigonaut_key_event_v1);
+    try expectAbiCompatible(PseudographicsResult, public_abi.zigonaut_pseudographics_result_v1);
 }
 
 test "null ABI handles are safe" {
@@ -1581,4 +1583,74 @@ test "title callback validates and bounds UTF-8 storage" {
     oversized[0] = 0xff;
     titleChanged(&core, &oversized);
     try std.testing.expectEqual(@as(u32, 4096), core.title_len);
+}
+pub const PseudographicsResult = extern struct {
+    version: u16,
+    size: u16,
+    status: i32,
+    width: u32,
+    height: u32,
+    stride: u32,
+    offset_x: i32,
+    offset_y: i32,
+    required_bytes: usize,
+    written_bytes: usize,
+};
+
+pub export fn zigonaut_pseudographics_covers(codepoint: u32) bool {
+    return codepoint <= std.math.maxInt(u21) and pseudographics.covers(@intCast(codepoint));
+}
+
+/// Render one full-cell physical-pixel A8 mask. Result version 1 has no
+/// trimmed offsets; callers cache using codepoint and all three metrics.
+pub export fn zigonaut_pseudographics_render(
+    codepoint: u32,
+    width: u32,
+    height: u32,
+    thickness: u32,
+    stride: u32,
+    output: ?[*]u8,
+    capacity: usize,
+    result: ?*PseudographicsResult,
+) callconv(.c) i32 {
+    const r = result orelse return -1;
+    const supplied_version = r.version;
+    const supplied_size = r.size;
+    r.* = .{ .version = 1, .size = @sizeOf(PseudographicsResult), .status = -1, .width = width, .height = height, .stride = stride, .offset_x = 0, .offset_y = 0, .required_bytes = 0, .written_bytes = 0 };
+    if (supplied_version != 1 or supplied_size < @sizeOf(PseudographicsResult)) return -1;
+    if (codepoint > std.math.maxInt(u21) or width > std.math.maxInt(u16) or height > std.math.maxInt(u16) or thickness > std.math.maxInt(u8)) return -1;
+    const metrics: pseudographics.Metrics = .{ .width = @intCast(width), .height = @intCast(height), .thickness = @intCast(thickness) };
+    const needed = pseudographics.requiredBytes(metrics, stride) catch return -1;
+    r.required_bytes = needed;
+    if (!pseudographics.covers(@intCast(codepoint))) return -2;
+    if (capacity < needed or output == null) {
+        r.status = 1;
+        return 1;
+    }
+    _ = pseudographics.render(@intCast(codepoint), metrics, stride, output.?[0..capacity]) catch return -1;
+    r.written_bytes = needed;
+    r.status = 0;
+    return 0;
+}
+
+test "pseudographics ABI validates and reports capacity" {
+    var result = std.mem.zeroes(PseudographicsResult);
+    try std.testing.expectEqual(@as(i32, -1), zigonaut_pseudographics_render(0x2588, 8, 8, 0, 8, null, 0, null));
+    try std.testing.expectEqual(@as(i32, -1), zigonaut_pseudographics_render(0x2588, 8, 8, 1, 8, null, 0, &result));
+    result.version = 1;
+    result.size = @sizeOf(PseudographicsResult) - 1;
+    try std.testing.expectEqual(@as(i32, -1), zigonaut_pseudographics_render(0x2588, 8, 8, 1, 8, null, 0, &result));
+    result.version = 1;
+    result.size = @sizeOf(PseudographicsResult);
+    try std.testing.expectEqual(@as(i32, 1), zigonaut_pseudographics_render(0x2588, 8, 8, 0, 8, null, 0, &result));
+    try std.testing.expectEqual(@as(usize, 64), result.required_bytes);
+    result.version = 1;
+    result.size = @sizeOf(PseudographicsResult);
+    try std.testing.expectEqual(@as(i32, -2), zigonaut_pseudographics_render(0x2600, 8, 8, 0, 8, null, 0, &result));
+    var bytes: [64]u8 = undefined;
+    result.version = 1;
+    result.size = @sizeOf(PseudographicsResult);
+    try std.testing.expectEqual(@as(i32, 0), zigonaut_pseudographics_render(0x2588, 8, 8, 0, 8, &bytes, bytes.len, &result));
+    try std.testing.expectEqual(@as(usize, 64), result.written_bytes);
+    for (bytes) |alpha| try std.testing.expectEqual(@as(u8, 255), alpha);
 }

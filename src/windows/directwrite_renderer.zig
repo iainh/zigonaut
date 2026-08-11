@@ -74,11 +74,16 @@ pub fn benchmarkPipeline() !native.ZigonautDirectWriteBenchmark {
 
 pub const Engine = struct {
     handle: *native.ZigonautTextEngine,
+    // Separate one- and two-cell entries: alternating spans must not evict the
+    // entire procedural cache every cell/frame.
+    builtin_masks: [320]?[]u8 = [_]?[]u8{null} ** 320,
+    builtin_metrics: Metrics = .{ .width = 0, .height = 0, .baseline = 0, .builtin_thickness = 0 },
 
     pub const Metrics = struct {
         width: u32,
         height: u32,
         baseline: u32,
+        builtin_thickness: u32,
     };
 
     pub fn init(font_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32, antialiasing: u32) !Engine {
@@ -103,6 +108,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
+        for (&self.builtin_masks) |*mask| if (mask.*) |bytes| std.heap.c_allocator.free(bytes);
         native.zigonaut_text_engine_destroy(self.handle);
     }
 
@@ -124,7 +130,40 @@ pub const Engine = struct {
             .width = value.width,
             .height = value.height,
             .baseline = value.baseline,
+            .builtin_thickness = value.builtin_thickness,
         };
+    }
+
+    fn builtinMask(self: *Engine, codepoint: u21, width: u32, height: u32) ![]const u8 {
+        const current = self.metrics();
+        if (self.builtin_metrics.width != current.width or self.builtin_metrics.height != current.height or
+            self.builtin_metrics.builtin_thickness != current.builtin_thickness)
+        {
+            for (&self.builtin_masks) |*mask| if (mask.*) |bytes| {
+                std.heap.c_allocator.free(bytes);
+                mask.* = null;
+            };
+            self.builtin_metrics = current;
+        }
+        const span_index: usize = if (width > current.width) 1 else 0;
+        const index: usize = codepoint - 0x2500 + span_index * 160;
+        if (self.builtin_masks[index] == null) {
+            const bytes = try std.heap.c_allocator.alloc(u8, try std.math.mul(usize, width, height));
+            errdefer std.heap.c_allocator.free(bytes);
+            _ = try shared.pseudographics.render(codepoint, .{
+                .width = @intCast(width),
+                .height = @intCast(height),
+                .thickness = @intCast(@min(current.builtin_thickness, 255)),
+            }, width, bytes);
+            self.builtin_masks[index] = bytes;
+        }
+        return self.builtin_masks[index].?;
+    }
+
+    pub fn drawBuiltinCell(self: *Engine, codepoint: u21, left: f32, top: f32, width: u32, height: u32, foreground: u32) !void {
+        const mask = try self.builtinMask(codepoint, width, height);
+        if (native.zigonaut_text_engine_draw_builtin_cell(self.handle, codepoint, mask.ptr, width, height, width, left, top, @floatFromInt(width), @floatFromInt(height), foreground) < 0)
+            return error.Direct2DDrawBuiltinFailed;
     }
 
     pub fn setWindow(self: *Engine, hwnd: ?*anyopaque) !void {
@@ -384,12 +423,16 @@ test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {
     try std.testing.expect(result.first_changed_pixels > 0);
     try std.testing.expect(result.first_red_dominant_pixels > 0);
     try std.testing.expect(result.first_green_dominant_pixels > 0);
+    try std.testing.expect(result.first_uploads > 0);
+    try std.testing.expect(result.first_rasterizations > 0);
     try std.testing.expectEqual(@as(u64, 0), result.empty_sprite_batches);
     try std.testing.expectEqual(@as(u64, 0), result.empty_sprites);
     try std.testing.expectEqual(@as(u64, 0), result.empty_changed_pixels);
     try std.testing.expectEqual(@as(u64, 1), result.second_sprite_batches);
     try std.testing.expectEqual(result.first_sprites, result.second_sprites);
     try std.testing.expectEqual(result.second_sprites, result.second_placement_hits);
+    try std.testing.expectEqual(@as(u64, 0), result.second_uploads);
+    try std.testing.expectEqual(@as(u64, 0), result.second_rasterizations);
     try std.testing.expect(result.second_changed_pixels > 0);
 }
 

@@ -66,4 +66,21 @@ void zigonaut_core_take_clipboard_write(zigonaut_core *, uint8_t *output, uint32
 bool zigonaut_core_mouse_tracking(zigonaut_core *);
 bool zigonaut_core_mouse(zigonaut_core *, uint8_t action, uint8_t button, int32_t x, int32_t y, uint32_t screen_width, uint32_t screen_height, uint32_t cell_width, uint32_t cell_height, uint32_t padding_top, uint32_t padding_bottom, uint32_t padding_left, uint32_t padding_right, uint16_t modifiers, bool any_button_pressed);
 void zigonaut_core_destroy(zigonaut_core *);
+
+typedef struct zigonaut_pseudographics_result_v1 {
+    uint16_t version;
+    uint16_t size;
+    int32_t status;
+    uint32_t width, height, stride;
+    int32_t offset_x, offset_y;
+    size_t required_bytes, written_bytes;
+} zigonaut_pseudographics_result_v1;
+
+/* Stateless physical-pixel A8 renderer. Initialize result version to 1 and size
+   to sizeof(*result). Status: 0 success, 1 capacity query, -1 invalid argument,
+   -2 codepoint not covered. The output is a full cell. */
+bool zigonaut_pseudographics_covers(uint32_t codepoint);
+int32_t zigonaut_pseudographics_render(uint32_t codepoint, uint32_t width,
+    uint32_t height, uint32_t thickness, uint32_t stride, uint8_t *output,
+    size_t capacity, zigonaut_pseudographics_result_v1 *result);
 #endif

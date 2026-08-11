@@ -4,6 +4,7 @@ const shared = @import("root.zig");
 const modules = .{
     shared.link,
     shared.pane_tree,
+    shared.pseudographics,
     shared.search,
     shared.terminal,
     shared.theme,
