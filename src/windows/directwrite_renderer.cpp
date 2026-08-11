@@ -437,6 +437,7 @@ struct ZigonautTextEngine {
     std::u16string row_text;
     RowSegment row_segment;
     std::vector<RowSegment> row_segments;
+    std::vector<int64_t> row_order;
     std::vector<D2D1_RECT_F> glyph_destinations;
     std::vector<D2D1_RECT_U> glyph_sources;
     std::vector<D2D1_COLOR_F> glyph_colors;
@@ -1885,7 +1886,8 @@ HRESULT ZigonautTextEngine::endRow() {
 
     auto& segments = row_segments;
     size_t segment_count = 0;
-    std::vector<int64_t> row_order;
+    auto& order = row_order;
+    order.clear();
     auto& segment = row_segment; segment.clear();
     bool has_segment = false;
     const auto flush = [&]() -> HRESULT {
@@ -1893,7 +1895,7 @@ HRESULT ZigonautTextEngine::endRow() {
         if (has_segment) try {
             if (segment_count == segments.size()) segments.emplace_back();
             std::swap(segment, segments[segment_count++]);
-            row_order.push_back(static_cast<int64_t>(segment_count - 1));
+            order.push_back(static_cast<int64_t>(segment_count - 1));
         } catch (...) { hr = E_OUTOFMEMORY; }
         segment.clear();
         has_segment = false;
@@ -1906,7 +1908,7 @@ HRESULT ZigonautTextEngine::endRow() {
         if (cell.kind == RowCell::Kind::builtin) {
             const HRESULT boundary = flush();
             if (FAILED(boundary)) return boundary;
-            try { row_order.push_back(-1 - static_cast<int64_t>(cell_index)); }
+            try { order.push_back(-1 - static_cast<int64_t>(cell_index)); }
             catch (...) { return E_OUTOFMEMORY; }
             continue;
         }
@@ -1940,7 +1942,7 @@ HRESULT ZigonautTextEngine::endRow() {
     }
     HRESULT hr = flush();
     if (FAILED(hr)) return hr;
-    const bool has_builtins = row_order.size() != segment_count;
+    const bool has_builtins = order.size() != segment_count;
     const bool atlas_eligible = text_antialiasing == ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE &&
         (has_builtins || segment_count >= 8);
     if (atlas_eligible && !atlas_disabled_for_frame && !atlas_allocator)
@@ -1959,10 +1961,10 @@ HRESULT ZigonautTextEngine::endRow() {
     sources.clear();
     colors.clear();
     if (batched) try {
-        destinations.reserve(row_order.size());
-        sources.reserve(row_order.size());
-        colors.reserve(row_order.size());
-        for (const int64_t ordered : row_order) {
+        destinations.reserve(order.size());
+        sources.reserve(order.size());
+        colors.reserve(order.size());
+        for (const int64_t ordered : order) {
             if (ordered < 0) {
                 const auto& cell = row_cells[static_cast<size_t>(-1 - ordered)];
                 const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
@@ -2087,7 +2089,7 @@ native_fallback:
         if (FAILED(hr)) return hr;
         if (atlas_eligible && benchmark_active) ++benchmark.atlas_fallback_rows;
         clip_guard.push();
-        for (const int64_t ordered : row_order) {
+        for (const int64_t ordered : order) {
             if (ordered >= 0) hr = drawSegment(segments[static_cast<size_t>(ordered)]);
             else {
                 const auto& cell=row_cells[static_cast<size_t>(-1-ordered)];
