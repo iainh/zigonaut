@@ -2,6 +2,19 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.7.2] - 2026-08-12
+
+### Added
+
+- Dormant Windows scroll-pipeline ETW instrumentation and WPR capture tooling for
+  correlating input, rendering, frame waits, presentation, and GPU activity.
+
+### Fixed
+
+- Prevented burst/pause scrolling stalls on Windows by reshaping native fallback
+  glyph runs instead of replaying cached runs that Direct2D could reject during
+  sustained rendering.
+
 ## [0.7.1] - 2026-08-12
 
 ### Added
@@ -232,6 +245,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.7.2]: https://github.com/iainh/zigonaut/releases/tag/v0.7.2
 [0.7.1]: https://github.com/iainh/zigonaut/releases/tag/v0.7.1
 [0.7.0]: https://github.com/iainh/zigonaut/releases/tag/v0.7.0
 [0.6.1]: https://github.com/iainh/zigonaut/releases/tag/v0.6.1
