@@ -37,6 +37,22 @@ void release(T*& value) {
 constexpr wchar_t fallback_family[] = L"Consolas";
 constexpr size_t max_layout_cache_entries = 2048;
 
+enum FrameCommandTag : uint32_t {
+    frame_command_begin = 1,
+    frame_command_clear = 2,
+    frame_command_row = 3,
+    frame_command_builtin = 4,
+    frame_command_image = 5,
+    frame_command_cursor = 6,
+    frame_command_preedit = 7,
+    frame_command_cell_decoration = 8,
+    frame_command_row_clip = 9,
+    frame_command_row_glyph = 10,
+    frame_command_row_builtin = 11,
+    frame_command_row_sprite = 12,
+    frame_command_row_strikethrough = 13,
+};
+
 HRESULT classifyPresentResult(HRESULT result) {
     if (result == DXGI_ERROR_WAS_STILL_DRAWING) return S_FALSE;
     return FAILED(result) ? result : S_OK;
@@ -401,6 +417,8 @@ struct ZigonautTextEngine {
     ID3D11BlendState* glyph_blend = nullptr;
     bool glyph_pipeline_failed = false;
     HRESULT glyph_frame_failure = S_OK;
+    ZigonautFrameFailure frame_failure{};
+    bool frame_diagnostics = false;
     bool benchmark_legacy_sprite_batch = false;
     std::unique_ptr<GlyphAtlasAllocator> atlas_allocator;
     uint64_t atlas_generation = 1;
@@ -1363,6 +1381,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         uint8_t underline,
         ZigonautCellOccupancy occupancy) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
+        setTag(frame_command_cell_decoration);
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
         if (!row_active && frame_active) {
             addDamage(frame_damage, left - 1.0f, top - 1.0f,
@@ -1481,6 +1500,10 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     HRESULT endRow();
 
     HRESULT drawSegment(const RowSegment& segment);
+
+    void setTag(uint32_t command, uint32_t subtype = 0) {
+        if (frame_diagnostics && target != nullptr) target->SetTags(command, subtype);
+    }
 };
 
 class GridTextRenderer final : public IDWriteTextRenderer {
@@ -1707,6 +1730,7 @@ public:
                                 layer->run_color.a));
                         }
                         const DWRITE_GLYPH_RUN color_run = layer->glyphRun();
+                        engine_->setTag(frame_command_row_glyph, 1);
                         engine_->target->DrawGlyphRun(
                             D2D1::Point2F(layer->origin_x, layer->origin_y),
                             &color_run,
@@ -1724,6 +1748,7 @@ public:
         }
         if (!rendered_color) {
             engine_->brush->SetColor(color(segment.foreground));
+            engine_->setTag(frame_command_row_glyph, 2);
             engine_->target->DrawGlyphRun(
                 D2D1::Point2F(origin_x, origin_y),
                 &adjusted,
@@ -1843,26 +1868,28 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
     auto cached_layout = layouts.find(key);
     if (cached_layout == layouts.end()) return E_UNEXPECTED;
     auto& cached_plan = cached_layout->second.plan;
-    if (cached_plan != nullptr &&
+    const bool plan_matches = cached_plan != nullptr &&
         matchesNormalizedColumns(cached_plan->columns, segment.columns, start_column) &&
-        cached_plan->cell_width == row_cell_width && cached_plan->cell_height == row_cell_height) {
+        cached_plan->cell_width == row_cell_width && cached_plan->cell_height == row_cell_height;
+    if (plan_matches) {
         if (benchmark_active) ++benchmark.resolved_plan_hits;
-        brush->SetColor(color(segment.foreground));
-        for (const auto& owned : cached_plan->runs) {
-            const DWRITE_GLYPH_RUN run = owned.glyphRun();
-            const float segment_origin_x = row_origin_x +
-                static_cast<float>(start_column) * row_cell_width;
-            target->DrawGlyphRun(D2D1::Point2F(segment_origin_x + owned.origin_x,
-                row_top + owned.origin_y), &run, brush, owned.measuring_mode);
-            if (benchmark_active) ++benchmark.glyph_submissions;
-        }
-        return S_OK;
+    } else if (benchmark_active) {
+        ++benchmark.resolved_plan_misses;
     }
-    if (benchmark_active) ++benchmark.resolved_plan_misses;
 
     if (grid_renderer == nullptr) {
         grid_renderer = new (std::nothrow) GridTextRenderer(this);
         if (grid_renderer == nullptr) return E_OUTOFMEMORY;
+    }
+    if (plan_matches) {
+        // Cached DWRITE_GLYPH_RUN replay can be rejected asynchronously by
+        // Direct2D with E_INVALIDARG after sustained rendering. Keep the plan for
+        // atlas rasterization, but let DirectWrite produce native fallback runs.
+        grid_renderer->setSegment(&segment, start_column, nullptr, nullptr);
+        if (benchmark_active) ++benchmark.layout_draws;
+        const HRESULT draw = layout->Draw(nullptr, grid_renderer, 0.0f, 0.0f);
+        grid_renderer->setSegment(nullptr, 0, nullptr, nullptr);
+        return draw;
     }
     std::unique_ptr<ResolvedDrawPlan> pending;
     try {
@@ -1908,6 +1935,7 @@ HRESULT ZigonautTextEngine::endRow() {
             // fast path. Partial frames clip glyph overhang to their recorded row.
             if (active || engine->frame_damage.full || engine->target == nullptr ||
                     engine->scene_texture == nullptr) return;
+            engine->setTag(frame_command_row_clip);
             engine->target->PushAxisAlignedClip(D2D1::RectF(0.0f, engine->row_top,
                 static_cast<float>(engine->scene_width),
                 engine->row_top + engine->row_cell_height),
@@ -2098,6 +2126,7 @@ HRESULT ZigonautTextEngine::endRow() {
             target3->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
             target3->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
             clip_guard.push();
+            setTag(frame_command_row_sprite);
             target3->DrawSpriteBatch(sprite_batch,sprite_count,count,atlas_bitmap,
                 D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,D2D1_SPRITE_OPTIONS_NONE);
             clip_guard.pop();
@@ -2138,6 +2167,7 @@ native_fallback:
                     brush->SetColor(color(cell.foreground));
                     const float left=row_origin_x+cell.column*row_cell_width;
                     const auto aa=target->GetAntialiasMode();
+                    setTag(frame_command_row_builtin, cell.builtin_codepoint);
                     target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
                     target->FillOpacityMask(bitmap,brush,
                         D2D1::RectF(left,row_top,left+cell.builtin_width,row_top+cell.builtin_height),
@@ -2158,6 +2188,7 @@ row_complete:
             static_cast<float>(cell.column) * row_cell_width;
         const float y = row_top + row_cell_height * 0.55f;
         brush->SetColor(color(cell.foreground));
+        setTag(frame_command_row_strikethrough);
         target->DrawLine(
             D2D1::Point2F(left, y),
             D2D1::Point2F(left + row_cell_width, y),
@@ -3635,6 +3666,7 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     if (engine->image_frame == 0) ++engine->image_frame;
     engine->target->SetTarget(engine->scene_bitmap);
     engine->target->BeginDraw();
+    engine->setTag(frame_command_begin);
     engine->target->SetTransform(D2D1::Matrix3x2F::Identity());
     if (full_rebuild || recreate) engine->target->Clear(color(background));
     engine->frame_active = true;
@@ -3644,6 +3676,7 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
 extern "C" void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
     float left, float top, float right, float bottom, uint32_t background) {
     if (engine == nullptr || !engine->frame_active || engine->brush == nullptr) return;
+    engine->setTag(frame_command_clear);
     engine->addDamage(engine->frame_damage, left, top, right, bottom);
     engine->brush->SetColor(color(background));
     engine->target->FillRectangle(D2D1::RectF(left, top, right, bottom), engine->brush);
@@ -3767,6 +3800,7 @@ extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
         cell.builtin_width=mask_width; cell.builtin_height=mask_height; cell.builtin_stride=mask_stride;
         return S_OK;
     }
+    engine->setTag(frame_command_builtin, codepoint);
     // A8 opacity masks are supported in every text AA policy and provide the
     // deterministic fallback when the glyph atlas is unavailable.
     ID2D1Bitmap* bitmap = nullptr;
@@ -3843,6 +3877,7 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
         cached.generation = generation;
     }
     cached.last_seen_frame = engine->image_frame;
+    engine->setTag(frame_command_image, image_id);
     engine->addDamage(engine->frame_damage,
         std::max(dl, cl), std::max(dt, ct),
         std::min(dl + dw, cr), std::min(dt + dh, cb));
@@ -3854,7 +3889,9 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
 }
 
 extern "C" HRESULT zigonaut_text_engine_end_row(ZigonautTextEngine* engine) {
-    return engine == nullptr ? E_INVALIDARG : engine->endRow();
+    if (engine == nullptr) return E_INVALIDARG;
+    engine->setTag(frame_command_row);
+    return engine->endRow();
 }
 
 extern "C" void zigonaut_text_engine_draw_cursor(
@@ -3867,6 +3904,7 @@ extern "C" void zigonaut_text_engine_draw_cursor(
     uint8_t style) {
     if (engine == nullptr || engine->target == nullptr || engine->brush == nullptr) return;
     if (FAILED(engine->flushGlyphInstances())) { engine->markFullDamage(engine->frame_damage); return; }
+    engine->setTag(frame_command_cursor, style);
     engine->addDamage(engine->frame_damage,
         left - 1.0f, top - 1.0f, left + width + 1.0f, top + height + 1.0f);
     engine->brush->SetColor(color(cursor_color));
@@ -3893,6 +3931,7 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
         !std::isfinite(height) || max_width <= 0 || height <= 0) return E_INVALIDARG;
     HRESULT pending=engine->flushGlyphInstances();
     if (FAILED(pending)) return pending;
+    engine->setTag(frame_command_preedit);
     IDWriteTextLayout* layout = nullptr;
     auto hr = engine->factory->CreateTextLayout(reinterpret_cast<const wchar_t*>(text), text_length,
         engine->formats[0], std::max(max_width, 1.0f), std::max(height, 1.0f), &layout);
@@ -3925,11 +3964,23 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
 
 extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     if (engine == nullptr || engine->target == nullptr || !engine->frame_active) return E_INVALIDARG;
+    engine->frame_failure = {};
     HRESULT hr = engine->flushGlyphInstances();
-    if (FAILED(hr)) { engine->frame_active=false; engine->discardTargetBitmap(); return hr; }
-    hr = engine->target->EndDraw();
+    if (FAILED(hr)) {
+        engine->frame_failure = {1, 0, hr};
+        engine->frame_active=false; engine->discardTargetBitmap(); return hr;
+    }
+    D2D1_TAG tag1 = 0, tag2 = 0;
+    hr = engine->frame_diagnostics
+        ? engine->target->EndDraw(&tag1, &tag2)
+        : engine->target->EndDraw();
     engine->frame_active = false;
     if (FAILED(hr)) {
+        engine->frame_failure = {
+            2,
+            static_cast<uint32_t>((tag1 & 0xff) | (tag2 & 0xffff) << 8),
+            hr,
+        };
         // EndDraw failures are not transactional: earlier scene commands may have
         // executed. Recreate the retained target and require a coherent full replay.
         engine->row_active = false;
@@ -3939,6 +3990,7 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
     engine->evictUnusedImages();
     const HRESULT copy_hr = engine->transferScene();
     if (FAILED(copy_hr)) {
+        engine->frame_failure = {3, 0, copy_hr};
         engine->discardTargetBitmap();
         return copy_hr;
     }
@@ -3952,8 +4004,21 @@ extern "C" HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine) {
         engine->commitPresentedDamage();
         return S_OK;
     }
+    engine->frame_failure = {4, 0, present};
     engine->discardTargetBitmap();
     return present;
+}
+
+extern "C" void zigonaut_text_engine_get_frame_failure(
+    const ZigonautTextEngine* engine, ZigonautFrameFailure* failure) {
+    if (failure != nullptr) *failure = engine == nullptr
+        ? ZigonautFrameFailure{}
+        : engine->frame_failure;
+}
+
+extern "C" void zigonaut_text_engine_set_frame_diagnostics(
+    ZigonautTextEngine* engine, BOOL enabled) {
+    if (engine != nullptr) engine->frame_diagnostics = enabled != FALSE;
 }
 
 extern "C" HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine) {

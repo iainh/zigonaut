@@ -681,6 +681,9 @@ fn loadThemes(allocator: std.mem.Allocator, io: std.Io) theme.Catalog {
 }
 
 pub fn main(init: std.process.Init) !void {
+    const scroll_trace = @import("scroll_trace.zig");
+    scroll_trace.register();
+    defer scroll_trace.unregister();
     try directwrite.installPngDecoder();
     var launch_plan = try launchPlanFromArgsAlloc(std.heap.page_allocator, init.minimal.args);
     errdefer launch_plan.deinit();

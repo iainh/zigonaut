@@ -11,6 +11,7 @@ pub const c = @cImport({
     @cInclude("wtsapi32.h");
     @cInclude("bridge.h");
     @cInclude("directwrite_renderer.h");
+    @cInclude("scroll_trace.h");
 });
 
 const std = @import("std");

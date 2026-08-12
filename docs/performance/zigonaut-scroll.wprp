@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="Zigonaut">
+  <Profiles>
+    <EventCollector Id="EventCollector_ZigonautScroll" Name="Zigonaut scroll events">
+      <BufferSize Value="64"/>
+      <Buffers Value="64"/>
+    </EventCollector>
+    <EventProvider Id="EventProvider_ZigonautScroll" Name="B0B70986-9D2A-4B52-A8CC-693BF873D56B">
+      <Keywords>
+        <Keyword Value="0x1"/>
+      </Keywords>
+    </EventProvider>
+    <Profile Id="ZigonautScroll.Light.File" LoggingMode="File" Name="ZigonautScroll" DetailLevel="Light" Description="Zigonaut interactive scroll pipeline">
+      <Collectors>
+        <EventCollectorId Value="EventCollector_ZigonautScroll">
+          <EventProviders>
+            <EventProviderId Value="EventProvider_ZigonautScroll"/>
+          </EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+    <Profile Id="ZigonautScroll.Light.Memory" Base="ZigonautScroll.Light.File" LoggingMode="Memory" Name="ZigonautScroll" DetailLevel="Light" Description="Zigonaut interactive scroll pipeline"/>
+    <Profile Id="ZigonautScroll.Verbose.File" Base="ZigonautScroll.Light.File" LoggingMode="File" Name="ZigonautScroll" DetailLevel="Verbose" Description="Zigonaut interactive scroll pipeline"/>
+    <Profile Id="ZigonautScroll.Verbose.Memory" Base="ZigonautScroll.Light.File" LoggingMode="Memory" Name="ZigonautScroll" DetailLevel="Verbose" Description="Zigonaut interactive scroll pipeline"/>
+  </Profiles>
+</WindowsPerformanceRecorder>

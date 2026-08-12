@@ -21,6 +21,12 @@ typedef struct ZigonautCellMetrics {
     uint32_t builtin_thickness;
 } ZigonautCellMetrics;
 
+typedef struct ZigonautFrameFailure {
+    uint32_t stage;
+    uint32_t tag;
+    int32_t hresult;
+} ZigonautFrameFailure;
+
 typedef struct ZigonautLayoutCacheBenchmark {
     uint64_t layout_creations;
     uint64_t hot_reuse_creations;
@@ -251,6 +257,12 @@ HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine, const uint
     float height, uint32_t foreground, uint32_t background, float* caret_x);
 
 HRESULT zigonaut_text_engine_end_frame(ZigonautTextEngine* engine);
+
+void zigonaut_text_engine_get_frame_failure(
+    const ZigonautTextEngine* engine, ZigonautFrameFailure* failure);
+
+void zigonaut_text_engine_set_frame_diagnostics(
+    ZigonautTextEngine* engine, BOOL enabled);
 
 HRESULT zigonaut_text_engine_retry_present(ZigonautTextEngine* engine);
 

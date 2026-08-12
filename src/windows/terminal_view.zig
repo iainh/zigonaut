@@ -7,6 +7,7 @@ const SessionRuntime = @import("session.zig").SessionRuntime;
 const Terminal = shared.terminal.Terminal;
 const TextEngine = @import("directwrite_renderer.zig").Engine;
 const GdiRenderer = @import("gdi_renderer.zig");
+const scroll_trace = @import("scroll_trace.zig");
 const config = @import("config.zig");
 const input = @import("input.zig");
 const search = shared.search;
@@ -111,6 +112,13 @@ const RenderGate = struct {
 };
 
 fn publishFrameWaitCompletion(view: *View, context: *const FrameWaitContext, request_id: u64, generation: u64, outcome: FrameWaitOutcome) void {
+    scroll_trace.write(
+        .frame_wait_completed,
+        view.tracePaneId(),
+        request_id,
+        @intCast(context.wait_id),
+        @intFromEnum(outcome),
+    );
     view.completion_request_id = request_id;
     view.completion_generation = generation;
     view.completion_outcome = outcome;
@@ -141,13 +149,18 @@ fn frameWaitCallback(raw: ?*anyopaque, timed_out: win.BOOLEAN) callconv(.winapi)
     }
     var outcome: FrameWaitOutcome = .prepared;
     var generation: u64 = 0;
-    if (context.runtime) |runtime| switch (runtime.captureRender() catch {
-        publishFrameWaitCompletion(view, context, request_id, generation, .failed);
-        return;
-    }) {
-        .prepared => |prepared| generation = prepared.content_generation,
-        .synchronized_output => outcome = .synchronized_output,
-    };
+    if (context.runtime) |runtime| {
+        scroll_trace.write(.capture_started, view.tracePaneId(), request_id, @intCast(context.wait_id), 0);
+        switch (runtime.captureRender() catch {
+            scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(FrameWaitOutcome.failed));
+            publishFrameWaitCompletion(view, context, request_id, generation, .failed);
+            return;
+        }) {
+            .prepared => |prepared| generation = prepared.content_generation,
+            .synchronized_output => outcome = .synchronized_output,
+        }
+        scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(outcome));
+    }
     publishFrameWaitCompletion(view, context, request_id, generation, outcome);
 }
 
@@ -357,7 +370,9 @@ pub const View = struct {
     prepared_available: bool = false,
     present_pending: bool = false,
     present_retry_delay_ms: u32 = present_retry_initial_ms,
+    present_retry_armed_delay_ms: u32 = 0,
     present_retry_started_tick: u64 = 0,
+    present_retry_count: u32 = 0,
     present_stall_recovery_attempted: bool = false,
     resize_render_pending: bool = false,
     scene_has_images: bool = false,
@@ -852,13 +867,18 @@ pub const View = struct {
 
     /// Terminal generation refreshes may update only libghostty's dirty rows.
     fn invalidateContent(self: *View) void {
-        _ = self.render_request_id.fetchAdd(1, .acq_rel);
+        const request_id = self.render_request_id.fetchAdd(1, .acq_rel) +% 1;
         if (self.text_engine == null) {
             if (self.hwnd != null) _ = win.InvalidateRect(self.hwnd, null, 0);
             return;
         }
-        self.render_dirty.store(true, .release);
+        const already_dirty = self.render_dirty.swap(true, .acq_rel);
+        scroll_trace.write(.invalidated, self.tracePaneId(), request_id, @intFromBool(already_dirty), 0);
         self.armFrameWait();
+    }
+
+    fn tracePaneId(self: *const View) u64 {
+        return @intCast(self.pane_id orelse 0);
     }
 
     fn armFrameWait(self: *View) void {
@@ -878,6 +898,7 @@ pub const View = struct {
         if (self.next_wait_id == 0) self.next_wait_id = 1;
         self.frame_wait_context = .{ .view = self, .runtime = self.boundRuntime(), .wait_id = self.next_wait_id, .epoch = epoch };
         self.active_wait_id = self.frame_wait_context.wait_id;
+        scroll_trace.write(.frame_wait_armed, self.tracePaneId(), self.render_request_id.load(.acquire), @intCast(self.active_wait_id), epoch);
         if (win.RegisterWaitForSingleObject(&self.frame_wait, self.text_engine.?.frameLatencyWaitableObject(), frameWaitCallback, &self.frame_wait_context, frame_wait_timeout_ms, win.WT_EXECUTEONLYONCE) == 0) {
             self.frame_wait = null;
             self.frame_wait_pending.store(false, .release);
@@ -903,7 +924,9 @@ pub const View = struct {
         if (self.present_pending) if (self.text_engine) |*engine| engine.abandonPendingPresent();
         self.present_pending = false;
         self.present_retry_delay_ms = present_retry_initial_ms;
+        self.present_retry_armed_delay_ms = 0;
         self.present_retry_started_tick = 0;
+        self.present_retry_count = 0;
     }
 
     fn clearFrameWait(self: *View) void {
@@ -1185,7 +1208,18 @@ pub const View = struct {
     fn scrollViewport(self: *View, delta: isize) void {
         if (delta == 0) return;
         const session = self.boundSession() orelse return;
+        const tracing = scroll_trace.enabled();
         session.runtime.?.scrollViewport(delta);
+        if (tracing) {
+            const state = session.runtime.?.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
+            scroll_trace.write(
+                .input,
+                self.tracePaneId(),
+                self.render_request_id.load(.acquire) +% 1,
+                @intCast(delta),
+                @intCast(state.offset),
+            );
+        }
         self.notifyScrollbar(true);
         self.invalidateContent();
     }
@@ -1290,23 +1324,53 @@ pub const View = struct {
         if (self.prepared_available) {
             self.prepared_available = false;
         } else if (!self.prepareBoundRender()) return false;
+        const request_id = self.render_request_id.load(.acquire);
+        scroll_trace.write(.paint_started, self.tracePaneId(), request_id, width, height);
+        self.text_engine.?.setFrameDiagnostics(scroll_trace.enabled());
         notifyAutomation(self.hwnd, win.ZIGONAUT_AUTOMATION_TEXT_CHANGED | win.ZIGONAUT_AUTOMATION_SELECTION_CHANGED);
         const result = self.paintDirect2D(client, width, height) catch |err| {
+            const detail = if (err == error.Direct2DEndFrameFailed)
+                packFrameFailure(self.text_engine.?.frameFailure())
+            else
+                0;
+            scroll_trace.write(.paint_failed, self.tracePaneId(), request_id, paintErrorCode(err), detail);
             log.warn("terminal renderer failed: {}", .{err});
             self.renderer_failed = true;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
             return true;
         };
+        scroll_trace.write(.paint_completed, self.tracePaneId(), request_id, @intFromEnum(result), 0);
         if (result == .retry) {
             self.present_pending = true;
             self.present_retry_delay_ms = present_retry_initial_ms;
             self.present_retry_started_tick = win.GetTickCount64();
+            self.present_retry_count = 0;
             if (!self.armPresentRetry()) return true;
         } else {
+            scroll_trace.write(.present_succeeded, self.tracePaneId(), request_id, 0, 0);
             self.present_stall_recovery_attempted = false;
             if (self.render_dirty.load(.acquire)) self.armFrameWait();
         }
         return true;
+    }
+
+    fn paintErrorCode(err: anyerror) i64 {
+        return switch (err) {
+            error.Direct2DBeginFrameFailed => 1,
+            error.Direct2DSceneShiftFailed => 2,
+            error.Direct2DDrawCellFailed => 3,
+            error.Direct2DEndRowFailed => 4,
+            error.Direct2DDrawImageFailed => 5,
+            error.Direct2DDrawBuiltinFailed => 6,
+            error.Direct2DEndFrameFailed => 7,
+            else => 0,
+        };
+    }
+
+    fn packFrameFailure(failure: TextEngine.FrameFailure) i64 {
+        const hresult: u32 = @bitCast(failure.hresult);
+        const location = failure.stage << 24 | failure.tag & 0x00ff_ffff;
+        return @bitCast(@as(u64, location) << 32 | hresult);
     }
 
     fn paintDirect2D(self: *View, client: win.RECT, width: i32, height: i32) !TextEngine.PresentResult {
@@ -1351,6 +1415,9 @@ pub const View = struct {
                 if (!session.runtime.?.preparedViewportCanShift(value)) break :blk null;
                 break :blk value;
             } else null;
+            const render_path: i64 = if (scroll_delta != null) 2 else if (full_rebuild or
+                (self.retained_scroll_offset != null and offset != self.retained_scroll_offset.?)) 1 else 0;
+            scroll_trace.write(.render_path, self.tracePaneId(), self.render_request_id.load(.acquire), render_path, scroll_delta orelse 0);
             var renderer = DirectWriteCellRenderer{
                 .engine = engine,
                 .view = self,
@@ -1400,6 +1467,14 @@ pub const View = struct {
             return;
         }
         _ = win.KillTimer(self.hwnd, present_retry_timer);
+        self.present_retry_count += 1;
+        scroll_trace.write(
+            .present_retry,
+            self.tracePaneId(),
+            self.render_request_id.load(.acquire),
+            self.present_retry_count,
+            self.present_retry_armed_delay_ms,
+        );
         const result = self.text_engine.?.retryPresent() catch |err| {
             log.warn("terminal renderer present retry failed: {}", .{err});
             self.renderer_failed = true;
@@ -1428,9 +1503,18 @@ pub const View = struct {
             _ = self.armPresentRetry();
             return;
         }
+        scroll_trace.write(
+            .present_succeeded,
+            self.tracePaneId(),
+            self.render_request_id.load(.acquire),
+            self.present_retry_count,
+            @intCast(win.GetTickCount64() -% self.present_retry_started_tick),
+        );
         self.present_pending = false;
         self.present_retry_delay_ms = present_retry_initial_ms;
+        self.present_retry_armed_delay_ms = 0;
         self.present_retry_started_tick = 0;
+        self.present_retry_count = 0;
         self.present_stall_recovery_attempted = false;
         if (self.resize_render_pending) {
             self.paintPendingResize();
@@ -1442,6 +1526,7 @@ pub const View = struct {
     fn armPresentRetry(self: *View) bool {
         if (!self.render_gate.enabled()) return false;
         if (win.SetTimer(self.hwnd, present_retry_timer, self.present_retry_delay_ms, null) != 0) {
+            self.present_retry_armed_delay_ms = self.present_retry_delay_ms;
             self.present_retry_delay_ms = @min(self.present_retry_delay_ms * 2, present_retry_max_ms);
             return true;
         }

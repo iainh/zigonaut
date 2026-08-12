@@ -5,7 +5,9 @@ const Terminal = shared.terminal.Terminal;
 const theme = shared.theme;
 const Search = shared.search.State;
 const SearchMatch = shared.search.Match;
-const win = @import("win32.zig").c;
+const win32 = @import("win32.zig");
+const win = win32.c;
+const scroll_trace = @import("scroll_trace.zig");
 const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
@@ -489,7 +491,15 @@ pub const SessionRuntime = struct {
     pub fn captureRender(self: *SessionRuntime) !RenderCapture {
         self.snapshot_mutex.lock();
         defer self.snapshot_mutex.unlock();
+        const lock_started = if (scroll_trace.enabled()) win32.monotonicNanoseconds() else null;
         self.render_handoff.lock(&self.terminal_mutex);
+        if (lock_started) |started| scroll_trace.write(
+            .capture_lock_acquired,
+            0,
+            self.content_generation.load(.monotonic),
+            @intCast((win32.monotonicNanoseconds() orelse started) -| started),
+            0,
+        );
         if (self.synchronized_output.remaining(win.GetTickCount64()) != null) {
             self.render_handoff.unlock(&self.terminal_mutex);
             return .synchronized_output;

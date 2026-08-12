@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     }
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
+    const debug_info = b.option(bool, "debug-info", "Retain debug information in optimized Windows builds") orelse false;
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", app_version);
     build_options.addOption([]const u8, "git_hash", gitHash(b));
@@ -60,7 +61,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/windows/main.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = optimize != .Debug,
+        .strip = optimize != .Debug and !debug_info,
     });
     app_module.addImport("shared", shared_module);
     app_module.addOptions("build_options", build_options);
@@ -100,6 +101,10 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("src/windows"));
     exe.root_module.addCSourceFile(.{
         .file = b.path("src/windows/directwrite_renderer.cpp"),
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+    });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/windows/scroll_trace.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
     exe.root_module.linkSystemLibrary("user32", .{});
@@ -174,6 +179,10 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/windows/directwrite_renderer.cpp"),
         .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
     });
+    tests.root_module.addCSourceFile(.{
+        .file = b.path("src/windows/scroll_trace.cpp"),
+        .flags = &.{ "-std=c++17", "-DUNICODE", "-D_UNICODE", "-DWIN32_LEAN_AND_MEAN" },
+    });
     tests.root_module.linkSystemLibrary("user32", .{});
     tests.root_module.linkSystemLibrary("gdi32", .{});
     tests.root_module.linkSystemLibrary("d2d1", .{});
@@ -181,6 +190,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("d3dcompiler_47", .{});
     tests.root_module.linkSystemLibrary("dwrite", .{});
     tests.root_module.linkSystemLibrary("dxgi", .{});
+    tests.root_module.linkSystemLibrary("advapi32", .{});
     tests.root_module.linkSystemLibrary("kernel32", .{});
     tests.root_module.linkSystemLibrary("wtsapi32", .{});
     tests.root_module.linkSystemLibrary("windowscodecs", .{});

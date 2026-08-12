@@ -155,6 +155,8 @@ zig build benchmark -Doptimize=ReleaseFast
 
 The benchmark uses a fixed colorized transcript in a 120-by-40 terminal so results do not depend on interactive timing.
 
+Interactive scroll stalls can be captured with the dormant ETW instrumentation described in [the scroll tracing guide](docs/performance/scroll-tracing.md).
+
 ## Architecture
 
 ```text
