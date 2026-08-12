@@ -2,6 +2,23 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.7.1] - 2026-08-12
+
+### Added
+
+- A staged entrance animation for newly created Windows tabs.
+
+### Changed
+
+- Refined Windows tab and pane drag handles and replaced native drag-and-drop with
+  pointer-driven interactions for more reliable behavior in the custom title bar.
+
+### Fixed
+
+- Preserved stable tab insertion targets during drag operations and safely canceled
+  interrupted tab and pane drags.
+- Corrected pane drag label encoding.
+
 ## [0.7.0] - 2026-08-11
 
 ### Added
@@ -215,6 +232,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.7.1]: https://github.com/iainh/zigonaut/releases/tag/v0.7.1
 [0.7.0]: https://github.com/iainh/zigonaut/releases/tag/v0.7.0
 [0.6.1]: https://github.com/iainh/zigonaut/releases/tag/v0.6.1
 [0.6.0]: https://github.com/iainh/zigonaut/releases/tag/v0.6.0
