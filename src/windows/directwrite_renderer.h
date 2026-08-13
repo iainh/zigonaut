@@ -44,6 +44,10 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint64_t scene_region_copy_gpu_nanoseconds;
     uint64_t scroll_full_nanoseconds;
     uint64_t scroll_shift_nanoseconds;
+    uint64_t background_legacy_nanoseconds;
+    uint64_t background_coalesced_nanoseconds;
+    uint64_t background_legacy_fill_calls;
+    uint64_t background_coalesced_fill_calls;
     uint64_t layout_hits;
     uint64_t layout_misses;
     uint64_t layout_draws;
@@ -101,6 +105,7 @@ typedef struct ZigonautDirectWriteBenchmark {
     uint32_t scene_height;
     uint32_t scene_region_height;
     uint32_t scroll_iterations;
+    uint32_t background_row_iterations;
 } ZigonautDirectWriteBenchmark;
 
 typedef struct ZigonautGlyphAtlasPixelsTest {

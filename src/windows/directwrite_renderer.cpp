@@ -453,6 +453,9 @@ struct ZigonautTextEngine {
     uint64_t layout_creation_count = 0;
     ZigonautDirectWriteBenchmark benchmark{};
     bool benchmark_active = false;
+    bool benchmark_legacy_background_fills = false;
+    bool benchmark_background_active = false;
+    uint64_t background_fill_calls = 0;
     uint64_t image_frame = 0;
     std::vector<RowCell> row_cells;
     std::u16string row_text;
@@ -476,6 +479,9 @@ struct ZigonautTextEngine {
     float row_cell_width = 0.0f;
     float row_cell_height = 0.0f;
     uint32_t frame_background = 0;
+    D2D1_RECT_F pending_row_background{};
+    uint32_t pending_row_background_color = 0;
+    bool pending_row_background_active = false;
     bool row_active = false;
     bool frame_active = false;
     bool present_pending = false;
@@ -1387,14 +1393,31 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             addDamage(frame_damage, left - 1.0f, top - 1.0f,
                 left + width + 1.0f, top + height + 1.0f);
         }
-        if (background != frame_background) {
+        if (row_active && !benchmark_legacy_background_fills) {
+            if (background == frame_background) {
+                flushRowBackground();
+            } else if (pending_row_background_active &&
+                    pending_row_background_color == background &&
+                    pending_row_background.right == rect.left &&
+                    pending_row_background.top == rect.top &&
+                    pending_row_background.bottom == rect.bottom) {
+                pending_row_background.right = rect.right;
+            } else {
+                flushRowBackground();
+                pending_row_background = rect;
+                pending_row_background_color = background;
+                pending_row_background_active = true;
+            }
+        } else if (background != frame_background) {
             brush->SetColor(color(background));
             target->FillRectangle(rect, brush);
+            if (benchmark_background_active) ++background_fill_calls;
         }
         if (faint) {
             foreground = blend(foreground, background);
             underline_color = blend(underline_color, background);
         }
+        if (row_active && (underline != 0 || overline)) flushRowBackground();
         brush->SetColor(color(underline_color));
         const float underline_y = top + height - 1.5f;
         if (underline != 0) {
@@ -1490,6 +1513,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         row_top = top;
         row_cell_width = cell_width;
         row_cell_height = cell_height;
+        pending_row_background_active = false;
         row_active = true;
         if (target != nullptr && scene_texture != nullptr && frame_active) {
             addDamage(frame_damage, 0.0f, top,
@@ -1498,6 +1522,14 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     }
 
     HRESULT endRow();
+
+    void flushRowBackground() {
+        if (!pending_row_background_active) return;
+        brush->SetColor(color(pending_row_background_color));
+        target->FillRectangle(pending_row_background, brush);
+        pending_row_background_active = false;
+        if (benchmark_background_active) ++background_fill_calls;
+    }
 
     HRESULT drawSegment(const RowSegment& segment);
 
@@ -1921,6 +1953,7 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
 
 HRESULT ZigonautTextEngine::endRow() {
     if (!row_active) return E_UNEXPECTED;
+    flushRowBackground();
     row_active = false;
     struct RowClipGuard {
         ZigonautTextEngine* engine;
@@ -2755,6 +2788,54 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
         &engine->benchmark.scene_copy_gpu_nanoseconds);
     if (SUCCEEDED(hr)) hr = measureGpuCopies(true,
         &engine->benchmark.scene_region_copy_gpu_nanoseconds);
+    // Run this command-submission A/B last: the legacy side deliberately records
+    // 48,000 D2D fills and must not perturb the renderer and GPU copy baselines.
+    constexpr uint32_t background_row_iterations = 400;
+    const auto backgroundRow = [&]() -> HRESULT {
+        engine->beginRow(0.0f, 0.0f, static_cast<float>(engine->metrics.width),
+            static_cast<float>(engine->metrics.height));
+        for (uint32_t column = 0; column < columns; ++column) {
+            const uint16_t character = static_cast<uint16_t>(u'a' + column % 26);
+            const HRESULT draw = engine->drawCell(&character, 1,
+                static_cast<float>(column * engine->metrics.width), 0,
+                static_cast<float>(engine->metrics.width),
+                static_cast<float>(engine->metrics.height), 0xe0e0e0, 0x304050,
+                0xe0e0e0, false, false, false, false, false, 0,
+                ZIGONAUT_CELL_NARROW);
+            if (FAILED(draw)) return draw;
+        }
+        return engine->endRow();
+    };
+    const auto measureBackgroundRows = [&](bool legacy, uint64_t* elapsed,
+            uint64_t* fill_calls) {
+        engine->benchmark_legacy_background_fills = legacy;
+        const uint64_t calls = engine->background_fill_calls;
+        const uint64_t start = now();
+        for (uint32_t index = 0; index < background_row_iterations && SUCCEEDED(hr); ++index)
+            hr = backgroundRow();
+        *elapsed = nanoseconds(now() - start);
+        *fill_calls = engine->background_fill_calls - calls;
+    };
+    if (SUCCEEDED(hr)) {
+        hr = zigonaut_text_engine_begin_frame(engine, width, height, 0x181818,
+            TRUE, &rebuild);
+    }
+    engine->benchmark_background_active = SUCCEEDED(hr);
+    if (SUCCEEDED(hr)) measureBackgroundRows(true,
+        &engine->benchmark.background_legacy_nanoseconds,
+        &engine->benchmark.background_legacy_fill_calls);
+    if (SUCCEEDED(hr)) measureBackgroundRows(false,
+        &engine->benchmark.background_coalesced_nanoseconds,
+        &engine->benchmark.background_coalesced_fill_calls);
+    engine->benchmark_legacy_background_fills = false;
+    engine->benchmark_background_active = false;
+    engine->benchmark.background_row_iterations = background_row_iterations;
+    if (engine->frame_active) {
+        HRESULT background_hr = engine->target->EndDraw();
+        engine->frame_active = false;
+        engine->target->SetTarget(nullptr);
+        if (SUCCEEDED(hr)) hr = background_hr;
+    }
     engine->benchmark.atlas_extent = engine->atlas_extent;
     engine->benchmark.atlas_reserved_area = engine->atlas_reserved_area;
     engine->benchmark.atlas_rejected_area = engine->atlas_rejected_area;
@@ -2947,6 +3028,9 @@ extern "C" HRESULT zigonaut_test_damage_aware_transfer(
     if (SUCCEEDED(hr)) hr = paintOverhangRow();
     if (SUCCEEDED(hr)) hr = finishAdjacent();
     uint64_t adjacent_batches = engine ? engine->benchmark.atlas_sprite_batches : 0;
+    // Build the reference with the old per-cell fill path, then compare it with
+    // the production coalesced path below.
+    if (engine) engine->benchmark_legacy_background_fills = true;
     if (SUCCEEDED(hr)) hr = begin(true);
     if (SUCCEEDED(hr)) paintRows(0, 1, 0x301020);
     if (SUCCEEDED(hr)) paintRows(1, 1, 0x1050a0);
@@ -2957,6 +3041,7 @@ extern "C" HRESULT zigonaut_test_damage_aware_transfer(
         hr = engine->d3d_device->CreateTexture2D(&description, nullptr, &adjacent_expected);
         if (SUCCEEDED(hr)) engine->d3d_context->CopyResource(adjacent_expected, engine->scene_texture);
     }
+    if (engine) engine->benchmark_legacy_background_fills = false;
     if (SUCCEEDED(hr)) hr = begin(false);
     if (SUCCEEDED(hr)) paintRows(0, 1, 0x301020);
     if (SUCCEEDED(hr)) hr = paintOverhangRow();

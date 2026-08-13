@@ -237,6 +237,17 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     std.debug.print(
+        "  adjacent background fills A/B ({d} rows x 120 cells; includes row shaping and Direct2D submission, excludes EndDraw): per-cell {d:.2} us/row ({d} fills); coalesced {d:.2} us/row ({d} fills); {d:.2}% change\n",
+        .{
+            dwrite.background_row_iterations,
+            perIterationUs(dwrite.background_legacy_nanoseconds, dwrite.background_row_iterations),
+            dwrite.background_legacy_fill_calls,
+            perIterationUs(dwrite.background_coalesced_nanoseconds, dwrite.background_row_iterations),
+            dwrite.background_coalesced_fill_calls,
+            improvement(dwrite.background_legacy_nanoseconds, dwrite.background_coalesced_nanoseconds),
+        },
+    );
+    std.debug.print(
         "    atlas: {d}x{d} generation={d}, allocations={d}, reserved={d} px, rejected={d}/{d} px, resets={d}; batches={d}, sprites={d}, native submissions={d}; placement hits={d}, misses={d}, rasterizations={d}; population batches={d}\n",
         .{ dwrite.atlas_extent, dwrite.atlas_extent, dwrite.atlas_generation, dwrite.atlas_resource_allocations, dwrite.atlas_reserved_area, dwrite.atlas_rejected_count, dwrite.atlas_rejected_area, dwrite.atlas_pressure_resets, dwrite.atlas_sprite_batches, dwrite.atlas_sprites, dwrite.fragmented_native_glyph_submissions, dwrite.atlas_placement_hits, dwrite.atlas_placement_misses, dwrite.atlas_rasterizations, dwrite.atlas_uploads },
     );

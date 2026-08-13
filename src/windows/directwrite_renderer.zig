@@ -500,6 +500,14 @@ test "fragmented rows reuse plans across absolute columns" {
     try std.testing.expect(result.glyph_slot_wraps > 0);
     try std.testing.expect(result.glyph_buffer_creations <= 3);
     try std.testing.expectEqual(result.glyph_buffer_creations, result.glyph_capacity_growths);
+    try std.testing.expectEqual(
+        @as(u64, result.background_row_iterations) * 120,
+        result.background_legacy_fill_calls,
+    );
+    try std.testing.expectEqual(
+        @as(u64, result.background_row_iterations),
+        result.background_coalesced_fill_calls,
+    );
 }
 
 fn sum(values: []const f32) f32 {
