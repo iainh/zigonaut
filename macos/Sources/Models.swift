@@ -109,6 +109,7 @@ struct TerminalRenderSnapshot {
   var images: [TerminalRenderImage] = []
   var imagesByRow: [[TerminalRenderImage]] = []
   var rowHashes: [UInt64] = []
+  var viewportOffset: UInt64 = 0
 }
 
 struct TerminalRenderImage {
@@ -640,7 +641,8 @@ struct TerminalPalette: Equatable {
       cellsByRow: retainedCellsByRow,
       images: images,
       imagesByRow: imagesByRow,
-      rowHashes: rowHashes
+      rowHashes: rowHashes,
+      viewportOffset: result.viewport_offset
     )
   }
 

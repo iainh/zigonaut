@@ -161,6 +161,7 @@ pub const RenderSnapshotResult = extern struct {
     written_text_bytes: u32,
     required_rows: u32,
     written_rows: u32,
+    viewport_offset: u64,
     status: u8,
     reserved: [7]u8,
 };
@@ -742,7 +743,7 @@ fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, matches: []const se
 /// `text_arena` by offset/length and remains valid only while the caller retains it.
 export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const u64, previous_count: u32, frame: ?*RenderFrame, cells: ?[*]RenderCell, cell_capacity: u32, text_arena: ?[*]u8, text_capacity: u32, current_hashes: ?[*]u64, hash_capacity: u32, result: ?*RenderSnapshotResult) void {
     const output = result orelse return;
-    output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .required_rows = 0, .written_rows = 0, .status = 2, .reserved = @splat(0) };
+    output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .required_rows = 0, .written_rows = 0, .viewport_offset = 0, .status = 2, .reserved = @splat(0) };
     const core = self orelse return;
     const output_frame = frame orelse return;
     var empty_cells: [0]RenderCell = .{};
@@ -755,6 +756,7 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     collector.search_matches = core.search_matches.items;
     collector.search_active = core.search_active;
     collector.viewport_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
+    output.viewport_offset = collector.viewport_offset;
     core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
     const row_count = core.render_snapshot.row_hashes.items.len;
     output.required_rows = @intCast(row_count);

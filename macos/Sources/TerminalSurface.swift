@@ -6,6 +6,7 @@ import QuartzCore
 import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
+import ZigonautRenderSupport
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMenuItemValidation {
   private struct TextStyle: Equatable {
@@ -70,8 +71,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var metalQueue: MTLCommandQueue?
   private var metalPipeline: MTLRenderPipelineState?
   private var retainedTexture: MTLTexture?
+  private var retainedScrollTexture: MTLTexture?
   private var retainedBitmap: CGContext?
   private var retainedRowHashes: [UInt64] = []
+  private var retainedViewportOffset: UInt64?
   private var retainedAppearance = ""
   private var retainedPixelSize = CGSize.zero
   private var encodedKeys = Set<UInt16>()
@@ -780,8 +783,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       descriptor.usage = [.shaderRead]
       descriptor.storageMode = .shared
       retainedTexture = device.makeTexture(descriptor: descriptor)
+      retainedScrollTexture = device.makeTexture(descriptor: descriptor)
       retainedPixelSize = pixelSize
       retainedRowHashes = []
+      retainedViewportOffset = nil
     }
     guard let bitmap = retainedBitmap, let texture = retainedTexture,
       let data = bitmap.data else { return disableMetal() }
@@ -793,11 +798,33 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       String(preferences.opacity), markedText.string,
       snapshot.images.map(\.signature).joined(separator: ","),
     ].joined(separator: "|")
-    let forceAll = retainedAppearance != appearance
+    var forceAll = retainedAppearance != appearance
       || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
     let rowCount = snapshot.rowHashes.isEmpty ? gridRows : snapshot.rowHashes.count
-    let dirtyRows = forceAll ? [] : snapshot.rowHashes.indices.filter {
-      retainedRowHashes[$0] != snapshot.rowHashes[$0]
+    var scrollDelta: Int?
+    if !forceAll, let previousOffset = retainedViewportOffset,
+      previousOffset != snapshot.viewportOffset
+    {
+      scrollDelta = RetainedScroll.rowDelta(
+        previousOffset: previousOffset, currentOffset: snapshot.viewportOffset, rowCount: rowCount)
+      if let delta = scrollDelta {
+        if !shiftRetainedScene(delta: delta, rowCount: rowCount, scale: scale,
+          pixelWidth: pixelWidth, pixelHeight: pixelHeight, bitmap: bitmap)
+        {
+          scrollDelta = nil
+          forceAll = true
+        }
+      } else {
+        forceAll = true
+      }
+    }
+    let dirtyRows = forceAll ? [] : snapshot.rowHashes.indices.filter { row in
+      guard let delta = scrollDelta else {
+        return retainedRowHashes[row] != snapshot.rowHashes[row]
+      }
+      guard let source = RetainedScroll.sourceRow(
+        for: row, delta: delta, rowCount: rowCount) else { return true }
+      return retainedRowHashes[source] != snapshot.rowHashes[row]
     }
     if forceAll || !dirtyRows.isEmpty {
       rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : dirtyRows, in: bitmap)
@@ -819,6 +846,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         }
       }
       retainedRowHashes = snapshot.rowHashes
+      retainedViewportOffset = snapshot.viewportOffset
       retainedAppearance = appearance
     }
     guard let drawable = presentation.nextDrawable() else { return disableMetal() }
@@ -836,6 +864,44 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     command.present(drawable)
     command.commit()
     presentation.isHidden = false
+    return true
+  }
+
+  private func shiftRetainedScene(delta: Int, rowCount: Int, scale: CGFloat,
+    pixelWidth: Int, pixelHeight: Int, bitmap: CGContext) -> Bool
+  {
+    guard let texture = retainedTexture, let scratch = retainedScrollTexture,
+      let queue = metalQueue, let command = queue.makeCommandBuffer(),
+      let encoder = command.makeBlitCommandEncoder(), let data = bitmap.data else { return false }
+    let rowHeight = max(1, Int((lineHeight * scale).rounded()))
+    let gridTop = max(0, Int((originY * scale).rounded()))
+    let gridBottom = min(pixelHeight, gridTop + rowHeight * rowCount)
+    let amount = abs(delta) * rowHeight
+    let retainedHeight = gridBottom - gridTop - amount
+    guard retainedHeight > 0 else { encoder.endEncoding(); return false }
+    let sourceY = delta > 0 ? gridTop : gridTop + amount
+    let destinationY = delta > 0 ? gridTop + amount : gridTop
+    let size = MTLSize(width: pixelWidth, height: retainedHeight, depth: 1)
+    encoder.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
+      sourceOrigin: MTLOrigin(x: 0, y: sourceY, z: 0), sourceSize: size,
+      to: scratch, destinationSlice: 0, destinationLevel: 0,
+      destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+    encoder.copy(from: scratch, sourceSlice: 0, sourceLevel: 0,
+      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: size,
+      to: texture, destinationSlice: 0, destinationLevel: 0,
+      destinationOrigin: MTLOrigin(x: 0, y: destinationY, z: 0))
+    encoder.endEncoding()
+    command.commit()
+    command.waitUntilCompleted()
+    guard command.status == .completed else { return false }
+
+    let byteCount = retainedHeight * bitmap.bytesPerRow
+    let retained = Data(bytes: data.advanced(by: sourceY * bitmap.bytesPerRow), count: byteCount)
+    retained.withUnsafeBytes { bytes in
+      guard let source = bytes.baseAddress else { return }
+      data.advanced(by: destinationY * bitmap.bytesPerRow).copyMemory(
+        from: source, byteCount: byteCount)
+    }
     return true
   }
 
