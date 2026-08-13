@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import CoreText
 import Metal
+import MetalKit
 import QuartzCore
 import SwiftUI
 import ZigonautAccessibility
@@ -70,9 +71,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var metalLayer: CAMetalLayer?
   private var metalQueue: MTLCommandQueue?
   private var metalPipeline: MTLRenderPipelineState?
+  private var metalImagePipeline: MTLRenderPipelineState?
+  private var metalOverlayPipeline: MTLRenderPipelineState?
+  private var metalCursorPipeline: MTLRenderPipelineState?
   private var retainedTexture: MTLTexture?
   private var retainedScrollTexture: MTLTexture?
   private var retainedBitmap: CGContext?
+  private var overlayTexture: MTLTexture?
+  private var overlayBitmap: CGContext?
+  private var metalImageTextures: [TerminalImageKey: MTLTexture] = [:]
   private var retainedRowHashes: [UInt64] = []
   private var retainedViewportOffset: UInt64?
   private var retainedAppearance = ""
@@ -258,20 +265,48 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         const float2 coordinates[] = { {0,1}, {1,1}, {0,0}, {1,0} };
         return { float4(positions[id], 0, 1), coordinates[id] };
       }
+      vertex VertexOut placement_vertex(const device float4 *vertices [[buffer(0)]], uint id [[vertex_id]]) {
+        return { float4(vertices[id].xy, 0, 1), vertices[id].zw };
+      }
       fragment float4 terminal_fragment(VertexOut in [[stage_in]],
           texture2d<float> image [[texture(0)]]) {
         constexpr sampler nearest(coord::normalized, address::clamp_to_edge, filter::nearest);
         return image.sample(nearest, in.uv);
       }
+      fragment float4 image_fragment(VertexOut in [[stage_in]],
+          texture2d<float> image [[texture(0)]]) {
+        constexpr sampler linear(coord::normalized, address::clamp_to_edge, filter::linear);
+        return image.sample(linear, in.uv);
+      }
+      fragment float4 cursor_fragment(VertexOut in [[stage_in]], float4 current [[color(0)]],
+          constant uint &difference [[buffer(0)]], constant float4 &cursor [[buffer(1)]]) {
+        return difference != 0 ? float4(abs(current.rgb - cursor.rgb), current.a) : cursor;
+      }
       """
     guard let library = try? device.makeLibrary(source: source, options: nil),
       let vertex = library.makeFunction(name: "terminal_vertex"),
-      let fragment = library.makeFunction(name: "terminal_fragment") else { return }
+      let placementVertex = library.makeFunction(name: "placement_vertex"),
+      let fragment = library.makeFunction(name: "terminal_fragment"),
+      let imageFragment = library.makeFunction(name: "image_fragment"),
+      let cursorFragment = library.makeFunction(name: "cursor_fragment") else { return }
     let descriptor = MTLRenderPipelineDescriptor()
     descriptor.vertexFunction = vertex
     descriptor.fragmentFunction = fragment
     descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
     guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    descriptor.vertexFunction = placementVertex
+    descriptor.fragmentFunction = imageFragment
+    descriptor.colorAttachments[0].isBlendingEnabled = true
+    descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+    descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+    descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+    descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    guard let imagePipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    descriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+    guard let overlayPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    descriptor.fragmentFunction = cursorFragment
+    descriptor.colorAttachments[0].isBlendingEnabled = false
+    guard let cursorPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
     let presentation = CAMetalLayer()
     presentation.device = device
     presentation.pixelFormat = .bgra8Unorm
@@ -282,6 +317,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     metalLayer = presentation
     metalQueue = queue
     metalPipeline = pipeline
+    metalImagePipeline = imagePipeline
+    metalOverlayPipeline = overlayPipeline
+    metalCursorPipeline = cursorPipeline
   }
 
   override var acceptsFirstResponder: Bool { true }
@@ -765,7 +803,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func renderMetal() -> Bool {
     guard let presentation = metalLayer, let queue = metalQueue, let pipeline = metalPipeline,
-      let device = presentation.device, let geometry = updateMetalGeometry() else { return false }
+      let imagePipeline = metalImagePipeline, let overlayPipeline = metalOverlayPipeline,
+      let cursorPipeline = metalCursorPipeline, let device = presentation.device,
+      let geometry = updateMetalGeometry() else { return false }
     let scale = geometry.scale
     let pixelWidth = geometry.width
     let pixelHeight = geometry.height
@@ -776,27 +816,33 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         bitsPerComponent: 8, bytesPerRow: pixelWidth * 4, space: colorSpace,
         bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
           | CGBitmapInfo.byteOrder32Little.rawValue)
+      overlayBitmap = CGContext(data: nil, width: pixelWidth, height: pixelHeight,
+        bitsPerComponent: 8, bytesPerRow: pixelWidth * 4, space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+          | CGBitmapInfo.byteOrder32Little.rawValue)
       retainedBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
       retainedBitmap?.scaleBy(x: scale, y: -scale)
+      overlayBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
+      overlayBitmap?.scaleBy(x: scale, y: -scale)
       let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
         width: pixelWidth, height: pixelHeight, mipmapped: false)
       descriptor.usage = [.shaderRead]
       descriptor.storageMode = .shared
       retainedTexture = device.makeTexture(descriptor: descriptor)
       retainedScrollTexture = device.makeTexture(descriptor: descriptor)
+      overlayTexture = device.makeTexture(descriptor: descriptor)
       retainedPixelSize = pixelSize
       retainedRowHashes = []
       retainedViewportOffset = nil
     }
     guard let bitmap = retainedBitmap, let texture = retainedTexture,
-      let data = bitmap.data else { return disableMetal() }
+      let overlayBitmap, let overlayTexture, let data = bitmap.data else { return disableMetal() }
     let snapshot = model.renderSnapshot
     let appearance = [
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
       preferences.intenseFontWeight, String(preferences.paddingHorizontal),
       String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
-      String(preferences.opacity), markedText.string,
-      snapshot.images.map(\.signature).joined(separator: ","),
+      String(preferences.opacity),
     ].joined(separator: "|")
     var forceAll = retainedAppearance != appearance
       || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
@@ -849,6 +895,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       retainedViewportOffset = snapshot.viewportOffset
       retainedAppearance = appearance
     }
+    if markedText.length > 0 {
+      rasterizeOverlay(frame: snapshot.frame, in: overlayBitmap)
+      guard let overlayData = overlayBitmap.data else { return disableMetal() }
+      overlayTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
+        withBytes: overlayData, bytesPerRow: overlayBitmap.bytesPerRow)
+    }
     guard let drawable = presentation.nextDrawable() else { return disableMetal() }
     guard let command = queue.makeCommandBuffer() else { return disableMetal() }
     let pass = MTLRenderPassDescriptor()
@@ -860,11 +912,120 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentTexture(texture, index: 0)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    drawMetalImages(snapshot.images, encoder: encoder, pipeline: imagePipeline)
+    if markedText.length > 0 {
+      encoder.setRenderPipelineState(overlayPipeline)
+      encoder.setFragmentTexture(overlayTexture, index: 0)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+    drawMetalCursor(snapshot.frame, encoder: encoder, pipeline: cursorPipeline)
     encoder.endEncoding()
     command.present(drawable)
     command.commit()
     presentation.isHidden = false
     return true
+  }
+
+  private func rasterizeOverlay(frame: TerminalRenderFrame, in bitmap: CGContext) {
+    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
+    guard markedText.length > 0 else { return }
+    let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    drawMarkedText(frame)
+    NSGraphicsContext.restoreGraphicsState()
+  }
+
+  private func drawMetalImages(_ images: [TerminalRenderImage], encoder: MTLRenderCommandEncoder,
+    pipeline: MTLRenderPipelineState)
+  {
+    let active = Set(images.map(\.key))
+    metalImageTextures = metalImageTextures.filter { active.contains($0.key) }
+    guard !images.isEmpty, bounds.width > 0, bounds.height > 0,
+      let device = retainedTexture?.device else { return }
+    let loader = MTKTextureLoader(device: device)
+    let clip = ImageRect(x: Double(originX), y: Double(originY),
+      width: Double(CGFloat(gridColumns) * cellWidth),
+      height: Double(CGFloat(gridRows) * lineHeight))
+    encoder.setRenderPipelineState(pipeline)
+    for placement in images {
+      let destination = ImageRect(
+        x: Double(originX + CGFloat(placement.viewportColumn) * cellWidth + placement.xOffset),
+        y: Double(originY + CGFloat(placement.viewportRow) * lineHeight + placement.yOffset),
+        width: Double(placement.pixelWidth), height: Double(placement.pixelHeight))
+      guard let quad = ImageGeometry.clippedQuad(
+        destination: destination,
+        source: ImageRect(x: Double(placement.sourcePixels.minX),
+          y: Double(placement.sourcePixels.minY), width: Double(placement.sourcePixels.width),
+          height: Double(placement.sourcePixels.height)), clip: clip) else { continue }
+      let texture: MTLTexture
+      if let cached = metalImageTextures[placement.key] {
+        texture = cached
+      } else {
+        guard let loaded = try? loader.newTexture(cgImage: placement.cgImage, options: [
+          .SRGB: false, .origin: MTKTextureLoader.Origin.topLeft,
+        ]) else { continue }
+        metalImageTextures[placement.key] = loaded
+        texture = loaded
+      }
+      var vertices = quadVertices(
+        destination: CGRect(x: quad.destination.x, y: quad.destination.y,
+          width: quad.destination.width, height: quad.destination.height),
+        source: CGRect(x: quad.source.x, y: quad.source.y,
+          width: quad.source.width, height: quad.source.height),
+        textureWidth: CGFloat(texture.width), textureHeight: CGFloat(texture.height))
+      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      encoder.setFragmentTexture(texture, index: 0)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+  }
+
+  private func quadVertices(destination: CGRect, source: CGRect,
+    textureWidth: CGFloat = 1, textureHeight: CGFloat = 1) -> [Float]
+  {
+    let left = Float(destination.minX / bounds.width * 2 - 1)
+    let right = Float(destination.maxX / bounds.width * 2 - 1)
+    let top = Float(1 - destination.minY / bounds.height * 2)
+    let bottom = Float(1 - destination.maxY / bounds.height * 2)
+    let u0 = Float(source.minX / textureWidth)
+    let u1 = Float(source.maxX / textureWidth)
+    let v0 = Float(source.minY / textureHeight)
+    let v1 = Float(source.maxY / textureHeight)
+    return [left, bottom, u0, v1, right, bottom, u1, v1,
+      left, top, u0, v0, right, top, u1, v0]
+  }
+
+  private func drawMetalCursor(_ frame: TerminalRenderFrame, encoder: MTLRenderCommandEncoder,
+    pipeline: MTLRenderPipelineState)
+  {
+    guard frame.cursorVisible else { return }
+    let rect = CGRect(x: originX + CGFloat(frame.cursorX) * cellWidth,
+      y: originY + CGFloat(frame.cursorY) * lineHeight,
+      width: cellWidth * CGFloat(max(frame.cursorColumns, 1)), height: lineHeight)
+    let rectangles: [CGRect]
+    switch frame.cursorStyle {
+    case 0: rectangles = [CGRect(x: rect.minX, y: rect.minY, width: 2, height: rect.height)]
+    case 2: rectangles = [CGRect(x: rect.minX, y: rect.maxY - 2, width: rect.width, height: 2)]
+    case 3:
+      rectangles = [
+        CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 1),
+        CGRect(x: rect.minX, y: rect.maxY - 1, width: rect.width, height: 1),
+        CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height),
+        CGRect(x: rect.maxX - 1, y: rect.minY, width: 1, height: rect.height),
+      ]
+    default: rectangles = [rect]
+    }
+    var difference: UInt32 = frame.cursorStyle == 1 ? 1 : 0
+    var cursor = SIMD4<Float>(Float((frame.cursor >> 16) & 0xff) / 255,
+      Float((frame.cursor >> 8) & 0xff) / 255, Float(frame.cursor & 0xff) / 255, 1)
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setFragmentBytes(&difference, length: MemoryLayout<UInt32>.stride, index: 0)
+    encoder.setFragmentBytes(&cursor, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+    for rectangle in rectangles {
+      var vertices = quadVertices(destination: rectangle, source: .zero)
+      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
   }
 
   private func shiftRetainedScene(delta: Int, rowCount: Int, scale: CGFloat,
@@ -932,10 +1093,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
         drawDecorations(cell, rect: cellRect(cell))
       }
-      let images = snapshot.imagesByRow.indices.contains(row) ? snapshot.imagesByRow[row] : []
-      drawImages(images)
-      drawCursor(snapshot.frame)
-      drawMarkedText(snapshot.frame)
       bitmap.restoreGState()
     }
     if let rows {

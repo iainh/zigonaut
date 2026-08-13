@@ -4,7 +4,6 @@ import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
 import ZigonautPaneLayout
-import ZigonautRenderSupport
 import ZigonautRestoration
 
 extension NSColor {
@@ -107,21 +106,27 @@ struct TerminalRenderSnapshot {
   var cells: [TerminalRenderCell] = []
   var cellsByRow: [[TerminalRenderCell]] = []
   var images: [TerminalRenderImage] = []
-  var imagesByRow: [[TerminalRenderImage]] = []
   var rowHashes: [UInt64] = []
   var viewportOffset: UInt64 = 0
 }
 
+struct TerminalImageKey: Hashable {
+  let id: UInt32
+  let generation: UInt64
+}
+
 struct TerminalRenderImage {
   let image: NSImage
+  let cgImage: CGImage
+  let key: TerminalImageKey
   let source: NSRect
+  let sourcePixels: CGRect
   let pixelWidth: CGFloat
   let pixelHeight: CGFloat
   let viewportColumn: Int
   let viewportRow: Int
   let xOffset: CGFloat
   let yOffset: CGFloat
-  let signature: String
 }
 
 struct TerminalProgress: Equatable {
@@ -374,7 +379,7 @@ struct TerminalPalette: Equatable {
   private var retainedCellsByRow = [[TerminalRenderCell]]()
   private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
-  private var imageCache: [ImageKey: NSImage] = [:]
+  private var imageCache: [TerminalImageKey: CGImage] = [:]
   private var currentColumns = 80
   private var currentRows = 24
   private var currentPixelWidth = 0
@@ -392,11 +397,6 @@ struct TerminalPalette: Equatable {
   private let preferences: Preferences
   private let defaultTitle: String
   var themeSeed: UInt64 { id.uuidString.utf8.reduce(5381) { ($0 &* 33) &+ UInt64($1) } }
-
-  private struct ImageKey: Hashable {
-    let id: UInt32
-    let generation: UInt64
-  }
 
   init(id: UUID = UUID(), shell: String, workingDirectory: String? = nil, preferences: Preferences) {
     self.id = id
@@ -618,14 +618,6 @@ struct TerminalPalette: Equatable {
       retainedCellsByRow[row] = dirtyCells[row]
     }
     let images = retrieveImages(core: core)
-    var imagesByRow = [[TerminalRenderImage]](repeating: [], count: rowCount)
-    let lineHeight = CGFloat(currentCellHeight) / max(currentScale, 1)
-    for image in images {
-      let rows = RowBucketing.overlappingRows(
-        viewportRow: image.viewportRow, yOffset: Double(image.yOffset),
-        height: Double(image.pixelHeight), lineHeight: Double(lineHeight), rowCount: rowCount)
-      for row in rows { imagesByRow[row].append(image) }
-    }
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -640,7 +632,6 @@ struct TerminalPalette: Equatable {
       cells: retainedCellsByRow.flatMap { $0 },
       cellsByRow: retainedCellsByRow,
       images: images,
-      imagesByRow: imagesByRow,
       rowHashes: rowHashes,
       viewportOffset: result.viewport_offset
     )
@@ -674,12 +665,12 @@ struct TerminalPalette: Equatable {
       }
     }
     guard result.status == 0 else { return [] }
-    var activeKeys = Set<ImageKey>()
+    var activeKeys = Set<TerminalImageKey>()
     let placements = imageBuffer.prefix(min(Int(result.written_images), imageBuffer.count))
     // Install every payload before resolving placements, so duplicate records
     // remain valid even if the payload-bearing record ordering changes.
     for placement in placements where placement.data_length > 0 {
-      let key = ImageKey(id: placement.image_id, generation: placement.generation)
+      let key = TerminalImageKey(id: placement.image_id, generation: placement.generation)
       let start = Int(placement.data_offset)
       let end = start + Int(placement.data_length)
       guard start >= 0, end <= imageData.count, placement.width > 0, placement.height > 0,
@@ -692,29 +683,27 @@ struct TerminalPalette: Equatable {
           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
           provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
       else { return [] }
-      imageCache[key] = NSImage(cgImage: value,
-        size: NSSize(width: Int(placement.width), height: Int(placement.height)))
+      imageCache[key] = value
     }
     let rendered = placements.compactMap { placement -> TerminalRenderImage? in
-      let key = ImageKey(id: placement.image_id, generation: placement.generation)
+      let key = TerminalImageKey(id: placement.image_id, generation: placement.generation)
       activeKeys.insert(key)
-      guard let image = imageCache[key] else { return nil }
+      guard let cgImage = imageCache[key] else { return nil }
       return TerminalRenderImage(
-        image: image,
+        image: NSImage(cgImage: cgImage,
+          size: NSSize(width: Int(placement.width), height: Int(placement.height))),
+        cgImage: cgImage,
+        key: key,
         source: NSRect(x: Int(placement.source_x),
           y: Int(placement.height - placement.source_y - placement.source_height),
+          width: Int(placement.source_width), height: Int(placement.source_height)),
+        sourcePixels: CGRect(x: Int(placement.source_x), y: Int(placement.source_y),
           width: Int(placement.source_width), height: Int(placement.source_height)),
         pixelWidth: CGFloat(placement.pixel_width) / currentScale,
         pixelHeight: CGFloat(placement.pixel_height) / currentScale,
         viewportColumn: Int(placement.viewport_column), viewportRow: Int(placement.viewport_row),
         xOffset: CGFloat(placement.x_offset) / currentScale,
-        yOffset: CGFloat(placement.y_offset) / currentScale,
-        signature: [placement.image_id, UInt32(truncatingIfNeeded: placement.generation),
-          UInt32(truncatingIfNeeded: placement.generation >> 32), placement.source_x,
-          placement.source_y, placement.source_width, placement.source_height,
-          placement.pixel_width, placement.pixel_height, UInt32(bitPattern: placement.viewport_column),
-          UInt32(bitPattern: placement.viewport_row), UInt32(bitPattern: placement.z),
-          placement.x_offset, placement.y_offset].map(String.init).joined(separator: ":"))
+        yOffset: CGFloat(placement.y_offset) / currentScale)
     }
     guard rendered.count == placements.count else { return [] }
     imageCache = imageCache.filter { activeKeys.contains($0.key) }
