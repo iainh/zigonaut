@@ -35,6 +35,14 @@ pub const Command = enum(u32) {
     close_other_tabs = win.ZIGONAUT_CHROME_CLOSE_OTHER_TABS,
     close_tabs_right = win.ZIGONAUT_CHROME_CLOSE_TABS_RIGHT,
     reorder_tab = win.ZIGONAUT_CHROME_REORDER_TAB,
+    resize_pane_left = win.ZIGONAUT_CHROME_RESIZE_PANE_LEFT,
+    resize_pane_right = win.ZIGONAUT_CHROME_RESIZE_PANE_RIGHT,
+    resize_pane_up = win.ZIGONAUT_CHROME_RESIZE_PANE_UP,
+    resize_pane_down = win.ZIGONAUT_CHROME_RESIZE_PANE_DOWN,
+    equalize_panes = win.ZIGONAUT_CHROME_EQUALIZE_PANES,
+    toggle_pane_zoom = win.ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM,
+    focus_next_pane = win.ZIGONAUT_CHROME_FOCUS_NEXT_PANE,
+    focus_previous_pane = win.ZIGONAUT_CHROME_FOCUS_PREVIOUS_PANE,
 };
 
 pub fn commandFromInt(value: u32) ?Command {
@@ -313,6 +321,10 @@ test "chrome commands match the shared ABI" {
     try std.testing.expectEqual(Command.find, commandFromInt(win.ZIGONAUT_CHROME_FIND).?);
     try std.testing.expectEqual(Command.shutdown, commandFromInt(win.ZIGONAUT_CHROME_SHUTDOWN).?);
     try std.testing.expectEqual(Command.zoom_in, commandFromInt(win.ZIGONAUT_CHROME_ZOOM_IN).?);
+    try std.testing.expectEqual(Command.resize_pane_left, commandFromInt(win.ZIGONAUT_CHROME_RESIZE_PANE_LEFT).?);
+    try std.testing.expectEqual(Command.equalize_panes, commandFromInt(win.ZIGONAUT_CHROME_EQUALIZE_PANES).?);
+    try std.testing.expectEqual(Command.toggle_pane_zoom, commandFromInt(win.ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM).?);
+    try std.testing.expectEqual(Command.focus_next_pane, commandFromInt(win.ZIGONAUT_CHROME_FOCUS_NEXT_PANE).?);
     try std.testing.expect(commandFromInt(2) == null);
 }
 

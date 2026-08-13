@@ -40,6 +40,14 @@ typedef enum zigonaut_chrome_command_id {
     ZIGONAUT_CHROME_CLOSE_OTHER_TABS = 32,
     ZIGONAUT_CHROME_CLOSE_TABS_RIGHT = 33,
     ZIGONAUT_CHROME_REORDER_TAB = 34,
+    ZIGONAUT_CHROME_RESIZE_PANE_LEFT = 35,
+    ZIGONAUT_CHROME_RESIZE_PANE_RIGHT = 36,
+    ZIGONAUT_CHROME_RESIZE_PANE_UP = 37,
+    ZIGONAUT_CHROME_RESIZE_PANE_DOWN = 38,
+    ZIGONAUT_CHROME_EQUALIZE_PANES = 39,
+    ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM = 40,
+    ZIGONAUT_CHROME_FOCUS_NEXT_PANE = 41,
+    ZIGONAUT_CHROME_FOCUS_PREVIOUS_PANE = 42,
 } zigonaut_chrome_command_id;
 
 typedef void (__cdecl *zigonaut_chrome_command)(void* context, uint32_t command, uint32_t argument);

@@ -1618,7 +1618,15 @@ pub const View = struct {
 
         const shift = win.GetKeyState(win.VK_SHIFT) < 0;
         const alt = win.GetKeyState(win.VK_MENU) < 0;
-        const command: ?u32 = if (alt and !shift and wparam == win.VK_LEFT)
+        const command: ?u32 = if (alt and shift and wparam == win.VK_LEFT)
+            win.ZIGONAUT_CHROME_RESIZE_PANE_LEFT
+        else if (alt and shift and wparam == win.VK_RIGHT)
+            win.ZIGONAUT_CHROME_RESIZE_PANE_RIGHT
+        else if (alt and shift and wparam == win.VK_UP)
+            win.ZIGONAUT_CHROME_RESIZE_PANE_UP
+        else if (alt and shift and wparam == win.VK_DOWN)
+            win.ZIGONAUT_CHROME_RESIZE_PANE_DOWN
+        else if (alt and !shift and wparam == win.VK_LEFT)
             win.ZIGONAUT_CHROME_FOCUS_LEFT
         else if (alt and !shift and wparam == win.VK_RIGHT)
             win.ZIGONAUT_CHROME_FOCUS_RIGHT
@@ -1626,6 +1634,12 @@ pub const View = struct {
             win.ZIGONAUT_CHROME_FOCUS_UP
         else if (alt and !shift and wparam == win.VK_DOWN)
             win.ZIGONAUT_CHROME_FOCUS_DOWN
+        else if (alt and !shift and wparam == win.VK_PRIOR)
+            win.ZIGONAUT_CHROME_FOCUS_PREVIOUS_PANE
+        else if (alt and !shift and wparam == win.VK_NEXT)
+            win.ZIGONAUT_CHROME_FOCUS_NEXT_PANE
+        else if (alt and !shift and wparam == win.VK_OEM_PLUS)
+            win.ZIGONAUT_CHROME_EQUALIZE_PANES
         else if (alt)
             null
         else if (shift and wparam == 'T')
@@ -1640,6 +1654,8 @@ pub const View = struct {
             win.ZIGONAUT_CHROME_SPLIT_DOWN
         else if (shift and wparam == 'G')
             win.ZIGONAUT_CHROME_PIPE_COMMAND_OUTPUT
+        else if (shift and wparam == win.VK_RETURN)
+            win.ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM
         else if (wparam == win.VK_TAB)
             if (shift) win.ZIGONAUT_CHROME_SELECT_PREVIOUS else win.ZIGONAUT_CHROME_SELECT_NEXT
         else if (wparam == win.VK_ADD or wparam == win.VK_OEM_PLUS)

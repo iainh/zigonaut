@@ -1026,6 +1026,62 @@ struct TerminalPalette: Equatable {
         : .split(id, axis, old, first.settingRatio(target, ratio), second.settingRatio(target, ratio))
     }
   }
+  func node(_ target: UUID) -> PaneNode? {
+    if id == target { return self }
+    switch self {
+    case .leaf: return nil
+    case .split(_, _, _, let first, let second): return first.node(target) ?? second.node(target)
+    }
+  }
+  func canResize(_ target: UUID, axis wanted: Axis) -> Bool {
+    switch self {
+    case .leaf: return false
+    case .split(_, let axis, _, let first, let second):
+      guard first.contains(target) || second.contains(target) else { return false }
+      let child = first.contains(target) ? first : second
+      return child.canResize(target, axis: wanted) || axis == wanted
+    }
+  }
+  func resizing(_ target: UUID, direction: PaneFocusDirection, amount: Double) -> (PaneNode, Bool) {
+    switch self {
+    case .leaf: return (self, false)
+    case .split(let id, let axis, let ratio, let first, let second):
+      guard first.contains(target) || second.contains(target) else { return (self, false) }
+      let wanted: Axis = direction == .left || direction == .right ? .horizontal : .vertical
+      if first.contains(target) {
+        if first.canResize(target, axis: wanted) {
+          let (resized, changed) = first.resizing(target, direction: direction, amount: amount)
+          return (.split(id, axis, ratio, resized, second), changed)
+        }
+      } else {
+        if second.canResize(target, axis: wanted) {
+          let (resized, changed) = second.resizing(target, direction: direction, amount: amount)
+          return (.split(id, axis, ratio, first, resized), changed)
+        }
+      }
+      guard axis == wanted else { return (self, false) }
+      let delta = direction == .left || direction == .up ? -amount : amount
+      let resized = min(max(ratio + delta, 0.1), 0.9)
+      return (.split(id, axis, resized, first, second), resized != ratio)
+    }
+  }
+  func axisWeight(_ wanted: Axis) -> Int {
+    switch self {
+    case .leaf: return 1
+    case .split(_, let axis, _, let first, let second):
+      return axis == wanted ? first.axisWeight(wanted) + second.axisWeight(wanted) : 1
+    }
+  }
+  func equalized() -> PaneNode {
+    switch self {
+    case .leaf: return self
+    case .split(let id, let axis, _, let first, let second):
+      let firstWeight = first.axisWeight(axis)
+      let secondWeight = second.axisWeight(axis)
+      return .split(id, axis, Double(firstWeight) / Double(firstWeight + secondWeight),
+        first.equalized(), second.equalized())
+    }
+  }
   var saved: SavedPaneNode {
     switch self {
     case .leaf(let pane): .leaf(SavedPane(id: pane.id, directory: pane.restorationDirectory()))
@@ -1039,11 +1095,13 @@ struct TerminalPalette: Equatable {
   @Published var root: PaneNode
   @Published var focusedPane: UUID? {
     didSet {
+      if zoomedPane != nil { zoomedPane = focusedPane }
       synchronizeTitleOwner()
       synchronizeFindOwner()
       stateChanged?()
     }
   }
+  @Published private(set) var zoomedPane: UUID?
   @Published private(set) var title: String
   @Published private(set) var progress: TerminalProgress?
   @Published var findVisible = false { didSet { synchronizeFindOwner() } }
@@ -1059,6 +1117,7 @@ struct TerminalPalette: Equatable {
     self.preferences = preferences
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
     root = .leaf(pane)
+    zoomedPane = nil
     focusedPane = pane.id
     title = pane.title
     synchronizeTitleOwner()
@@ -1077,6 +1136,7 @@ struct TerminalPalette: Equatable {
     }
     let restored = restore(saved.root)
     root = restored
+    zoomedPane = nil
     focusedPane = restored.contains(saved.focusedPane) ? saved.focusedPane : restored.leaves[0].id
     title = restored.leaves.first?.title ?? "Terminal"
     synchronizeTitleOwner()
@@ -1084,6 +1144,7 @@ struct TerminalPalette: Equatable {
   var saved: SavedTab { SavedTab(root: root.saved, focusedPane: focusedPane ?? root.leaves[0].id) }
   var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
   var panes: [TerminalModel] { root.leaves }
+  var visibleRoot: PaneNode { zoomedPane.flatMap { root.node($0) } ?? root }
   var foregroundJobCount: Int { panes.filter(\.hasForegroundJob).count }
   func updateFindQuery(_ query: String) {
     findQuery = query
@@ -1118,6 +1179,7 @@ struct TerminalPalette: Equatable {
     else { return }
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
     root = root.replacing(focus, with: .split(UUID(), axis, 0.5, .leaf(existing), .leaf(pane)))
+    zoomedPane = nil
     focusedPane = pane.id
     stateChanged?()
   }
@@ -1134,12 +1196,13 @@ struct TerminalPalette: Equatable {
   func closePane(_ pane: UUID) -> Bool {
     guard root.contains(pane), let remaining = root.removing(pane) else { return false }
     root = remaining
+    if zoomedPane == pane { zoomedPane = nil }
     focusedPane = remaining.leaves.first?.id
     stateChanged?()
     return true
   }
   func updatePaneFrames(_ frames: [UUID: CGRect]) {
-    let visible = Set(root.leaves.map(\.id))
+    let visible = Set(visibleRoot.leaves.map(\.id))
     paneFrames = frames.filter { visible.contains($0.key) }
   }
   func focus(_ direction: PaneFocusDirection) {
@@ -1147,6 +1210,36 @@ struct TerminalPalette: Equatable {
       let destination = DirectionalPaneFocus.destination(from: focusedPane, direction: direction,
         frames: paneFrames, stableOrder: root.leaves.map(\.id)) else { return }
     self.focusedPane = destination
+  }
+  func focusCycle(forward: Bool) {
+    let leaves = root.leaves
+    guard leaves.count > 1, let focusedPane,
+      let index = leaves.firstIndex(where: { $0.id == focusedPane }) else { return }
+    let destination = forward ? (index + 1) % leaves.count : (index + leaves.count - 1) % leaves.count
+    self.focusedPane = leaves[destination].id
+  }
+  func canResize(_ direction: PaneFocusDirection) -> Bool {
+    guard let focusedPane else { return false }
+    let axis: Axis = direction == .left || direction == .right ? .horizontal : .vertical
+    return root.canResize(focusedPane, axis: axis)
+  }
+  func resize(_ direction: PaneFocusDirection) {
+    guard let focusedPane else { return }
+    let (resized, changed) = root.resizing(focusedPane, direction: direction, amount: 0.05)
+    guard changed else { return }
+    root = resized
+    zoomedPane = nil
+    stateChanged?()
+  }
+  func equalizePanes() {
+    guard panes.count > 1 else { return }
+    root = root.equalized()
+    stateChanged?()
+  }
+  func togglePaneZoom() {
+    guard panes.count > 1 else { return }
+    zoomedPane = zoomedPane == nil ? focusedPane : nil
+    stateChanged?()
   }
   func canFocus(_ direction: PaneFocusDirection) -> Bool {
     guard let focusedPane else { return false }

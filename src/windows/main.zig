@@ -583,13 +583,13 @@ const Application = struct {
     fn syncPresentation(self: *Application) !void {
         const bridge = if (self.chrome) |*value| value else return error.ChromeUnavailable;
         const tab = self.model.activeTab() orelse return;
-        const node_count = tab.tree.nodeCount();
+        const node_count = tab.tree.presentationNodeCount();
         const layout = try std.heap.page_allocator.alloc(chrome.LayoutNode, node_count);
         defer std.heap.page_allocator.free(layout);
         try self.attached_panes.ensureUnusedCapacity(std.heap.page_allocator, node_count);
         errdefer self.detachPresentation() catch {};
         var writer = PresentationWriter{ .application = self, .bridge = bridge, .output = layout };
-        try tab.tree.writePreorder(&writer);
+        try tab.tree.writePresentation(&writer);
         const focused = (self.model.activePane() orelse return).id;
         if (!bridge.updateLayout(layout, focused)) return error.UpdateLayoutFailed;
         // updateLayout attaches each swap chain to its WinUI panel. Open the
@@ -1077,20 +1077,50 @@ fn chromeMessageImpl(self: *Application, hwnd: win.HWND, wparam: win.WPARAM, lpa
                 return 0;
             };
         },
-        .focus_left, .focus_right, .focus_up, .focus_down => {
-            const changed = self.model.focusDirection(switch (command) {
-                .focus_left => .left,
-                .focus_right => .right,
-                .focus_up => .up,
-                .focus_down => .down,
+        .focus_left, .focus_right, .focus_up, .focus_down, .focus_next_pane, .focus_previous_pane => {
+            const changed = switch (command) {
+                .focus_left => self.model.focusDirection(.left),
+                .focus_right => self.model.focusDirection(.right),
+                .focus_up => self.model.focusDirection(.up),
+                .focus_down => self.model.focusDirection(.down),
+                .focus_next_pane => self.model.focusCycle(true),
+                .focus_previous_pane => self.model.focusCycle(false),
                 else => unreachable,
-            });
+            };
             if (!changed) return 0;
-            const pane = self.model.activePane() orelse return 0;
-            if (self.chrome) |*bridge| _ = bridge.focusPane(pane.id);
+            self.syncPresentation() catch |err| {
+                log.err("unable to present focused pane: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+                return 0;
+            };
             self.syncChrome();
             self.syncScrollbar(false);
             self.syncTaskbarProgress();
+            return 0;
+        },
+        .resize_pane_left, .resize_pane_right, .resize_pane_up, .resize_pane_down => {
+            const changed = self.model.resizeFocused(switch (command) {
+                .resize_pane_left => .left,
+                .resize_pane_right => .right,
+                .resize_pane_up => .up,
+                .resize_pane_down => .down,
+                else => unreachable,
+            });
+            if (!changed) return 0;
+            self.syncPresentation() catch |err| log.err("unable to present resized panes: {}", .{err});
+            return 0;
+        },
+        .equalize_panes => {
+            if (!self.model.equalizePanes()) return 0;
+            self.syncPresentation() catch |err| log.err("unable to present equalized panes: {}", .{err});
+            return 0;
+        },
+        .toggle_pane_zoom => {
+            if (!self.model.togglePaneZoom()) return 0;
+            self.syncPresentation() catch |err| {
+                log.err("unable to present pane zoom: {}", .{err});
+                _ = win.PostMessageW(hwnd, win.WM_CLOSE, 0, 0);
+            };
             return 0;
         },
         .close_pane => {

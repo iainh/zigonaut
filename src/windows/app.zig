@@ -336,6 +336,22 @@ pub const App = struct {
         return (self.activeTab() orelse return false).tree.focusDirection(direction);
     }
 
+    pub fn focusCycle(self: *App, forward: bool) bool {
+        return (self.activeTab() orelse return false).tree.focusCycle(forward);
+    }
+
+    pub fn resizeFocused(self: *App, direction: pane_tree.Direction) bool {
+        return (self.activeTab() orelse return false).tree.resizeFocused(direction, 3277);
+    }
+
+    pub fn equalizePanes(self: *App) bool {
+        return (self.activeTab() orelse return false).tree.equalize();
+    }
+
+    pub fn togglePaneZoom(self: *App) bool {
+        return (self.activeTab() orelse return false).tree.toggleZoom();
+    }
+
     pub fn setSplitRatio(self: *App, split_id: pane_tree.SplitId, ratio: u16) bool {
         const tab = self.activeTab() orelse return false;
         tab.tree.setRatio(split_id, ratio) catch return false;

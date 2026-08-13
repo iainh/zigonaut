@@ -703,6 +703,8 @@ struct Bridge {
         add_pane_command(L"Split right", L"Ctrl+Shift+O", ZIGONAUT_CHROME_SPLIT_RIGHT);
         add_pane_command(L"Split down", L"Ctrl+Shift+E", ZIGONAUT_CHROME_SPLIT_DOWN);
         add_pane_command(L"Close pane", L"Ctrl+Shift+W", ZIGONAUT_CHROME_CLOSE_PANE);
+        add_pane_command(L"Zoom pane", L"Ctrl+Shift+Enter", ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM);
+        add_pane_command(L"Equalize panes", L"Ctrl+Alt+=", ZIGONAUT_CHROME_EQUALIZE_PANES);
         auto focus_item = MenuFlyoutSubItem{};
         focus_item.Text(L"Focus pane");
         auto add_focus_command = [this, focus_item](std::wstring_view text, std::wstring_view shortcut, zigonaut_chrome_command_id command) {
@@ -719,7 +721,26 @@ struct Bridge {
         add_focus_command(L"Right", L"Ctrl+Alt+Right", ZIGONAUT_CHROME_FOCUS_RIGHT);
         add_focus_command(L"Up", L"Ctrl+Alt+Up", ZIGONAUT_CHROME_FOCUS_UP);
         add_focus_command(L"Down", L"Ctrl+Alt+Down", ZIGONAUT_CHROME_FOCUS_DOWN);
+        add_focus_command(L"Previous", L"Ctrl+Alt+Page Up", ZIGONAUT_CHROME_FOCUS_PREVIOUS_PANE);
+        add_focus_command(L"Next", L"Ctrl+Alt+Page Down", ZIGONAUT_CHROME_FOCUS_NEXT_PANE);
         pane_item.Items().Append(focus_item);
+        auto resize_item = MenuFlyoutSubItem{};
+        resize_item.Text(L"Resize panes");
+        auto add_resize_command = [this, resize_item](std::wstring_view text, std::wstring_view shortcut, zigonaut_chrome_command_id command) {
+            auto item = MenuFlyoutItem{};
+            item.Text(text);
+            item.KeyboardAcceleratorTextOverride(shortcut);
+            app_command_revokers.emplace_back(item.Click(auto_revoke, [this, command](auto&&, auto&&) {
+                notify(command, 0);
+                focusTerminal();
+            }));
+            resize_item.Items().Append(item);
+        };
+        add_resize_command(L"Left", L"Ctrl+Alt+Shift+Left", ZIGONAUT_CHROME_RESIZE_PANE_LEFT);
+        add_resize_command(L"Right", L"Ctrl+Alt+Shift+Right", ZIGONAUT_CHROME_RESIZE_PANE_RIGHT);
+        add_resize_command(L"Up", L"Ctrl+Alt+Shift+Up", ZIGONAUT_CHROME_RESIZE_PANE_UP);
+        add_resize_command(L"Down", L"Ctrl+Alt+Shift+Down", ZIGONAUT_CHROME_RESIZE_PANE_DOWN);
+        pane_item.Items().Append(resize_item);
         view_item = MenuFlyoutSubItem{};
         view_item.Text(L"View");
         view_item.AccessKey(L"V");
@@ -860,6 +881,14 @@ struct Bridge {
         addAccelerator(Windows::System::VirtualKey::Right, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_RIGHT);
         addAccelerator(Windows::System::VirtualKey::Up, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_UP);
         addAccelerator(Windows::System::VirtualKey::Down, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_DOWN);
+        addAccelerator(Windows::System::VirtualKey::Left, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_RESIZE_PANE_LEFT);
+        addAccelerator(Windows::System::VirtualKey::Right, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_RESIZE_PANE_RIGHT);
+        addAccelerator(Windows::System::VirtualKey::Up, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_RESIZE_PANE_UP);
+        addAccelerator(Windows::System::VirtualKey::Down, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_RESIZE_PANE_DOWN);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_PRIOR), Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_PREVIOUS_PANE);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_NEXT), Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_FOCUS_NEXT_PANE);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_OEM_PLUS), Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Menu, ZIGONAUT_CHROME_EQUALIZE_PANES);
+        addAccelerator(static_cast<Windows::System::VirtualKey>(VK_RETURN), Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_TOGGLE_PANE_ZOOM);
         addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_SELECT_NEXT);
         addAccelerator(Windows::System::VirtualKey::Tab, Windows::System::VirtualKeyModifiers::Control | Windows::System::VirtualKeyModifiers::Shift, ZIGONAUT_CHROME_SELECT_PREVIOUS);
         addAccelerator(Windows::System::VirtualKey::Number0, Windows::System::VirtualKeyModifiers::Control, ZIGONAUT_CHROME_ZOOM_RESET);

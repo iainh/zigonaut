@@ -47,6 +47,7 @@ pub const Tree = struct {
     allocator: std.mem.Allocator,
     root: ?*Node,
     focused: ?PaneId,
+    zoomed: ?PaneId = null,
 
     pub fn init(allocator: std.mem.Allocator, pane_id: PaneId) (Error || std.mem.Allocator.Error)!Tree {
         if (pane_id == 0) return error.InvalidId;
@@ -59,7 +60,7 @@ pub const Tree = struct {
 
     pub fn deinit(self: *Tree) void {
         if (self.root) |root| destroyNode(self.allocator, root);
-        self.* = .{ .allocator = self.allocator, .root = null, .focused = null };
+        self.* = .{ .allocator = self.allocator, .root = null, .focused = null, .zoomed = null };
     }
 
     pub fn split(self: *Tree, target: PaneId, new_pane: PaneId, split_id: SplitId, axis: Axis) (Error || std.mem.Allocator.Error)!void {
@@ -82,6 +83,7 @@ pub const Tree = struct {
             .first = first,
             .second = second,
         } };
+        self.zoomed = null;
         self.assertValid();
     }
 
@@ -112,8 +114,10 @@ pub const Tree = struct {
             .second = if (before) old_target else incoming,
         } };
         self.focused = source.focused;
+        self.zoomed = null;
         source.root = null;
         source.focused = null;
+        source.zoomed = null;
         self.assertValid();
         source.assertValid();
     }
@@ -144,12 +148,14 @@ pub const Tree = struct {
             .second = if (before) old_target else incoming,
         } };
         self.focused = source;
+        self.zoomed = null;
         self.assertValid();
     }
 
     pub fn focus(self: *Tree, pane_id: PaneId) bool {
         if (findPane(self.root, pane_id) == null) return false;
         self.focused = pane_id;
+        if (self.zoomed != null) self.zoomed = pane_id;
         self.assertValid();
         return true;
     }
@@ -180,6 +186,18 @@ pub const Tree = struct {
         if (self.root) |root| _ = try writeNode(root, writer);
     }
 
+    pub fn presentationNodeCount(self: *const Tree) usize {
+        return if (self.zoomed != null) 1 else self.nodeCount();
+    }
+
+    pub fn writePresentation(self: *const Tree, writer: anytype) !void {
+        if (self.zoomed) |pane_id| {
+            try writer.leaf(pane_id);
+        } else {
+            try self.writePreorder(writer);
+        }
+    }
+
     pub fn close(self: *Tree, pane_id: PaneId) bool {
         if (findPane(self.root, pane_id) == null) return false;
         var previous: ?PaneId = null;
@@ -188,7 +206,28 @@ pub const Tree = struct {
         neighbors(self.root.?, pane_id, &seen, &previous, &next);
         self.root = removeLeaf(self.allocator, self.root.?, pane_id);
         if (self.focused == pane_id) self.focused = previous orelse next;
-        if (self.root == null) self.focused = null;
+        if (self.zoomed == pane_id) self.zoomed = null;
+        if (self.root == null) {
+            self.focused = null;
+            self.zoomed = null;
+        }
+        self.assertValid();
+        return true;
+    }
+
+    pub fn focusCycle(self: *Tree, forward: bool) bool {
+        const current = self.focused orelse return false;
+        var previous: ?PaneId = null;
+        var next: ?PaneId = null;
+        var seen = false;
+        neighbors(self.root orelse return false, current, &seen, &previous, &next);
+        const destination = if (forward)
+            next orelse firstLeaf(self.root.?)
+        else
+            previous orelse lastLeaf(self.root.?);
+        if (destination == current) return false;
+        self.focused = destination;
+        if (self.zoomed != null) self.zoomed = destination;
         self.assertValid();
         return true;
     }
@@ -226,18 +265,54 @@ pub const Tree = struct {
         };
         if (best) |id| {
             self.focused = id;
+            if (self.zoomed != null) self.zoomed = id;
             return true;
         }
         return false;
     }
 
+    pub fn resizeFocused(self: *Tree, direction: Direction, amount: u16) bool {
+        if (amount == 0) return false;
+        const focused = self.focused orelse return false;
+        const axis: Axis = if (direction == .left or direction == .right) .left_right else .top_bottom;
+        const target = findResizeTarget(self.root orelse return false, focused, axis) orelse return false;
+        const old = target.split.ratio;
+        const minimum: u16 = 6554;
+        const maximum: u16 = 58981;
+        const next: u16 = if (direction == .left or direction == .up)
+            @intCast(@max(@as(i32, minimum), @as(i32, old) - amount))
+        else
+            @intCast(@min(@as(u32, maximum), @as(u32, old) + amount));
+        if (next == old) return false;
+        target.split.ratio = next;
+        self.zoomed = null;
+        self.assertValid();
+        return true;
+    }
+
+    pub fn equalize(self: *Tree) bool {
+        const root = self.root orelse return false;
+        const changed = equalizeNode(root);
+        self.assertValid();
+        return changed;
+    }
+
+    pub fn toggleZoom(self: *Tree) bool {
+        if (self.nodeCount() <= 1) return false;
+        self.zoomed = if (self.zoomed == null) self.focused else null;
+        self.assertValid();
+        return true;
+    }
+
     fn assertValid(self: *const Tree) void {
         const root = self.root orelse {
             std.debug.assert(self.focused == null);
+            std.debug.assert(self.zoomed == null);
             return;
         };
         std.debug.assert(self.focused != null);
         std.debug.assert(findPane(root, self.focused.?) != null);
+        if (self.zoomed) |pane_id| std.debug.assert(findPane(root, pane_id) != null);
         std.debug.assert(countNodes(root) <= max_nodes);
         assertNodeValid(root, root);
     }
@@ -269,6 +344,56 @@ fn findSplit(root: ?*Node, id: SplitId) ?*Node {
     return switch (node.*) {
         .leaf => null,
         .split => |split| if (split.id == id) node else findSplit(split.first, id) orelse findSplit(split.second, id),
+    };
+}
+
+fn firstLeaf(node: *const Node) PaneId {
+    return switch (node.*) {
+        .leaf => |id| id,
+        .split => |split| firstLeaf(split.first),
+    };
+}
+
+fn lastLeaf(node: *const Node) PaneId {
+    return switch (node.*) {
+        .leaf => |id| id,
+        .split => |split| lastLeaf(split.second),
+    };
+}
+
+fn findResizeTarget(node: *Node, pane_id: PaneId, axis: Axis) ?*Node {
+    return switch (node.*) {
+        .leaf => null,
+        .split => |split| {
+            const child = if (findPane(split.first, pane_id) != null) split.first else if (findPane(split.second, pane_id) != null) split.second else return null;
+            return findResizeTarget(child, pane_id, axis) orelse if (split.axis == axis) node else null;
+        },
+    };
+}
+
+fn axisWeight(node: *const Node, axis: Axis) u32 {
+    return switch (node.*) {
+        .leaf => 1,
+        .split => |split| if (split.axis == axis)
+            axisWeight(split.first, axis) + axisWeight(split.second, axis)
+        else
+            1,
+    };
+}
+
+fn equalizeNode(node: *Node) bool {
+    return switch (node.*) {
+        .leaf => false,
+        .split => |*split| {
+            const first_weight = axisWeight(split.first, split.axis);
+            const second_weight = axisWeight(split.second, split.axis);
+            const ratio: u16 = @intCast((@as(u64, first_weight) * std.math.maxInt(u16)) / (first_weight + second_weight));
+            const changed = split.ratio != ratio;
+            split.ratio = ratio;
+            const first_changed = equalizeNode(split.first);
+            const second_changed = equalizeNode(split.second);
+            return first_changed or second_changed or changed;
+        },
     };
 }
 
@@ -461,6 +586,64 @@ test "directional focus handles nested unequal splits and outside edges" {
     try std.testing.expect(!tree.focusDirection(.down));
     try std.testing.expect(tree.focusDirection(.left));
     try std.testing.expectEqual(@as(?PaneId, 1), tree.focused);
+}
+
+test "focus cycling wraps and carries zoom" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    try tree.split(1, 2, 11, .left_right);
+    try tree.split(2, 3, 12, .top_bottom);
+
+    try std.testing.expect(tree.toggleZoom());
+    try std.testing.expect(tree.focusCycle(true));
+    try std.testing.expectEqual(@as(?PaneId, 2), tree.focused);
+    try std.testing.expectEqual(tree.focused, tree.zoomed);
+    try std.testing.expect(tree.focusCycle(true));
+    try std.testing.expect(tree.focusCycle(true));
+    try std.testing.expectEqual(@as(?PaneId, 1), tree.focused);
+    try std.testing.expect(tree.focusCycle(false));
+    try std.testing.expectEqual(@as(?PaneId, 3), tree.focused);
+}
+
+test "resize uses nearest matching ancestor and clears zoom" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    try tree.split(1, 2, 11, .left_right);
+    try tree.split(2, 3, 12, .top_bottom);
+    try std.testing.expect(tree.focus(3));
+    try std.testing.expect(tree.toggleZoom());
+
+    try std.testing.expect(tree.resizeFocused(.up, 3277));
+    try std.testing.expectEqual(@as(u16, 29491), findSplit(tree.root, 12).?.split.ratio);
+    try std.testing.expectEqual(@as(?PaneId, null), tree.zoomed);
+    try std.testing.expect(tree.resizeFocused(.right, 3277));
+    try std.testing.expectEqual(@as(u16, 36045), findSplit(tree.root, 11).?.split.ratio);
+}
+
+test "equalize weights nested panes along their shared axis" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    try tree.split(1, 2, 11, .left_right);
+    try tree.split(2, 3, 12, .left_right);
+    try tree.setRatio(11, 12345);
+    try tree.setRatio(12, 54321);
+
+    try std.testing.expect(tree.equalize());
+    try std.testing.expectEqual(@as(u16, 21845), findSplit(tree.root, 11).?.split.ratio);
+    try std.testing.expectEqual(@as(u16, 32767), findSplit(tree.root, 12).?.split.ratio);
+    try std.testing.expect(!tree.equalize());
+}
+
+test "zoom presents only the focused pane without changing structure" {
+    var tree = try Tree.init(std.testing.allocator, 1);
+    defer tree.deinit();
+    try tree.split(1, 2, 11, .left_right);
+    try std.testing.expect(tree.focus(2));
+    try std.testing.expect(tree.toggleZoom());
+    try std.testing.expectEqual(@as(usize, 1), tree.presentationNodeCount());
+    try std.testing.expectEqual(@as(usize, 3), tree.nodeCount());
+    try std.testing.expect(tree.toggleZoom());
+    try std.testing.expectEqual(@as(usize, 3), tree.presentationNodeCount());
 }
 
 test "close collapses parents and selects preorder neighbor" {

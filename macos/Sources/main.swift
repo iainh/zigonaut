@@ -528,6 +528,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
     @objc func focusRight(_ sender: Any?) { current?.focus(.right) }
     @objc func focusUp(_ sender: Any?) { current?.focus(.up) }
     @objc func focusDown(_ sender: Any?) { current?.focus(.down) }
+    @objc func focusPreviousPane(_ sender: Any?) { current?.focusCycle(forward: false) }
+    @objc func focusNextPane(_ sender: Any?) { current?.focusCycle(forward: true) }
+    @objc func resizePaneLeft(_ sender: Any?) { current?.resize(.left) }
+    @objc func resizePaneRight(_ sender: Any?) { current?.resize(.right) }
+    @objc func resizePaneUp(_ sender: Any?) { current?.resize(.up) }
+    @objc func resizePaneDown(_ sender: Any?) { current?.resize(.down) }
+    @objc func equalizePanes(_ sender: Any?) { current?.equalizePanes() }
+    @objc func togglePaneZoom(_ sender: Any?) { current?.togglePaneZoom() }
 
     @objc func closePane(_ sender: Any?) {
         guard let window = NSApp.keyWindow else { return }
@@ -678,6 +686,15 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         view.addItem(item("Focus Right", #selector(focusRight), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.control, .option]))
         view.addItem(item("Focus Up", #selector(focusUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.control, .option]))
         view.addItem(item("Focus Down", #selector(focusDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Previous Pane", #selector(focusPreviousPane), String(UnicodeScalar(NSPageUpFunctionKey)!), [.control, .option]))
+        view.addItem(item("Focus Next Pane", #selector(focusNextPane), String(UnicodeScalar(NSPageDownFunctionKey)!), [.control, .option]))
+        view.addItem(.separator())
+        view.addItem(item("Resize Panes Left", #selector(resizePaneLeft), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [.control, .option, .shift]))
+        view.addItem(item("Resize Panes Right", #selector(resizePaneRight), String(UnicodeScalar(NSRightArrowFunctionKey)!), [.control, .option, .shift]))
+        view.addItem(item("Resize Panes Up", #selector(resizePaneUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.control, .option, .shift]))
+        view.addItem(item("Resize Panes Down", #selector(resizePaneDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.control, .option, .shift]))
+        view.addItem(item("Equalize Panes", #selector(equalizePanes), "=", [.control, .option]))
+        view.addItem(item("Toggle Pane Zoom", #selector(togglePaneZoom), "\r", [.control, .shift]))
         view.addItem(.separator())
         view.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
         let window = menu("Window")
@@ -704,6 +721,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         case #selector(focusRight): return current?.canFocus(.right) == true
         case #selector(focusUp): return current?.canFocus(.up) == true
         case #selector(focusDown): return current?.canFocus(.down) == true
+        case #selector(focusPreviousPane), #selector(focusNextPane),
+          #selector(equalizePanes), #selector(togglePaneZoom):
+            return (current?.panes.count ?? 0) > 1
+        case #selector(resizePaneLeft): return current?.canResize(.left) == true
+        case #selector(resizePaneRight): return current?.canResize(.right) == true
+        case #selector(resizePaneUp): return current?.canResize(.up) == true
+        case #selector(resizePaneDown): return current?.canResize(.down) == true
         case #selector(findNext), #selector(findPrevious):
             return current?.findVisible == true && !(current?.findQuery.isEmpty ?? true)
                 && (current?.focused?.searchMatchCount ?? 0) > 0

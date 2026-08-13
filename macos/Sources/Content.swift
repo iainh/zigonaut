@@ -104,7 +104,7 @@ struct ContentView: View {
           FindBar(window: window, terminal: terminal)
         }
       }
-      PaneView(node: window.root, window: window)
+      PaneView(node: window.visibleRoot, window: window)
     }
     .background(windowBackground)
     .coordinateSpace(name: paneCoordinateSpace)

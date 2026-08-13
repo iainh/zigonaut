@@ -81,6 +81,10 @@ The versioned JSON document is managed by the settings window and uses ordered p
 | `Ctrl+Shift+O` | Split the focused pane to the right |
 | `Ctrl+Shift+E` | Split the focused pane downward |
 | `Ctrl+Alt+Arrow` | Move focus between panes |
+| `Ctrl+Alt+Page Up` / `Ctrl+Alt+Page Down` | Cycle focus through panes |
+| `Ctrl+Alt+Shift+Arrow` | Resize the nearest pane divider by 5% |
+| `Ctrl+Alt+=` | Equalize pane sizes |
+| `Ctrl+Shift+Enter` | Toggle focused-pane zoom |
 | `Ctrl+Shift+W` | Close the focused pane, tab, or window |
 | `Ctrl+Shift+F` | Search scrollback |
 | `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Move between shell prompts |

@@ -31,6 +31,10 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 | Close focused pane/tab | Command-W | Standard macOS convention (Windows uses Control-Shift-W) |
 | Next / previous tab | Command-Shift-] / Command-Shift-[ | Standard tab convention |
 | Focus left/right/up/down | Control-Option-Arrow | Moves to the nearest pane in that direction |
+| Focus previous/next pane | Control-Option-Page Up / Page Down | Wraps through panes in layout order |
+| Resize panes | Control-Option-Shift-Arrow | Moves the nearest matching divider by 5% |
+| Equalize panes | Control-Option-= | Gives panes equal space along each split axis |
+| Toggle focused-pane zoom | Control-Shift-Return | Preserves the underlying layout |
 | Find / copy / paste | Command-F / Command-C / Command-V | Standard macOS convention |
 | Zoom in/out/reset | Command-Plus / Command-Minus / Command-0 | Standard macOS convention |
 | Settings | Command-Comma | Standard macOS convention |
