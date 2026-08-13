@@ -115,6 +115,13 @@ struct TerminalImageKey: Hashable {
   let generation: UInt64
 }
 
+struct TerminalLink {
+  let url: URL
+  let row: Int
+  let startColumn: Int
+  let endColumn: Int
+}
+
 struct TerminalRenderImage {
   let image: NSImage
   let cgImage: CGImage
@@ -467,13 +474,17 @@ struct TerminalPalette: Equatable {
     return zigonaut_core_has_foreground_job(core.pointer)
   }
 
-  func link(column: Int, row: Int) -> URL? {
+  func link(column: Int, row: Int) -> TerminalLink? {
     guard let core else { return nil }
     var bytes = [UInt8](repeating: 0, count: 2048)
-    let required = zigonaut_core_link_at(core.pointer, UInt16(clamping: column), UInt16(clamping: row), &bytes, UInt32(bytes.count))
+    var startColumn: UInt16 = 0
+    var endColumn: UInt16 = 0
+    let required = zigonaut_core_link_at(core.pointer, UInt16(clamping: column),
+      UInt16(clamping: row), &bytes, UInt32(bytes.count), &startColumn, &endColumn)
     guard required > 0, required <= bytes.count,
-      let value = String(bytes: bytes.prefix(Int(required)), encoding: .utf8) else { return nil }
-    return URL(string: value)
+      let value = String(bytes: bytes.prefix(Int(required)), encoding: .utf8),
+      let url = URL(string: value) else { return nil }
+    return TerminalLink(url: url, row: row, startColumn: Int(startColumn), endColumn: Int(endColumn))
   }
   func applyClipboardSettings() {
     if let core {

@@ -954,14 +954,17 @@ export fn zigonaut_core_title(self: ?*Core, output: ?[*]u8, capacity: u32) u32 {
     return @intCast(title.len);
 }
 
-/// Returns the required URI length and copies a bounded, allowed-scheme URI.
-export fn zigonaut_core_link_at(self: ?*Core, column: u16, row: u16, output: ?[*]u8, capacity: u32) u32 {
+/// Returns the required URI length, copies a bounded allowed-scheme URI, and
+/// reports the coherent viewport-column range occupied by the link.
+export fn zigonaut_core_link_at(self: ?*Core, column: u16, row: u16, output: ?[*]u8, capacity: u32, start_column: ?*u16, end_column: ?*u16) u32 {
     const core = self orelse return 0;
     core.mutex.lock();
     defer core.mutex.unlock();
     const found = core.terminal.linkAtAlloc(std.heap.c_allocator, .{ .x = column, .y = row }) catch return 0;
     const link = found orelse return 0;
     defer std.heap.c_allocator.free(link.uri);
+    if (start_column) |start| start.* = link.start_column;
+    if (end_column) |end| end.* = link.end_column;
     const count = @min(capacity, link.uri.len);
     if (output) |destination| @memcpy(destination[0..count], link.uri[0..count]);
     return @intCast(@min(link.uri.len, std.math.maxInt(u32)));
@@ -1348,7 +1351,7 @@ test "null ABI handles are safe" {
     try std.testing.expect(!zigonaut_core_has_selection(null));
     zigonaut_core_write(null, null, 0);
     zigonaut_core_selection_begin(null, 0, 0, 0, false);
-    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0));
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_link_at(null, 0, 0, null, 0, null, null));
     var notification = std.mem.zeroes(NotificationResult);
     zigonaut_core_take_notification(null, null, 0, null, 0, &notification);
     try std.testing.expectEqual(@as(u8, 2), notification.status);

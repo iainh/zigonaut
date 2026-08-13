@@ -58,7 +58,7 @@ void zigonaut_core_progress(zigonaut_core *, zigonaut_progress_v1 *);
 /* True only while a foreground process group other than the login shell owns the PTY. */
 bool zigonaut_core_has_foreground_job(zigonaut_core *);
 uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity);
-uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity);
+uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity, uint16_t *start_column, uint16_t *end_column);
 void zigonaut_core_take_notification(zigonaut_core *, uint8_t *title, uint32_t title_capacity, uint8_t *body, uint32_t body_capacity, zigonaut_notification_result_v1 *);
 /* Enabled means intentionally permit immediate OSC 52 writes; accepted writes are queued for the host. */
 void zigonaut_core_set_clipboard_write(zigonaut_core *, bool enabled, uint32_t max_bytes);

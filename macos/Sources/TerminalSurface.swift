@@ -61,6 +61,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let batched: Bool
   }
 
+  private struct HoveredLink: Equatable {
+    let row: Int
+    let startColumn: Int
+    let endColumn: Int
+  }
+
   let model: TerminalModel
   var preferences: Preferences
   var focused = false
@@ -74,6 +80,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var selectionShouldCopy = false
   private var trackingArea: NSTrackingArea?
   private var lastMousePoint: NSPoint?
+  private var hoveredLink: HoveredLink?
   private var cachedFontFamily = ""
   private var cachedFontSize = 0.0
   private var cachedFontWeight = ""
@@ -405,7 +412,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   override func updateTrackingAreas() {
     if let trackingArea { removeTrackingArea(trackingArea) }
-    let area = NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
+    let area = NSTrackingArea(rect: bounds,
+      options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
       owner: self, userInfo: nil)
     addTrackingArea(area)
     trackingArea = area
@@ -415,6 +423,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   override func mouseMoved(with event: NSEvent) {
     lastMousePoint = convert(event.locationInWindow, from: nil)
     updateLinkCursor(event.modifierFlags)
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    lastMousePoint = nil
+    setHoveredLink(nil)
+    NSCursor.arrow.set()
   }
 
   override func flagsChanged(with event: NSEvent) {
@@ -428,12 +442,33 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func updateLinkCursor(_ flags: NSEvent.ModifierFlags) {
     guard flags.contains(.command), let point = lastMousePoint else {
+      setHoveredLink(nil)
+      NSCursor.arrow.set()
+      return
+    }
+    let grid = NSRect(x: originX, y: originY,
+      width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)
+    guard grid.contains(point) else {
+      setHoveredLink(nil)
       NSCursor.arrow.set()
       return
     }
     let column = max(0, Int((point.x - originX) / cellWidth))
     let row = max(0, Int((point.y - originY) / lineHeight))
-    (model.link(column: column, row: row) == nil ? NSCursor.arrow : NSCursor.pointingHand).set()
+    guard let link = model.link(column: column, row: row) else {
+      setHoveredLink(nil)
+      NSCursor.arrow.set()
+      return
+    }
+    setHoveredLink(HoveredLink(
+      row: link.row, startColumn: link.startColumn, endColumn: link.endColumn))
+    NSCursor.pointingHand.set()
+  }
+
+  private func setHoveredLink(_ value: HoveredLink?) {
+    guard hoveredLink != value else { return }
+    hoveredLink = value
+    needsDisplay = true
   }
 
   override func viewDidMoveToWindow() {
@@ -650,8 +685,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     onFocus()
     window?.makeFirstResponder(self)
     let point = cell(event)
-    if event.modifierFlags.contains(.command), let url = model.link(column: point.0, row: point.1) {
-      NSWorkspace.shared.open(url)
+    if event.modifierFlags.contains(.command), let link = model.link(column: point.0, row: point.1) {
+      NSWorkspace.shared.open(link.url)
       return
     }
     if shouldReport(event) {
@@ -823,7 +858,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
     drawText(snapshot.cells)
     for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
-      drawDecorations(cell, rect: cellRect(cell))
+      drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
     }
     drawImages(snapshot.images)
     drawCursor(snapshot.frame)
@@ -946,7 +981,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let hasDecorations = snapshot.cells.contains {
       !$0.text.isEmpty && $0.occupancy != 2
         && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
-    }
+    } || hoveredLink != nil
     if hasDecorations {
       rasterizeDecorations(snapshot.cells, in: decorationBitmap)
       guard let decorationData = decorationBitmap.data else { return disableMetal() }
@@ -1136,9 +1171,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
     for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
-      drawDecorations(cell, rect: cellRect(cell))
+      drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
     }
     NSGraphicsContext.restoreGraphicsState()
+  }
+
+  private func isHoveredLinkCell(_ cell: TerminalRenderCell) -> Bool {
+    guard let hoveredLink else { return false }
+    return cell.y == hoveredLink.row && cell.x >= hoveredLink.startColumn
+      && cell.x < hoveredLink.endColumn
   }
 
   private func drawMetalImages(_ images: [TerminalRenderImage], encoder: MTLRenderCommandEncoder,
@@ -1530,10 +1571,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     markedText.draw(at: point)
   }
 
-  private func drawDecorations(_ cell: TerminalRenderCell, rect: NSRect) {
-    guard cell.underlineStyle != 0 || cell.strikethrough || cell.overline else { return }
+  private func drawDecorations(_ cell: TerminalRenderCell, rect: NSRect,
+    forceUnderline: Bool = false)
+  {
+    let underlineStyle = forceUnderline ? max(cell.underlineStyle, 1) : cell.underlineStyle
+    guard underlineStyle != 0 || cell.strikethrough || cell.overline else { return }
     color(cell.underlineColor).setStroke()
-    switch cell.underlineStyle {
+    switch underlineStyle {
     case 1:
       strokeLine(y: rect.maxY - 1.5, rect: rect, width: 1)
     case 2:
@@ -1546,7 +1590,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     case 5:
       strokePattern(y: rect.maxY - 1.5, rect: rect, pattern: [4, 2], rounded: false)
     default:
-      if cell.underlineStyle != 0 { strokeLine(y: rect.maxY - 1.5, rect: rect, width: 1) }
+      if underlineStyle != 0 { strokeLine(y: rect.maxY - 1.5, rect: rect, width: 1) }
     }
     if cell.strikethrough {
       strokeLine(y: rect.midY, rect: rect, width: 1)
