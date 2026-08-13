@@ -74,6 +74,8 @@ The versioned JSON document is managed by the settings window and uses ordered p
 
 ## Keyboard shortcuts
 
+See [Windows keyboard shortcuts](docs/keyboard-shortcuts-windows.md) for the complete Windows reference, including tab selection, clipboard alternatives, and search controls.
+
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+Shift+T` | Open a tab with the default profile |
