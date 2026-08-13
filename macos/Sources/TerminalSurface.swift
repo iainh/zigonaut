@@ -10,7 +10,7 @@ import ZigonautCore
 import ZigonautRenderSupport
 
 final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMenuItemValidation {
-  private struct TextStyle: Equatable {
+  private struct TextStyle: Hashable {
     let rgb: UInt32
     let bold: Bool
     let italic: Bool
@@ -35,6 +35,30 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let width: Int
     let height: Int
     let thickness: Int
+  }
+
+  private struct GlyphKey: Hashable {
+    let text: String
+    let style: TextStyle
+    let columns: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let batched: Bool
+  }
+
+  private struct CachedGlyph {
+    let texture: MTLTexture
+    let byteCount: Int
+    var lastUsed: UInt64
+  }
+
+  private struct MetalTextPlacement {
+    let text: String
+    let x: Int
+    let y: Int
+    let columns: Int
+    let style: TextStyle
+    let batched: Bool
   }
 
   let model: TerminalModel
@@ -79,7 +103,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var retainedBitmap: CGContext?
   private var overlayTexture: MTLTexture?
   private var overlayBitmap: CGContext?
+  private var decorationTexture: MTLTexture?
+  private var decorationBitmap: CGContext?
   private var metalImageTextures: [TerminalImageKey: MTLTexture] = [:]
+  private var metalGlyphTextures: [GlyphKey: CachedGlyph] = [:]
+  private var metalGlyphUse: UInt64 = 0
   private var retainedRowHashes: [UInt64] = []
   private var retainedViewportOffset: UInt64?
   private var retainedAppearance = ""
@@ -106,6 +134,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     cachedFonts.removeAll(keepingCapacity: true)
     cachedFontAdvances.removeAll(keepingCapacity: true)
     pseudographicsCache.removeAll(keepingCapacity: true)
+    metalGlyphTextures.removeAll(keepingCapacity: true)
     pseudographicsMetrics = nil
     let base = preferences.terminalFont(size: preferences.fontSize)
     cachedFonts[0] = base
@@ -422,6 +451,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     super.viewDidChangeBackingProperties()
     resizeTerminal()
     model.refresh()
+    metalGlyphTextures.removeAll(keepingCapacity: true)
     retainedPixelSize = .zero
     needsDisplay = true
   }
@@ -820,10 +850,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         bitsPerComponent: 8, bytesPerRow: pixelWidth * 4, space: colorSpace,
         bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
           | CGBitmapInfo.byteOrder32Little.rawValue)
+      decorationBitmap = CGContext(data: nil, width: pixelWidth, height: pixelHeight,
+        bitsPerComponent: 8, bytesPerRow: pixelWidth * 4, space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+          | CGBitmapInfo.byteOrder32Little.rawValue)
       retainedBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
       retainedBitmap?.scaleBy(x: scale, y: -scale)
       overlayBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
       overlayBitmap?.scaleBy(x: scale, y: -scale)
+      decorationBitmap?.translateBy(x: 0, y: CGFloat(pixelHeight))
+      decorationBitmap?.scaleBy(x: scale, y: -scale)
       let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
         width: pixelWidth, height: pixelHeight, mipmapped: false)
       descriptor.usage = [.shaderRead]
@@ -831,12 +867,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       retainedTexture = device.makeTexture(descriptor: descriptor)
       retainedScrollTexture = device.makeTexture(descriptor: descriptor)
       overlayTexture = device.makeTexture(descriptor: descriptor)
+      decorationTexture = device.makeTexture(descriptor: descriptor)
       retainedPixelSize = pixelSize
       retainedRowHashes = []
       retainedViewportOffset = nil
     }
     guard let bitmap = retainedBitmap, let texture = retainedTexture,
-      let overlayBitmap, let overlayTexture, let data = bitmap.data else { return disableMetal() }
+      let overlayBitmap, let overlayTexture, let decorationBitmap, let decorationTexture,
+      let data = bitmap.data else { return disableMetal() }
     let snapshot = model.renderSnapshot
     let appearance = [
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
@@ -901,6 +939,20 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       overlayTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
         withBytes: overlayData, bytesPerRow: overlayBitmap.bytesPerRow)
     }
+    let textPlacements = metalTextPlacements(snapshot.cells)
+    guard prepareMetalGlyphs(textPlacements, device: device, scale: scale) else {
+      return disableMetal()
+    }
+    let hasDecorations = snapshot.cells.contains {
+      !$0.text.isEmpty && $0.occupancy != 2
+        && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
+    }
+    if hasDecorations {
+      rasterizeDecorations(snapshot.cells, in: decorationBitmap)
+      guard let decorationData = decorationBitmap.data else { return disableMetal() }
+      decorationTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
+        withBytes: decorationData, bytesPerRow: decorationBitmap.bytesPerRow)
+    }
     guard let drawable = presentation.nextDrawable() else { return disableMetal() }
     guard let command = queue.makeCommandBuffer() else { return disableMetal() }
     let pass = MTLRenderPassDescriptor()
@@ -912,6 +964,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentTexture(texture, index: 0)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    drawMetalText(textPlacements, encoder: encoder, pipeline: overlayPipeline, scale: scale)
+    if hasDecorations {
+      encoder.setRenderPipelineState(overlayPipeline)
+      encoder.setFragmentTexture(decorationTexture, index: 0)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
     drawMetalImages(snapshot.images, encoder: encoder, pipeline: imagePipeline)
     if markedText.length > 0 {
       encoder.setRenderPipelineState(overlayPipeline)
@@ -933,6 +991,153 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
     drawMarkedText(frame)
+    NSGraphicsContext.restoreGraphicsState()
+  }
+
+  private func metalTextPlacements(_ cells: [TerminalRenderCell]) -> [MetalTextPlacement] {
+    var placements: [MetalTextPlacement] = []
+    var run: TextRun?
+    func flush() {
+      guard let current = run else { return }
+      placements.append(MetalTextPlacement(
+        text: String(decoding: current.bytes, as: UTF8.self), x: current.x, y: current.y,
+        columns: current.nextX - current.x, style: current.style, batched: true))
+      run = nil
+    }
+    for cell in cells {
+      if proceduralScalar(cell.text) != nil {
+        flush()
+        continue
+      }
+      guard cell.occupancy == 0 else {
+        flush()
+        if !cell.text.isEmpty && cell.occupancy != 2 {
+          placements.append(MetalTextPlacement(text: cell.text, x: cell.x, y: cell.y,
+            columns: cell.occupancy == 1 ? 2 : 1, style: textStyle(cell), batched: false))
+        }
+        continue
+      }
+      let bytes = Array((cell.text.isEmpty ? " " : cell.text).utf8)
+      let style = textStyle(cell)
+      if var current = run, current.y == cell.y, current.nextX == cell.x, current.style == style {
+        current.bytes.append(contentsOf: bytes)
+        current.nextX += 1
+        run = current
+      } else {
+        flush()
+        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: bytes)
+      }
+    }
+    flush()
+    return placements
+  }
+
+  private func glyphKey(_ placement: MetalTextPlacement, scale: CGFloat) -> GlyphKey? {
+    guard !placement.text.allSatisfy({ $0 == " " }) else { return nil }
+    return GlyphKey(text: placement.text, style: placement.style, columns: placement.columns,
+      pixelWidth: max(1, Int((CGFloat(placement.columns) * cellWidth * scale).rounded(.up))),
+      pixelHeight: max(1, Int((lineHeight * scale).rounded(.up))), batched: placement.batched)
+  }
+
+  private func prepareMetalGlyphs(_ placements: [MetalTextPlacement], device: MTLDevice,
+    scale: CGFloat) -> Bool
+  {
+    metalGlyphUse &+= 1
+    if metalGlyphUse == 0 { metalGlyphUse = 1 }
+    let loader = MTKTextureLoader(device: device)
+    var active = Set<GlyphKey>()
+    for placement in placements {
+      guard let key = glyphKey(placement, scale: scale) else { continue }
+      active.insert(key)
+      if var cached = metalGlyphTextures[key] {
+        cached.lastUsed = metalGlyphUse
+        metalGlyphTextures[key] = cached
+        continue
+      }
+      guard let texture = makeGlyphTexture(key, loader: loader, scale: scale) else { return false }
+      metalGlyphTextures[key] = CachedGlyph(
+        texture: texture, byteCount: texture.width * texture.height * 4, lastUsed: metalGlyphUse)
+    }
+    let maximumGlyphs = 2_048
+    let maximumBytes = 64 * 1_024 * 1_024
+    var cachedBytes = metalGlyphTextures.values.reduce(0) { $0 + $1.byteCount }
+    if metalGlyphTextures.count > maximumGlyphs || cachedBytes > maximumBytes {
+      let removable = metalGlyphTextures
+        .filter { !active.contains($0.key) }
+        .sorted { $0.value.lastUsed < $1.value.lastUsed }
+      for entry in removable {
+        guard metalGlyphTextures.count > maximumGlyphs || cachedBytes > maximumBytes else { break }
+        metalGlyphTextures.removeValue(forKey: entry.key)
+        cachedBytes -= entry.value.byteCount
+      }
+    }
+    return true
+  }
+
+  private func makeGlyphTexture(_ key: GlyphKey, loader: MTKTextureLoader,
+    scale: CGFloat) -> MTLTexture?
+  {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let bitmap = CGContext(data: nil, width: key.pixelWidth, height: key.pixelHeight,
+      bitsPerComponent: 8, bytesPerRow: key.pixelWidth * 4, space: colorSpace,
+      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+        | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+    bitmap.translateBy(x: 0, y: CGFloat(key.pixelHeight))
+    bitmap.scaleBy(x: scale, y: -scale)
+    let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    var traits: NSFontTraitMask = []
+    if key.style.bold { traits.insert(.boldFontMask) }
+    if key.style.italic { traits.insert(.italicFontMask) }
+    let glyphFont = styledFont(traits: traits)
+    var attributes: [NSAttributedString.Key: Any] = [
+      .font: glyphFont,
+      .foregroundColor: color(key.style.rgb, alpha: key.style.faint ? 0.55 : 1),
+    ]
+    if key.batched && key.text.unicodeScalars.allSatisfy(\.isASCII) {
+      attributes[.ligature] = 0
+      attributes[.kern] = cellWidth - styledAdvance(traits: traits, font: glyphFont)
+    }
+    let target = NSRect(x: 0, y: 0, width: CGFloat(key.columns) * cellWidth, height: lineHeight)
+    NSBezierPath(rect: target).addClip()
+    NSAttributedString(string: key.text, attributes: attributes).draw(
+      at: NSPoint(x: 0, y: font.ascender - glyphFont.ascender))
+    NSGraphicsContext.restoreGraphicsState()
+    guard let image = bitmap.makeImage() else { return nil }
+    return try? loader.newTexture(cgImage: image, options: [
+      .SRGB: false, .origin: MTKTextureLoader.Origin.topLeft,
+    ])
+  }
+
+  private func drawMetalText(_ placements: [MetalTextPlacement], encoder: MTLRenderCommandEncoder,
+    pipeline: MTLRenderPipelineState, scale: CGFloat)
+  {
+    encoder.setRenderPipelineState(pipeline)
+    for placement in placements {
+      guard let key = glyphKey(placement, scale: scale),
+        let cached = metalGlyphTextures[key] else { continue }
+      let destination = CGRect(
+        x: originX + CGFloat(placement.x) * cellWidth,
+        y: originY + CGFloat(placement.y) * lineHeight,
+        width: CGFloat(placement.columns) * cellWidth, height: lineHeight)
+      var vertices = quadVertices(destination: destination,
+        source: CGRect(x: 0, y: 0, width: cached.texture.width, height: cached.texture.height),
+        textureWidth: CGFloat(cached.texture.width), textureHeight: CGFloat(cached.texture.height))
+      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      encoder.setFragmentTexture(cached.texture, index: 0)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+  }
+
+  private func rasterizeDecorations(_ cells: [TerminalRenderCell], in bitmap: CGContext) {
+    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
+    let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
+      drawDecorations(cell, rect: cellRect(cell))
+    }
     NSGraphicsContext.restoreGraphicsState()
   }
 
@@ -1089,10 +1294,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       let cells = snapshot.cellsByRow.indices.contains(row) ? snapshot.cellsByRow[row] : []
       drawEdgeColors(cells)
       for cell in cells { drawBackground(cell) }
-      drawText(cells)
-      for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
-        drawDecorations(cell, rect: cellRect(cell))
-      }
+      drawRetainedPseudographics(cells)
       bitmap.restoreGState()
     }
     if let rows {
@@ -1202,6 +1404,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       }
     }
     flush()
+  }
+
+  private func drawRetainedPseudographics(_ cells: [TerminalRenderCell]) {
+    for cell in cells {
+      let columns = cell.occupancy == 1 ? 2 : 1
+      guard let scalar = proceduralScalar(cell.text),
+        let mask = pseudographicsMask(codepoint: scalar, columns: columns) else { continue }
+      drawPseudographics(mask, cell: cell)
+    }
   }
 
   private func proceduralScalar(_ text: String) -> UInt32? {
