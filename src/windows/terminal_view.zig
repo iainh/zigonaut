@@ -41,7 +41,7 @@ const search_refresh_interval_ms = 33;
 const process_exit_refresh_interval_ms = 50;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
-const wheel_rows = 3;
+const default_wheel_rows = 3;
 const minimum_columns = 10;
 const minimum_rows = 4;
 
@@ -1242,10 +1242,11 @@ pub const View = struct {
     }
 
     pub fn handleMouseWheelDelta(self: *View, delta: i32) void {
-        self.wheel_remainder += delta;
-        const row_delta = @divTrunc(self.wheel_remainder, @divExact(win.WHEEL_DELTA, wheel_rows));
-        self.wheel_remainder -= row_delta * @divExact(win.WHEEL_DELTA, wheel_rows);
-        self.scrollViewport(-@as(isize, row_delta));
+        var lines: win.UINT = default_wheel_rows;
+        _ = win.SystemParametersInfoW(win.SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        const result = wheelScroll(self.wheel_remainder, delta, lines, self.scrollbar().len);
+        self.wheel_remainder = result.remainder;
+        self.scrollViewport(-result.rows);
     }
 
     fn handleMouseWheel(self: *View, wparam: usize, lparam: win.LPARAM) void {
@@ -2786,6 +2787,24 @@ fn wheelAccumulation(remainder: i32, delta: i32) WheelAccumulation {
     return .{ .steps = steps, .remainder = total - steps * win.WHEEL_DELTA };
 }
 
+const WheelScroll = struct { rows: isize, remainder: i32 };
+fn wheelScroll(remainder: i32, delta: i32, lines: win.UINT, page_rows: usize) WheelScroll {
+    if (lines == 0) return .{ .rows = 0, .remainder = 0 };
+    if (lines == std.math.maxInt(win.UINT)) {
+        const accumulated = wheelAccumulation(remainder, delta);
+        return .{
+            .rows = @as(isize, accumulated.steps) * @as(isize, @intCast(@min(page_rows, std.math.maxInt(isize)))),
+            .remainder = accumulated.remainder,
+        };
+    }
+    const total = @as(i64, remainder) + @as(i64, delta) * @as(i64, lines);
+    const rows = @divTrunc(total, win.WHEEL_DELTA);
+    return .{
+        .rows = @intCast(rows),
+        .remainder = @intCast(total - rows * win.WHEEL_DELTA),
+    };
+}
+
 const ClipboardShortcut = enum { copy, paste };
 
 fn clipboardShortcut(key: win.WPARAM, control: bool, shift: bool, alt: bool) ?ClipboardShortcut {
@@ -2954,6 +2973,13 @@ test "protocol wheel accumulation keeps partial deltas" {
     try std.testing.expectEqual(WheelAccumulation{ .steps = 0, .remainder = 80 }, wheelAccumulation(40, 40));
     try std.testing.expectEqual(WheelAccumulation{ .steps = 1, .remainder = 0 }, wheelAccumulation(80, 40));
     try std.testing.expectEqual(WheelAccumulation{ .steps = -1, .remainder = -20 }, wheelAccumulation(0, -140));
+}
+
+test "local wheel scrolling follows Windows line and page settings" {
+    try std.testing.expectEqual(WheelScroll{ .rows = 3, .remainder = 0 }, wheelScroll(0, 120, 3, 40));
+    try std.testing.expectEqual(WheelScroll{ .rows = 1, .remainder = 60 }, wheelScroll(0, 60, 3, 40));
+    try std.testing.expectEqual(WheelScroll{ .rows = 40, .remainder = 0 }, wheelScroll(0, 120, std.math.maxInt(win.UINT), 40));
+    try std.testing.expectEqual(WheelScroll{ .rows = 0, .remainder = 0 }, wheelScroll(40, 120, 0, 40));
 }
 
 test "balanced grid geometry divides residual space equally" {
