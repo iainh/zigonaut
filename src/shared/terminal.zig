@@ -998,6 +998,14 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_mode_set(self.terminal, vt.ghostty_mode_new(2026, false), enabled));
     }
 
+    pub fn encodeFocusReport(self: *Terminal, focused: bool, output: []u8) []const u8 {
+        var enabled = false;
+        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(1004, false), &enabled)) catch return output[0..0];
+        if (!enabled or output.len < 3) return output[0..0];
+        @memcpy(output[0..3], if (focused) "\x1b[I" else "\x1b[O");
+        return output[0..3];
+    }
+
     pub fn scrollbar(self: *Terminal) !Scrollbar {
         var state = std.mem.zeroes(vt.GhosttyTerminalScrollbar);
         try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_SCROLLBAR, &state));
@@ -2201,6 +2209,19 @@ test "libghostty exposes synchronized output mode" {
     try terminal.setSynchronizedOutput(true);
     try terminal.setSynchronizedOutput(false);
     try std.testing.expect(!terminal.synchronizedOutput());
+}
+
+test "focus reports are emitted only when requested" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    var buffer: [3]u8 = undefined;
+
+    try std.testing.expectEqualStrings("", terminal.encodeFocusReport(true, &buffer));
+    terminal.feed("\x1b[?1004h");
+    try std.testing.expectEqualStrings("\x1b[I", terminal.encodeFocusReport(true, &buffer));
+    try std.testing.expectEqualStrings("\x1b[O", terminal.encodeFocusReport(false, &buffer));
+    terminal.feed("\x1b[?1004l");
+    try std.testing.expectEqualStrings("", terminal.encodeFocusReport(false, &buffer));
 }
 
 test "libghostty emits decoded clipboard writes but ignores reads" {

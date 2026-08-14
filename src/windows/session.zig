@@ -920,6 +920,14 @@ pub const SessionRuntime = struct {
         return encoded.len != 0;
     }
 
+    pub fn sendFocus(self: *SessionRuntime, focused: bool) void {
+        var buffer: [3]u8 = undefined;
+        self.terminal_mutex.lock();
+        const encoded = self.terminal.encodeFocusReport(focused, &buffer);
+        self.terminal_mutex.unlock();
+        self.write(encoded) catch |err| log.debug("unable to write terminal focus report: {}", .{err});
+    }
+
     fn readerMain(self: *SessionRuntime) void {
         var buffer: [reader_buffer_bytes]u8 = undefined;
         var read_failure: ?anyerror = null;

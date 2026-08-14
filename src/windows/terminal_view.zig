@@ -2560,6 +2560,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_SETFOCUS => {
             if (view) |current| {
+                if (!current.focused) if (current.boundRuntime()) |runtime| runtime.sendFocus(true);
                 current.focused = true;
                 current.invalidate();
             }
@@ -2567,6 +2568,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         },
         win.WM_KILLFOCUS => {
             if (view) |current| {
+                if (current.focused) if (current.boundRuntime()) |runtime| runtime.sendFocus(false);
                 current.focused = false;
                 current.consumed_prompt_key = null;
                 current.consumed_application_key = null;
