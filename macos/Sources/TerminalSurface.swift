@@ -511,6 +511,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       encodedKeys.insert(event.keyCode)
       return
     }
+    if event.modifierFlags.contains(.control) && !event.modifierFlags.contains(.option) {
+      // AppKit maps control characters such as Ctrl-D to editing commands, so
+      // interpretKeyEvents may never commit text for the terminal to encode.
+      sendKey(event, action: event.isARepeat ? 1 : 0,
+        text: event.charactersIgnoringModifiers ?? "")
+      encodedKeys.insert(event.keyCode)
+      return
+    }
     // AppKit calls insertText synchronously for simple committed text. Keeping
     // this pending only across interpretation lets IME own composition while
     // still associating ordinary printable commits with their physical key.
@@ -577,9 +585,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     markedText = NSMutableAttributedString()
     markedSelection = NSRange(location: NSNotFound, length: 0)
     if !string.isEmpty, let event = pendingKeyEvent, !wasMarked {
-      let text = event.modifierFlags.contains(.control) && !event.modifierFlags.contains(.option)
-        ? (event.charactersIgnoringModifiers ?? string) : string
-      sendKey(event, action: event.isARepeat ? 1 : 0, text: text)
+      sendKey(event, action: event.isARepeat ? 1 : 0, text: string)
       encodedKeys.insert(event.keyCode)
     } else if !string.isEmpty {
       model.write(string)

@@ -1444,11 +1444,12 @@ test "mapped Mac keys preserve repeat and protocol release actions" {
     try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(macKey(0).?, .release, 0, 0, "", 'a', &buffer));
 }
 
-test "mapped Mac control key uses logical text rather than AppKit control character" {
+test "mapped Mac control keys use logical text rather than AppKit commands or control characters" {
     var terminal = try Terminal.init(20, 3, theme.rasmus);
     defer terminal.deinit();
     var buffer: [128]u8 = undefined;
     try std.testing.expectEqualStrings("\x03", try terminal.encodeKey(macKey(8).?, .press, 2, 0, "c", 'c', &buffer));
+    try std.testing.expectEqualStrings("\x04", try terminal.encodeKey(macKey(2).?, .press, 2, 0, "d", 'd', &buffer));
 }
 
 test "snapshot with null handle is bounded" {
