@@ -7,6 +7,7 @@ const SessionRuntime = @import("session.zig").SessionRuntime;
 
 pub const max_tabs = 256;
 const theme = shared.theme;
+const Terminal = shared.terminal.Terminal;
 
 test {
     _ = directwrite_renderer;
@@ -161,6 +162,7 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     terminal_theme: theme.Theme,
+    intense_text_style: Terminal.IntenseTextStyle = .all,
     randomize_tab_background: bool,
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
@@ -266,6 +268,7 @@ pub const App = struct {
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setIntenseTextStyle(self.intense_text_style);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background, background_seed);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
@@ -375,6 +378,7 @@ pub const App = struct {
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, source.session.shell, source.session.command(), working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse source.session.command(), if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setIntenseTextStyle(self.intense_text_style);
         return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
 
@@ -388,6 +392,7 @@ pub const App = struct {
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setIntenseTextStyle(self.intense_text_style);
         return self.insertFocusedSessionRecord(axis, shell, profile_title, command, working_directory, hold_on_exit, runtime, session_theme.background, background_seed);
     }
 
@@ -725,6 +730,13 @@ pub const App = struct {
         self.clipboard_write_max_bytes = max_bytes;
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
             runtime.setClipboardWriteSettings(enabled, max_bytes);
+        };
+    }
+
+    pub fn setIntenseTextStyle(self: *App, value: Terminal.IntenseTextStyle) void {
+        self.intense_text_style = value;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            runtime.setIntenseTextStyle(value);
         };
     }
 

@@ -216,6 +216,7 @@ struct TerminalPalette: Equatable {
   @AppStorage("opacity") var opacity = 1.0
   @AppStorage("fontWeight") var fontWeight = "Regular"
   @AppStorage("intenseFontWeight") var intenseFontWeight = "Bold"
+  @AppStorage("intenseTextStyle") var intenseTextStyle = "all"
   @AppStorage("scrollbackSize") var scrollbackSize = 10_000
   @AppStorage("initialColumns") var initialColumns = 80
   @AppStorage("initialRows") var initialRows = 24
@@ -358,6 +359,7 @@ struct TerminalPalette: Equatable {
     opacity = 1
     fontWeight = "Regular"
     intenseFontWeight = "Bold"
+    intenseTextStyle = "all"
     scrollbackSize = 10_000
     initialColumns = 80
     initialRows = 24
@@ -497,7 +499,7 @@ struct TerminalPalette: Equatable {
         UInt32(clamping: preferences.terminalClipboardMaxBytes))
     }
   }
-  func applyTerminalSettings(palette: TerminalPalette, scrollback: Int) {
+  func applyTerminalSettings(palette: TerminalPalette, scrollback: Int, intenseTextStyle: String) {
     guard let core else { return }
     var value = zigonaut_terminal_theme_v1()
     value.version = 1
@@ -513,6 +515,8 @@ struct TerminalPalette: Equatable {
     }
     _ = zigonaut_core_set_theme(core.pointer, &value)
     _ = zigonaut_core_set_scrollback(core.pointer, UInt32(clamping: scrollback))
+    let style: UInt8 = intenseTextStyle == "bold" ? 0 : intenseTextStyle == "bright" ? 2 : 1
+    _ = zigonaut_core_set_intense_text_style(core.pointer, style)
     DispatchQueue.main.async { [weak self] in self?.refresh() }
   }
   private func drainNotifications(core: OpaquePointer) {

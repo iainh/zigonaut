@@ -101,6 +101,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var pseudographicsMetrics: (cellWidth: Int, height: Int, thickness: Int)?
   private var appliedPalette: TerminalPalette?
   private var appliedScrollback = -1
+  private var appliedIntenseTextStyle = ""
   private var metalLayer: CAMetalLayer?
   private var metalQueue: MTLCommandQueue?
   private var metalPipeline: MTLRenderPipelineState?
@@ -258,11 +259,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   func updateTerminalSettings() {
     let palette = preferences.terminalPalette(dark: isDarkAppearance, seed: model.themeSeed)
-    guard palette != appliedPalette || preferences.scrollbackSize != appliedScrollback else { return }
+    guard palette != appliedPalette || preferences.scrollbackSize != appliedScrollback
+      || preferences.intenseTextStyle != appliedIntenseTextStyle else { return }
     appliedPalette = palette
     appliedScrollback = preferences.scrollbackSize
+    appliedIntenseTextStyle = preferences.intenseTextStyle
     colorCache.removeAll(keepingCapacity: true)
-    model.applyTerminalSettings(palette: palette, scrollback: preferences.scrollbackSize)
+    model.applyTerminalSettings(palette: palette, scrollback: preferences.scrollbackSize,
+      intenseTextStyle: preferences.intenseTextStyle)
   }
 
   init(model: TerminalModel, preferences: Preferences, onFocus: @escaping () -> Void) {
@@ -937,7 +941,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let snapshot = model.renderSnapshot
     let appearance = [
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
-      preferences.intenseFontWeight, String(preferences.paddingHorizontal),
+      preferences.intenseFontWeight, preferences.intenseTextStyle, String(preferences.paddingHorizontal),
       String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
       String(preferences.opacity), String(copyFlash),
     ].joined(separator: "|")

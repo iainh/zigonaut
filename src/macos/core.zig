@@ -975,6 +975,15 @@ export fn zigonaut_core_set_scrollback(self: ?*Core, lines: u32) bool {
     return true;
 }
 
+export fn zigonaut_core_set_intense_text_style(self: ?*Core, style: u8) bool {
+    const core = self orelse return false;
+    if (style > @intFromEnum(Terminal.IntenseTextStyle.bright)) return false;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    core.terminal.setIntenseTextStyle(@enumFromInt(style));
+    return true;
+}
+
 export fn zigonaut_core_progress(self: ?*Core, result: ?*Progress) void {
     const output = result orelse return;
     output.* = .{ .version = 1, .size = @sizeOf(Progress), .generation = 0, .active = 0, .state = 0, .value = 0, .reserved = @splat(0) };
@@ -1455,6 +1464,7 @@ test "null ABI handles are safe" {
     var terminal_theme = std.mem.zeroes(TerminalTheme);
     try std.testing.expect(!zigonaut_core_set_theme(null, &terminal_theme));
     try std.testing.expect(!zigonaut_core_set_scrollback(null, 10_000));
+    try std.testing.expect(!zigonaut_core_set_intense_text_style(null, 1));
     var progress = std.mem.zeroes(Progress);
     zigonaut_core_progress(null, &progress);
     try std.testing.expectEqual(@as(u8, 0), progress.active);

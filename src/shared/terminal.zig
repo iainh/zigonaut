@@ -38,6 +38,7 @@ pub const Terminal = struct {
     progress_report_context: ?*anyopaque = null,
     columns: u16,
     rows: u16,
+    intense_text_style: IntenseTextStyle = .all,
 
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
@@ -58,6 +59,12 @@ pub const Terminal = struct {
         error_state,
         indeterminate,
         paused,
+    };
+
+    pub const IntenseTextStyle = enum(u8) {
+        bold,
+        all,
+        bright,
     };
 
     pub const Cell = struct {
@@ -135,6 +142,7 @@ pub const Terminal = struct {
         cursor_x: u16,
         cursor_y: u16,
         cursor_columns: u8,
+        intense_text_style: IntenseTextStyle,
     };
 
     pub const Image = struct {
@@ -955,6 +963,10 @@ pub const Terminal = struct {
         try applyTheme(self.terminal, value);
     }
 
+    pub fn setIntenseTextStyle(self: *Terminal, value: IntenseTextStyle) void {
+        self.intense_text_style = value;
+    }
+
     pub fn setScrollbackSize(self: *Terminal, max_scrollback: u32) !void {
         const scrollback_lines: usize = max_scrollback;
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
@@ -1400,18 +1412,20 @@ pub const Terminal = struct {
             .cursor_x = cursor_x,
             .cursor_y = cursor_y,
             .cursor_columns = if (cursor_wide_tail) 2 else 1,
+            .intense_text_style = self.intense_text_style,
         };
         renderer.beginFrame(frame);
-        const global_colors_changed = if (previous_frame) |previous|
+        const global_appearance_changed = if (previous_frame) |previous|
             !std.meta.eql(previous.foreground, frame.foreground) or
-                !std.meta.eql(previous.background, frame.background)
+                !std.meta.eql(previous.background, frame.background) or
+                previous.intense_text_style != frame.intense_text_style
         else
             true;
-        if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !global_colors_changed) {
+        if (dirty_only and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE and !global_appearance_changed) {
             renderer.endFrame(frame);
             return;
         }
-        if (global_colors_changed) dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
+        if (global_appearance_changed) dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
 
         try check(vt.ghostty_render_state_get(
             self.render_state,
@@ -1470,10 +1484,19 @@ pub const Terminal = struct {
                     vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
                     &foreground,
                 ) != vt.GHOSTTY_SUCCESS) foreground = colors.foreground;
-                // Use bright ANSI colours for bold low-palette text. This
-                // preserves the conventional terminal bold-colour behaviour.
-                if (style.bold and style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_PALETTE and style.fg_color.value.palette < 8) {
+                const palette_foreground = style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_PALETTE;
+                const can_brighten = style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_NONE or
+                    (palette_foreground and style.fg_color.value.palette < 16);
+                const brighten = style.bold and self.intense_text_style != .bold;
+                if (brighten and palette_foreground and style.fg_color.value.palette < 8) {
                     foreground = colors.palette[style.fg_color.value.palette + 8];
+                } else if (brighten and style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_NONE) {
+                    for (colors.palette[0..8], 0..) |normal, index| {
+                        if (std.meta.eql(normal, foreground)) {
+                            foreground = colors.palette[index + 8];
+                            break;
+                        }
+                    }
                 }
                 const has_background = vt.ghostty_render_state_row_cells_get(
                     self.row_cells,
@@ -1516,7 +1539,10 @@ pub const Terminal = struct {
                     .foreground = fromGhostty(foreground),
                     .background = fromGhostty(background),
                     .underline_color = fromGhostty(underline_color),
-                    .bold = style.bold,
+                    // Match Windows Terminal's fallback: RGB and 256-colour
+                    // text has no bright variant, so bold remains its visible
+                    // representation of intensity in bright-only mode.
+                    .bold = style.bold and (self.intense_text_style != .bright or !can_brighten),
                     .italic = style.italic,
                     .faint = style.faint,
                     .strikethrough = style.strikethrough,
@@ -2441,6 +2467,61 @@ test "render state resolves ANSI colors through the Rasmus theme" {
 
     try std.testing.expectEqual(theme.rasmus.background, renderer.frame.?.background);
     try std.testing.expectEqual(theme.rasmus.ansi[1], renderer.x_foreground.?);
+}
+
+test "intense text style controls bold weight and bright ANSI colors" {
+    inline for (.{
+        .{ .style = Terminal.IntenseTextStyle.bold, .foreground = theme.rasmus.ansi[1], .bold = true },
+        .{ .style = Terminal.IntenseTextStyle.all, .foreground = theme.rasmus.ansi[9], .bold = true },
+        .{ .style = Terminal.IntenseTextStyle.bright, .foreground = theme.rasmus.ansi[9], .bold = false },
+    }) |expected| {
+        var terminal = try Terminal.init(4, 2, theme.rasmus);
+        defer terminal.deinit();
+        terminal.setIntenseTextStyle(expected.style);
+        terminal.feed("\x1b[1;31mX");
+        var renderer = TestRenderer{};
+        try terminal.renderViewport(&renderer);
+        try std.testing.expectEqual(expected.foreground, renderer.x_foreground.?);
+        try std.testing.expectEqual(expected.bold, renderer.x_bold);
+    }
+}
+
+test "bright-only intense text falls back to bold for RGB colors" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.setIntenseTextStyle(.bright);
+    terminal.feed("\x1b[1;38;2;10;20;30mX");
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(theme.Color{ .red = 10, .green = 20, .blue = 30 }, renderer.x_foreground.?);
+    try std.testing.expect(renderer.x_bold);
+}
+
+test "bright intense text promotes a matching default foreground" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.setIntenseTextStyle(.bright);
+    terminal.feed("\x1b[1mX");
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(theme.rasmus.ansi[15], renderer.x_foreground.?);
+    try std.testing.expect(!renderer.x_bold);
+}
+
+test "changing intense text style rebuilds render snapshots" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b[1;31mX");
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    terminal.setIntenseTextStyle(.bright);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    var renderer = TestRenderer{};
+    snapshot.replay(&renderer);
+    try std.testing.expectEqual(theme.rasmus.ansi[9], renderer.x_foreground.?);
+    try std.testing.expect(!renderer.x_bold);
 }
 
 test "scrollback limit can be updated after initialization" {

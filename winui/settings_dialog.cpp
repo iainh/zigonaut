@@ -130,6 +130,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["font_size"] = number(font.GetNamedNumber(L"size"));
     values["font_weight"] = to_string(font.GetNamedString(L"weight", L"regular"));
     values["intense_font_weight"] = to_string(font.GetNamedString(L"intenseWeight", L"bold"));
+    values["intense_text_style"] = to_string(font.GetNamedString(L"intenseTextStyle", L"all"));
     values["text_antialiasing"] = to_string(font.GetNamedString(L"antialiasing", L"acceleratedGrayscale"));
     values["scrollback_size"] = number(terminal.GetNamedNumber(L"scrollbackSize"));
     values["initial_columns"] = number(initial_size.GetNamedNumber(L"columns"));
@@ -603,7 +604,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool open = true;
     bool updating_font_weights = false;
 
-    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, text_antialiasing{nullptr};
+    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, intense_text_style{nullptr}, text_antialiasing{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr}, padding_balance{nullptr}, padding_color{nullptr};
     ToggleSwitch random_background{nullptr};
@@ -782,6 +783,9 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
         font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
         intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
+        intense_text_style = combo("", {L"Bold font", L"Bold font with bright colours", L"Bright colours"});
+        auto const style = value(values, "intense_text_style", "all");
+        intense_text_style.SelectedIndex(style == "bold" ? 0 : style == "bright" ? 2 : 1);
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
         text_antialiasing = combo("", {L"Accelerated grayscale (recommended)", L"Native ClearType"});
         text_antialiasing.SelectedIndex(value(values, "text_antialiasing", "acceleratedGrayscale") == "nativeClearType" ? 1 : 0);
@@ -794,6 +798,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         appendLabeled(font, L"Font family", font_family);
         appendLabeled(font, L"Normal weight", font_weight);
         appendLabeled(font, L"Intense weight", intense_font_weight);
+        appendLabeled(font, L"Intense text style", intense_text_style);
         appendLabeled(font, L"Size (points)", font_size);
         appendLabeled(font, L"Text antialiasing", text_antialiasing);
         return page(L"Appearance", L"Choose how Zigonaut and terminal sessions look.", {
@@ -1250,6 +1255,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
         auto const selected_font_weight = selectedWeight(font_weight);
         auto const selected_intense_font_weight = selectedWeight(intense_font_weight);
+        auto const selected_intense_text_style = intense_text_style.SelectedIndex() == 0 ? "bold" : intense_text_style.SelectedIndex() == 2 ? "bright" : "all";
         auto const selected_dark_theme = selectedTheme(dark_theme);
         auto const selected_light_theme = selectedTheme(light_theme);
         auto integer = [](NumberBox const& box, double minimum, double maximum) {
@@ -1315,6 +1321,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         font.Insert(L"size", number(font_size_value));
         font.Insert(L"weight", text(selected_font_weight));
         font.Insert(L"intenseWeight", text(selected_intense_font_weight));
+        font.Insert(L"intenseTextStyle", text(selected_intense_text_style));
         font.Insert(L"antialiasing", text(text_antialiasing.SelectedIndex() == 1 ? "nativeClearType" : "acceleratedGrayscale"));
         appearance.Insert(L"font", font);
         JsonObject selected_themes;
@@ -1423,6 +1430,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         backdrop.SelectionChanged(selection_changed);
         dark_theme.SelectionChanged(selection_changed);
         light_theme.SelectionChanged(selection_changed);
+        intense_text_style.SelectionChanged(selection_changed);
         text_antialiasing.SelectionChanged(selection_changed);
         padding_balance.SelectionChanged(selection_changed);
         padding_color.SelectionChanged(selection_changed);

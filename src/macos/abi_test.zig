@@ -30,6 +30,7 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_render_images",
     "zigonaut_core_set_theme",
     "zigonaut_core_set_scrollback",
+    "zigonaut_core_set_intense_text_style",
     "zigonaut_core_progress",
     "zigonaut_core_has_foreground_job",
     "zigonaut_core_title",

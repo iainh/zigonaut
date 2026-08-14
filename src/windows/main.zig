@@ -357,6 +357,7 @@ const Application = struct {
             .dark_theme = dark_theme,
             .zoomed_font_size = loaded.value.font_size,
         };
+        result.model.setIntenseTextStyle(loaded.value.intense_text_style);
         result.model.applyClipboardWriteSettings(loaded.value.osc52_clipboard_write, loaded.value.osc52_clipboard_max_bytes);
         result.model.setDefaultScrollbackSize(loaded.value.scrollback_size);
         return result;
@@ -2150,6 +2151,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     previous.deinit();
 
     if (changed.theme) self.themes = loadThemes(std.heap.page_allocator, self.io);
+    self.model.setIntenseTextStyle(self.settings.intense_text_style);
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);

@@ -449,6 +449,11 @@ struct SettingsView: View {
         Picker("Intense weight", selection: $preferences.intenseFontWeight) {
           ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
         }
+        Picker("Intense text style", selection: $preferences.intenseTextStyle) {
+          Text("Bold font").tag("bold")
+          Text("Bold font with bright colours").tag("all")
+          Text("Bright colours").tag("bright")
+        }
       }
     }
     .formStyle(.columns)

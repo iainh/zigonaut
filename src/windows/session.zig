@@ -851,6 +851,16 @@ pub const SessionRuntime = struct {
         _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
+    pub fn setIntenseTextStyle(self: *SessionRuntime, value: Terminal.IntenseTextStyle) void {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.setIntenseTextStyle(value);
+        self.render_snapshot.frame = null;
+        _ = self.content_generation.fetchAdd(1, .monotonic);
+    }
+
     /// Admit input to the bounded writer queue. Delivery is asynchronous so a
     /// terminal protocol response cannot block while `terminal_mutex` is held.
     pub fn write(self: *SessionRuntime, bytes: []const u8) !void {

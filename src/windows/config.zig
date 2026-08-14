@@ -6,7 +6,7 @@ pub const default_contents =
     \\{
     \\  "version": 1,
     \\  "appearance": {
-    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "antialiasing": "acceleratedGrayscale" },
+    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8, "balance": "none", "color": "background" },
     \\    "background": { "opacity": 100, "backdrop": "mica" },
@@ -60,6 +60,7 @@ pub const ColorScheme = enum { system, light, dark };
 pub const PaddingBalance = enum { none, equal };
 pub const PaddingColor = enum { background, extend, extendAlways };
 pub const TextAntialiasing = enum { acceleratedGrayscale, nativeClearType };
+pub const IntenseTextStyle = @import("shared").terminal.Terminal.IntenseTextStyle;
 pub const FontWeight = enum(u16) {
     thin = 100,
     extraLight = 200,
@@ -89,6 +90,7 @@ const JsonConfig = struct {
             size: u16,
             weight: FontWeight = .regular,
             intenseWeight: FontWeight = .bold,
+            intenseTextStyle: IntenseTextStyle = .all,
             antialiasing: TextAntialiasing = .acceleratedGrayscale,
         },
         themes: struct {
@@ -141,6 +143,7 @@ pub const Config = struct {
     font_size: u16 = 18,
     font_weight: FontWeight = .regular,
     intense_font_weight: FontWeight = .bold,
+    intense_text_style: IntenseTextStyle = .all,
     text_antialiasing: TextAntialiasing = .acceleratedGrayscale,
     scrollback_size: u32 = 10_000,
     initial_columns: u16 = 80,
@@ -332,6 +335,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.font_size = json.appearance.font.size;
     result.font_weight = json.appearance.font.weight;
     result.intense_font_weight = json.appearance.font.intenseWeight;
+    result.intense_text_style = json.appearance.font.intenseTextStyle;
     result.text_antialiasing = json.appearance.font.antialiasing;
     result.scrollback_size = json.terminal.scrollbackSize;
     result.initial_columns = json.terminal.initialSize.columns;
@@ -395,7 +399,7 @@ test "configuration parses structured JSON" {
         \\{
         \\  "version": 1,
         \\  "appearance": {
-        \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold" },
+        \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold", "intenseTextStyle": "bright" },
         \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
         \\    "padding": { "horizontal": 12, "vertical": 4, "balance": "equal", "color": "extend" },
         \\    "background": { "opacity": 82, "backdrop": "acrylic" },
@@ -421,6 +425,7 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqual(@as(u16, 14), value.font_size);
     try std.testing.expectEqual(FontWeight.light, value.font_weight);
     try std.testing.expectEqual(FontWeight.semiBold, value.intense_font_weight);
+    try std.testing.expectEqual(IntenseTextStyle.bright, value.intense_text_style);
     try std.testing.expectEqual(TextAntialiasing.acceleratedGrayscale, value.text_antialiasing);
     try std.testing.expectEqual(@as(u32, 50_000), value.scrollback_size);
     try std.testing.expectEqual(@as(u16, 120), value.initial_columns);
@@ -447,6 +452,7 @@ test "default JSON configuration parses" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(FontWeight.regular, value.font_weight);
     try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
+    try std.testing.expectEqual(IntenseTextStyle.all, value.intense_text_style);
     try std.testing.expectEqual(TextAntialiasing.acceleratedGrayscale, value.text_antialiasing);
     try std.testing.expectEqualStrings("fluent-dark", value.dark_theme);
     try std.testing.expectEqualStrings("fluent-light", value.light_theme);
@@ -478,6 +484,21 @@ test "font weights default for existing configurations" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(FontWeight.regular, value.font_weight);
     try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
+}
+
+test "intense text style defaults for existing configurations" {
+    const legacy_contents = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        default_contents,
+        ", \"intenseTextStyle\": \"all\"",
+        "",
+    );
+    defer std.testing.allocator.free(legacy_contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    const value = try configFromJson(parsed.value);
+    try std.testing.expectEqual(IntenseTextStyle.all, value.intense_text_style);
 }
 
 test "padding appearance defaults for existing configurations" {

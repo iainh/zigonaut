@@ -54,6 +54,8 @@ void zigonaut_core_render_snapshot(zigonaut_core *, const uint64_t *previous_has
 void zigonaut_core_render_images(zigonaut_core *, const zigonaut_image_generation_v1 *known_generations, uint32_t known_count, zigonaut_render_image_v1 *, uint32_t image_capacity, uint8_t *rgba_arena, uint32_t rgba_capacity, zigonaut_render_images_result_v1 *);
 bool zigonaut_core_set_theme(zigonaut_core *, const zigonaut_terminal_theme_v1 *);
 bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);
+/* style: 0 bold font, 1 bold font with bright colors, 2 bright colors. */
+bool zigonaut_core_set_intense_text_style(zigonaut_core *, uint8_t style);
 void zigonaut_core_progress(zigonaut_core *, zigonaut_progress_v1 *);
 /* True only while a foreground process group other than the login shell owns the PTY. */
 bool zigonaut_core_has_foreground_job(zigonaut_core *);
