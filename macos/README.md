@@ -4,7 +4,7 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 
 ## Supported now
 
-- Multiple windows, native title-bar tabs with inactive-output indicators, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface.
+- Multiple windows, native title-bar tabs with inactive-output indicators, and recursively resizable right/down splits, each with a stable terminal model and AppKit surface. Hover a pane to reveal its drag handle, then drop it near another pane's edge to rearrange the split without restarting either terminal.
 - New/close/select operations and geometric directional pane focus.
 - Configurable executable absolute shell path for new panes (invalid values visibly fall back to `/bin/zsh`).
 - Physical press/repeat/release input through the core terminal key encoder, including enhanced keyboard protocols, Apple ANSI/ISO/JIS keys, navigation, keypad, modifiers, and F1–F20. AppKit still owns menu equivalents, IME/dead-key composition, and committed text, with candidate windows positioned at the terminal cursor.

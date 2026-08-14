@@ -1098,6 +1098,7 @@ struct TerminalPalette: Equatable {
 
 @MainActor final class WindowModel: ObservableObject {
   @Published var root: PaneNode
+  @Published var draggingPane: UUID?
   @Published var focusedPane: UUID? {
     didSet {
       if zoomedPane != nil { zoomedPane = focusedPane }
@@ -1201,6 +1202,22 @@ struct TerminalPalette: Equatable {
     zoomedPane = nil
     focusedPane = pane.id
     stateChanged?()
+  }
+  func movePane(_ source: UUID, onto target: UUID, edge: PaneDropEdge) -> Bool {
+    guard source != target, panes.count > 1,
+      let sourceNode = root.node(source), case .leaf = sourceNode,
+      let remaining = root.removing(source), remaining.contains(target) else { return false }
+    let axis: Axis = edge == .left || edge == .right ? .horizontal : .vertical
+    let sourceFirst = edge == .left || edge == .top
+    let targetNode = remaining.node(target) ?? remaining
+    let split = sourceFirst
+      ? PaneNode.split(UUID(), axis, 0.5, sourceNode, targetNode)
+      : PaneNode.split(UUID(), axis, 0.5, targetNode, sourceNode)
+    root = remaining.replacing(target, with: split)
+    zoomedPane = nil
+    focusedPane = source
+    stateChanged?()
+    return true
   }
   func setRatio(_ id: UUID, _ ratio: Double) {
     root = root.settingRatio(id, min(max(ratio, 0.1), 0.9))

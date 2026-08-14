@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
+import ZigonautPaneLayout
 
 private let paneCoordinateSpace = "ZigonautContentView"
 
@@ -17,6 +19,25 @@ struct PaneView: View {
   var body: some View {
     switch node {
     case .leaf(let pane):
+      PaneLeafView(pane: pane, window: window)
+    case .split(let id, let axis, let ratio, let first, let second):
+      RestorableSplit(axis: axis, ratio: ratio, ratioChanged: { window.setRatio(id, $0) }) {
+        PaneView(node: first, window: window)
+      } second: {
+        PaneView(node: second, window: window)
+      }
+    }
+  }
+}
+
+private struct PaneLeafView: View {
+  @ObservedObject var pane: TerminalModel
+  @ObservedObject var window: WindowModel
+  @State private var hovered = false
+  @State private var dropEdge: PaneDropEdge?
+
+  var body: some View {
+    GeometryReader { geometry in
       TerminalSurface(
         model: pane,
         preferences: window.preferences,
@@ -25,18 +46,112 @@ struct PaneView: View {
       ) {
         window.focusedPane = pane.id
       }
-      .id(pane.id)
-      .background(GeometryReader { geometry in
-        Color.clear.preference(key: PaneFrameKey.self,
-          value: [pane.id: geometry.frame(in: .named(paneCoordinateSpace))])
-      })
-    case .split(let id, let axis, let ratio, let first, let second):
-      RestorableSplit(axis: axis, ratio: ratio, ratioChanged: { window.setRatio(id, $0) }) {
-        PaneView(node: first, window: window)
-      } second: {
-        PaneView(node: second, window: window)
+      .overlay(alignment: .top) {
+        if window.panes.count > 1 {
+          Image(systemName: "line.3.horizontal")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: 32, height: 13)
+            .background(.ultraThinMaterial, in: Capsule())
+            .contentShape(Rectangle())
+            .opacity(hovered ? 1 : 0)
+            .allowsHitTesting(hovered)
+            .onDrag {
+              window.draggingPane = pane.id
+              return NSItemProvider(object: pane.id.uuidString as NSString)
+            } preview: {
+              TerminalDragPreview()
+            }
+            .help("Drag to move this pane")
+        }
+      }
+      .overlay {
+        if let dropEdge {
+          PaneDropPreview(edge: dropEdge)
+            .allowsHitTesting(false)
+        }
+      }
+      .onHover { hovered = $0 }
+      .onDrop(of: [.plainText], delegate: PaneDropDelegate(
+        edge: $dropEdge, size: geometry.size, destination: pane.id, window: window))
+    }
+    .id(pane.id)
+    .background(GeometryReader { geometry in
+      Color.clear.preference(key: PaneFrameKey.self,
+        value: [pane.id: geometry.frame(in: .named(paneCoordinateSpace))])
+    })
+  }
+}
+
+private struct TerminalDragPreview: View {
+  var body: some View {
+    Label("Move Pane", systemImage: "rectangle.split.2x1")
+      .padding(8)
+      .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+  }
+}
+
+private struct PaneDropPreview: View {
+  let edge: PaneDropEdge
+
+  var body: some View {
+    GeometryReader { geometry in
+      let color = Color.accentColor.opacity(0.3)
+      switch edge {
+      case .left:
+        HStack(spacing: 0) {
+          Rectangle().fill(color).frame(width: geometry.size.width / 2)
+          Spacer(minLength: 0)
+        }
+      case .right:
+        HStack(spacing: 0) {
+          Spacer(minLength: 0)
+          Rectangle().fill(color).frame(width: geometry.size.width / 2)
+        }
+      case .top:
+        VStack(spacing: 0) {
+          Rectangle().fill(color).frame(height: geometry.size.height / 2)
+          Spacer(minLength: 0)
+        }
+      case .bottom:
+        VStack(spacing: 0) {
+          Spacer(minLength: 0)
+          Rectangle().fill(color).frame(height: geometry.size.height / 2)
+        }
       }
     }
+  }
+}
+
+private struct PaneDropDelegate: DropDelegate {
+  @Binding var edge: PaneDropEdge?
+  let size: CGSize
+  let destination: UUID
+  let window: WindowModel
+
+  func validateDrop(info: DropInfo) -> Bool {
+    window.draggingPane != nil && window.draggingPane != destination
+      && info.hasItemsConforming(to: [.plainText])
+  }
+
+  func dropEntered(info: DropInfo) { update(info) }
+  func dropUpdated(info: DropInfo) -> DropProposal? {
+    guard validateDrop(info: info) else { edge = nil; return DropProposal(operation: .forbidden) }
+    update(info)
+    return DropProposal(operation: .move)
+  }
+  func dropExited(info: DropInfo) { edge = nil }
+
+  func performDrop(info: DropInfo) -> Bool {
+    guard validateDrop(info: info), let source = window.draggingPane,
+      let destinationEdge = PaneDropEdge.nearest(to: info.location, in: size) else { return false }
+    edge = nil
+    window.draggingPane = nil
+    return window.movePane(source, onto: destination, edge: destinationEdge)
+  }
+
+  private func update(_ info: DropInfo) {
+    edge = validateDrop(info: info) ? PaneDropEdge.nearest(to: info.location, in: size) : nil
   }
 }
 
