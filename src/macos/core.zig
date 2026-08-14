@@ -721,15 +721,59 @@ const SnapshotCollector = struct {
     }
 };
 
+const RenderSelectionRange = struct {
+    start: u32 = 0,
+    end: u32 = 0,
+    present: bool = false,
+};
+
+const SelectionCollector = struct {
+    ranges: []RenderSelectionRange,
+
+    pub fn beginFrame(_: *SelectionCollector, _: Terminal.Frame) void {}
+    pub fn endFrame(_: *SelectionCollector, _: Terminal.Frame) void {}
+    pub fn beginRow(_: *SelectionCollector, _: u16) void {}
+    pub fn endRow(_: *SelectionCollector, _: u16) void {}
+    pub fn drawImage(_: *SelectionCollector, _: Terminal.Image) void {}
+    pub fn drawCell(self: *SelectionCollector, cell: Terminal.Cell) void {
+        if (!cell.selected or cell.y >= self.ranges.len) return;
+        const range = &self.ranges[cell.y];
+        const start: u32 = cell.x;
+        const span: u32 = if (cell.occupancy == .wide) 2 else 1;
+        const end = start + span;
+        if (!range.present) {
+            range.* = .{ .start = start, .end = end, .present = true };
+            return;
+        }
+        range.start = @min(range.start, start);
+        range.end = @max(range.end, end);
+    }
+};
+
 fn dirtyRows(previous: []const u64, current: []const u64, dirty: []bool) void {
     std.debug.assert(dirty.len == current.len);
     for (current, 0..) |hash, row| dirty[row] = previous.len != current.len or previous[row] != hash;
 }
 
-fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, matches: []const search.Match, active: ?usize, viewport_offset: u64, output: []u64) void {
+fn hashSelectionRange(seed: u64, range: RenderSelectionRange) u64 {
+    var value = seed;
+    const present: u8 = @intFromBool(range.present);
+    value = std.hash.Wyhash.hash(value, std.mem.asBytes(&present));
+    value = std.hash.Wyhash.hash(value, std.mem.asBytes(&range.start));
+    return std.hash.Wyhash.hash(value, std.mem.asBytes(&range.end));
+}
+
+fn hashSelectionContext(seed: u64, row: usize, ranges: []const RenderSelectionRange) u64 {
+    var value = seed;
+    value = hashSelectionRange(value, if (row > 0) ranges[row - 1] else .{});
+    value = hashSelectionRange(value, ranges[row]);
+    return hashSelectionRange(value, if (row + 1 < ranges.len) ranges[row + 1] else .{});
+}
+
+fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, selection_ranges: []const RenderSelectionRange, matches: []const search.Match, active: ?usize, viewport_offset: u64, output: []u64) void {
     const frame = snapshot.frame;
     for (snapshot.row_hashes.items, 0..) |base, y| {
-        var value = base;
+        var value = hashSelectionContext(base, y, selection_ranges);
         if (frame) |current| {
             if (current.cursor_visible and current.cursor_has_position and current.cursor_y == y) {
                 value = std.hash.Wyhash.hash(value, std.mem.asBytes(&current.cursor_x));
@@ -774,7 +818,14 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     defer std.heap.c_allocator.free(visual);
     const dirty = std.heap.c_allocator.alloc(bool, row_count) catch return;
     defer std.heap.c_allocator.free(dirty);
-    visualRowHashes(&core.render_snapshot, core.search_matches.items, core.search_active, collector.viewport_offset, visual);
+    const selection_ranges = std.heap.c_allocator.alloc(RenderSelectionRange, row_count) catch return;
+    defer std.heap.c_allocator.free(selection_ranges);
+    @memset(selection_ranges, .{});
+    if (core.terminal.hasSelection()) {
+        var selection_collector = SelectionCollector{ .ranges = selection_ranges };
+        core.render_snapshot.replay(&selection_collector);
+    }
+    visualRowHashes(&core.render_snapshot, selection_ranges, core.search_matches.items, core.search_active, collector.viewport_offset, visual);
     const previous = if (previous_hashes) |pointer| pointer[0..previous_count] else &.{};
     dirtyRows(previous, visual, dirty);
     collector.dirty_rows = dirty;
@@ -801,6 +852,21 @@ test "dirty rows select changes and force a complete snapshot after resize" {
 
     dirtyRows(&.{ 10, 20 }, &current, &dirty);
     try std.testing.expectEqualSlices(bool, &.{ true, true, true }, &dirty);
+}
+
+test "selection context invalidates the changed row and its neighbours" {
+    const bases = [_]u64{ 10, 20, 30, 40 };
+    const before = [_]RenderSelectionRange{ .{}, .{}, .{}, .{} };
+    const after = [_]RenderSelectionRange{ .{}, .{ .start = 2, .end = 5, .present = true }, .{}, .{} };
+    for (bases, 0..) |base, row| {
+        const previous = hashSelectionContext(base, row, &before);
+        const current = hashSelectionContext(base, row, &after);
+        if (row <= 2) {
+            try std.testing.expect(previous != current);
+        } else {
+            try std.testing.expectEqual(previous, current);
+        }
+    }
 }
 
 const ImageCollector = struct {

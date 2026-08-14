@@ -859,9 +859,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: bounds).addClip()
     drawEdgeColors(snapshot.cells)
-    for cell in snapshot.cells {
-      drawBackground(cell)
-    }
+    drawBackgrounds(snapshot.cells, selectionPath: roundedSelectionPath(snapshot.cellsByRow))
     drawText(snapshot.cells)
     for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
       drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
@@ -1327,6 +1325,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     in bitmap: CGContext)
   {
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
+    let selectionPath = roundedSelectionPath(snapshot.cellsByRow)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
     func drawRow(_ row: Int) {
@@ -1340,7 +1339,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       rowRect.fill()
       let cells = snapshot.cellsByRow.indices.contains(row) ? snapshot.cellsByRow[row] : []
       drawEdgeColors(cells)
-      for cell in cells { drawBackground(cell) }
+      drawBackgrounds(cells, selectionPath: selectionPath)
       drawRetainedPseudographics(cells)
       bitmap.restoreGState()
     }
@@ -1405,13 +1404,73 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     )
   }
 
-  private func drawBackground(_ cell: TerminalRenderCell) {
-    let highlightBackground: NSColor? =
-      cell.searchHighlight == 2 ? .systemOrange : cell.searchHighlight == 1 ? .systemYellow : nil
-    if highlightBackground == nil && !cell.selected && cell.backgroundIsDefault { return }
-    (highlightBackground ?? color(cell.selected ? cell.foreground : cell.background,
-      alpha: preferences.opacity)).setFill()
-    cellRect(cell).fill()
+  private func roundedSelectionPath(_ rows: [[TerminalRenderCell]]) -> CGPath? {
+    var lines: [SelectionLine] = []
+    for (row, cells) in rows.enumerated() {
+      var start: Int?
+      var end = 0
+      for cell in cells where cell.selected {
+        start = min(start ?? cell.x, cell.x)
+        end = max(end, cell.x + (cell.occupancy == 1 ? 2 : 1))
+      }
+      if let start, start < end {
+        lines.append(SelectionLine(row: row, startColumn: start, endColumn: end))
+      }
+    }
+    let components = SelectionShape.paths(
+      lines: lines, rowCount: rows.count, originX: Double(originX), originY: Double(originY),
+      cellWidth: Double(cellWidth), lineHeight: Double(lineHeight))
+    guard !components.isEmpty else { return nil }
+    let path = CGMutablePath()
+    for commands in components {
+      for command in commands {
+        switch command {
+        case .move(let point):
+          path.move(to: CGPoint(x: point.x, y: point.y))
+        case .line(let point):
+          path.addLine(to: CGPoint(x: point.x, y: point.y))
+        case .quadratic(let control, let end):
+          path.addQuadCurve(
+            to: CGPoint(x: end.x, y: end.y),
+            control: CGPoint(x: control.x, y: control.y))
+        case .close:
+          path.closeSubpath()
+        }
+      }
+    }
+    return path
+  }
+
+  private func drawBackgrounds(_ cells: [TerminalRenderCell], selectionPath: CGPath?) {
+    for cell in cells {
+      if cell.backgroundIsDefault { continue }
+      color(cell.background, alpha: preferences.opacity).setFill()
+      cellRect(cell).fill()
+    }
+
+    if let selectionPath, let context = NSGraphicsContext.current?.cgContext {
+      let radius = CGFloat(SelectionShape.cornerRadius(
+        cellWidth: Double(cellWidth), lineHeight: Double(lineHeight)))
+      context.saveGState()
+      context.addPath(selectionPath)
+      context.clip()
+      // Concave curves extend just beyond the selected cell union. Bleed the
+      // nearest cell colours into those pixels, then restore exact cell fills.
+      for cell in cells where cell.selected && cell.searchHighlight == 0 {
+        color(cell.foreground, alpha: preferences.opacity).setFill()
+        cellRect(cell).insetBy(dx: -radius, dy: -radius).fill()
+      }
+      for cell in cells where cell.selected && cell.searchHighlight == 0 {
+        color(cell.foreground, alpha: preferences.opacity).setFill()
+        cellRect(cell).fill()
+      }
+      context.restoreGState()
+    }
+
+    for cell in cells where cell.searchHighlight != 0 {
+      (cell.searchHighlight == 2 ? NSColor.systemOrange : .systemYellow).setFill()
+      cellRect(cell).fill()
+    }
   }
 
   private func drawText(_ cells: [TerminalRenderCell]) {
