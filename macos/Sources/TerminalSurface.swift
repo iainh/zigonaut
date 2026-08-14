@@ -78,6 +78,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var reportingButton: UInt8 = 0
   private var selecting = false
   private var selectionShouldCopy = false
+  private var copyFlash = false
+  private var copyFlashTimer: Timer?
   private var trackingArea: NSTrackingArea?
   private var lastMousePoint: NSPoint?
   private var hoveredLink: HoveredLink?
@@ -652,7 +654,23 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   @objc func copy(_ sender: Any?) {
-    model.copy()
+    copySelection()
+  }
+
+  private func copySelection() {
+    guard model.copy() else { return }
+    copyFlashTimer?.invalidate()
+    copyFlash = true
+    needsDisplay = true
+    copyFlashTimer = Timer.scheduledTimer(
+      timeInterval: 0.15, target: self, selector: #selector(endCopyFlash(_:)),
+      userInfo: nil, repeats: false)
+  }
+
+  @objc private func endCopyFlash(_ timer: Timer) {
+    copyFlashTimer = nil
+    copyFlash = false
+    needsDisplay = true
   }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -748,11 +766,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     selecting = false
     model.selectionEnd()
     if selectionShouldCopy {
-      model.copy()
+      // Finish the synchronous snapshot work before starting the short flash.
+      model.refresh()
+      copySelection()
     } else {
       model.clearSelection()
+      model.refresh()
     }
-    model.refresh()
   }
 
   override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -919,7 +939,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
       preferences.intenseFontWeight, String(preferences.paddingHorizontal),
       String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
-      String(preferences.opacity),
+      String(preferences.opacity), String(copyFlash),
     ].joined(separator: "|")
     var forceAll = retainedAppearance != appearance
       || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
@@ -1457,11 +1477,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       // Concave curves extend just beyond the selected cell union. Bleed the
       // nearest cell colours into those pixels, then restore exact cell fills.
       for cell in cells where cell.selected && cell.searchHighlight == 0 {
-        color(cell.foreground, alpha: preferences.opacity).setFill()
+        selectionBackground(cell).setFill()
         cellRect(cell).insetBy(dx: -radius, dy: -radius).fill()
       }
       for cell in cells where cell.selected && cell.searchHighlight == 0 {
-        color(cell.foreground, alpha: preferences.opacity).setFill()
+        selectionBackground(cell).setFill()
         cellRect(cell).fill()
       }
       context.restoreGState()
@@ -1590,10 +1610,26 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func textStyle(_ cell: TerminalRenderCell) -> TextStyle {
     TextStyle(
-      rgb: cell.selected ? cell.background : cell.foreground,
+      rgb: cell.selected
+        ? (copyFlash ? cell.background : rgb(NSColor.selectedTextColor))
+        : cell.foreground,
       bold: cell.bold,
       italic: cell.italic,
       faint: cell.faint)
+  }
+
+  private func selectionBackground(_ cell: TerminalRenderCell) -> NSColor {
+    copyFlash
+      ? color(cell.foreground, alpha: preferences.opacity)
+      : NSColor.selectedTextBackgroundColor
+  }
+
+  private func rgb(_ color: NSColor) -> UInt32 {
+    guard let converted = color.usingColorSpace(.deviceRGB) else { return 0xffffff }
+    let red = UInt32((converted.redComponent * 255).rounded())
+    let green = UInt32((converted.greenComponent * 255).rounded())
+    let blue = UInt32((converted.blueComponent * 255).rounded())
+    return red << 16 | green << 8 | blue
   }
 
   private func drawText(_ text: String, x: Int, y: Int, columns: Int, style: TextStyle, batched: Bool) {

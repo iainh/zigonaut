@@ -966,15 +966,16 @@ struct TerminalPalette: Equatable {
   func clearSelection() { if let core { zigonaut_core_selection_clear(core.pointer) } }
   var hasSelection: Bool { core.map { zigonaut_core_has_selection($0.pointer) } ?? false }
   var acceptsPaste: Bool { core != nil }
-  func copy() {
-    guard let core else { return }
+  @discardableResult
+  func copy() -> Bool {
+    guard let core else { return false }
     let required = zigonaut_core_copy_selection(core.pointer, nil, 0)
-    guard required > 0, required <= maximumSelectionBytes else { return }
+    guard required > 0, required <= maximumSelectionBytes else { return false }
     var bytes = [UInt8](repeating: 0, count: required)
     let count = zigonaut_core_copy_selection(core.pointer, &bytes, bytes.count)
-    guard count == required, let value = String(bytes: bytes, encoding: .utf8) else { return }
+    guard count == required, let value = String(bytes: bytes, encoding: .utf8) else { return false }
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(value, forType: .string)
+    return NSPasteboard.general.setString(value, forType: .string)
   }
   deinit {
     guard let core else { return }
