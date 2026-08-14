@@ -28,6 +28,8 @@ pub const Terminal = struct {
     selection_anchor: vt.GhosttyTrackedGridRef = null,
     write_pty: ?WritePty = null,
     write_pty_context: ?*anyopaque = null,
+    bell_callback: ?Bell = null,
+    bell_context: ?*anyopaque = null,
     title_changed: ?TitleChanged = null,
     title_context: ?*anyopaque = null,
     clipboard_write: ?ClipboardWrite = null,
@@ -41,6 +43,7 @@ pub const Terminal = struct {
     intense_text_style: IntenseTextStyle = .all,
 
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
+    pub const Bell = *const fn (?*anyopaque) void;
     pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
     pub const ClipboardWrite = *const fn (?*anyopaque, ClipboardWriteOperation) ClipboardWriteResult;
     pub const ClipboardWriteOperation = union(enum) { clear, text: []const u8 };
@@ -1342,6 +1345,13 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(vt.GhosttyTerminalWritePtyFn, writePty)));
     }
 
+    pub fn setBell(self: *Terminal, callback: Bell, context: ?*anyopaque) !void {
+        self.bell_callback = callback;
+        self.bell_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_BELL, @as(vt.GhosttyTerminalBellFn, bell)));
+    }
+
     pub fn setClipboardWrite(self: *Terminal, callback: ClipboardWrite, context: ?*anyopaque) !void {
         self.clipboard_write = callback;
         self.clipboard_context = context;
@@ -2026,6 +2036,12 @@ fn writePty(_: vt.GhosttyTerminal, userdata: ?*anyopaque, data: [*c]const u8, le
     callback(self.write_pty_context, data[0..len]);
 }
 
+fn bell(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.bell_callback orelse return;
+    callback(self.bell_context);
+}
+
 fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.title_changed orelse return;
@@ -2164,6 +2180,24 @@ test "libghostty reports shell title changes" {
 
     terminal.feed("\x1b]2;project shell\x07");
     try std.testing.expectEqualStrings("project shell", listener.value);
+}
+
+test "libghostty reports terminal bells" {
+    const Listener = struct {
+        count: usize = 0,
+
+        fn ring(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+        }
+    };
+
+    var terminal = try Terminal.init(20, 3, theme.rasmus);
+    defer terminal.deinit();
+    var listener = Listener{};
+    try terminal.setBell(Listener.ring, &listener);
+    terminal.feed("one\x07two\x07");
+    try std.testing.expectEqual(@as(usize, 2), listener.count);
 }
 
 test "libghostty returns terminal queries and in-band size reports" {

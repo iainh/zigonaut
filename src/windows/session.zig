@@ -49,6 +49,7 @@ pub const SessionRuntime = struct {
     taskbar_progress: ?TaskbarProgress = null,
     progress_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     notifications: NotificationQueue = .{},
+    pending_bell: bool = false,
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
     pending_clipboard_write: ?PendingClipboardWrite = null,
@@ -265,6 +266,7 @@ pub const SessionRuntime = struct {
         errdefer self.terminal.deinit();
         try self.terminal.setTitleChanged(titleChanged, self);
         try self.terminal.setWritePty(writePty, self);
+        try self.terminal.setBell(bell, self);
         try self.terminal.setClipboardWrite(clipboardWrite, self);
         try self.terminal.setDesktopNotification(desktopNotification, self);
         try self.terminal.setProgressReport(progressReport, self);
@@ -763,6 +765,14 @@ pub const SessionRuntime = struct {
         return self.notifications.count > 0;
     }
 
+    pub fn takeBell(self: *SessionRuntime) bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        const pending = self.pending_bell;
+        self.pending_bell = false;
+        return pending;
+    }
+
     pub fn freeNotification(self: *SessionRuntime, notification: Notification) void {
         notification.deinit(self.allocator);
     }
@@ -1146,6 +1156,12 @@ pub const SessionRuntime = struct {
         @memcpy(payload[title.len..], body);
         const notification = Notification{ .payload = payload, .title_len = @intCast(title.len) };
         self.notifications.push(self.allocator, notification) catch notification.deinit(self.allocator);
+        self.requestRefresh();
+    }
+
+    fn bell(context: ?*anyopaque) void {
+        const self: *SessionRuntime = @ptrCast(@alignCast(context orelse return));
+        self.pending_bell = true;
         self.requestRefresh();
     }
 

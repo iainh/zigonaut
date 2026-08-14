@@ -41,6 +41,7 @@ const search_refresh_interval_ms = 33;
 const process_exit_refresh_interval_ms = 50;
 const search_time_budget_ns = 2 * std.time.ns_per_ms;
 const copy_flash_duration_ms = 150;
+const bell_minimum_interval_ms = 100;
 const default_wheel_rows = 3;
 const minimum_columns = 10;
 const minimum_rows = 4;
@@ -422,6 +423,7 @@ pub const View = struct {
     consumed_application_key: ?win.WPARAM = null,
     suppress_application_character: bool = false,
     copy_flash: bool = false,
+    last_bell_tick: u64 = 0,
     padding_horizontal: u16,
     padding_vertical: u16,
     balance_padding: bool = false,
@@ -1062,6 +1064,7 @@ pub const View = struct {
     }
 
     fn refreshIfNeeded(self: *View) void {
+        if (self.model.takePendingBell()) self.ringBell();
         if (self.model.hasExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
         }
@@ -1128,6 +1131,23 @@ pub const View = struct {
         self.last_content_generation = generation;
         self.notifyScrollbar(false);
         self.invalidateContent();
+    }
+
+    fn ringBell(self: *View) void {
+        const now = win.GetTickCount64();
+        if (now -| self.last_bell_tick < bell_minimum_interval_ms) return;
+        self.last_bell_tick = now;
+        _ = win.MessageBeep(win.MB_OK);
+        const parent = win.GetParent(self.hwnd);
+        if (parent == null or win.GetForegroundWindow() == parent) return;
+        var flash = win.FLASHWINFO{
+            .cbSize = @sizeOf(win.FLASHWINFO),
+            .hwnd = parent,
+            .dwFlags = win.FLASHW_TRAY | win.FLASHW_TIMERNOFG,
+            .uCount = 3,
+            .dwTimeout = 0,
+        };
+        _ = win.FlashWindowEx(&flash);
     }
 
     pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool, background_opacity: u8) void {
