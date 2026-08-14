@@ -2171,6 +2171,13 @@ const DirectWriteCellRenderer = struct {
     search_active: ?usize = null,
     search_offset: u64 = 0,
     row_metadata: Terminal.RowMetadata = .{},
+    selection_context: Terminal.RenderSnapshot.SelectionContext = .{
+        .previous = null,
+        .current = null,
+        .next = null,
+        .top_clipped = false,
+        .bottom_clipped = false,
+    },
     vertical_extension: ?PaddingExtensionRun = null,
     draw_error: ?anyerror = null,
 
@@ -2187,6 +2194,10 @@ const DirectWriteCellRenderer = struct {
 
     pub fn rowMetadata(self: *DirectWriteCellRenderer, _: u16, metadata: Terminal.RowMetadata) void {
         self.row_metadata = metadata;
+    }
+
+    pub fn selectionContext(self: *DirectWriteCellRenderer, _: u16, context: Terminal.RenderSnapshot.SelectionContext) void {
+        self.selection_context = context;
     }
 
     pub fn beginRow(self: *DirectWriteCellRenderer, y: u16) void {
@@ -2222,6 +2233,7 @@ const DirectWriteCellRenderer = struct {
             @floatFromInt(top),
             @floatFromInt(self.view.cell_width),
             @floatFromInt(self.view.cell_height),
+            self.selection_context,
         );
     }
 
@@ -2287,6 +2299,8 @@ const DirectWriteCellRenderer = struct {
             (if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(self.frame.?.cursor))
         else
             normal_background;
+        const selection_background = cell.selected and search_kind == 0 and !self.view.high_contrast;
+        const search_background = search_kind != 0;
         const underline_color = if (self.view.high_contrast) foreground else colorRef(cell.underline_color);
         const hovered = if (self.view.hovered_link) |value|
             value.link.row == cell.y and cell.x >= value.link.start_column and cell.x < value.link.end_column
@@ -2306,6 +2320,9 @@ const DirectWriteCellRenderer = struct {
             @floatFromInt(self.view.cell_height),
             foreground,
             background,
+            normal_background,
+            selection_background,
+            search_background,
             underline_color,
             cell.bold,
             cell.italic,
@@ -2888,6 +2905,9 @@ fn drawDirectWriteMessage(
         @floatFromInt(@max(rect.bottom - rect.top, 1)),
         foreground,
         background,
+        background,
+        false,
+        false,
         foreground,
         false,
         false,

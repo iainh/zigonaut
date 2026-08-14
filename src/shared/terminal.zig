@@ -157,6 +157,19 @@ pub const Terminal = struct {
     };
 
     pub const RenderSnapshot = struct {
+        pub const SelectionRange = struct {
+            start: u16,
+            end: u16,
+        };
+
+        pub const SelectionContext = struct {
+            previous: ?SelectionRange,
+            current: ?SelectionRange,
+            next: ?SelectionRange,
+            top_clipped: bool,
+            bottom_clipped: bool,
+        };
+
         frame: ?Frame = null,
         previous_frame: ?Frame = null,
         cells: std.ArrayList(OwnedCell) = .empty,
@@ -165,6 +178,7 @@ pub const Terminal = struct {
         placements: std.ArrayList(Placement) = .empty,
         row_hashes: std.ArrayList(u64) = .empty,
         previous_row_hashes: std.ArrayList(u64) = .empty,
+        previous_selection_ranges: std.ArrayList(?SelectionRange) = .empty,
 
         const OwnedImage = struct {
             image_id: u32,
@@ -194,6 +208,7 @@ pub const Terminal = struct {
             graphemes: std.ArrayList(u32) = .empty,
             dirty: bool = false,
             metadata: RowMetadata = .{},
+            selection: ?SelectionRange = null,
         };
 
         const OwnedCell = struct {
@@ -286,6 +301,7 @@ pub const Terminal = struct {
                 self.snapshot.rows.items[y].dirty = true;
                 self.snapshot.rows.items[y].graphemes.clearRetainingCapacity();
                 self.snapshot.rows.items[y].metadata.never_extend_background = false;
+                self.snapshot.rows.items[y].selection = null;
             }
 
             pub fn rowMetadata(self: *Recorder, y: u16, metadata: RowMetadata) void {
@@ -299,6 +315,14 @@ pub const Terminal = struct {
                 try row.graphemes.appendSlice(self.allocator, cell.codepoints[0..count]);
                 const index = @as(usize, cell.y) * self.snapshot.columns() + cell.x;
                 self.snapshot.cells.items[index] = .init(cell, offset);
+                if (cell.selected) {
+                    if (row.selection) |*selection| {
+                        selection.start = @min(selection.start, cell.x);
+                        selection.end = @max(selection.end, cell.x + 1);
+                    } else {
+                        row.selection = .{ .start = cell.x, .end = cell.x + 1 };
+                    }
+                }
                 row.metadata.never_extend_background = row.metadata.never_extend_background or
                     cell.background_is_default or cell.background_matches_default or cell.powerline;
             }
@@ -317,6 +341,7 @@ pub const Terminal = struct {
             self.placements.deinit(allocator);
             self.row_hashes.deinit(allocator);
             self.previous_row_hashes.deinit(allocator);
+            self.previous_selection_ranges.deinit(allocator);
             self.* = .{};
         }
 
@@ -330,6 +355,7 @@ pub const Terminal = struct {
                 try replacement.rows.resize(allocator, terminal.rows);
                 try replacement.row_hashes.resize(allocator, terminal.rows);
                 try replacement.previous_row_hashes.resize(allocator, terminal.rows);
+                try replacement.previous_selection_ranges.resize(allocator, terminal.rows);
                 for (replacement.rows.items) |*row| row.* = .{};
                 for (replacement.rows.items) |*row|
                     try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
@@ -339,6 +365,8 @@ pub const Terminal = struct {
                 try replacement.captureImages(allocator, terminal);
                 replacement.updateRowHashes();
                 @memcpy(replacement.previous_row_hashes.items, replacement.row_hashes.items);
+                for (replacement.rows.items, 0..) |row, y|
+                    replacement.previous_selection_ranges.items[y] = row.selection;
                 replacement.previous_frame = replacement.frame;
                 self.deinit(allocator);
                 self.* = replacement;
@@ -347,6 +375,8 @@ pub const Terminal = struct {
             const previous_frame = self.frame;
             self.previous_frame = previous_frame;
             @memcpy(self.previous_row_hashes.items, self.row_hashes.items);
+            for (self.rows.items, 0..) |row, y|
+                self.previous_selection_ranges.items[y] = row.selection;
             for (self.rows.items) |*row| row.dirty = false;
             var recorder = Recorder{ .snapshot = self, .allocator = allocator };
             terminal.renderViewportInternal(&recorder, self.frame) catch |err| {
@@ -355,6 +385,7 @@ pub const Terminal = struct {
                 self.frame = null;
                 return err;
             };
+            self.invalidateSelectionNeighbours();
             if (previous_frame) |previous| {
                 const current = self.frame.?;
                 if (cursorChanged(previous, current)) {
@@ -379,12 +410,44 @@ pub const Terminal = struct {
                 if (!row.dirty) continue;
                 const cells = self.cells.items[y * count ..][0..count];
                 var hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&row.metadata));
+                const context = self.selectionContext(y);
+                const absent = std.math.maxInt(u16);
+                const context_values = [8]u16{
+                    if (context.previous) |range| range.start else absent,
+                    if (context.previous) |range| range.end else absent,
+                    if (context.current) |range| range.start else absent,
+                    if (context.current) |range| range.end else absent,
+                    if (context.next) |range| range.start else absent,
+                    if (context.next) |range| range.end else absent,
+                    @intFromBool(context.top_clipped),
+                    @intFromBool(context.bottom_clipped),
+                };
+                hash = std.hash.Wyhash.hash(hash, std.mem.asBytes(&context_values));
                 hash = std.hash.Wyhash.hash(hash, std.mem.sliceAsBytes(cells));
                 self.row_hashes.items[y] = std.hash.Wyhash.hash(
                     hash,
                     std.mem.sliceAsBytes(row.graphemes.items),
                 );
             }
+        }
+
+        fn invalidateSelectionNeighbours(self: *RenderSnapshot) void {
+            for (self.rows.items, self.previous_selection_ranges.items, 0..) |row, previous, y| {
+                if (std.meta.eql(row.selection, previous)) continue;
+                if (y > 0) self.rows.items[y - 1].dirty = true;
+                self.rows.items[y].dirty = true;
+                if (y + 1 < self.rows.items.len) self.rows.items[y + 1].dirty = true;
+            }
+        }
+
+        fn selectionContext(self: *const RenderSnapshot, y: usize) SelectionContext {
+            return .{
+                .previous = if (y > 0) self.rows.items[y - 1].selection else null,
+                .current = self.rows.items[y].selection,
+                .next = if (y + 1 < self.rows.items.len) self.rows.items[y + 1].selection else null,
+                .top_clipped = y == 0,
+                .bottom_clipped = y + 1 == self.rows.items.len,
+            };
         }
 
         pub fn canShift(self: *const RenderSnapshot, delta: i32) bool {
@@ -405,6 +468,8 @@ pub const Terminal = struct {
                 const changed = old_y < 0 or old_y >= self.rows.items.len or old_cursor or new_cursor or
                     self.row_hashes.items[y] != self.previous_row_hashes.items[@intCast(old_y)];
                 if (!changed) continue;
+                if (comptime @hasDecl(@TypeOf(renderer.*), "selectionContext"))
+                    renderer.selectionContext(@intCast(y), self.selectionContext(y));
                 if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata")) renderer.rowMetadata(@intCast(y), row.metadata);
                 renderer.beginRow(@intCast(y));
                 for (self.cells.items[y * columns_count ..][0..columns_count], 0..) |*cell, x|
@@ -547,6 +612,8 @@ pub const Terminal = struct {
             const column_count = self.columns();
             for (self.rows.items, 0..) |*row, y| {
                 if (dirty_only and !row.dirty) continue;
+                if (comptime @hasDecl(@TypeOf(renderer.*), "selectionContext"))
+                    renderer.selectionContext(@intCast(y), self.selectionContext(y));
                 if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata"))
                     renderer.rowMetadata(@intCast(y), row.metadata);
                 renderer.beginRow(@intCast(y));
@@ -2924,6 +2991,63 @@ test "render snapshot shifted replay emits only exposed mismatched and cursor ro
         .pixels = try std.testing.allocator.dupe(u8, &.{ 0, 0, 0, 0 }),
     });
     try std.testing.expect(!snapshot.canShift(1));
+}
+
+test "render snapshot extracts half-open selection context" {
+    var terminal = try Terminal.init(6, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("abcdef\r\nghijkl\r\nmnopqr\r\nstuvwx");
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 2, .y = 0 },
+        .focus = .{ .x = 3, .y = 2 },
+    });
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(Terminal.RenderSnapshot.SelectionRange{ .start = 2, .end = 6 }, snapshot.rows.items[0].selection.?);
+    try std.testing.expectEqual(Terminal.RenderSnapshot.SelectionRange{ .start = 0, .end = 6 }, snapshot.rows.items[1].selection.?);
+    try std.testing.expectEqual(Terminal.RenderSnapshot.SelectionRange{ .start = 0, .end = 4 }, snapshot.rows.items[2].selection.?);
+    try std.testing.expect(snapshot.rows.items[3].selection == null);
+
+    const first = snapshot.selectionContext(0);
+    try std.testing.expect(first.previous == null);
+    try std.testing.expect(first.top_clipped);
+    try std.testing.expectEqual(snapshot.rows.items[0].selection, first.current);
+    try std.testing.expectEqual(snapshot.rows.items[1].selection, first.next);
+    const middle = snapshot.selectionContext(1);
+    try std.testing.expectEqual(snapshot.rows.items[0].selection, middle.previous);
+    try std.testing.expectEqual(snapshot.rows.items[2].selection, middle.next);
+    try std.testing.expect(!middle.top_clipped);
+    try std.testing.expect(!middle.bottom_clipped);
+}
+
+test "selection interval changes invalidate only immediate row neighbours" {
+    var terminal = try Terminal.init(6, 5, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("aaaaaa\r\nbbbbbb\r\ncccccc\r\ndddddd\r\neeeeee");
+    try terminal.setSelection(.{
+        .anchor = .{ .x = 1, .y = 2 },
+        .focus = .{ .x = 2, .y = 2 },
+    });
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    for (snapshot.rows.items, 0..) |*row, y| {
+        snapshot.previous_selection_ranges.items[y] = row.selection;
+        row.dirty = false;
+    }
+    const neighbour_hash = snapshot.row_hashes.items[1];
+    snapshot.rows.items[2].selection = .{ .start = 2, .end = 4 };
+    snapshot.invalidateSelectionNeighbours();
+    snapshot.updateRowHashes();
+
+    try std.testing.expect(!snapshot.rows.items[0].dirty);
+    try std.testing.expect(snapshot.rows.items[1].dirty);
+    try std.testing.expect(snapshot.rows.items[2].dirty);
+    try std.testing.expect(snapshot.rows.items[3].dirty);
+    try std.testing.expect(!snapshot.rows.items[4].dirty);
+    try std.testing.expect(neighbour_hash != snapshot.row_hashes.items[1]);
 }
 
 const ShiftReplayTestRenderer = struct {

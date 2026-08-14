@@ -164,6 +164,11 @@ struct RowCell {
     bool italic;
     bool strikethrough;
     ZigonautCellOccupancy occupancy;
+    uint32_t underline_color = 0;
+    uint8_t underline = 0;
+    bool overline = false;
+    bool selection_background = false;
+    bool search_background = false;
     enum class Kind : uint8_t { font, builtin } kind = Kind::font;
     uint32_t builtin_codepoint = 0;
     const uint8_t* builtin_mask = nullptr;
@@ -376,6 +381,198 @@ extern "C" HRESULT zigonaut_test_present_status_classification() {
 
 class GridTextRenderer;
 
+struct SelectionInterval {
+    uint32_t start = 0;
+    uint32_t end = 0;
+    bool active = false;
+};
+
+bool intervalsOverlap(const SelectionInterval& left, const SelectionInterval& right) {
+    return left.active && right.active &&
+        std::max(left.start, right.start) < std::min(left.end, right.end);
+}
+
+HRESULT createSelectionGeometry(ID2D1Factory1* factory,
+    SelectionInterval previous, SelectionInterval current, SelectionInterval next,
+    float origin_x, float top, float cell_width, float cell_height,
+    bool top_clipped, bool bottom_clipped, ID2D1PathGeometry** result) {
+    if (result == nullptr) return E_POINTER;
+    *result = nullptr;
+    if (factory == nullptr || !current.active || cell_width <= 0.0f || cell_height <= 0.0f)
+        return E_INVALIDARG;
+    struct Line { float left, right, top; };
+    Line lines[3]{};
+    size_t count = 0;
+    if (intervalsOverlap(previous, current)) lines[count++] = {
+        origin_x + previous.start * cell_width,
+        origin_x + previous.end * cell_width,
+        top - cell_height,
+    };
+    lines[count++] = {
+        origin_x + current.start * cell_width,
+        origin_x + current.end * cell_width,
+        top,
+    };
+    if (intervalsOverlap(current, next)) lines[count++] = {
+        origin_x + next.start * cell_width,
+        origin_x + next.end * cell_width,
+        top + cell_height,
+    };
+    const bool clip_top = top_clipped && count != 0 && lines[0].top == top;
+    const bool clip_bottom = bottom_clipped && count != 0 &&
+        lines[count - 1].top == top;
+    const float radius = std::min(0.15f * cell_height, 0.25f * cell_width);
+    const float vertical_radius = std::min(radius, 0.5f * cell_height);
+
+    ID2D1PathGeometry* geometry = nullptr;
+    HRESULT hr = factory->CreatePathGeometry(&geometry);
+    ID2D1GeometrySink* sink = nullptr;
+    if (SUCCEEDED(hr)) hr = geometry->Open(&sink);
+    if (FAILED(hr)) {
+        release(sink);
+        release(geometry);
+        return hr;
+    }
+    const auto point = [](float x, float y) { return D2D1::Point2F(x, y); };
+    const auto line_to = [&](float x, float y) { sink->AddLine(point(x, y)); };
+    const auto curve_to = [&](float control_x, float control_y, float x, float y) {
+        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+            point(control_x, control_y), point(x, y)));
+    };
+
+    const Line& first = lines[0];
+    const float first_top = first.top;
+    const float first_width_radius = std::min(radius, 0.5f * (first.right - first.left));
+    if (clip_top) {
+        sink->BeginFigure(point(first.right, first_top), D2D1_FIGURE_BEGIN_FILLED);
+    } else {
+        sink->BeginFigure(point(first.right - first_width_radius, first_top),
+            D2D1_FIGURE_BEGIN_FILLED);
+        curve_to(first.right, first_top, first.right, first_top + vertical_radius);
+    }
+
+    for (size_t index = 0; index + 1 < count; ++index) {
+        const Line& upper = lines[index];
+        const Line& lower = lines[index + 1];
+        const float boundary = lower.top;
+        if (upper.right == lower.right) {
+            line_to(lower.right, boundary);
+            continue;
+        }
+        const float direction = lower.right > upper.right ? 1.0f : -1.0f;
+        const float width_radius = std::min(radius,
+            0.5f * std::abs(lower.right - upper.right));
+        line_to(upper.right, boundary - vertical_radius);
+        curve_to(upper.right, boundary,
+            upper.right + direction * width_radius, boundary);
+        line_to(lower.right - direction * width_radius, boundary);
+        curve_to(lower.right, boundary,
+            lower.right, boundary + vertical_radius);
+    }
+
+    const Line& last = lines[count - 1];
+    const float bottom = last.top + cell_height;
+    const float last_width_radius = std::min(radius, 0.5f * (last.right - last.left));
+    if (clip_bottom) {
+        line_to(last.right, bottom);
+        line_to(last.left, bottom);
+    } else {
+        line_to(last.right, bottom - vertical_radius);
+        curve_to(last.right, bottom, last.right - last_width_radius, bottom);
+        line_to(last.left + last_width_radius, bottom);
+        curve_to(last.left, bottom, last.left, bottom - vertical_radius);
+    }
+
+    for (size_t index = count - 1; index > 0; --index) {
+        const Line& lower = lines[index];
+        const Line& upper = lines[index - 1];
+        const float boundary = lower.top;
+        if (lower.left == upper.left) {
+            line_to(upper.left, boundary);
+            continue;
+        }
+        const float direction = upper.left > lower.left ? 1.0f : -1.0f;
+        const float width_radius = std::min(radius,
+            0.5f * std::abs(upper.left - lower.left));
+        line_to(lower.left, boundary + vertical_radius);
+        curve_to(lower.left, boundary,
+            lower.left + direction * width_radius, boundary);
+        line_to(upper.left - direction * width_radius, boundary);
+        curve_to(upper.left, boundary,
+            upper.left, boundary - vertical_radius);
+    }
+
+    if (clip_top) {
+        line_to(first.left, first_top);
+    } else {
+        line_to(first.left, first_top + vertical_radius);
+        curve_to(first.left, first_top,
+            first.left + first_width_radius, first_top);
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    hr = sink->Close();
+    release(sink);
+    if (FAILED(hr)) {
+        release(geometry);
+        return hr;
+    }
+    *result = geometry;
+    return S_OK;
+}
+
+extern "C" HRESULT zigonaut_test_selection_geometry() {
+    ID2D1Factory1* factory = nullptr;
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+        __uuidof(ID2D1Factory1), nullptr, reinterpret_cast<void**>(&factory));
+    if (FAILED(hr)) return hr;
+    ID2D1PathGeometry* geometry = nullptr;
+    const auto contains = [&](float x, float y, bool expected) {
+        BOOL value = FALSE;
+        const HRESULT result = geometry->FillContainsPoint(
+            D2D1::Point2F(x, y), nullptr, 0.01f, &value);
+        return SUCCEEDED(result) && (value != FALSE) == expected;
+    };
+
+    hr = createSelectionGeometry(factory, {}, {1, 4, true}, {},
+        0.0f, 0.0f, 10.0f, 20.0f, false, false, &geometry);
+    if (SUCCEEDED(hr) && (!contains(20.0f, 10.0f, true) ||
+            !contains(10.1f, 0.1f, false) || !contains(39.9f, 19.9f, false)))
+        hr = E_FAIL;
+    release(geometry);
+
+    if (SUCCEEDED(hr)) hr = createSelectionGeometry(factory,
+        {0, 4, true}, {2, 4, true}, {},
+        0.0f, 20.0f, 10.0f, 20.0f, false, false, &geometry);
+    bool found_concave_bleed = false;
+    bool concave_bleed_covered = true;
+    if (SUCCEEDED(hr)) {
+        for (float y = 20.05f; y < 23.0f; y += 0.05f) {
+            for (float x = 15.0f; x < 20.0f; x += 0.05f) {
+                BOOL value = FALSE;
+                if (SUCCEEDED(geometry->FillContainsPoint(
+                        D2D1::Point2F(x, y), nullptr, 0.01f, &value)) && value != FALSE) {
+                    // The concave curve enters the unselected notch, and the
+                    // horizontal radius expansion must cover every such point.
+                    found_concave_bleed = true;
+                    concave_bleed_covered = concave_bleed_covered && x >= 20.0f - 2.5f;
+                }
+            }
+        }
+        if (!contains(10.0f, 10.0f, true) || !contains(30.0f, 30.0f, true) ||
+                !found_concave_bleed || !concave_bleed_covered) hr = E_FAIL;
+    }
+    release(geometry);
+
+    if (SUCCEEDED(hr)) hr = createSelectionGeometry(factory, {}, {0, 2, true}, {},
+        0.0f, 0.0f, 10.0f, 20.0f, true, true, &geometry);
+    if (SUCCEEDED(hr) && (!contains(0.1f, 0.1f, true) ||
+            !contains(19.9f, 19.9f, true)))
+        hr = E_FAIL;
+    release(geometry);
+    release(factory);
+    return hr;
+}
+
 struct ZigonautTextEngine {
     enum class TestFault { none, atlas_resource, atlas_texture, rasterize, upload,
         instance_upload, instance_append };
@@ -482,6 +679,10 @@ struct ZigonautTextEngine {
     D2D1_RECT_F pending_row_background{};
     uint32_t pending_row_background_color = 0;
     bool pending_row_background_active = false;
+    bool pending_row_background_selection = false;
+    bool pending_row_background_search = false;
+    ID2D1PathGeometry* selection_geometry = nullptr;
+    float selection_radius = 0.0f;
     bool row_active = false;
     bool frame_active = false;
     bool present_pending = false;
@@ -1385,8 +1586,12 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         bool strikethrough,
         bool overline,
         uint8_t underline,
-        ZigonautCellOccupancy occupancy) {
+        ZigonautCellOccupancy occupancy,
+        uint32_t ordinary_background = UINT32_MAX,
+        bool selection_background = false,
+        bool search_background = false) {
         if (target == nullptr || brush == nullptr) return E_UNEXPECTED;
+        if (ordinary_background == UINT32_MAX) ordinary_background = background;
         setTag(frame_command_cell_decoration);
         const auto rect = D2D1::RectF(left, top, left + width, top + height);
         if (!row_active && frame_active) {
@@ -1394,9 +1599,31 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 left + width + 1.0f, top + height + 1.0f);
         }
         if (row_active && !benchmark_legacy_background_fills) {
-            if (background == frame_background) {
+            if (selection_background) {
+                if (ordinary_background != frame_background) {
+                    brush->SetColor(color(ordinary_background));
+                    target->FillRectangle(rect, brush);
+                    if (benchmark_background_active) ++background_fill_calls;
+                }
+                if (pending_row_background_active && pending_row_background_selection &&
+                        pending_row_background_color == background &&
+                        pending_row_background.right == rect.left &&
+                        pending_row_background.top == rect.top &&
+                        pending_row_background.bottom == rect.bottom) {
+                    pending_row_background.right = rect.right;
+                } else {
+                    flushRowBackground();
+                    pending_row_background = rect;
+                    pending_row_background_color = background;
+                    pending_row_background_selection = true;
+                    pending_row_background_search = false;
+                    pending_row_background_active = true;
+                }
+            } else if (background == frame_background && !search_background) {
                 flushRowBackground();
             } else if (pending_row_background_active &&
+                    !pending_row_background_selection &&
+                    pending_row_background_search == search_background &&
                     pending_row_background_color == background &&
                     pending_row_background.right == rect.left &&
                     pending_row_background.top == rect.top &&
@@ -1406,6 +1633,8 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 flushRowBackground();
                 pending_row_background = rect;
                 pending_row_background_color = background;
+                pending_row_background_selection = false;
+                pending_row_background_search = search_background;
                 pending_row_background_active = true;
             }
         } else if (background != frame_background) {
@@ -1417,10 +1646,10 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             foreground = blend(foreground, background);
             underline_color = blend(underline_color, background);
         }
-        if (row_active && (underline != 0 || overline)) flushRowBackground();
+        const bool defer_decorations = row_active;
         brush->SetColor(color(underline_color));
         const float underline_y = top + height - 1.5f;
-        if (underline != 0) {
+        if (underline != 0 && !defer_decorations) {
             if (underline == 4) {
                 for (float x = left + 1.0f; x < left + width; x += 3.0f) {
                     target->DrawLine(D2D1::Point2F(x, underline_y),
@@ -1455,7 +1684,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             const float y = top + height * 0.55f;
             target->DrawLine(D2D1::Point2F(left, y), D2D1::Point2F(left + width, y), brush, 1.0f);
         }
-        if (overline) {
+        if (overline && !defer_decorations) {
             target->DrawLine(D2D1::Point2F(left, top + 1.0f),
                 D2D1::Point2F(left + width, top + 1.0f), brush, 1.0f);
         }
@@ -1476,6 +1705,11 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 italic,
                 strikethrough,
                 occupancy,
+                underline_color,
+                underline,
+                overline,
+                selection_background,
+                search_background,
             });
             return S_OK;
         }
@@ -1506,7 +1740,12 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         float origin_x,
         float top,
         float cell_width,
-        float cell_height) {
+        float cell_height,
+        SelectionInterval previous = {},
+        SelectionInterval current = {},
+        SelectionInterval next = {},
+        bool top_clipped = false,
+        bool bottom_clipped = false) {
         row_cells.clear();
         row_text.clear();
         row_origin_x = origin_x;
@@ -1514,6 +1753,15 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         row_cell_width = cell_width;
         row_cell_height = cell_height;
         pending_row_background_active = false;
+        pending_row_background_selection = false;
+        pending_row_background_search = false;
+        release(selection_geometry);
+        selection_radius = std::min(0.15f * cell_height, 0.25f * cell_width);
+        if (current.active) {
+            (void)createSelectionGeometry(d2d_factory, previous, current, next,
+                origin_x, top, cell_width, cell_height,
+                top_clipped, bottom_clipped, &selection_geometry);
+        }
         row_active = true;
         if (target != nullptr && scene_texture != nullptr && frame_active) {
             addDamage(frame_damage, 0.0f, top,
@@ -1526,8 +1774,19 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     void flushRowBackground() {
         if (!pending_row_background_active) return;
         brush->SetColor(color(pending_row_background_color));
-        target->FillRectangle(pending_row_background, brush);
+        if (pending_row_background_selection && selection_geometry != nullptr) {
+            auto parameters = D2D1::LayerParameters1();
+            parameters.geometricMask = selection_geometry;
+            parameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+            target->PushLayer(parameters, nullptr);
+            target->FillRectangle(pending_row_background, brush);
+            target->PopLayer();
+        } else {
+            target->FillRectangle(pending_row_background, brush);
+        }
         pending_row_background_active = false;
+        pending_row_background_selection = false;
+        pending_row_background_search = false;
         if (benchmark_background_active) ++background_fill_calls;
     }
 
@@ -1848,6 +2107,7 @@ private:
 
 ZigonautTextEngine::~ZigonautTextEngine() {
     delete grid_renderer;
+    release(selection_geometry);
     invalidateAtlas();
     discardTargetBitmap();
     clearBuiltinBitmaps();
@@ -1954,6 +2214,79 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
 HRESULT ZigonautTextEngine::endRow() {
     if (!row_active) return E_UNEXPECTED;
     flushRowBackground();
+    if (selection_geometry != nullptr) {
+        auto parameters = D2D1::LayerParameters1();
+        parameters.geometricMask = selection_geometry;
+        parameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+        target->PushLayer(parameters, nullptr);
+        for (const auto& cell : row_cells) {
+            if (!cell.selection_background) continue;
+            const float left = row_origin_x + cell.column * row_cell_width;
+            const float width = row_cell_width *
+                (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
+            brush->SetColor(color(cell.background));
+            target->FillRectangle(D2D1::RectF(left - selection_radius, row_top,
+                left + width + selection_radius, row_top + row_cell_height), brush);
+        }
+        // Restore exact per-cell colours after adjacent expanded fills overlap.
+        for (const auto& cell : row_cells) {
+            if (!cell.selection_background) continue;
+            const float left = row_origin_x + cell.column * row_cell_width;
+            const float width = row_cell_width *
+                (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
+            brush->SetColor(color(cell.background));
+            target->FillRectangle(D2D1::RectF(left, row_top,
+                left + width, row_top + row_cell_height), brush);
+        }
+        target->PopLayer();
+    }
+    for (const auto& cell : row_cells) {
+        if (!cell.search_background) continue;
+        const float left = row_origin_x + cell.column * row_cell_width;
+        const float width = row_cell_width *
+            (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
+        brush->SetColor(color(cell.background));
+        target->FillRectangle(D2D1::RectF(left, row_top,
+            left + width, row_top + row_cell_height), brush);
+    }
+    // Backgrounds are complete now. Draw decorations afterward so concave
+    // colour bleed and the exact selection/search passes cannot cover them;
+    // text and strikethrough are already emitted later in this method.
+    for (const auto& cell : row_cells) {
+        if (cell.underline == 0 && !cell.overline) continue;
+        const float left = row_origin_x + cell.column * row_cell_width;
+        const float width = row_cell_width *
+            (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
+        const float underline_y = row_top + row_cell_height - 1.5f;
+        brush->SetColor(color(cell.underline_color));
+        if (cell.underline == 4) {
+            for (float x = left + 1.0f; x < left + width; x += 3.0f)
+                target->DrawLine(D2D1::Point2F(x, underline_y),
+                    D2D1::Point2F(x + 0.5f, underline_y), brush, 1.0f);
+        } else if (cell.underline == 5) {
+            for (float x = left; x < left + width; x += 6.0f)
+                target->DrawLine(D2D1::Point2F(x, underline_y),
+                    D2D1::Point2F(std::min(x + 3.0f, left + width), underline_y),
+                    brush, 1.0f);
+        } else if (cell.underline == 3) {
+            for (float x = left; x < left + width; x += 4.0f) {
+                target->DrawLine(D2D1::Point2F(x, underline_y - 1.0f),
+                    D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+                    brush, 1.0f);
+                target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+                    D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 1.0f),
+                    brush, 1.0f);
+            }
+        } else if (cell.underline != 0) {
+            target->DrawLine(D2D1::Point2F(left, underline_y),
+                D2D1::Point2F(left + width, underline_y), brush, 1.0f);
+            if (cell.underline == 2) target->DrawLine(
+                D2D1::Point2F(left, underline_y - 2.0f),
+                D2D1::Point2F(left + width, underline_y - 2.0f), brush, 1.0f);
+        }
+        if (cell.overline) target->DrawLine(D2D1::Point2F(left, row_top + 1.0f),
+            D2D1::Point2F(left + width, row_top + 1.0f), brush, 1.0f);
+    }
     row_active = false;
     struct RowClipGuard {
         ZigonautTextEngine* engine;
@@ -3826,9 +4159,25 @@ extern "C" void zigonaut_text_engine_begin_row(
     float origin_x,
     float top,
     float cell_width,
-    float cell_height) {
+    float cell_height,
+    uint32_t previous_start,
+    uint32_t previous_end,
+    uint32_t current_start,
+    uint32_t current_end,
+    uint32_t next_start,
+    uint32_t next_end,
+    BOOL top_clipped,
+    BOOL bottom_clipped) {
     if (engine == nullptr || cell_width <= 0.0f || cell_height <= 0.0f) return;
-    engine->beginRow(origin_x, top, cell_width, cell_height);
+    const auto interval = [](uint32_t start, uint32_t end) {
+        return SelectionInterval{start, end,
+            start != UINT32_MAX && end != UINT32_MAX && start < end};
+    };
+    engine->beginRow(origin_x, top, cell_width, cell_height,
+        interval(previous_start, previous_end),
+        interval(current_start, current_end),
+        interval(next_start, next_end),
+        top_clipped != FALSE, bottom_clipped != FALSE);
 }
 
 extern "C" HRESULT zigonaut_text_engine_draw_cell(
@@ -3841,6 +4190,9 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
     float height,
     uint32_t foreground,
     uint32_t background,
+    uint32_t ordinary_background,
+    BOOL selection_background,
+    BOOL search_background,
     uint32_t underline_color,
     BOOL bold,
     BOOL italic,
@@ -3866,7 +4218,10 @@ extern "C" HRESULT zigonaut_text_engine_draw_cell(
         strikethrough != FALSE,
         overline != FALSE,
         underline,
-        occupancy);
+        occupancy,
+        ordinary_background,
+        selection_background != FALSE,
+        search_background != FALSE);
 }
 
 extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(

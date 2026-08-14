@@ -218,6 +218,9 @@ pub const Engine = struct {
         height: f32,
         foreground: u32,
         background: u32,
+        ordinary_background: u32,
+        selection_background: bool,
+        search_background: bool,
         underline_color: u32,
         bold: bool,
         italic: bool,
@@ -237,6 +240,9 @@ pub const Engine = struct {
             height,
             foreground,
             background,
+            ordinary_background,
+            @intFromBool(selection_background),
+            @intFromBool(search_background),
             underline_color,
             @intFromBool(bold),
             @intFromBool(italic),
@@ -255,7 +261,9 @@ pub const Engine = struct {
         top: f32,
         cell_width: f32,
         cell_height: f32,
+        context: shared.terminal.Terminal.RenderSnapshot.SelectionContext,
     ) void {
+        const absent = std.math.maxInt(u32);
         native.zigonaut_text_engine_begin_row(
             self.handle,
             row,
@@ -263,6 +271,14 @@ pub const Engine = struct {
             top,
             cell_width,
             cell_height,
+            if (context.previous) |range| range.start else absent,
+            if (context.previous) |range| range.end else absent,
+            if (context.current) |range| range.start else absent,
+            if (context.current) |range| range.end else absent,
+            if (context.next) |range| range.start else absent,
+            if (context.next) |range| range.end else absent,
+            @intFromBool(context.top_clipped),
+            @intFromBool(context.bottom_clipped),
         );
     }
 
@@ -429,6 +445,10 @@ test "fixed glyph atlas allocator is deterministic and transactional" {
 
 test "DXGI successful presentation statuses are not renderer failures" {
     try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_present_status_classification());
+}
+
+test "rounded selection geometry covers concave transitions and clipped edges" {
+    try std.testing.expectEqual(@as(native.HRESULT, 0), native.zigonaut_test_selection_geometry());
 }
 
 test "glyph atlas draws pixels, skips empty sprites, and survives frame reset" {

@@ -154,6 +154,7 @@ HRESULT zigonaut_test_present_status_classification(void);
 HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest* result);
 HRESULT zigonaut_test_atlas_policy_and_faults(void);
 HRESULT zigonaut_test_damage_aware_transfer(ZigonautDamageTransferTest* result);
+HRESULT zigonaut_test_selection_geometry(void);
 
 typedef enum ZigonautCellOccupancy {
     ZIGONAUT_CELL_NARROW = 0,
@@ -209,7 +210,15 @@ void zigonaut_text_engine_begin_row(
     float origin_x,
     float top,
     float cell_width,
-    float cell_height);
+    float cell_height,
+    uint32_t previous_start,
+    uint32_t previous_end,
+    uint32_t current_start,
+    uint32_t current_end,
+    uint32_t next_start,
+    uint32_t next_end,
+    BOOL top_clipped,
+    BOOL bottom_clipped);
 
 HRESULT zigonaut_text_engine_draw_cell(
     ZigonautTextEngine* engine,
@@ -221,6 +230,9 @@ HRESULT zigonaut_text_engine_draw_cell(
     float height,
     uint32_t foreground,
     uint32_t background,
+    uint32_t ordinary_background,
+    BOOL selection_background,
+    BOOL search_background,
     uint32_t underline_color,
     BOOL bold,
     BOOL italic,
