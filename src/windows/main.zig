@@ -456,6 +456,7 @@ const Application = struct {
 
     fn syncRenderAvailability(self: *Application, restart: bool) void {
         const available = self.render_availability.enabled();
+        self.model.setVisible(available);
         var renderer_failed = false;
         for (self.views.items) |entry| {
             entry.view.setEnvironmentAvailable(available);
@@ -491,6 +492,7 @@ const Application = struct {
             return err;
         };
         view.setEnvironmentAvailable(self.render_availability.enabled());
+        self.model.setVisible(self.render_availability.enabled());
         if (view.swapChain() == null) {
             if (!view.destroy()) {
                 may_free = false;

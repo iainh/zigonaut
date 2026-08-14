@@ -938,6 +938,12 @@ pub const SessionRuntime = struct {
         self.write(encoded) catch |err| log.debug("unable to write terminal focus report: {}", .{err});
     }
 
+    pub fn setVisible(self: *SessionRuntime, visible: bool) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.setVisible(visible);
+    }
+
     fn readerMain(self: *SessionRuntime) void {
         var buffer: [reader_buffer_bytes]u8 = undefined;
         var read_failure: ?anyerror = null;

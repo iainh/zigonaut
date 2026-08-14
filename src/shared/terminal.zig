@@ -38,6 +38,7 @@ pub const Terminal = struct {
     desktop_notification_context: ?*anyopaque = null,
     progress_report: ?ProgressReport = null,
     progress_report_context: ?*anyopaque = null,
+    visible: bool = true,
     columns: u16,
     rows: u16,
     intense_text_style: IntenseTextStyle = .all,
@@ -1007,6 +1008,16 @@ pub const Terminal = struct {
         if (!enabled or output.len < 3) return output[0..0];
         @memcpy(output[0..3], if (focused) "\x1b[I" else "\x1b[O");
         return output[0..3];
+    }
+
+    pub fn setVisible(self: *Terminal, visible: bool) void {
+        if (self.visible == visible) return;
+        self.visible = visible;
+        var enabled = false;
+        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2033, false), &enabled)) catch return;
+        if (!enabled) return;
+        const callback = self.write_pty orelse return;
+        callback(self.write_pty_context, if (visible) "\x1b[?999;1n" else "\x1b[?999;2n");
     }
 
     pub fn scrollbar(self: *Terminal) !Scrollbar {
@@ -2033,7 +2044,11 @@ fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
 fn writePty(_: vt.GhosttyTerminal, userdata: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.write_pty orelse return;
-    callback(self.write_pty_context, data[0..len]);
+    const bytes = data[0..len];
+    callback(
+        self.write_pty_context,
+        if (!self.visible and std.mem.eql(u8, bytes, "\x1b[?999;1n")) "\x1b[?999;2n" else bytes,
+    );
 }
 
 fn bell(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
@@ -2256,6 +2271,33 @@ test "focus reports are emitted only when requested" {
     try std.testing.expectEqualStrings("\x1b[O", terminal.encodeFocusReport(false, &buffer));
     terminal.feed("\x1b[?1004l");
     try std.testing.expectEqualStrings("", terminal.encodeFocusReport(false, &buffer));
+}
+
+test "visibility reports follow host visibility" {
+    const Listener = struct {
+        bytes: std.ArrayList(u8) = .empty,
+
+        fn write(context: ?*anyopaque, bytes: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.bytes.appendSlice(std.testing.allocator, bytes) catch @panic("OOM");
+        }
+    };
+
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    var listener = Listener{};
+    defer listener.bytes.deinit(std.testing.allocator);
+    try terminal.setWritePty(Listener.write, &listener);
+
+    terminal.setVisible(false);
+    terminal.feed("\x1b[?2033h");
+    try std.testing.expectEqualStrings("\x1b[?999;2n", listener.bytes.items);
+    listener.bytes.clearRetainingCapacity();
+    terminal.feed("\x1b[?998n");
+    try std.testing.expectEqualStrings("\x1b[?999;2n", listener.bytes.items);
+    listener.bytes.clearRetainingCapacity();
+    terminal.setVisible(true);
+    try std.testing.expectEqualStrings("\x1b[?999;1n", listener.bytes.items);
 }
 
 test "libghostty emits decoded clipboard writes but ignores reads" {

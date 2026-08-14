@@ -712,6 +712,12 @@ pub const App = struct {
         return pending;
     }
 
+    pub fn setVisible(self: *App, visible: bool) void {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            runtime.setVisible(visible);
+        };
+    }
+
     pub fn resizeSessions(self: *App, columns: u16, rows: u16, cell_width: u32, cell_height: u32) void {
         self.terminal_size = .{ .columns = columns, .rows = rows, .cell_width = cell_width, .cell_height = cell_height };
         self.resizeActiveSession();
