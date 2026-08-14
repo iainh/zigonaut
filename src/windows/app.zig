@@ -454,10 +454,10 @@ pub const App = struct {
     }
 
     /// Removes exactly one eligible pane without destroying its still-live runtime.
-    pub fn extractCleanlyExitedPane(self: *App) ?RemovedPane {
+    pub fn extractExitedPane(self: *App) ?RemovedPane {
         for (self.tabs.items, 0..) |*tab, tab_index| for (tab.panes.items) |pane| {
             const runtime = pane.session.runtime orelse continue;
-            if (runtime.exitedCleanly() and !pane.session.hold_on_exit)
+            if (runtime.exited() and !pane.session.hold_on_exit)
                 return self.extractPane(tab_index, pane.id);
         };
         return null;
@@ -740,8 +740,8 @@ pub const App = struct {
         return generation;
     }
 
-    pub fn hasCleanlyExitedSession(self: *const App) bool {
-        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.exitedCleanly()) return true;
+    pub fn hasExitedSession(self: *const App) bool {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| if (runtime.exited()) return true;
         return false;
     }
 
@@ -750,7 +750,7 @@ pub const App = struct {
         return false;
     }
 
-    pub fn closeCleanlyExitedSessions(self: *App) bool {
+    pub fn closeExitedSessions(self: *App) bool {
         var changed = false;
         var ti = self.tabs.items.len;
         while (ti > 0) {
@@ -760,7 +760,7 @@ pub const App = struct {
                 pi -= 1;
                 const pane = self.tabs.items[ti].panes.items[pi];
                 const runtime = pane.session.runtime orelse continue;
-                if (!runtime.exitedCleanly() or pane.session.hold_on_exit) continue;
+                if (!runtime.exited() or pane.session.hold_on_exit) continue;
                 self.closePane(ti, pane.id);
                 changed = true;
             }

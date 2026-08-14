@@ -377,6 +377,7 @@ struct TerminalPalette: Equatable {
   @Published private(set) var searchError = false
   @Published private(set) var progress: TerminalProgress?
   @Published private(set) var outputGeneration: UInt64 = 0
+  @Published private(set) var exited = false
   nonisolated(unsafe) private var core: TerminalCoreHandle?
   nonisolated private let writer = DispatchQueue(label: "dev.zigonaut.pty-writer")
   nonisolated private let callbackBox: Unmanaged<TerminalCallbackBox>
@@ -453,6 +454,7 @@ struct TerminalPalette: Equatable {
     retrieveSnapshot(core: core.pointer, retry: true)
     let generation = zigonaut_core_output_generation(core.pointer)
     if generation != outputGeneration { outputGeneration = generation }
+    if !exited, zigonaut_core_exited(core.pointer) { exited = true }
     retrieveTitle(core: core.pointer)
     retrieveProgress(core: core.pointer)
     drainNotifications(core: core.pointer)
@@ -1118,9 +1120,11 @@ struct TerminalPalette: Equatable {
   private var titleObservation: AnyCancellable?
   private var progressObservation: AnyCancellable?
   private var outputObservations: [UUID: AnyCancellable] = [:]
+  private var exitObservations: [UUID: AnyCancellable] = [:]
   private var paneFrames: [UUID: CGRect] = [:]
   let preferences: Preferences
   var stateChanged: (() -> Void)?
+  var paneExited: ((UUID) -> Void)?
   init(preferences: Preferences) {
     self.preferences = preferences
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
@@ -1186,9 +1190,13 @@ struct TerminalPalette: Equatable {
   private func synchronizeOutputOwners() {
     let active = Set(panes.map(\.id))
     outputObservations = outputObservations.filter { active.contains($0.key) }
+    exitObservations = exitObservations.filter { active.contains($0.key) }
     for pane in panes where outputObservations[pane.id] == nil {
       outputObservations[pane.id] = pane.$outputGeneration.dropFirst().sink { [weak self] _ in
         self?.outputGeneration &+= 1
+      }
+      exitObservations[pane.id] = pane.$exited.filter { $0 }.sink { [weak self] _ in
+        self?.paneExited?(pane.id)
       }
     }
   }

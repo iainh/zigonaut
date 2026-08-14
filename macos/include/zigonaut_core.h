@@ -57,6 +57,7 @@ bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);
 void zigonaut_core_progress(zigonaut_core *, zigonaut_progress_v1 *);
 /* True only while a foreground process group other than the login shell owns the PTY. */
 bool zigonaut_core_has_foreground_job(zigonaut_core *);
+bool zigonaut_core_exited(zigonaut_core *);
 uint64_t zigonaut_core_output_generation(zigonaut_core *);
 uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity);
 uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity, uint16_t *start_column, uint16_t *end_column);

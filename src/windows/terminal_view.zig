@@ -1062,7 +1062,7 @@ pub const View = struct {
     }
 
     fn refreshIfNeeded(self: *View) void {
-        if (self.model.hasCleanlyExitedSession()) {
+        if (self.model.hasExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
         }
         const waiting_for_process_exit = self.model.hasSessionWaitingForProcessExit();

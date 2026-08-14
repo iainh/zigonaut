@@ -42,6 +42,7 @@ const Core = struct {
     child: c.pid_t,
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake: Wake,
     context: ?*anyopaque,
     title: [4096]u8 = undefined,
@@ -418,6 +419,13 @@ fn readLoop(self: *Core) void {
         if (wake) |callback| callback(context);
         self.callback_mutex.unlock();
     }
+    if (self.stopping.load(.acquire)) return;
+    self.exited.store(true, .release);
+    self.callback_mutex.lock();
+    const wake = self.wake;
+    const context = self.context;
+    if (wake) |callback| callback(context);
+    self.callback_mutex.unlock();
 }
 
 export fn zigonaut_core_resize(self: ?*Core, columns: u16, rows: u16, pixel_width: u16, pixel_height: u16, cell_width: u32, cell_height: u32) void {
@@ -937,6 +945,11 @@ export fn zigonaut_core_has_foreground_job(self: ?*Core) bool {
     return isForegroundJob(core.child, c.tcgetpgrp(core.master));
 }
 
+export fn zigonaut_core_exited(self: ?*Core) bool {
+    const core = self orelse return false;
+    return core.exited.load(.acquire);
+}
+
 export fn zigonaut_core_output_generation(self: ?*Core) u64 {
     const core = self orelse return 0;
     core.mutex.lock();
@@ -1357,6 +1370,7 @@ test "null ABI handles are safe" {
     zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
     try std.testing.expect(!zigonaut_core_has_foreground_job(null));
+    try std.testing.expect(!zigonaut_core_exited(null));
     try std.testing.expectEqual(@as(u64, 0), zigonaut_core_output_generation(null));
     try std.testing.expect(!zigonaut_core_has_selection(null));
     zigonaut_core_write(null, null, 0);

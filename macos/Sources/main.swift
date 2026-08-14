@@ -416,6 +416,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         controller.stateChanged = { [weak self] in self?.scheduleSave() }
         controller.shouldClose = { [weak self] window in self?.shouldClose(window) ?? true }
         model.stateChanged = { [weak self] in self?.scheduleSave() }
+        model.paneExited = { [weak self, weak model, weak window] pane in
+            guard let self, let model, let window else { return }
+            if !model.closePane(pane) {
+                self.confirmedWindows.insert(ObjectIdentifier(window))
+                window.performClose(nil)
+            }
+        }
         terminalWindows[window] = controller
         updateDockProgress()
         return controller

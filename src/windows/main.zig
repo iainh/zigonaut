@@ -1271,7 +1271,7 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
                 return 0;
             };
             var changed = false;
-            while (self.model.extractCleanlyExitedPane()) |removed_value| {
+            while (self.model.extractExitedPane()) |removed_value| {
                 var removed = removed_value;
                 if (!self.destroyView(removed.pane_id)) {
                     // The pane is already extracted; retain its runtime forever rather

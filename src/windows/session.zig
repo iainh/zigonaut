@@ -887,9 +887,9 @@ pub const SessionRuntime = struct {
         try self.write(encoded);
     }
 
-    pub fn exitedCleanly(self: *const SessionRuntime) bool {
+    pub fn exited(self: *const SessionRuntime) bool {
         const pty = self.pty orelse return false;
-        return pty.exitedCleanly();
+        return pty.exited();
     }
 
     pub fn waitingForProcessExit(self: *const SessionRuntime) bool {
