@@ -1976,13 +1976,16 @@ struct Bridge {
         focusTerminal();
     }
 
-    void updateFind(uint64_t pane_id, uint32_t match_count, int32_t active_match, bool) {
+    void updateFind(uint64_t pane_id, uint32_t match_count, int32_t active_match, bool scanning) {
         if (!pane_id || pane_id != find_pane) return;
         std::wstring status;
         if (active_match >= 0 && static_cast<uint32_t>(active_match) < match_count) {
             status = std::to_wstring(static_cast<uint32_t>(active_match) + 1) + L" / " + std::to_wstring(match_count);
+            if (scanning) status += L"+";
         } else {
-            status = std::to_wstring(match_count) + (match_count == 1 ? L" match" : L" matches");
+            status = std::to_wstring(match_count);
+            if (scanning) status += L"+";
+            status += match_count == 1 && !scanning ? L" match" : L" matches";
         }
         find_status.Text(status);
         find_previous.IsEnabled(match_count != 0);
