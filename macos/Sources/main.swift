@@ -53,18 +53,31 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     var shouldClose: ((NSWindow) -> Bool)?
     private var titleObservation: AnyCancellable?
     private var progressObservation: AnyCancellable?
+    private var activityObservation: AnyCancellable?
     private var backgroundObservations = Set<AnyCancellable>()
+    private var terminalTitle = "Terminal"
+    private var hasUnreadOutput = false
 
     init(window: NSWindow, kind: Kind) {
         self.kind = kind
         super.init(window: window)
         window.delegate = self
         if case .terminal(let model) = kind {
-            titleObservation = model.$title.sink { [weak window] title in
-                window?.title = title
+            terminalTitle = model.title
+            titleObservation = model.$title.sink { [weak self] title in
+                self?.terminalTitle = title
+                self?.updateTerminalTitle()
             }
             progressObservation = model.$progress.sink { [weak self] _ in
                 self?.progressChanged?()
+            }
+            activityObservation = model.$outputGeneration.dropFirst().sink { [weak self, weak window] _ in
+                guard let self, let window else { return }
+                let selected = window.tabGroup?.selectedWindow ?? window
+                guard selected !== window else { return }
+                self.hasUnreadOutput = true
+                self.updateTerminalTitle()
+                window.setAccessibilityHelp("New terminal output")
             }
             model.$focusedPane.sink { [weak window] _ in
                 (window as? TerminalWindow)?.updateTitlebarColor()
@@ -102,8 +115,29 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        if let window = notification.object as? NSWindow {
+            clearActivityIfSelected(window)
+        }
         progressChanged?()
         stateChanged?()
+    }
+
+    func windowDidUpdate(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        clearActivityIfSelected(window)
+    }
+
+    private func clearActivityIfSelected(_ window: NSWindow) {
+        let selected = window.tabGroup?.selectedWindow ?? window
+        guard selected === window, hasUnreadOutput else { return }
+        hasUnreadOutput = false
+        updateTerminalTitle()
+        window.setAccessibilityHelp(nil)
+    }
+
+    private func updateTerminalTitle() {
+        guard let window, case .terminal = kind else { return }
+        window.title = hasUnreadOutput ? "● \(terminalTitle)" : terminalTitle
     }
 
     func windowDidMove(_ notification: Notification) { stateChanged?() }

@@ -376,6 +376,7 @@ struct TerminalPalette: Equatable {
   @Published private(set) var searchActiveIndex: Int?
   @Published private(set) var searchError = false
   @Published private(set) var progress: TerminalProgress?
+  @Published private(set) var outputGeneration: UInt64 = 0
   nonisolated(unsafe) private var core: TerminalCoreHandle?
   nonisolated private let writer = DispatchQueue(label: "dev.zigonaut.pty-writer")
   nonisolated private let callbackBox: Unmanaged<TerminalCallbackBox>
@@ -450,6 +451,8 @@ struct TerminalPalette: Equatable {
         repeating: zigonaut_render_cell_v1(), count: desiredCells)
     }
     retrieveSnapshot(core: core.pointer, retry: true)
+    let generation = zigonaut_core_output_generation(core.pointer)
+    if generation != outputGeneration { outputGeneration = generation }
     retrieveTitle(core: core.pointer)
     retrieveProgress(core: core.pointer)
     drainNotifications(core: core.pointer)
@@ -1106,12 +1109,14 @@ struct TerminalPalette: Equatable {
   @Published private(set) var zoomedPane: UUID?
   @Published private(set) var title: String
   @Published private(set) var progress: TerminalProgress?
+  @Published private(set) var outputGeneration: UInt64 = 0
   @Published var findVisible = false { didSet { synchronizeFindOwner() } }
   @Published var findQuery = ""
   @Published private(set) var findFocusRequest = 0
   private weak var searchOwner: TerminalModel?
   private var titleObservation: AnyCancellable?
   private var progressObservation: AnyCancellable?
+  private var outputObservations: [UUID: AnyCancellable] = [:]
   private var paneFrames: [UUID: CGRect] = [:]
   let preferences: Preferences
   var stateChanged: (() -> Void)?
@@ -1123,6 +1128,7 @@ struct TerminalPalette: Equatable {
     focusedPane = pane.id
     title = pane.title
     synchronizeTitleOwner()
+    synchronizeOutputOwners()
   }
   init(saved: SavedTab, preferences: Preferences) {
     self.preferences = preferences
@@ -1142,6 +1148,7 @@ struct TerminalPalette: Equatable {
     focusedPane = restored.contains(saved.focusedPane) ? saved.focusedPane : restored.leaves[0].id
     title = restored.leaves.first?.title ?? "Terminal"
     synchronizeTitleOwner()
+    synchronizeOutputOwners()
   }
   var saved: SavedTab { SavedTab(root: root.saved, focusedPane: focusedPane ?? root.leaves[0].id) }
   var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
@@ -1175,12 +1182,22 @@ struct TerminalPalette: Equatable {
     titleObservation = owner?.$title.sink { [weak self] value in self?.title = value }
     progressObservation = owner?.$progress.sink { [weak self] value in self?.progress = value }
   }
+  private func synchronizeOutputOwners() {
+    let active = Set(panes.map(\.id))
+    outputObservations = outputObservations.filter { active.contains($0.key) }
+    for pane in panes where outputObservations[pane.id] == nil {
+      outputObservations[pane.id] = pane.$outputGeneration.dropFirst().sink { [weak self] _ in
+        self?.outputGeneration &+= 1
+      }
+    }
+  }
   func split(_ axis: Axis) {
     guard let focus = focusedPane,
       let existing = root.leaves.first(where: { $0.id == focus })
     else { return }
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
     root = root.replacing(focus, with: .split(UUID(), axis, 0.5, .leaf(existing), .leaf(pane)))
+    synchronizeOutputOwners()
     zoomedPane = nil
     focusedPane = pane.id
     stateChanged?()
@@ -1198,6 +1215,7 @@ struct TerminalPalette: Equatable {
   func closePane(_ pane: UUID) -> Bool {
     guard root.contains(pane), let remaining = root.removing(pane) else { return false }
     root = remaining
+    synchronizeOutputOwners()
     if zoomedPane == pane { zoomedPane = nil }
     focusedPane = remaining.leaves.first?.id
     stateChanged?()

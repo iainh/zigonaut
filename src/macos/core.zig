@@ -65,6 +65,7 @@ const Core = struct {
     progress_state: Terminal.ProgressState = .normal,
     progress_value: u8 = 0,
     progress_generation: u64 = 0,
+    output_generation: u64 = 0,
     render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
@@ -409,6 +410,7 @@ fn readLoop(self: *Core) void {
         if (count == 0) break;
         self.mutex.lock();
         self.terminal.feed(buffer[0..@intCast(count)]);
+        self.output_generation +%= 1;
         self.mutex.unlock();
         self.callback_mutex.lock();
         const wake = if (!self.stopping.load(.acquire)) self.wake else null;
@@ -935,6 +937,13 @@ export fn zigonaut_core_has_foreground_job(self: ?*Core) bool {
     return isForegroundJob(core.child, c.tcgetpgrp(core.master));
 }
 
+export fn zigonaut_core_output_generation(self: ?*Core) u64 {
+    const core = self orelse return 0;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    return core.output_generation;
+}
+
 /// Returns an explicit OSC title, or the foreground process name when the
 /// shell/application has not supplied one. Copies at most `capacity` bytes.
 export fn zigonaut_core_title(self: ?*Core, output: ?[*]u8, capacity: u32) u32 {
@@ -1348,6 +1357,7 @@ test "null ABI handles are safe" {
     zigonaut_core_resize(null, 80, 24, 800, 600, 10, 25);
     zigonaut_core_request_stop(null);
     try std.testing.expect(!zigonaut_core_has_foreground_job(null));
+    try std.testing.expectEqual(@as(u64, 0), zigonaut_core_output_generation(null));
     try std.testing.expect(!zigonaut_core_has_selection(null));
     zigonaut_core_write(null, null, 0);
     zigonaut_core_selection_begin(null, 0, 0, 0, false);
