@@ -143,6 +143,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["padding_balance"] = to_string(padding.GetNamedString(L"balance", L"none"));
     values["padding_color"] = to_string(padding.GetNamedString(L"color", L"background"));
     values["background_opacity"] = number(background.GetNamedNumber(L"opacity"));
+    values["background_opacity_cells"] = background.GetNamedBoolean(L"opacityCells", false) ? "true" : "false";
     values["backdrop"] = to_string(background.GetNamedString(L"backdrop"));
     values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
     values["default_profile"] = to_string(profiles.GetNamedString(L"default"));
@@ -607,7 +608,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, intense_text_style{nullptr}, text_antialiasing{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr}, padding_balance{nullptr}, padding_color{nullptr};
-    ToggleSwitch random_background{nullptr};
+    ToggleSwitch random_background{nullptr}, opacity_cells{nullptr};
     std::vector<TextBox> colors;
     std::vector<ThemeChoice> themes;
 
@@ -778,6 +779,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         dark_theme = themeCombo(value(values, "dark_theme", value(values, "theme", "fluent-dark")));
         light_theme = themeCombo(value(values, "light_theme", "fluent-light"));
         opacity = numberBox(value(values, "background_opacity", "100"), 100, 0, 100);
+        opacity_cells = toggle(value(values, "background_opacity_cells", "false"));
         random_background = toggle(value(values, "randomize_tab_background", "true"));
         font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
         auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
@@ -807,6 +809,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             card(L"Terminal themes", L"Theme names are loaded from the themes folder beside Zigonaut.", theme_grid, true),
             card(L"Font", L"Use an installed monospace font family.", font, true),
             card(L"Background opacity", L"Percentage opacity for the terminal background.", opacity),
+            card(L"Transparent cell colors", L"Apply background opacity to explicitly colored terminal cells.", opacity_cells),
             card(L"Random tab colors", L"Gently tint each new tab's background while keeping it close to the selected theme.", random_background),
         });
     }
@@ -1337,6 +1340,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         appearance.Insert(L"padding", padding);
         JsonObject terminal_background;
         terminal_background.Insert(L"opacity", number(opacity_value));
+        terminal_background.Insert(L"opacityCells", JsonValue::CreateBooleanValue(opacity_cells.IsOn()));
         terminal_background.Insert(L"backdrop", text(backdrop.SelectedIndex() == 0 ? "none" : backdrop.SelectedIndex() == 2 ? "mica_alt" : backdrop.SelectedIndex() == 3 ? "acrylic" : "mica"));
         appearance.Insert(L"background", terminal_background);
         JsonObject palette;
@@ -1451,7 +1455,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             if (!updating_profiles) save();
         });
         auto toggled = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {random_background, hold_on_exit}) editor.Toggled(toggled);
+        for (auto const& editor : {random_background, opacity_cells, hold_on_exit}) editor.Toggled(toggled);
         clipboard_write.Toggled([this](auto const&, auto const&) {
             clipboard_limit.IsEnabled(clipboard_write.IsOn());
             save();

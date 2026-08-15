@@ -19,6 +19,7 @@ pub const Context = struct {
     foreground: theme.Color,
     background: theme.Color,
     background_opacity: u8,
+    background_opacity_cells: bool,
     dark_theme: bool,
     runtime: ?*SessionRuntime,
     cell_width: u32,
@@ -148,7 +149,7 @@ const CellRenderer = struct {
         const normal_foreground = if (self.context.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
         const normal_background = if (self.context.high_contrast)
             win.GetSysColor(win.COLOR_WINDOW)
-        else if (std.meta.eql(cell.background, self.frame.?.background))
+        else if (cell.background_is_default or self.context.background_opacity_cells)
             translucentColorRef(cell.background, self.context.background_opacity, self.context.dark_theme)
         else
             colorRef(cell.background);

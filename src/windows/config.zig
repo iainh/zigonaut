@@ -9,7 +9,7 @@ pub const default_contents =
     \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8, "balance": "none", "color": "background" },
-    \\    "background": { "opacity": 100, "backdrop": "mica" },
+    \\    "background": { "opacity": 100, "opacityCells": false, "backdrop": "mica" },
     \\    "palette": {},
     \\    "randomizeTabBackground": true
     \\  },
@@ -106,6 +106,7 @@ const JsonConfig = struct {
         },
         background: struct {
             opacity: u8,
+            opacityCells: bool = false,
             backdrop: Backdrop,
         },
         palette: struct {
@@ -156,6 +157,7 @@ pub const Config = struct {
     padding_balance: PaddingBalance = .none,
     padding_color: PaddingColor = .background,
     background_opacity: u8 = 100,
+    background_opacity_cells: bool = false,
     backdrop: Backdrop = .mica,
     palette: theme.Overrides = .{},
     default_profile: []const u8 = "PowerShell",
@@ -348,6 +350,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.padding_balance = json.appearance.padding.balance;
     result.padding_color = json.appearance.padding.color;
     result.background_opacity = json.appearance.background.opacity;
+    result.background_opacity_cells = json.appearance.background.opacityCells;
     result.backdrop = json.appearance.background.backdrop;
     result.randomize_tab_background = json.appearance.randomizeTabBackground;
     result.default_profile = json.profiles.default;
@@ -402,7 +405,7 @@ test "configuration parses structured JSON" {
         \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold", "intenseTextStyle": "bright" },
         \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
         \\    "padding": { "horizontal": 12, "vertical": 4, "balance": "equal", "color": "extend" },
-        \\    "background": { "opacity": 82, "backdrop": "acrylic" },
+        \\    "background": { "opacity": 82, "opacityCells": true, "backdrop": "acrylic" },
         \\    "palette": { "ansi": ["#000000", null, null, null, null, null, null, null, null, null, null, null, null, null, null, "#abcdef"] },
         \\    "randomizeTabBackground": false
         \\  },
@@ -432,6 +435,7 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqual(@as(u16, 40), value.initial_rows);
     try std.testing.expectEqual(ColorScheme.light, value.color_scheme);
     try std.testing.expectEqual(Backdrop.acrylic, value.backdrop);
+    try std.testing.expect(value.background_opacity_cells);
     try std.testing.expectEqual(PaddingBalance.equal, value.padding_balance);
     try std.testing.expectEqual(PaddingColor.extend, value.padding_color);
     try std.testing.expectEqual(theme.Color{ .red = 0xab, .green = 0xcd, .blue = 0xef }, value.palette.ansi[15].?);

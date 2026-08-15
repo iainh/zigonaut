@@ -485,7 +485,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color, self.settings.background_opacity, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color, self.settings.background_opacity, self.settings.background_opacity_cells, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -2174,7 +2174,7 @@ fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
     self.high_contrast = highContrastEnabled();
     const update_terminal_theme = self.terminal_ready and (terminal_theme_changed or previous_dark_theme != self.dark_theme);
     if (update_terminal_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
-    if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity);
+    if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity, self.settings.background_opacity_cells);
     if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
     if (update_terminal_theme) self.syncChrome();
     _ = win.InvalidateRect(hwnd, null, 0);

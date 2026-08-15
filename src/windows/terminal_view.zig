@@ -429,6 +429,7 @@ pub const View = struct {
     balance_padding: bool = false,
     padding_color: config.PaddingColor = .background,
     background_opacity: u8,
+    background_opacity_cells: bool,
     ime_preedit: std.ArrayList(u16) = .empty,
     ime_selection_start: u32 = 0,
     ime_selection_length: u32 = 0,
@@ -471,6 +472,7 @@ pub const View = struct {
         padding_balance: config.PaddingBalance,
         padding_color: config.PaddingColor,
         background_opacity: u8,
+        background_opacity_cells: bool,
         titles_changed_message: win.UINT,
         shell_exited_message: win.UINT,
         scrollbar_changed_message: win.UINT,
@@ -497,6 +499,7 @@ pub const View = struct {
             .balance_padding = padding_balance == .equal,
             .padding_color = padding_color,
             .background_opacity = background_opacity,
+            .background_opacity_cells = background_opacity_cells,
             .titles_changed_message = titles_changed_message,
             .shell_exited_message = shell_exited_message,
             .scrollbar_changed_message = scrollbar_changed_message,
@@ -1150,10 +1153,11 @@ pub const View = struct {
         _ = win.FlashWindowEx(&flash);
     }
 
-    pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool, background_opacity: u8) void {
+    pub fn updateTheme(self: *View, dark_theme: bool, high_contrast: bool, background_opacity: u8, background_opacity_cells: bool) void {
         self.dark_theme = dark_theme;
         self.high_contrast = high_contrast;
         self.background_opacity = background_opacity;
+        self.background_opacity_cells = background_opacity_cells;
         self.invalidate();
     }
 
@@ -1301,6 +1305,7 @@ pub const View = struct {
             .foreground = self.model.terminal_theme.foreground,
             .background = self.activeBackground(),
             .background_opacity = self.background_opacity,
+            .background_opacity_cells = self.background_opacity_cells,
             .dark_theme = self.dark_theme,
             .runtime = if (session) |active| active.runtime else null,
             .cell_width = self.cell_width,
@@ -1562,9 +1567,9 @@ pub const View = struct {
         return translucentColorRef(color, self.background_opacity, self.dark_theme);
     }
 
-    fn cellBackgroundColorRef(self: *const View, color: theme.Color, default: theme.Color) win.COLORREF {
-        if (!std.meta.eql(color, default)) return colorRef(color);
-        return self.backgroundColorRef(color);
+    fn cellBackgroundColorRef(self: *const View, color: theme.Color, is_default: bool) win.COLORREF {
+        if (is_default or self.background_opacity_cells) return self.backgroundColorRef(color);
+        return colorRef(color);
     }
 
     fn activeBackground(self: *View) theme.Color {
@@ -2271,7 +2276,7 @@ const DirectWriteCellRenderer = struct {
             cell.x < self.frame.?.cursor_x + self.frame.?.cursor_columns and
             cell.y == self.frame.?.cursor_y;
         const normal_foreground = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else colorRef(cell.foreground);
-        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, self.frame.?.background);
+        const normal_background = if (self.view.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else self.view.cellBackgroundColorRef(cell.background, cell.background_is_default);
         const search_kind = search.highlightRow(self.search_row_matches, self.search_active, cell.x);
         if (self.view.padding_color != .background and !self.view.high_contrast) {
             const extension_foreground = if (search_kind == 2)
