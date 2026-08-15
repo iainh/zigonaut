@@ -174,6 +174,10 @@ HRESULT zigonaut_text_engine_create(
 
 void zigonaut_text_engine_destroy(ZigonautTextEngine* engine);
 
+HRESULT zigonaut_text_engine_set_symbol_fallback(
+    ZigonautTextEngine* engine,
+    const wchar_t* font_family);
+
 HRESULT zigonaut_text_engine_set_dpi(ZigonautTextEngine* engine, uint32_t dpi);
 
 HRESULT zigonaut_text_engine_refresh_rendering_params(ZigonautTextEngine* engine);

@@ -86,7 +86,7 @@ pub const Engine = struct {
         builtin_thickness: u32,
     };
 
-    pub fn init(font_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32, antialiasing: u32) !Engine {
+    pub fn init(font_family: []const u8, symbol_fallback_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32, antialiasing: u32) !Engine {
         if (antialiasing > 1) return error.InvalidTextAntialiasing;
         var wide_name = [_]u16{0} ** 128;
         _ = @import("std").unicode.utf8ToUtf16Le(
@@ -104,6 +104,17 @@ pub const Engine = struct {
             &handle,
         );
         if (result < 0 or handle == null) return error.DirectWriteInitializationFailed;
+        errdefer native.zigonaut_text_engine_destroy(handle.?);
+        if (symbol_fallback_family.len != 0) {
+            var wide_fallback = [_]u16{0} ** 128;
+            _ = std.unicode.utf8ToUtf16Le(
+                wide_fallback[0 .. wide_fallback.len - 1],
+                symbol_fallback_family,
+            ) catch return error.InvalidSymbolFallbackFamily;
+            if (native.zigonaut_text_engine_set_symbol_fallback(handle.?, &wide_fallback) < 0) {
+                return error.DirectWriteSymbolFallbackFailed;
+            }
+        }
         return .{ .handle = handle.? };
     }
 
@@ -486,8 +497,8 @@ test "damage-aware transfer stays coherent across rotating buffers" {
 }
 
 test "invalid numeric antialias policy is rejected before enum conversion" {
-    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, 2));
-    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", 18, 400, 700, 96, std.math.maxInt(u32)));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 96, 2));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 96, std.math.maxInt(u32)));
 }
 
 test "layout cache retains hot entries when crossing capacity" {

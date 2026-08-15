@@ -6,7 +6,7 @@ pub const default_contents =
     \\{
     \\  "version": 1,
     \\  "appearance": {
-    \\    "font": { "family": "Cascadia Mono", "size": 18, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
+    \\    "font": { "family": "Cascadia Mono", "symbolFallbackFamily": "", "size": 18, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8, "balance": "none", "color": "background" },
     \\    "background": { "opacity": 100, "opacityCells": false, "backdrop": "mica" },
@@ -87,6 +87,7 @@ const JsonConfig = struct {
     appearance: struct {
         font: struct {
             family: []const u8,
+            symbolFallbackFamily: []const u8 = "",
             size: u16,
             weight: FontWeight = .regular,
             intenseWeight: FontWeight = .bold,
@@ -141,6 +142,7 @@ const JsonConfig = struct {
 
 pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
+    symbol_fallback_family: []const u8 = "",
     font_size: u16 = 18,
     font_weight: FontWeight = .regular,
     intense_font_weight: FontWeight = .bold,
@@ -192,7 +194,8 @@ pub fn changes(previous: Config, next: Config) Changes {
             previous.font_weight != next.font_weight or
             previous.intense_font_weight != next.intense_font_weight or
             previous.text_antialiasing != next.text_antialiasing or
-            !std.mem.eql(u8, previous.font_family, next.font_family),
+            !std.mem.eql(u8, previous.font_family, next.font_family) or
+            !std.mem.eql(u8, previous.symbol_fallback_family, next.symbol_fallback_family),
         .theme = !std.mem.eql(u8, previous.dark_theme, next.dark_theme) or
             !std.mem.eql(u8, previous.light_theme, next.light_theme) or
             previous.color_scheme != next.color_scheme or
@@ -316,6 +319,7 @@ fn validWindowsText(value: []const u8) bool {
 fn configFromJson(json: JsonConfig) !Config {
     if (json.version != 1) return error.UnsupportedConfigVersion;
     if (json.appearance.font.family.len == 0 or json.appearance.font.family.len >= 128 or !validWindowsText(json.appearance.font.family) or
+        json.appearance.font.symbolFallbackFamily.len >= 128 or !validWindowsText(json.appearance.font.symbolFallbackFamily) or
         json.appearance.font.size < 6 or json.appearance.font.size > 72 or
         json.terminal.scrollbackSize > 1_000_000 or
         json.terminal.initialSize.columns < 10 or json.terminal.initialSize.columns > 1000 or
@@ -334,6 +338,7 @@ fn configFromJson(json: JsonConfig) !Config {
 
     var result = Config{};
     result.font_family = json.appearance.font.family;
+    result.symbol_fallback_family = json.appearance.font.symbolFallbackFamily;
     result.font_size = json.appearance.font.size;
     result.font_weight = json.appearance.font.weight;
     result.intense_font_weight = json.appearance.font.intenseWeight;
@@ -402,7 +407,7 @@ test "configuration parses structured JSON" {
         \\{
         \\  "version": 1,
         \\  "appearance": {
-        \\    "font": { "family": "JetBrains Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold", "intenseTextStyle": "bright" },
+        \\    "font": { "family": "JetBrains Mono", "symbolFallbackFamily": "Symbols Nerd Font Mono", "size": 14, "weight": "light", "intenseWeight": "semiBold", "intenseTextStyle": "bright" },
         \\    "themes": { "dark": "campbell", "light": "campbell-light", "colorScheme": "light" },
         \\    "padding": { "horizontal": 12, "vertical": 4, "balance": "equal", "color": "extend" },
         \\    "background": { "opacity": 82, "opacityCells": true, "backdrop": "acrylic" },
@@ -425,6 +430,7 @@ test "configuration parses structured JSON" {
     defer parsed.deinit();
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqualStrings("JetBrains Mono", value.font_family);
+    try std.testing.expectEqualStrings("Symbols Nerd Font Mono", value.symbol_fallback_family);
     try std.testing.expectEqual(@as(u16, 14), value.font_size);
     try std.testing.expectEqual(FontWeight.light, value.font_weight);
     try std.testing.expectEqual(FontWeight.semiBold, value.intense_font_weight);
@@ -552,6 +558,10 @@ test "configuration rejects strings Windows cannot represent" {
     try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
     parsed.value.appearance.font.family = "Cascadia Mono";
 
+    parsed.value.appearance.font.symbolFallbackFamily = "Bad\x00Font";
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.appearance.font.symbolFallbackFamily = "";
+
     parsed.value.profiles.workingDirectory = "C:\\bad\x00path";
     try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
     parsed.value.profiles.workingDirectory = "";
@@ -583,6 +593,10 @@ test "configuration changes are classified by subsystem" {
 
     modified = original;
     modified.intense_font_weight = .extraBold;
+    try std.testing.expect(changes(original, modified).font);
+
+    modified = original;
+    modified.symbol_fallback_family = "Symbols Nerd Font Mono";
     try std.testing.expect(changes(original, modified).font);
 
     modified = original;

@@ -127,6 +127,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     auto number = [](double value) { return std::to_string(static_cast<uint64_t>(value)); };
 
     values["font_family"] = to_string(font.GetNamedString(L"family"));
+    values["symbol_fallback_family"] = to_string(font.GetNamedString(L"symbolFallbackFamily", L""));
     values["font_size"] = number(font.GetNamedNumber(L"size"));
     values["font_weight"] = to_string(font.GetNamedString(L"weight", L"regular"));
     values["intense_font_weight"] = to_string(font.GetNamedString(L"intenseWeight", L"bold"));
@@ -486,6 +487,21 @@ ComboBox fontCombo(std::string const& selected) {
     return result;
 }
 
+ComboBox symbolFontCombo(std::string const& selected) {
+    auto result = ComboBox{};
+    result.HorizontalAlignment(HorizontalAlignment::Stretch);
+    auto choices = monospaceFonts();
+    choices.push_back(L"None");
+    auto const selected_name = selected.empty() ? hstring{L"None"} : to_hstring(selected);
+    if (std::find(choices.begin(), choices.end(), selected_name.c_str()) == choices.end()) choices.push_back(selected_name.c_str());
+    std::sort(choices.begin(), choices.end());
+    for (size_t index = 0; index < choices.size(); ++index) {
+        result.Items().Append(box_value(choices[index]));
+        if (choices[index] == selected_name.c_str()) result.SelectedIndex(static_cast<int32_t>(index));
+    }
+    return result;
+}
+
 struct FontWeightChoice {
     DWRITE_FONT_WEIGHT value;
     wchar_t const* label;
@@ -605,7 +621,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool open = true;
     bool updating_font_weights = false;
 
-    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, intense_text_style{nullptr}, text_antialiasing{nullptr};
+    ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, symbol_fallback_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, intense_text_style{nullptr}, text_antialiasing{nullptr};
     NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr}, padding_balance{nullptr}, padding_color{nullptr};
     ToggleSwitch random_background{nullptr}, opacity_cells{nullptr};
@@ -782,6 +798,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         opacity_cells = toggle(value(values, "background_opacity_cells", "false"));
         random_background = toggle(value(values, "randomize_tab_background", "true"));
         font_family = fontCombo(value(values, "font_family", "Cascadia Mono"));
+        symbol_fallback_family = symbolFontCombo(value(values, "symbol_fallback_family", ""));
         auto const selected_family = unbox_value<hstring>(font_family.SelectedItem());
         font_weight = weightCombo(selected_family.c_str(), value(values, "font_weight", "regular"));
         intense_font_weight = weightCombo(selected_family.c_str(), value(values, "intense_font_weight", "bold"));
@@ -798,6 +815,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         appendLabeled(theme_grid, L"Light theme", light_theme);
         auto font = StackPanel{}; font.Spacing(8);
         appendLabeled(font, L"Font family", font_family);
+        appendLabeled(font, L"Symbol fallback", symbol_fallback_family);
         appendLabeled(font, L"Normal weight", font_weight);
         appendLabeled(font, L"Intense weight", intense_font_weight);
         appendLabeled(font, L"Intense text style", intense_text_style);
@@ -1256,6 +1274,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             return trim(to_string(box.SelectedItem().as<ComboBoxItem>().Tag().as<hstring>()));
         };
         auto const selected_font = trim(to_string(unbox_value<hstring>(font_family.SelectedItem())));
+        auto selected_symbol_fallback = trim(to_string(unbox_value<hstring>(symbol_fallback_family.SelectedItem())));
+        if (selected_symbol_fallback == "None") selected_symbol_fallback.clear();
         auto const selected_font_weight = selectedWeight(font_weight);
         auto const selected_intense_font_weight = selectedWeight(intense_font_weight);
         auto const selected_intense_text_style = intense_text_style.SelectedIndex() == 0 ? "bold" : intense_text_style.SelectedIndex() == 2 ? "bright" : "all";
@@ -1279,6 +1299,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             throw FieldValidationError("Enter a clipboard limit between 1 byte and 16 MiB.", clipboard_limit);
         auto const clipboard_limit_value = std::round(clipboard_kib_value * 1024);
         if (selected_font.empty() || selected_font.size() >= 128) throw FieldValidationError("Choose a valid font family.", font_family);
+        if (selected_symbol_fallback.size() >= 128) throw FieldValidationError("Choose a valid symbol fallback family.", symbol_fallback_family);
         if (selected_dark_theme.empty() || selected_dark_theme.size() >= 64 || selected_light_theme.empty() || selected_light_theme.size() >= 64)
             throw std::runtime_error("Theme names must be between 1 and 63 UTF-8 bytes.");
         for (auto const& editor : colors) if (!validColor(string(editor))) throw FieldValidationError("Enter a color as #RRGGBB, or leave it empty.", editor);
@@ -1321,6 +1342,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         JsonObject appearance;
         JsonObject font;
         font.Insert(L"family", text(selected_font));
+        font.Insert(L"symbolFallbackFamily", text(selected_symbol_fallback));
         font.Insert(L"size", number(font_size_value));
         font.Insert(L"weight", text(selected_font_weight));
         font.Insert(L"intenseWeight", text(selected_intense_font_weight));
@@ -1436,6 +1458,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         light_theme.SelectionChanged(selection_changed);
         intense_text_style.SelectionChanged(selection_changed);
         text_antialiasing.SelectionChanged(selection_changed);
+        symbol_fallback_family.SelectionChanged(selection_changed);
         padding_balance.SelectionChanged(selection_changed);
         padding_color.SelectionChanged(selection_changed);
         font_family.SelectionChanged([this](auto const&, auto const&) {

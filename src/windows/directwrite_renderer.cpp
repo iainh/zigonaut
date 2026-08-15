@@ -580,6 +580,7 @@ struct ZigonautTextEngine {
     IDWriteFactory2* factory2 = nullptr;
     IDWriteRenderingParams* rendering_params = nullptr;
     IDWriteFontCollection* fonts = nullptr;
+    IDWriteFontFallback* symbol_fallback = nullptr;
     IDWriteFontFace* normal_face = nullptr;
     IDWriteTextFormat* formats[4] = {};
     ID2D1Factory1* d2d_factory = nullptr;
@@ -1270,8 +1271,46 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 &formats[index]);
             if (FAILED(hr)) return hr;
             formats[index]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            if (symbol_fallback != nullptr) {
+                IDWriteTextFormat1* format = nullptr;
+                const HRESULT fallback_hr = formats[index]->QueryInterface(IID_PPV_ARGS(&format));
+                if (FAILED(fallback_hr)) return fallback_hr;
+                const HRESULT set_hr = format->SetFontFallback(symbol_fallback);
+                release(format);
+                if (FAILED(set_hr)) return set_hr;
+            }
         }
         return S_OK;
+    }
+
+    HRESULT setSymbolFallback(const wchar_t* fallback) {
+        if (factory2 == nullptr || fallback == nullptr || fallback[0] == L'\0') return E_INVALIDARG;
+        IDWriteFontFallbackBuilder* builder = nullptr;
+        IDWriteFontFallback* system_fallback = nullptr;
+        IDWriteFontFallback* configured = nullptr;
+        HRESULT hr = factory2->CreateFontFallbackBuilder(&builder);
+        constexpr DWRITE_UNICODE_RANGE ranges[] = {
+            {0xE000, 0xF8FF},
+            {0xF0000, 0xFFFFD},
+            {0x100000, 0x10FFFD},
+        };
+        const wchar_t* families[] = {fallback};
+        if (SUCCEEDED(hr)) hr = builder->AddMapping(
+            ranges, static_cast<UINT32>(std::size(ranges)),
+            families, static_cast<UINT32>(std::size(families)),
+            fonts, nullptr, family.c_str(), 1.0f);
+        if (SUCCEEDED(hr)) hr = factory2->GetSystemFontFallback(&system_fallback);
+        if (SUCCEEDED(hr)) hr = builder->AddMappings(system_fallback);
+        if (SUCCEEDED(hr)) hr = builder->CreateFontFallback(&configured);
+        release(system_fallback);
+        release(builder);
+        if (FAILED(hr)) {
+            release(configured);
+            return hr;
+        }
+        release(symbol_fallback);
+        symbol_fallback = configured;
+        return createFormats();
     }
 
     HRESULT updateSwapChainTransform() {
@@ -2125,6 +2164,7 @@ ZigonautTextEngine::~ZigonautTextEngine() {
     clearLayouts();
     for (auto*& format : formats) release(format);
     release(normal_face);
+    release(symbol_fallback);
     release(fonts);
     release(rendering_params);
     release(factory2);
@@ -2600,6 +2640,13 @@ extern "C" HRESULT zigonaut_text_engine_create(
 
 extern "C" void zigonaut_text_engine_destroy(ZigonautTextEngine* engine) {
     delete engine;
+}
+
+extern "C" HRESULT zigonaut_text_engine_set_symbol_fallback(
+    ZigonautTextEngine* engine,
+    const wchar_t* font_family) {
+    if (engine == nullptr) return E_INVALIDARG;
+    return engine->setSymbolFallback(font_family);
 }
 
 extern "C" HRESULT zigonaut_benchmark_layout_cache(
