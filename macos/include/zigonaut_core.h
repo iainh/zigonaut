@@ -11,7 +11,7 @@ typedef struct { uint32_t version, size, text_offset, text_length; uint32_t fore
 /* data_offset/data_length reference the caller-owned RGBA arena. */
 typedef struct { uint32_t version, size, image_id; uint64_t generation; uint32_t data_offset, data_length, width, height, source_x, source_y, source_width, source_height, pixel_width, pixel_height; int32_t viewport_column, viewport_row, z; uint32_t x_offset, y_offset; uint8_t reserved[8]; } zigonaut_render_image_v1;
 typedef struct { uint32_t image_id, reserved; uint64_t generation; } zigonaut_image_generation_v1;
-/* status: 0 complete, 1 truncated, 2 error. */
+/* status: 0 complete, 1 truncated, 2 error, 3 synchronized-output suppression. */
 typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes, required_rows, written_rows; uint64_t viewport_offset; uint8_t status; uint8_t reserved[7]; } zigonaut_render_snapshot_result_v1;
 typedef struct { uint32_t version, size, required_images, written_images, required_data_bytes, written_data_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_images_result_v1;
 typedef struct { uint32_t version, size, foreground_rgb, background_rgb, cursor_rgb; uint32_t ansi_rgb[16]; uint8_t reserved[8]; } zigonaut_terminal_theme_v1;

@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("signal.h");
     @cInclude("sys/ioctl.h");
     @cInclude("sys/wait.h");
+    @cInclude("time.h");
     @cInclude("unistd.h");
 });
 const shared = @import("shared");
@@ -26,9 +27,43 @@ const notification_max_bytes = 4096;
 const clipboard_queue_capacity = 16;
 const clipboard_default_max_bytes: u32 = 1024 * 1024;
 const key_utf8_max_bytes = 64;
+const synchronized_output_timeout_ms: i64 = 1000;
 
 const QueuedNotification = struct { payload: []u8, title_len: u16 };
 const QueuedClipboard = struct { payload: []u8, token: u64, clear: bool };
+
+const SynchronizedOutput = struct {
+    deadline_ms: i64 = 0,
+
+    fn update(self: *SynchronizedOutput, enabled: bool, now_ms: i64) bool {
+        if (enabled) {
+            if (self.deadline_ms != 0) return false;
+            self.deadline_ms = now_ms +| synchronized_output_timeout_ms;
+            return true;
+        }
+        if (self.deadline_ms == 0) return false;
+        self.deadline_ms = 0;
+        return true;
+    }
+
+    fn remaining(self: *const SynchronizedOutput, now_ms: i64) ?c_int {
+        if (self.deadline_ms == 0) return null;
+        if (self.deadline_ms <= now_ms) return 0;
+        return @intCast(@min(self.deadline_ms - now_ms, std.math.maxInt(c_int)));
+    }
+
+    fn clear(self: *SynchronizedOutput) bool {
+        if (self.deadline_ms == 0) return false;
+        self.deadline_ms = 0;
+        return true;
+    }
+};
+
+fn monotonicMillis() i64 {
+    var value: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &value) != 0) return 0;
+    return @as(i64, value.tv_sec) * std.time.ms_per_s + @divTrunc(value.tv_nsec, std.time.ns_per_ms);
+}
 
 pub const Wake = ?*const fn (?*anyopaque) callconv(.c) void;
 const Core = struct {
@@ -67,6 +102,7 @@ const Core = struct {
     progress_value: u8 = 0,
     progress_generation: u64 = 0,
     output_generation: u64 = 0,
+    synchronized_output: SynchronizedOutput = .{},
     render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
@@ -388,6 +424,13 @@ fn failCreate(self: *Core, slave: c_int) ?*Core {
     return null;
 }
 
+fn wakeHost(self: *Core) void {
+    self.callback_mutex.lock();
+    defer self.callback_mutex.unlock();
+    const wake = if (!self.stopping.load(.acquire)) self.wake else null;
+    if (wake) |callback| callback(self.context);
+}
+
 fn readLoop(self: *Core) void {
     var buffer: [16384]u8 = undefined;
     var fds = [_]c.pollfd{
@@ -395,10 +438,24 @@ fn readLoop(self: *Core) void {
         .{ .fd = self.cancel_read, .events = c.POLLIN, .revents = 0 },
     };
     while (true) {
-        const ready = c.poll(&fds, fds.len, -1);
+        self.mutex.lock();
+        const timeout = self.synchronized_output.remaining(monotonicMillis()) orelse -1;
+        self.mutex.unlock();
+        const ready = c.poll(&fds, fds.len, timeout);
         if (ready < 0) {
             if (c.__error().* == c.EINTR) continue;
             break;
+        }
+        if (ready == 0) {
+            self.mutex.lock();
+            const expired = self.synchronized_output.remaining(monotonicMillis()) == 0;
+            if (expired) {
+                self.terminal.setSynchronizedOutput(false) catch {};
+                _ = self.synchronized_output.clear();
+            }
+            self.mutex.unlock();
+            if (expired) wakeHost(self);
+            continue;
         }
         if (fds[1].revents != 0) break;
         if (fds[0].revents == 0) continue;
@@ -412,29 +469,29 @@ fn readLoop(self: *Core) void {
         self.mutex.lock();
         self.terminal.feed(buffer[0..@intCast(count)]);
         self.output_generation +%= 1;
+        const synchronized = self.terminal.synchronizedOutput();
+        const mode_changed = self.synchronized_output.update(synchronized, monotonicMillis());
         self.mutex.unlock();
-        self.callback_mutex.lock();
-        const wake = if (!self.stopping.load(.acquire)) self.wake else null;
-        const context = self.context;
-        if (wake) |callback| callback(context);
-        self.callback_mutex.unlock();
+        if (!synchronized or mode_changed) wakeHost(self);
     }
     if (self.stopping.load(.acquire)) return;
     self.exited.store(true, .release);
-    self.callback_mutex.lock();
-    const wake = self.wake;
-    const context = self.context;
-    if (wake) |callback| callback(context);
-    self.callback_mutex.unlock();
+    self.mutex.lock();
+    _ = self.synchronized_output.clear();
+    self.mutex.unlock();
+    wakeHost(self);
 }
 
 export fn zigonaut_core_resize(self: ?*Core, columns: u16, rows: u16, pixel_width: u16, pixel_height: u16, cell_width: u32, cell_height: u32) void {
     const core = self orelse return;
     var size = c.winsize{ .ws_row = rows, .ws_col = columns, .ws_xpixel = pixel_width, .ws_ypixel = pixel_height };
     core.mutex.lock();
+    const synchronized = core.synchronized_output.clear();
+    if (synchronized) core.terminal.setSynchronizedOutput(false) catch {};
     core.terminal.resize(columns, rows, cell_width, cell_height) catch {};
     core.mutex.unlock();
     _ = c.ioctl(core.master, c.TIOCSWINSZ, &size);
+    if (synchronized) wakeHost(core);
 }
 
 export fn zigonaut_core_request_stop(self: ?*Core) void {
@@ -795,6 +852,7 @@ fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, selection_ranges: [
 
 /// Writes one coherent viewport into caller-owned arrays. Cell text refers to
 /// `text_arena` by offset/length and remains valid only while the caller retains it.
+/// Status 3 leaves the retained native frame untouched during synchronized output.
 export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const u64, previous_count: u32, frame: ?*RenderFrame, cells: ?[*]RenderCell, cell_capacity: u32, text_arena: ?[*]u8, text_capacity: u32, current_hashes: ?[*]u64, hash_capacity: u32, result: ?*RenderSnapshotResult) void {
     const output = result orelse return;
     output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .required_rows = 0, .written_rows = 0, .viewport_offset = 0, .status = 2, .reserved = @splat(0) };
@@ -806,6 +864,10 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     const text_slice = if (text_arena) |pointer| pointer[0..text_capacity] else if (text_capacity == 0) empty_text[0..] else return;
     core.mutex.lock();
     defer core.mutex.unlock();
+    if (core.terminal.synchronizedOutput()) {
+        output.status = 3;
+        return;
+    }
     var collector = SnapshotCollector{ .frame = output_frame, .cells = cell_slice, .text = text_slice, .result = output };
     collector.search_matches = core.search_matches.items;
     collector.search_active = core.search_active;
@@ -867,6 +929,17 @@ test "selection context invalidates the changed row and its neighbours" {
             try std.testing.expectEqual(previous, current);
         }
     }
+}
+
+test "synchronized output arms once and expires after one second" {
+    var state = SynchronizedOutput{};
+    try std.testing.expect(state.update(true, 100));
+    try std.testing.expectEqual(@as(?c_int, 1000), state.remaining(100));
+    try std.testing.expect(!state.update(true, 500));
+    try std.testing.expectEqual(@as(?c_int, 600), state.remaining(500));
+    try std.testing.expectEqual(@as(?c_int, 0), state.remaining(1100));
+    try std.testing.expect(state.clear());
+    try std.testing.expectEqual(@as(?c_int, null), state.remaining(1100));
 }
 
 const ImageCollector = struct {
