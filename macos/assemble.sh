@@ -12,7 +12,19 @@ mkdir -p "$app/MacOS" "$app/Frameworks" "$app/Resources"
 cp "$root/macos/.build/$configuration/ZigonautMac" "$app/MacOS/ZigonautMac"
 cp "$root/zig-out/bin/zigonaut-pty-helper" "$app/MacOS/zigonaut-pty-helper"
 cp "$root/zig-out/lib/libzigonaut-core.dylib" "$app/Frameworks/"
-cp "$root/macos/Resources/Zigonaut.icns" "$app/Resources/Zigonaut.icns"
+if [ "$configuration" = debug ]; then
+    iconset="$app/Resources/Zigonaut.iconset"
+    mkdir -p "$iconset"
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" "$root/assets/icons/zigonaut-debug-master.png" --out "$iconset/icon_${size}x${size}.png"
+        scaled_size=$((size * 2))
+        sips -z "$scaled_size" "$scaled_size" "$root/assets/icons/zigonaut-debug-master.png" --out "$iconset/icon_${size}x${size}@2x.png"
+    done
+    iconutil -c icns "$iconset" -o "$app/Resources/Zigonaut.icns"
+    rm -rf "$iconset"
+else
+    cp "$root/macos/Resources/Zigonaut.icns" "$app/Resources/Zigonaut.icns"
+fi
 mkdir -p "$app/Resources/Themes"
 cp "$root/themes/"*.json "$app/Resources/Themes/"
 cp "$root/macos/Info.plist" "$app/Info.plist"
