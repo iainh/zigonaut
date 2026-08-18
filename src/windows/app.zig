@@ -868,6 +868,8 @@ test "notification identity selects its tab and pane" {
     const id = app.tabs.items[0].panes.items[0].session.id;
     try std.testing.expect(app.activateSessionId(id));
     try std.testing.expectEqual(@as(?usize, 0), app.activeTabIndex());
+    app.closeTab(0);
+    try std.testing.expect(!app.activateSessionId(id));
     try std.testing.expect(!app.activateSessionId(999_999));
 }
 

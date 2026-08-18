@@ -2701,6 +2701,22 @@ test "quote and logical line units derive stable selections" {
     try std.testing.expect(std.mem.indexOf(u8, selected, "abcdefgh") != null);
 }
 
+test "tracked selection can mutate after reflow" {
+    var terminal = try Terminal.init(8, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("abcdefghijklmnop");
+    try terminal.beginSelectionAnchor(.{ .x = 2, .y = 0 });
+    defer terminal.endSelectionAnchor();
+    try terminal.setDerivedSelection(.{ .x = 5, .y = 1 }, .cell, false);
+
+    try terminal.resize(5, 4, 9, 18);
+    try terminal.setDerivedSelection(.{ .x = 4, .y = 2 }, .cell, false);
+    const selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(selected);
+
+    try std.testing.expectEqualStrings("cdefghijklmno", selected);
+}
+
 test "wide cell tails do not add spaces to viewport text" {
     var terminal = try Terminal.init(8, 2, theme.rasmus);
     defer terminal.deinit();

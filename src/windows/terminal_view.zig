@@ -1589,13 +1589,26 @@ pub const View = struct {
     }
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
-        if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
-        if (self.handleLinkHintKey(wparam, released)) return true;
-        if (self.handleApplicationShortcut(wparam, lparam, released)) return true;
-        if (self.handleClipboardShortcut(wparam, lparam, released)) return true;
-        if (self.consumed_prompt_key == wparam) {
-            if (released) self.consumed_prompt_key = null;
-            return true;
+        // A modifier can turn a key into a host shortcut after its original
+        // press was delivered to the terminal. The matching release still
+        // belongs to that terminal key and must bypass shortcut consumption.
+        const delivered_release = released and self.input_state.hasPressedMessage(wparam, lparam);
+        if (delivered_release) {
+            if (self.consumed_application_key == wparam) {
+                self.consumed_application_key = null;
+                self.suppress_application_character = false;
+            }
+            if (self.consumed_prompt_key == wparam) self.consumed_prompt_key = null;
+        }
+        if (!delivered_release) {
+            if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+            if (self.handleLinkHintKey(wparam, released)) return true;
+            if (self.handleApplicationShortcut(wparam, lparam, released)) return true;
+            if (self.handleClipboardShortcut(wparam, lparam, released)) return true;
+            if (self.consumed_prompt_key == wparam) {
+                if (released) self.consumed_prompt_key = null;
+                return true;
+            }
         }
         if (released and (wparam == win.VK_CONTROL or wparam == win.VK_LCONTROL or wparam == win.VK_RCONTROL)) {
             self.clearHoveredLink();

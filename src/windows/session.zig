@@ -1266,6 +1266,33 @@ test "PTY work queue preserves input ordering and coalesces adjacent resizes" {
     try std.testing.expectEqual(@as(usize, 3), runtime.outstanding_input_bytes);
 }
 
+test "large paste followed by input remains one ordered PTY operation" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    const paste = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(paste);
+    @memset(paste, 'p');
+    try runtime.enqueuePtyInput(paste);
+    try runtime.enqueuePtyInput("x");
+
+    try std.testing.expectEqual(@as(usize, 1), runtime.pty_operations.items.len);
+    const input = switch (runtime.pty_operations.items[0]) {
+        .input => |value| value.items,
+        .resize => return error.ExpectedInput,
+    };
+    try std.testing.expectEqual(paste.len + 1, input.len);
+    try std.testing.expectEqualSlices(u8, paste, input[0..paste.len]);
+    try std.testing.expectEqual(@as(u8, 'x'), input[paste.len]);
+    try std.testing.expectEqual(input.len, runtime.outstanding_input_bytes);
+}
+
 test "PTY reader exit makes writes unavailable and wakes the writer" {
     var runtime = SessionRuntime{
         .allocator = std.testing.allocator,

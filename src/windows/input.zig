@@ -55,6 +55,11 @@ pub const State = struct {
         return event;
     }
 
+    pub fn hasPressedMessage(self: *const State, virtual_key: usize, lparam: isize) bool {
+        const key = keyFromMessage(virtual_key, lparam) orelse return false;
+        return self.pressed[@intFromEnum(key)];
+    }
+
     pub fn takePressed(self: *State, key: Terminal.Key) ?PressedKey {
         const index = @intFromEnum(key);
         const pressed = &self.pressed[index];
@@ -415,7 +420,9 @@ test "key releases require a delivered press" {
     const a_message: isize = 0x1e << 16;
     try std.testing.expectEqual(@as(?KeyEvent, null), state.keyEvent('A', a_message, true));
     try std.testing.expectEqual(Terminal.KeyAction.press, state.keyEvent('A', a_message, false).?.action);
+    try std.testing.expect(state.hasPressedMessage('A', a_message));
     try std.testing.expectEqual(Terminal.KeyAction.release, state.keyEvent('A', a_message, true).?.action);
+    try std.testing.expect(!state.hasPressedMessage('A', a_message));
     try std.testing.expectEqual(@as(?KeyEvent, null), state.keyEvent('A', a_message, true));
 }
 
