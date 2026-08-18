@@ -681,7 +681,6 @@ struct ZigonautTextEngine {
     uint32_t pending_row_background_color = 0;
     bool pending_row_background_active = false;
     bool pending_row_background_selection = false;
-    bool pending_row_background_search = false;
     ID2D1PathGeometry* selection_geometry = nullptr;
     float selection_radius = 0.0f;
     bool row_active = false;
@@ -1655,14 +1654,19 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                     pending_row_background = rect;
                     pending_row_background_color = background;
                     pending_row_background_selection = true;
-                    pending_row_background_search = false;
                     pending_row_background_active = true;
                 }
+            } else if (search_background) {
+                if (ordinary_background != frame_background) {
+                    brush->SetColor(color(ordinary_background));
+                    target->FillRectangle(rect, brush);
+                    if (benchmark_background_active) ++background_fill_calls;
+                }
+                flushRowBackground();
             } else if (background == frame_background && !search_background) {
                 flushRowBackground();
             } else if (pending_row_background_active &&
                     !pending_row_background_selection &&
-                    pending_row_background_search == search_background &&
                     pending_row_background_color == background &&
                     pending_row_background.right == rect.left &&
                     pending_row_background.top == rect.top &&
@@ -1673,11 +1677,10 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 pending_row_background = rect;
                 pending_row_background_color = background;
                 pending_row_background_selection = false;
-                pending_row_background_search = search_background;
                 pending_row_background_active = true;
             }
-        } else if (background != frame_background) {
-            brush->SetColor(color(background));
+        } else if ((search_background ? ordinary_background : background) != frame_background) {
+            brush->SetColor(color(search_background ? ordinary_background : background));
             target->FillRectangle(rect, brush);
             if (benchmark_background_active) ++background_fill_calls;
         }
@@ -1793,7 +1796,6 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         row_cell_height = cell_height;
         pending_row_background_active = false;
         pending_row_background_selection = false;
-        pending_row_background_search = false;
         release(selection_geometry);
         selection_radius = std::min(0.15f * cell_height, 0.25f * cell_width);
         if (current.active) {
@@ -1825,7 +1827,6 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         }
         pending_row_background_active = false;
         pending_row_background_selection = false;
-        pending_row_background_search = false;
         if (benchmark_background_active) ++background_fill_calls;
     }
 
@@ -2280,15 +2281,35 @@ HRESULT ZigonautTextEngine::endRow() {
         }
         target->PopLayer();
     }
+    D2D1_RECT_F search_rect{};
+    uint32_t search_color = 0;
+    bool search_active = false;
+    const auto flush_search = [&]() {
+        if (!search_active) return;
+        brush->SetColor(color(search_color));
+        target->FillRoundedRectangle(
+            D2D1::RoundedRect(search_rect, selection_radius, selection_radius), brush);
+        search_active = false;
+    };
     for (const auto& cell : row_cells) {
-        if (!cell.search_background) continue;
+        if (!cell.search_background) {
+            flush_search();
+            continue;
+        }
         const float left = row_origin_x + cell.column * row_cell_width;
         const float width = row_cell_width *
             (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
-        brush->SetColor(color(cell.background));
-        target->FillRectangle(D2D1::RectF(left, row_top,
-            left + width, row_top + row_cell_height), brush);
+        if (search_active && search_color == cell.background && search_rect.right == left) {
+            search_rect.right = left + width;
+        } else {
+            flush_search();
+            search_rect = D2D1::RectF(left, row_top,
+                left + width, row_top + row_cell_height);
+            search_color = cell.background;
+            search_active = true;
+        }
     }
+    flush_search();
     // Backgrounds are complete now. Draw decorations afterward so concave
     // colour bleed and the exact selection/search passes cannot cover them;
     // text and strikethrough are already emitted later in this method.
