@@ -14,11 +14,13 @@ cp "$root/zig-out/bin/zigonaut-pty-helper" "$app/MacOS/zigonaut-pty-helper"
 cp "$root/zig-out/lib/libzigonaut-core.dylib" "$app/Frameworks/"
 if [ "$configuration" = debug ]; then
     iconset="$app/Resources/Zigonaut.iconset"
-    mkdir -p "$iconset"
+    mkdir "$iconset"
     for size in 16 32 128 256 512; do
-        sips -z "$size" "$size" "$root/assets/icons/zigonaut-debug-master.png" --out "$iconset/icon_${size}x${size}.png"
-        scaled_size=$((size * 2))
-        sips -z "$scaled_size" "$scaled_size" "$root/assets/icons/zigonaut-debug-master.png" --out "$iconset/icon_${size}x${size}@2x.png"
+        sips -z "$size" "$size" "$root/assets/icons/zigonaut-debug-master.png" \
+            --out "$iconset/icon_${size}x${size}.png" >/dev/null
+        double_size=$((size * 2))
+        sips -z "$double_size" "$double_size" "$root/assets/icons/zigonaut-debug-master.png" \
+            --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns "$iconset" -o "$app/Resources/Zigonaut.icns"
     rm -rf "$iconset"
