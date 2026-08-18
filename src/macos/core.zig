@@ -13,6 +13,7 @@ const shared = @import("shared");
 const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;
 const search = shared.search;
+const hint = shared.hint;
 const theme = shared.theme;
 const Mutex = @import("platform_sync").Mutex;
 const public_abi = @cImport({
@@ -133,6 +134,28 @@ pub const ClipboardResult = extern struct {
     clear: u8,
     status: u8,
     reserved: [6]u8,
+};
+
+pub const HintRecord = extern struct {
+    target_offset: u32,
+    target_length: u32,
+    row: u16,
+    start_column: u16,
+    end_column: u16,
+    label_length: u8,
+    label: [8]u8,
+    reserved: [5]u8,
+};
+
+pub const HintResult = extern struct {
+    version: u32,
+    size: u32,
+    required_hints: u32,
+    required_bytes: u32,
+    written_hints: u32,
+    written_bytes: u32,
+    status: u8,
+    reserved: [7]u8,
 };
 
 pub const KeyEvent = extern struct {
@@ -1146,6 +1169,41 @@ export fn zigonaut_core_link_at(self: ?*Core, column: u16, row: u16, output: ?[*
     const count = @min(capacity, link.uri.len);
     if (output) |destination| @memcpy(destination[0..count], link.uri[0..count]);
     return @intCast(@min(link.uri.len, std.math.maxInt(u32)));
+}
+
+export fn zigonaut_core_hint_snapshot(self: ?*Core, records: ?[*]HintRecord, record_capacity: u32, bytes: ?[*]u8, byte_capacity: u32, result: ?*HintResult) void {
+    const output = result orelse return;
+    output.* = .{ .version = 1, .size = @sizeOf(HintResult), .required_hints = 0, .required_bytes = 0, .written_hints = 0, .written_bytes = 0, .status = 2, .reserved = @splat(0) };
+    const core = self orelse return;
+    if ((records == null and record_capacity != 0) or (bytes == null and byte_capacity != 0)) return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const candidates = core.terminal.linkHintsAlloc(std.heap.c_allocator) catch return;
+    defer hint.deinitCandidates(std.heap.c_allocator, candidates);
+    output.required_hints = @intCast(@min(candidates.len, std.math.maxInt(u32)));
+    for (candidates) |candidate| output.required_bytes +|= @intCast(candidate.target.len);
+    if (record_capacity < output.required_hints or byte_capacity < output.required_bytes or (output.required_hints != 0 and records == null) or (output.required_bytes != 0 and bytes == null)) {
+        output.status = 1;
+        return;
+    }
+    var offset: u32 = 0;
+    for (candidates, 0..) |candidate, index| {
+        if (bytes) |destination| @memcpy(destination[offset..][0..candidate.target.len], candidate.target);
+        records.?[index] = .{
+            .target_offset = offset,
+            .target_length = @intCast(candidate.target.len),
+            .row = candidate.row,
+            .start_column = candidate.start_column,
+            .end_column = candidate.end_column,
+            .label_length = candidate.label_len,
+            .label = candidate.label,
+            .reserved = @splat(0),
+        };
+        offset += @intCast(candidate.target.len);
+    }
+    output.written_hints = output.required_hints;
+    output.written_bytes = offset;
+    output.status = 0;
 }
 
 /// Takes ownership from the core queue and frees it after copying. Status is

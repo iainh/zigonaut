@@ -126,6 +126,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var pressedModifiers = Set<UInt16>()
   private var pendingKeyEvent: NSEvent?
   private var pendingKeyUsedMarkedText = false
+  private var linkHints: [TerminalHint] = []
+  private var hintPrefix = ""
+  private var hintCopies = false
 
   private var font: NSFont {
     styledFont(traits: [])
@@ -498,6 +501,17 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   override func keyDown(with event: NSEvent) {
+    if !linkHints.isEmpty {
+      handleHintKey(event)
+      return
+    }
+    if event.keyCode == 32, event.modifierFlags.contains([.command, .shift]) {
+      linkHints = model.linkHints()
+      hintPrefix = ""
+      hintCopies = event.modifierFlags.contains(.option)
+      needsDisplay = true
+      return
+    }
     // Command equivalents belong to menus and the responder chain. Text input
     // stays with NSTextInputClient unless it is a physical key we can describe
     // without pre-empting IME/dead-key composition.
@@ -533,6 +547,44 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     interpretKeyEvents([event])
     pendingKeyEvent = nil
     pendingKeyUsedMarkedText = false
+  }
+
+  private func handleHintKey(_ event: NSEvent) {
+    if event.keyCode == 53 {
+      cancelHints()
+      return
+    }
+    if event.keyCode == 51 {
+      if !hintPrefix.isEmpty { hintPrefix.removeLast() }
+      needsDisplay = true
+      return
+    }
+    guard let value = event.charactersIgnoringModifiers?.lowercased(), value.count == 1,
+      "asdfghjkl".contains(value) else { return }
+    hintPrefix += value
+    let matches = linkHints.filter { $0.label.hasPrefix(hintPrefix) }
+    guard !matches.isEmpty else {
+      NSSound.beep()
+      cancelHints()
+      return
+    }
+    if let match = matches.first(where: { $0.label == hintPrefix }) {
+      if hintCopies {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(match.url.absoluteString, forType: .string)
+      } else {
+        NSWorkspace.shared.open(match.url)
+      }
+      cancelHints()
+    } else {
+      needsDisplay = true
+    }
+  }
+
+  private func cancelHints() {
+    linkHints = []
+    hintPrefix = ""
+    needsDisplay = true
   }
 
   override func keyUp(with event: NSEvent) {
@@ -891,6 +943,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     drawImages(snapshot.images)
     drawCursor(snapshot.frame)
     drawMarkedText(snapshot.frame)
+    drawHintLabels()
     NSGraphicsContext.current?.restoreGraphicsState()
   }
 
@@ -996,7 +1049,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       retainedViewportOffset = snapshot.viewportOffset
       retainedAppearance = appearance
     }
-    if markedText.length > 0 {
+    let hasOverlay = markedText.length > 0 || !linkHints.isEmpty
+    if hasOverlay {
       rasterizeOverlay(frame: snapshot.frame, in: overlayBitmap)
       guard let overlayData = overlayBitmap.data else { return disableMetal() }
       overlayTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
@@ -1009,7 +1063,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let hasDecorations = snapshot.cells.contains {
       !$0.text.isEmpty && $0.occupancy != 2
         && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
-    } || hoveredLink != nil
+    } || hoveredLink != nil || !linkHints.isEmpty
     if hasDecorations {
       rasterizeDecorations(snapshot.cells, in: decorationBitmap)
       guard let decorationData = decorationBitmap.data else { return disableMetal() }
@@ -1034,7 +1088,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
     drawMetalImages(snapshot.images, encoder: encoder, pipeline: imagePipeline)
-    if markedText.length > 0 {
+    if hasOverlay {
       encoder.setRenderPipelineState(overlayPipeline)
       encoder.setFragmentTexture(overlayTexture, index: 0)
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -1049,12 +1103,27 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func rasterizeOverlay(frame: TerminalRenderFrame, in bitmap: CGContext) {
     bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
-    guard markedText.length > 0 else { return }
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
     drawMarkedText(frame)
+    drawHintLabels()
     NSGraphicsContext.restoreGraphicsState()
+  }
+
+  private func drawHintLabels() {
+    let attributes: [NSAttributedString.Key: Any] = [
+      .font: NSFont.monospacedSystemFont(ofSize: max(9, preferences.fontSize - 1), weight: .bold),
+      .foregroundColor: NSColor.black,
+      .backgroundColor: NSColor.systemYellow,
+    ]
+    for hint in linkHints where hint.label.hasPrefix(hintPrefix) {
+      let text = hint.label.dropFirst(hintPrefix.count)
+      guard !text.isEmpty else { continue }
+      NSAttributedString(string: String(text), attributes: attributes).draw(at: NSPoint(
+        x: originX + CGFloat(hint.startColumn) * cellWidth,
+        y: originY + CGFloat(hint.row) * lineHeight))
+    }
   }
 
   private func metalTextPlacements(_ cells: [TerminalRenderCell]) -> [MetalTextPlacement] {
@@ -1205,9 +1274,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func isHoveredLinkCell(_ cell: TerminalRenderCell) -> Bool {
-    guard let hoveredLink else { return false }
-    return cell.y == hoveredLink.row && cell.x >= hoveredLink.startColumn
-      && cell.x < hoveredLink.endColumn
+    if let hoveredLink, cell.y == hoveredLink.row && cell.x >= hoveredLink.startColumn
+      && cell.x < hoveredLink.endColumn { return true }
+    return linkHints.contains { hint in
+      hint.label.hasPrefix(hintPrefix) && cell.y == hint.row
+        && cell.x >= hint.startColumn && cell.x < hint.endColumn
+    }
   }
 
   private func drawMetalImages(_ images: [TerminalRenderImage], encoder: MTLRenderCommandEncoder,

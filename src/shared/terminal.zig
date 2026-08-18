@@ -1,4 +1,5 @@
 const std = @import("std");
+const hint = @import("hint.zig");
 const link = @import("link.zig");
 const theme = @import("theme.zig");
 const SearchMatch = @import("search.zig").Match;
@@ -1261,6 +1262,34 @@ pub const Terminal = struct {
         var scratch = LinkScratch{};
         defer scratch.deinit(allocator);
         return self.linkAtAllocWithScratch(allocator, allocator, &scratch, point);
+    }
+
+    pub fn linkHintsAlloc(self: *Terminal, allocator: std.mem.Allocator) ![]hint.Candidate {
+        var candidates: std.ArrayList(hint.Candidate) = .empty;
+        errdefer {
+            for (candidates.items) |candidate| allocator.free(candidate.target);
+            candidates.deinit(allocator);
+        }
+        var scratch = LinkScratch{};
+        defer scratch.deinit(allocator);
+        var row: u16 = 0;
+        while (row < self.rows) : (row += 1) {
+            var column: u16 = 0;
+            while (column < self.columns) {
+                const found = try self.linkAtAllocWithScratch(allocator, allocator, &scratch, .{ .x = column, .y = row });
+                if (found) |value| {
+                    try candidates.append(allocator, .{
+                        .target = value.uri,
+                        .row = row,
+                        .start_column = value.start_column,
+                        .end_column = value.end_column,
+                    });
+                    column = @max(column + 1, value.end_column);
+                } else column += 1;
+            }
+        }
+        hint.assignLabels(candidates.items);
+        return candidates.toOwnedSlice(allocator);
     }
 
     pub fn linkAtAllocWithScratch(
@@ -2542,6 +2571,17 @@ test "resolves OSC 8 and detected links at viewport cells" {
     const detected = (try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 12, .y = 1 })).?;
     defer std.testing.allocator.free(detected.uri);
     try std.testing.expectEqualStrings("https://ziglang.org/docs", detected.uri);
+}
+
+test "link hints label visible OSC and detected links from bottom to top" {
+    var terminal = try Terminal.init(40, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("\x1b]8;;https://old.example\x1b\\old\x1b]8;;\x1b\\\r\nhttps://new.example");
+    const candidates = try terminal.linkHintsAlloc(std.testing.allocator);
+    defer hint.deinitCandidates(std.testing.allocator, candidates);
+    try std.testing.expectEqual(@as(usize, 2), candidates.len);
+    try std.testing.expectEqualStrings("s", candidates[0].labelSlice());
+    try std.testing.expectEqualStrings("a", candidates[1].labelSlice());
 }
 
 test "shrinking rows and columns keeps a bottom-row cursor in bounds" {

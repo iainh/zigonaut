@@ -21,6 +21,9 @@ typedef struct { uint32_t version, size, matches; int32_t active; uint8_t status
 /* take status: 0 complete and consumed, 1 empty, 2 invalid, 3 insufficient capacity (not consumed). */
 typedef struct { uint32_t version, size, required_title, written_title, required_body, written_body; uint8_t status, reserved[7]; } zigonaut_notification_result_v1;
 typedef struct { uint32_t version, size; uint64_t token; uint32_t required_bytes, written_bytes; uint8_t clear, status, reserved[6]; } zigonaut_clipboard_result_v1;
+typedef struct { uint32_t target_offset, target_length; uint16_t row, start_column, end_column; uint8_t label_length, label[8], reserved[5]; } zigonaut_hint_v1;
+/* status: 0 complete, 1 insufficient capacity, 2 invalid/error. */
+typedef struct { uint32_t version, size, required_hints, required_bytes, written_hints, written_bytes; uint8_t status, reserved[7]; } zigonaut_hint_result_v1;
 /* action: 0 press, 1 repeat, 2 release. UTF-8 is optional and limited to 64 bytes. */
 typedef struct { uint32_t version, size; uint16_t key_code, modifiers, consumed_modifiers, utf8_length; uint8_t action, reserved0[3]; uint32_t unshifted_codepoint; const uint8_t *utf8; uint8_t reserved[8]; } zigonaut_key_event_v1;
 zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, zigonaut_wake_fn wake, void *context);
@@ -64,6 +67,7 @@ bool zigonaut_core_exited(zigonaut_core *);
 uint64_t zigonaut_core_output_generation(zigonaut_core *);
 uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity);
 uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity, uint16_t *start_column, uint16_t *end_column);
+void zigonaut_core_hint_snapshot(zigonaut_core *, zigonaut_hint_v1 *, uint32_t hint_capacity, uint8_t *bytes, uint32_t byte_capacity, zigonaut_hint_result_v1 *);
 void zigonaut_core_take_notification(zigonaut_core *, uint8_t *title, uint32_t title_capacity, uint8_t *body, uint32_t body_capacity, zigonaut_notification_result_v1 *);
 /* Enabled means intentionally permit immediate OSC 52 writes; accepted writes are queued for the host. */
 void zigonaut_core_set_clipboard_write(zigonaut_core *, bool enabled, uint32_t max_bytes);

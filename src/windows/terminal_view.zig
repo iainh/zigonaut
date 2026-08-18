@@ -11,6 +11,7 @@ const scroll_trace = @import("scroll_trace.zig");
 const config = @import("config.zig");
 const input = @import("input.zig");
 const search = shared.search;
+const hint = shared.hint;
 const shell_quote = @import("shell_quote.zig");
 const theme = shared.theme;
 const SearchMatch = search.Match;
@@ -401,6 +402,10 @@ pub const View = struct {
     last_titles_generation: u64 = 0,
     selection: ?MouseSelection = null,
     hovered_link: ?HoveredLink = null,
+    link_hints: ?[]hint.Candidate = null,
+    hint_prefix: [8]u8 = @splat(0),
+    hint_prefix_len: u8 = 0,
+    hint_copies: bool = false,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
     scrollbar_changed_message: win.UINT,
@@ -547,6 +552,7 @@ pub const View = struct {
     fn deinitResources(self: *View) void {
         self.stopFrameScheduling();
         self.ime_preedit.deinit(std.heap.page_allocator);
+        self.clearLinkHints();
         self.clearHoveredLink();
         self.gdi_renderer.release();
         if (self.text_engine) |*engine| engine.deinit();
@@ -853,6 +859,7 @@ pub const View = struct {
         self.protocol_button = null;
         self.protocol_runtime = null;
         self.clearHoveredLink();
+        self.clearLinkHints();
         self.wheel_remainder = 0;
         self.protocol_wheel_remainder = 0;
         self.protocol_hwheel_remainder = 0;
@@ -1340,6 +1347,7 @@ pub const View = struct {
             self.ime_caret_y = top;
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.ime_bounds_changed_message, @intCast(self.pane_id orelse 0), 0);
         }
+        self.drawLinkHintsGdi(dc, geometry);
     }
 
     fn paintSwapChain(self: *View) bool {
@@ -1469,6 +1477,7 @@ pub const View = struct {
                 self.ime_caret_x = @intFromFloat(engine.drawPreedit(self.ime_preedit.items, self.ime_selection_start + self.ime_selection_length, left, top, @floatFromInt(@max(client.right - @as(i32, @intFromFloat(left)), 1)), @floatFromInt(self.cell_height), foreground, background) orelse left);
                 self.ime_caret_y = @intFromFloat(top);
             }
+            self.drawLinkHintsDirectWrite(engine, geometry, foreground, background);
         } else {
             try drawDirectWriteMessage(
                 engine,
@@ -1581,6 +1590,7 @@ pub const View = struct {
 
     fn handleKey(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {
         if (wparam == win.VK_F4 and win.GetKeyState(win.VK_MENU) < 0) return false;
+        if (self.handleLinkHintKey(wparam, released)) return true;
         if (self.handleApplicationShortcut(wparam, lparam, released)) return true;
         if (self.handleClipboardShortcut(wparam, lparam, released)) return true;
         if (self.consumed_prompt_key == wparam) {
@@ -1632,6 +1642,114 @@ pub const View = struct {
             self.scrollToBottom();
         }
         return true;
+    }
+
+    fn handleLinkHintKey(self: *View, wparam: win.WPARAM, released: bool) bool {
+        if (self.link_hints) |candidates| {
+            if (released) return true;
+            if (wparam == win.VK_ESCAPE) {
+                self.clearLinkHints();
+                return true;
+            }
+            if (wparam == win.VK_BACK) {
+                self.hint_prefix_len -|= 1;
+                self.invalidate();
+                return true;
+            }
+            const character: ?u8 = switch (wparam) {
+                'A' => 'a',
+                'S' => 's',
+                'D' => 'd',
+                'F' => 'f',
+                'G' => 'g',
+                'H' => 'h',
+                'J' => 'j',
+                'K' => 'k',
+                'L' => 'l',
+                else => null,
+            };
+            const value = character orelse return true;
+            if (self.hint_prefix_len >= self.hint_prefix.len) return true;
+            self.hint_prefix[self.hint_prefix_len] = value;
+            self.hint_prefix_len += 1;
+            const prefix = self.hint_prefix[0..self.hint_prefix_len];
+            var any = false;
+            for (candidates) |candidate| {
+                if (!hint.matchesPrefix(candidate, prefix)) continue;
+                any = true;
+                if (!std.mem.eql(u8, candidate.labelSlice(), prefix)) continue;
+                if (self.hint_copies) {
+                    setClipboardText(self.hwnd, candidate.target) catch |err| log.debug("unable to copy terminal hint: {}", .{err});
+                } else openUri(candidate.target) catch |err| log.debug("unable to open terminal hint: {}", .{err});
+                self.clearLinkHints();
+                return true;
+            }
+            if (!any) {
+                _ = win.MessageBeep(win.MB_ICONWARNING);
+                self.clearLinkHints();
+            } else self.invalidate();
+            return true;
+        }
+        if (released or wparam != 'U' or win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_SHIFT) >= 0) return false;
+        const runtime = self.boundRuntime() orelse return true;
+        const candidates = runtime.linkHintsAlloc(std.heap.page_allocator) catch |err| {
+            log.debug("unable to collect terminal hints: {}", .{err});
+            return true;
+        };
+        if (candidates.len == 0) {
+            hint.deinitCandidates(std.heap.page_allocator, candidates);
+            return true;
+        }
+        self.link_hints = candidates;
+        self.hint_prefix_len = 0;
+        self.hint_copies = win.GetKeyState(win.VK_MENU) < 0;
+        self.consumed_application_key = wparam;
+        self.suppress_application_character = true;
+        self.invalidate();
+        return true;
+    }
+
+    fn clearLinkHints(self: *View) void {
+        if (self.link_hints) |candidates| hint.deinitCandidates(std.heap.page_allocator, candidates);
+        const changed = self.link_hints != null;
+        self.link_hints = null;
+        self.hint_prefix_len = 0;
+        if (changed) self.invalidate();
+    }
+
+    fn drawLinkHintsDirectWrite(self: *View, engine: *TextEngine, geometry: GridGeometry, foreground: u32, background: u32) void {
+        const candidates = self.link_hints orelse return;
+        const prefix = self.hint_prefix[0..self.hint_prefix_len];
+        for (candidates) |candidate| {
+            if (!hint.matchesPrefix(candidate, prefix)) continue;
+            const remaining = candidate.labelSlice()[prefix.len..];
+            if (remaining.len == 0) continue;
+            var wide: [8]u16 = undefined;
+            const length = std.unicode.utf8ToUtf16Le(&wide, remaining) catch continue;
+            const left: f32 = @floatFromInt(geometry.left + @as(i32, candidate.start_column) * @as(i32, @intCast(self.cell_width)));
+            const top: f32 = @floatFromInt(geometry.top + @as(i32, candidate.row) * @as(i32, @intCast(self.cell_height)));
+            _ = engine.drawPreedit(wide[0..length], @intCast(length), left, top, @floatFromInt(@max(1, @as(u32, @intCast(length)) * self.cell_width)), @floatFromInt(self.cell_height), if (self.high_contrast) foreground else colorRef(.{ .red = 0, .green = 0, .blue = 0 }), if (self.high_contrast) background else colorRef(.{ .red = 255, .green = 196, .blue = 0 }));
+        }
+    }
+
+    fn drawLinkHintsGdi(self: *View, dc: win.HDC, geometry: GridGeometry) void {
+        const candidates = self.link_hints orelse return;
+        const prefix = self.hint_prefix[0..self.hint_prefix_len];
+        _ = win.SelectObject(dc, self.font);
+        _ = win.SetTextColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else win.RGB(0, 0, 0));
+        _ = win.SetBkColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else win.RGB(255, 196, 0));
+        _ = win.SetBkMode(dc, win.OPAQUE);
+        for (candidates) |candidate| {
+            if (!hint.matchesPrefix(candidate, prefix)) continue;
+            const remaining = candidate.labelSlice()[prefix.len..];
+            if (remaining.len == 0) continue;
+            var wide: [8]u16 = undefined;
+            const length = std.unicode.utf8ToUtf16Le(&wide, remaining) catch continue;
+            const left = geometry.left + @as(i32, candidate.start_column) * @as(i32, @intCast(self.cell_width));
+            const top = geometry.top + @as(i32, candidate.row) * @as(i32, @intCast(self.cell_height));
+            const rect = win.RECT{ .left = left, .top = top, .right = left + @as(i32, @intCast(length)) * @as(i32, @intCast(self.cell_width)), .bottom = top + @as(i32, @intCast(self.cell_height)) };
+            _ = win.ExtTextOutW(dc, left, top, win.ETO_CLIPPED | win.ETO_OPAQUE, &rect, &wide, @intCast(length), null);
+        }
     }
 
     fn handleApplicationShortcut(self: *View, wparam: win.WPARAM, lparam: win.LPARAM, released: bool) bool {

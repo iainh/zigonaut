@@ -122,6 +122,14 @@ struct TerminalLink {
   let endColumn: Int
 }
 
+struct TerminalHint {
+  let url: URL
+  let label: String
+  let row: Int
+  let startColumn: Int
+  let endColumn: Int
+}
+
 struct TerminalRenderImage {
   let image: NSImage
   let cgImage: CGImage
@@ -493,6 +501,30 @@ struct TerminalPalette: Equatable {
       let value = String(bytes: bytes.prefix(Int(required)), encoding: .utf8),
       let url = URL(string: value) else { return nil }
     return TerminalLink(url: url, row: row, startColumn: Int(startColumn), endColumn: Int(endColumn))
+  }
+  func linkHints() -> [TerminalHint] {
+    guard let core else { return [] }
+    var result = zigonaut_hint_result_v1()
+    zigonaut_core_hint_snapshot(core.pointer, nil, 0, nil, 0, &result)
+    guard result.status == 1, result.required_hints <= 4096, result.required_bytes <= 1_048_576 else {
+      return []
+    }
+    var records = [zigonaut_hint_v1](repeating: zigonaut_hint_v1(), count: Int(result.required_hints))
+    var bytes = [UInt8](repeating: 0, count: Int(result.required_bytes))
+    zigonaut_core_hint_snapshot(core.pointer, &records, UInt32(records.count), &bytes,
+      UInt32(bytes.count), &result)
+    guard result.status == 0 else { return [] }
+    return records.prefix(Int(result.written_hints)).compactMap { record in
+      let start = Int(record.target_offset)
+      let end = start + Int(record.target_length)
+      guard start >= 0, end <= bytes.count,
+        let url = URL(string: String(decoding: bytes[start..<end], as: UTF8.self)) else { return nil }
+      let label = withUnsafeBytes(of: record.label) {
+        String(decoding: $0.prefix(Int(record.label_length)), as: UTF8.self)
+      }
+      return TerminalHint(url: url, label: label, row: Int(record.row),
+        startColumn: Int(record.start_column), endColumn: Int(record.end_column))
+    }
   }
   func applyClipboardSettings() {
     if let core {

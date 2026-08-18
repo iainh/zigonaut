@@ -482,6 +482,12 @@ pub const SessionRuntime = struct {
         return self.terminal.linkAtAllocWithScratch(allocator, self.allocator, &self.link_scratch, point);
     }
 
+    pub fn linkHintsAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]shared.hint.Candidate {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.linkHintsAlloc(allocator);
+    }
+
     pub const RenderCapture = union(enum) {
         prepared: struct { content_generation: u64 },
         synchronized_output,
