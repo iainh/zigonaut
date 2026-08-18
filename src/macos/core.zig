@@ -59,10 +59,14 @@ const SynchronizedOutput = struct {
     }
 };
 
-fn monotonicMillis() i64 {
+fn monotonicNanos() i64 {
     var value: c.timespec = undefined;
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &value) != 0) return 0;
-    return @as(i64, value.tv_sec) * std.time.ms_per_s + @divTrunc(value.tv_nsec, std.time.ns_per_ms);
+    return @as(i64, value.tv_sec) * std.time.ns_per_s + value.tv_nsec;
+}
+
+fn monotonicMillis() i64 {
+    return @divTrunc(monotonicNanos(), std.time.ns_per_ms);
 }
 
 pub const Wake = ?*const fn (?*anyopaque) callconv(.c) void;
@@ -90,11 +94,14 @@ const Core = struct {
     clipboard_enabled: bool = false,
     clipboard_max_bytes: u32 = clipboard_default_max_bytes,
     next_clipboard_token: u64 = 1,
-    search_scratch: Terminal.SearchScratch = .{},
+    search_cache: Terminal.SearchCache = .{},
     search_query: std.ArrayList(u8) = .empty,
     search_matches: std.ArrayList(search.Match) = .empty,
     search_active: ?usize = null,
     search_saved_offset: ?u64 = null,
+    search_next_row: u32 = 0,
+    search_scanning: bool = false,
+    search_generation: u64 = 0,
     selection_unit: Terminal.SelectionUnit = .cell,
     selection_rectangle: bool = false,
     progress_active: bool = false,
@@ -187,7 +194,8 @@ pub const SearchStatus = extern struct {
     matches: u32,
     active: i32,
     status: u8,
-    reserved: [7]u8,
+    scanning: u8,
+    reserved: [6]u8,
 };
 
 pub const RenderSnapshotResult = extern struct {
@@ -1239,12 +1247,13 @@ fn fillSearchStatus(core: *Core, output: *SearchStatus, status: u8) void {
         .matches = @intCast(@min(core.search_matches.items.len, std.math.maxInt(u32))),
         .active = if (core.search_active) |active| @intCast(active) else -1,
         .status = status,
+        .scanning = @intFromBool(core.search_scanning),
         .reserved = @splat(0),
     };
 }
 
-/// Searches the complete current scrollback. Swift invokes this on its serialized
-/// worker queue, so large histories never block the AppKit main actor.
+/// Replaces the query without scanning history. The host advances the scan with
+/// bounded `search_tick` calls so PTY parsing and snapshots can take the lock.
 export fn zigonaut_core_search_set(self: ?*Core, bytes: ?[*]const u8, len: usize, result: ?*SearchStatus) void {
     const output = result orelse return;
     output.* = std.mem.zeroes(SearchStatus);
@@ -1266,11 +1275,53 @@ export fn zigonaut_core_search_set(self: ?*Core, bytes: ?[*]const u8, len: usize
     core.search_query.clearRetainingCapacity();
     core.search_matches.clearRetainingCapacity();
     core.search_active = null;
+    core.search_next_row = 0;
+    core.search_scanning = len != 0;
+    core.search_generation = core.output_generation;
+    core.search_cache.clear(std.heap.c_allocator);
     core.search_query.appendSlice(std.heap.c_allocator, input[0..len]) catch return;
-    if (len != 0) {
-        const total = core.terminal.totalRows() catch return;
-        for (0..total) |row| core.terminal.searchRow(std.heap.c_allocator, &core.search_scratch, @intCast(row), core.search_query.items, &core.search_matches) catch return;
+    fillSearchStatus(core, output, 0);
+}
+
+export fn zigonaut_core_search_tick(self: ?*Core, time_budget_ns: u64, result: ?*SearchStatus) void {
+    const output = result orelse return;
+    output.* = std.mem.zeroes(SearchStatus);
+    output.version = 1;
+    output.size = @sizeOf(SearchStatus);
+    output.active = -1;
+    output.status = 2;
+    const core = self orelse return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    if (core.search_generation != core.output_generation) {
+        core.search_matches.clearRetainingCapacity();
+        core.search_active = null;
+        core.search_next_row = 0;
+        core.search_scanning = core.search_query.items.len != 0;
+        core.search_generation = core.output_generation;
+        core.search_cache.clear(std.heap.c_allocator);
     }
+    if (!core.search_scanning) {
+        fillSearchStatus(core, output, 0);
+        return;
+    }
+    const total = core.terminal.totalRows() catch {
+        fillSearchStatus(core, output, 2);
+        return;
+    };
+    const start_ns = monotonicNanos();
+    var scanned: usize = 0;
+    while (core.search_next_row < total) {
+        core.terminal.searchRowCached(std.heap.c_allocator, &core.search_cache, core.search_next_row, core.search_query.items, &core.search_matches) catch {
+            core.search_scanning = false;
+            fillSearchStatus(core, output, 2);
+            return;
+        };
+        core.search_next_row += 1;
+        scanned += 1;
+        if (scanned != 0 and monotonicNanos() -| start_ns >= time_budget_ns) break;
+    }
+    core.search_scanning = core.search_next_row < total;
     fillSearchStatus(core, output, 0);
 }
 
@@ -1320,6 +1371,9 @@ export fn zigonaut_core_search_clear(self: ?*Core) void {
     core.search_query.clearRetainingCapacity();
     core.search_matches.clearRetainingCapacity();
     core.search_active = null;
+    core.search_next_row = 0;
+    core.search_scanning = false;
+    core.search_cache.clear(std.heap.c_allocator);
 }
 
 export fn zigonaut_core_navigate_prompt(self: ?*Core, forward: bool) bool {
@@ -1449,7 +1503,7 @@ export fn zigonaut_core_destroy(self: ?*Core) void {
     _ = c.close(core.cancel_write);
     _ = c.close(core.master);
     reapBounded(core.child);
-    core.search_scratch.deinit(std.heap.c_allocator);
+    core.search_cache.deinit(std.heap.c_allocator);
     core.search_query.deinit(std.heap.c_allocator);
     core.search_matches.deinit(std.heap.c_allocator);
     for (core.notifications.items) |item| std.heap.c_allocator.free(item.payload);

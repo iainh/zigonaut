@@ -399,6 +399,7 @@ struct TerminalPalette: Equatable {
   private var currentCellHeight = 0
   private var currentScale: CGFloat = 1
   private var progressGeneration: UInt64 = 0
+  private var searchRequestGeneration: UInt64 = 0
   private let maximumCells = 500_000
   private let maximumTextBytes = 8_000_000
   private let maximumImages = 256
@@ -830,6 +831,8 @@ struct TerminalPalette: Equatable {
   }
   func setSearch(_ query: String) {
     guard let core else { return }
+    searchRequestGeneration &+= 1
+    let request = searchRequestGeneration
     let bytes = Array(query.utf8)
     writer.async { [weak self] in
       var status = zigonaut_search_status_v1()
@@ -837,8 +840,22 @@ struct TerminalPalette: Equatable {
         zigonaut_core_search_set(core.pointer, buffer.baseAddress, buffer.count, &status)
       }
       DispatchQueue.main.async {
+        guard self?.searchRequestGeneration == request else { return }
         self?.applySearch(status)
         self?.refresh()
+        if status.scanning != 0 { self?.continueSearch(core: core, request: request) }
+      }
+    }
+  }
+  private func continueSearch(core: TerminalCoreHandle, request: UInt64) {
+    writer.async { [weak self] in
+      var status = zigonaut_search_status_v1()
+      zigonaut_core_search_tick(core.pointer, 2_000_000, &status)
+      DispatchQueue.main.async {
+        guard self?.searchRequestGeneration == request else { return }
+        self?.applySearch(status)
+        self?.refresh()
+        if status.scanning != 0 { self?.continueSearch(core: core, request: request) }
       }
     }
   }
@@ -923,6 +940,7 @@ struct TerminalPalette: Equatable {
   }
   func clearSearch() {
     guard let core else { return }
+    searchRequestGeneration &+= 1
     writer.async { [weak self] in
       zigonaut_core_search_clear(core.pointer)
       DispatchQueue.main.async {

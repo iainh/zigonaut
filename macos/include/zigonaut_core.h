@@ -16,8 +16,8 @@ typedef struct { uint32_t version, size, required_cells, written_cells, required
 typedef struct { uint32_t version, size, required_images, written_images, required_data_bytes, written_data_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_images_result_v1;
 typedef struct { uint32_t version, size, foreground_rgb, background_rgb, cursor_rgb; uint32_t ansi_rgb[16]; uint8_t reserved[8]; } zigonaut_terminal_theme_v1;
 typedef struct { uint32_t version, size; uint64_t generation; uint8_t active, state, value; uint8_t reserved[5]; } zigonaut_progress_v1;
-/* search status: 0 complete, 2 invalid handle/error, 3 invalid or overlong query; active is -1 when unset. */
-typedef struct { uint32_t version, size, matches; int32_t active; uint8_t status; uint8_t reserved[7]; } zigonaut_search_status_v1;
+/* search status: 0 success, 2 invalid handle/error, 3 invalid or overlong query; active is -1 when unset. */
+typedef struct { uint32_t version, size, matches; int32_t active; uint8_t status, scanning; uint8_t reserved[6]; } zigonaut_search_status_v1;
 /* take status: 0 complete and consumed, 1 empty, 2 invalid, 3 insufficient capacity (not consumed). */
 typedef struct { uint32_t version, size, required_title, written_title, required_body, written_body; uint8_t status, reserved[7]; } zigonaut_notification_result_v1;
 typedef struct { uint32_t version, size; uint64_t token; uint32_t required_bytes, written_bytes; uint8_t clear, status, reserved[6]; } zigonaut_clipboard_result_v1;
@@ -32,6 +32,7 @@ bool zigonaut_core_key(zigonaut_core *, const zigonaut_key_event_v1 *);
 void zigonaut_core_paste(zigonaut_core *, const uint8_t *bytes, size_t length);
 void zigonaut_core_scroll(zigonaut_core *, ptrdiff_t rows);
 void zigonaut_core_search_set(zigonaut_core *, const uint8_t *query, size_t length, zigonaut_search_status_v1 *);
+void zigonaut_core_search_tick(zigonaut_core *, uint64_t time_budget_ns, zigonaut_search_status_v1 *);
 void zigonaut_core_search_status(zigonaut_core *, zigonaut_search_status_v1 *);
 void zigonaut_core_search_navigate(zigonaut_core *, bool forward, zigonaut_search_status_v1 *);
 void zigonaut_core_search_clear(zigonaut_core *);
