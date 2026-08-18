@@ -7,6 +7,7 @@ const modules = .{
     shared.pane_tree,
     shared.pseudographics,
     shared.search,
+    shared.synchronized_output,
     shared.terminal,
     shared.theme,
 };

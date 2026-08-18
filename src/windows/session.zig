@@ -5,6 +5,7 @@ const Terminal = shared.terminal.Terminal;
 const theme = shared.theme;
 const Search = shared.search.State;
 const SearchMatch = shared.search.Match;
+const SynchronizedOutput = shared.synchronized_output.Watchdog;
 const win32 = @import("win32.zig");
 const win = win32.c;
 const scroll_trace = @import("scroll_trace.zig");
@@ -12,7 +13,6 @@ const log = std.log.scoped(.session);
 const reader_buffer_bytes = 16 * 1024;
 const feed_chunk_bytes = 4 * 1024;
 const pty_write_queue_max_bytes = 8 * 1024 * 1024;
-const synchronized_output_timeout_ms = 1000;
 const notification_max_bytes = 4096;
 const retirement_retry_initial_ms = 1;
 const retirement_retry_max_ms = 250;
@@ -128,33 +128,6 @@ pub const SessionRuntime = struct {
         matches: usize,
         active: ?usize,
         scanning: bool,
-    };
-
-    const SynchronizedOutput = struct {
-        deadline_tick: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-
-        fn update(self: *SynchronizedOutput, enabled: bool, now: u64) bool {
-            const deadline = self.deadline_tick.load(.acquire);
-            if (enabled) {
-                if (deadline != 0) return false;
-                self.deadline_tick.store(now +| synchronized_output_timeout_ms, .release);
-                return true;
-            }
-            if (deadline == 0) return false;
-            self.deadline_tick.store(0, .release);
-            return true;
-        }
-
-        fn remaining(self: *const SynchronizedOutput, now: u64) ?u32 {
-            const deadline = self.deadline_tick.load(.acquire);
-            if (deadline == 0) return null;
-            if (deadline <= now) return 0;
-            return @intCast(@min(deadline - now, std.math.maxInt(u32)));
-        }
-
-        fn clear(self: *SynchronizedOutput) void {
-            self.deadline_tick.store(0, .release);
-        }
     };
 
     pub const Notification = struct {
@@ -618,7 +591,7 @@ pub const SessionRuntime = struct {
                 log.warn("unable to clear synchronized output mode: {}", .{err});
             };
         }
-        self.synchronized_output.clear();
+        _ = self.synchronized_output.clear();
         return null;
     }
 
@@ -628,7 +601,7 @@ pub const SessionRuntime = struct {
         self.terminal.setSynchronizedOutput(false) catch |err| {
             log.warn("unable to clear synchronized output mode: {}", .{err});
         };
-        self.synchronized_output.clear();
+        _ = self.synchronized_output.clear();
     }
 
     pub fn scrollbar(self: *SessionRuntime) !Terminal.Scrollbar {
@@ -870,7 +843,7 @@ pub const SessionRuntime = struct {
             };
             break :resized true;
         };
-        if (!self.terminal.synchronizedOutput()) self.synchronized_output.clear();
+        if (!self.terminal.synchronizedOutput()) _ = self.synchronized_output.clear();
         self.terminal_mutex.unlock();
         if (!resized) return;
         if (grid_changed) {
@@ -1000,7 +973,7 @@ pub const SessionRuntime = struct {
         self.reader_stopped.store(true, .release);
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
-        self.synchronized_output.clear();
+        _ = self.synchronized_output.clear();
         self.terminal_mutex.unlock();
         self.requestRefresh();
     }
@@ -1380,18 +1353,6 @@ test "runtime retirement closes writes and disables refresh callbacks" {
     try std.testing.expectEqual(@as(usize, 1), callback_count);
 }
 
-test "synchronized output arms once and releases when disabled" {
-    var state = SessionRuntime.SynchronizedOutput{};
-
-    try std.testing.expect(state.update(true, 100));
-    try std.testing.expectEqual(@as(?u32, 1000), state.remaining(100));
-    try std.testing.expect(!state.update(true, 500));
-    try std.testing.expectEqual(@as(?u32, 600), state.remaining(500));
-    try std.testing.expect(state.update(false, 600));
-    try std.testing.expectEqual(@as(?u32, null), state.remaining(600));
-    try std.testing.expect(!state.update(false, 700));
-}
-
 test "latency traces keep newer key correlation when an older frame completes" {
     var runtime = SessionRuntime{
         .allocator = std.testing.allocator,
@@ -1451,16 +1412,6 @@ test "render handoff gives a waiting snapshot lock its turn" {
     try std.testing.expect(entered.load(.acquire));
     try std.testing.expect(handoff.generation.load(.monotonic) != generation);
     try std.testing.expectEqual(@as(u32, 0), handoff.demand.load(.monotonic));
-}
-
-test "synchronized output watchdog expires and clear releases rendering" {
-    var state = SessionRuntime.SynchronizedOutput{};
-
-    try std.testing.expect(state.update(true, 50));
-    try std.testing.expectEqual(@as(?u32, 1), state.remaining(1049));
-    try std.testing.expectEqual(@as(?u32, 0), state.remaining(1050));
-    state.clear();
-    try std.testing.expectEqual(@as(?u32, null), state.remaining(1050));
 }
 
 test "session defers synchronized chunks and prepares once mode ends" {

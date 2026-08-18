@@ -14,6 +14,7 @@ const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;
 const search = shared.search;
 const Search = search.State;
+const SynchronizedOutput = shared.synchronized_output.Watchdog;
 const hint = shared.hint;
 const theme = shared.theme;
 const Mutex = @import("platform_sync").Mutex;
@@ -29,37 +30,9 @@ const notification_max_bytes = 4096;
 const clipboard_queue_capacity = 16;
 const clipboard_default_max_bytes: u32 = 1024 * 1024;
 const key_utf8_max_bytes = 64;
-const synchronized_output_timeout_ms: i64 = 1000;
 
 const QueuedNotification = struct { payload: []u8, title_len: u16 };
 const QueuedClipboard = struct { payload: []u8, token: u64, clear: bool };
-
-const SynchronizedOutput = struct {
-    deadline_ms: i64 = 0,
-
-    fn update(self: *SynchronizedOutput, enabled: bool, now_ms: i64) bool {
-        if (enabled) {
-            if (self.deadline_ms != 0) return false;
-            self.deadline_ms = now_ms +| synchronized_output_timeout_ms;
-            return true;
-        }
-        if (self.deadline_ms == 0) return false;
-        self.deadline_ms = 0;
-        return true;
-    }
-
-    fn remaining(self: *const SynchronizedOutput, now_ms: i64) ?c_int {
-        if (self.deadline_ms == 0) return null;
-        if (self.deadline_ms <= now_ms) return 0;
-        return @intCast(@min(self.deadline_ms - now_ms, std.math.maxInt(c_int)));
-    }
-
-    fn clear(self: *SynchronizedOutput) bool {
-        if (self.deadline_ms == 0) return false;
-        self.deadline_ms = 0;
-        return true;
-    }
-};
 
 fn monotonicNanos() i64 {
     var value: c.timespec = undefined;
@@ -67,8 +40,8 @@ fn monotonicNanos() i64 {
     return @as(i64, value.tv_sec) * std.time.ns_per_s + value.tv_nsec;
 }
 
-fn monotonicMillis() i64 {
-    return @divTrunc(monotonicNanos(), std.time.ns_per_ms);
+fn monotonicMillis() u64 {
+    return @intCast(@max(0, @divTrunc(monotonicNanos(), std.time.ns_per_ms)));
 }
 
 pub const Wake = ?*const fn (?*anyopaque) callconv(.c) void;
@@ -465,7 +438,7 @@ fn readLoop(self: *Core) void {
     };
     while (true) {
         self.mutex.lock();
-        const timeout = self.synchronized_output.remaining(monotonicMillis()) orelse -1;
+        const timeout: c_int = if (self.synchronized_output.remaining(monotonicMillis())) |remaining| @intCast(remaining) else -1;
         self.mutex.unlock();
         const ready = c.poll(&fds, fds.len, timeout);
         if (ready < 0) {
@@ -962,17 +935,6 @@ test "selection context invalidates the changed row and its neighbours" {
             try std.testing.expectEqual(previous, current);
         }
     }
-}
-
-test "synchronized output arms once and expires after one second" {
-    var state = SynchronizedOutput{};
-    try std.testing.expect(state.update(true, 100));
-    try std.testing.expectEqual(@as(?c_int, 1000), state.remaining(100));
-    try std.testing.expect(!state.update(true, 500));
-    try std.testing.expectEqual(@as(?c_int, 600), state.remaining(500));
-    try std.testing.expectEqual(@as(?c_int, 0), state.remaining(1100));
-    try std.testing.expect(state.clear());
-    try std.testing.expectEqual(@as(?c_int, null), state.remaining(1100));
 }
 
 const ImageCollector = struct {
