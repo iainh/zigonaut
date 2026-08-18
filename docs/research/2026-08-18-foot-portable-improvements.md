@@ -118,6 +118,25 @@ Map the protocol-neutral state to Windows app notifications and `UNUserNotificat
 
 This likely requires additions to libghostty's public VT API. Prefer contributing that boundary upstream over parsing OSC 99 a second time in Zigonaut.
 
+**Implementation status (2026-08-18): blocked upstream.** The pinned
+libghostty revision and current libghostty `main` recognize OSC 9 and OSC 777,
+but don't recognize OSC 99. `GhosttyTerminalDesktopNotification` exposes only
+borrowed title and body strings. The unknown-sequence callback reports APC, not
+unknown OSC payloads, so Zigonaut cannot safely recover OSC 99 before the
+terminal parser discards it. Adding a second OSC parser around the PTY stream
+would split parser state and can misinterpret control strings, UTF-8 fragments,
+and terminators.
+
+The required upstream boundary is a parsed OSC 99 event with bounded decoded
+fields, a terminal-scoped protocol ID, create/replace/close/query operations,
+and an API for serializing activation and closure reports. Once libghostty
+provides that boundary, Zigonaut can map it to its existing native notification
+owners. Both owners already resolve activation through stable pane/session IDs
+rather than retaining a terminal pointer: macOS looks up a UUID in the live
+window model and Windows validates a process nonce before looking up the
+session. A completion arriving after pane destruction therefore has no session
+state to dereference.
+
 ### 7. Use foot's changelog as a regression corpus
 
 Foot's current unreleased fixes cover malformed percent-encoded URIs, unclamped DECCRA rectangles, huge CHT/CBT counts, zero-length text-size requests, notification callbacks after terminal destruction, wide characters at word boundaries, quote selection at column zero and selection damage after resize. Earlier releases add paste interleaving, OSC 52 replies, focus-mode transitions, enhanced-keyboard releases, reflow and scrollback wrap-around cases.
