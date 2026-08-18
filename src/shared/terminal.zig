@@ -40,6 +40,7 @@ pub const Terminal = struct {
     progress_report: ?ProgressReport = null,
     progress_report_context: ?*anyopaque = null,
     visible: bool = true,
+    focused: bool = false,
     columns: u16,
     rows: u16,
     intense_text_style: IntenseTextStyle = .all,
@@ -990,7 +991,13 @@ pub const Terminal = struct {
     }
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
+        const focus_reporting = self.focusReporting();
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+        if (!focus_reporting and self.focusReporting()) {
+            var buffer: [3]u8 = undefined;
+            const encoded = self.encodeFocusReport(self.focused, &buffer);
+            if (self.write_pty) |callback| callback(self.write_pty_context, encoded);
+        }
     }
 
     pub fn synchronizedOutput(self: *Terminal) bool {
@@ -1004,11 +1011,23 @@ pub const Terminal = struct {
     }
 
     pub fn encodeFocusReport(self: *Terminal, focused: bool, output: []u8) []const u8 {
-        var enabled = false;
-        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(1004, false), &enabled)) catch return output[0..0];
-        if (!enabled or output.len < 3) return output[0..0];
+        if (!self.focusReporting() or output.len < 3) return output[0..0];
         @memcpy(output[0..3], if (focused) "\x1b[I" else "\x1b[O");
         return output[0..3];
+    }
+
+    fn focusReporting(self: *Terminal) bool {
+        var enabled = false;
+        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(1004, false), &enabled)) catch return false;
+        return enabled;
+    }
+
+    pub fn setFocused(self: *Terminal, focused: bool) void {
+        if (self.focused == focused) return;
+        self.focused = focused;
+        var buffer: [3]u8 = undefined;
+        const encoded = self.encodeFocusReport(focused, &buffer);
+        if (self.write_pty) |callback| callback(self.write_pty_context, encoded);
     }
 
     pub fn setVisible(self: *Terminal, visible: bool) void {
@@ -2428,6 +2447,24 @@ test "focus reports are emitted only when requested" {
     try std.testing.expectEqualStrings("\x1b[O", terminal.encodeFocusReport(false, &buffer));
     terminal.feed("\x1b[?1004l");
     try std.testing.expectEqualStrings("", terminal.encodeFocusReport(false, &buffer));
+}
+
+test "enabling focus reporting emits the current state immediately" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+    var writes = std.ArrayList(u8).empty;
+    defer writes.deinit(std.testing.allocator);
+    const Callback = struct {
+        fn write(context: ?*anyopaque, bytes: []const u8) void {
+            const output: *std.ArrayList(u8) = @ptrCast(@alignCast(context.?));
+            output.appendSlice(std.testing.allocator, bytes) catch unreachable;
+        }
+    };
+    try terminal.setWritePty(Callback.write, &writes);
+    terminal.setFocused(true);
+    try std.testing.expectEqual(@as(usize, 0), writes.items.len);
+    terminal.feed("\x1b[?1004h");
+    try std.testing.expectEqualStrings("\x1b[I", writes.items);
 }
 
 test "visibility reports follow host visibility" {

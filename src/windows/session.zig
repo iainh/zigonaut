@@ -937,11 +937,9 @@ pub const SessionRuntime = struct {
     }
 
     pub fn sendFocus(self: *SessionRuntime, focused: bool) void {
-        var buffer: [3]u8 = undefined;
         self.terminal_mutex.lock();
-        const encoded = self.terminal.encodeFocusReport(focused, &buffer);
+        self.terminal.setFocused(focused);
         self.terminal_mutex.unlock();
-        self.write(encoded) catch |err| log.debug("unable to write terminal focus report: {}", .{err});
     }
 
     pub fn setVisible(self: *SessionRuntime, visible: bool) void {

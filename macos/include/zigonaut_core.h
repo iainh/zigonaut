@@ -30,6 +30,7 @@ zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_p
 void zigonaut_core_resize(zigonaut_core *, uint16_t columns, uint16_t rows, uint16_t pixel_width, uint16_t pixel_height, uint32_t cell_width, uint32_t cell_height);
 void zigonaut_core_request_stop(zigonaut_core *);
 void zigonaut_core_write(zigonaut_core *, const uint8_t *bytes, size_t length);
+void zigonaut_core_set_focused(zigonaut_core *, bool focused);
 /* True means the physical key/action was recognized, even when the active protocol emits no bytes. */
 bool zigonaut_core_key(zigonaut_core *, const zigonaut_key_event_v1 *);
 void zigonaut_core_paste(zigonaut_core *, const uint8_t *bytes, size_t length);

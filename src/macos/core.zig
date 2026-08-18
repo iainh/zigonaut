@@ -537,6 +537,13 @@ export fn zigonaut_core_write(self: ?*Core, bytes: ?[*]const u8, len: usize) voi
     writeSerialized(core, input[0..len]);
 }
 
+export fn zigonaut_core_set_focused(self: ?*Core, focused: bool) void {
+    const core = self orelse return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    core.terminal.setFocused(focused);
+}
+
 fn macKey(key_code: u16) ?Terminal.Key {
     return switch (key_code) {
         0 => .a,

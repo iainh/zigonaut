@@ -815,6 +815,10 @@ struct TerminalPalette: Equatable {
     return snapshotGeometryChanged
   }
   func write(_ value: String) { enqueue(value, paste: false) }
+  func setFocused(_ focused: Bool) {
+    guard let core else { return }
+    writer.async { zigonaut_core_set_focused(core.pointer, focused) }
+  }
   func paste(_ value: String) { enqueue(value, paste: true) }
   func sendKey(keyCode: UInt16, modifiers: UInt16, consumedModifiers: UInt16, action: UInt8,
     unshiftedCodepoint: UInt32, utf8: [UInt8])

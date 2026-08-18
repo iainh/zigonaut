@@ -69,7 +69,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   let model: TerminalModel
   var preferences: Preferences
-  var focused = false
+  var focused = false {
+    didSet { model.setFocused(focused && window?.firstResponder === self) }
+  }
   var wantsKeyboardFocus = false
   var onFocus: () -> Void
   private var scrollRemainder: CGFloat = 0
@@ -378,11 +380,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   override func becomeFirstResponder() -> Bool {
+    model.setFocused(focused)
     needsDisplay = true
     return true
   }
 
   override func resignFirstResponder() -> Bool {
+    model.setFocused(false)
     clearEncodedKeys()
     needsDisplay = true
     return true
