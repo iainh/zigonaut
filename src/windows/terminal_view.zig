@@ -421,7 +421,7 @@ pub const View = struct {
     protocol_button: ?Terminal.MouseButton = null,
     protocol_runtime: ?*SessionRuntime = null,
     last_click_tick: u64 = 0,
-    click_count: u2 = 0,
+    click_count: u3 = 0,
     last_click_point: ?Terminal.Point = null,
     suppressed_search_character: ?u16 = null,
     consumed_prompt_key: ?win.WPARAM = null,
@@ -1905,7 +1905,16 @@ pub const View = struct {
             self.click_count = 1;
         self.last_click_tick = now;
         self.last_click_point = point;
-        const unit: Terminal.SelectionUnit = if (self.click_count >= 3) .line else if (self.click_count == 2) .word else .cell;
+        const unit: Terminal.SelectionUnit = if (self.click_count >= 4)
+            .logical_line
+        else if (self.click_count == 3)
+            .quote
+        else if (self.click_count == 2 and win.GetKeyState(win.VK_SHIFT) < 0)
+            .whitespace
+        else if (self.click_count == 2)
+            .word
+        else
+            .cell;
         runtime.beginSelectionAnchor(point) catch return;
         runtime.setDerivedSelection(point, unit, unit == .cell and win.GetKeyState(win.VK_MENU) < 0) catch {
             runtime.endSelectionAnchor();
@@ -2923,8 +2932,8 @@ fn isContextMenuShortcut(key: win.WPARAM) bool {
     return key == win.VK_APPS or key == win.VK_F10 and win.GetKeyState(win.VK_SHIFT) < 0;
 }
 
-fn saturatingClick(value: u2) u2 {
-    return if (value < 3) value + 1 else 3;
+fn saturatingClick(value: u3) u3 {
+    return if (value < 4) value + 1 else 4;
 }
 
 const WheelAccumulation = struct { steps: i32, remainder: i32 };
@@ -3112,8 +3121,8 @@ test "standard terminal clipboard shortcuts are recognized" {
 }
 
 test "click count saturates" {
-    try std.testing.expectEqual(@as(u2, 3), saturatingClick(3));
-    try std.testing.expectEqual(@as(u2, 3), saturatingClick(2));
+    try std.testing.expectEqual(@as(u3, 4), saturatingClick(4));
+    try std.testing.expectEqual(@as(u3, 4), saturatingClick(3));
 }
 
 test "protocol wheel accumulation keeps partial deltas" {

@@ -115,7 +115,7 @@ pub const Terminal = struct {
         rectangle: bool = false,
     };
 
-    pub const SelectionUnit = enum { cell, word, line };
+    pub const SelectionUnit = enum { cell, word, line, whitespace, quote, logical_line };
     pub const PixelPoint = struct { x: i32, y: i32 };
     pub const MouseGeometry = struct {
         screen_width: u32,
@@ -672,7 +672,7 @@ pub const Terminal = struct {
     };
 
     pub const SearchCache = struct {
-        const Row = struct { text_start: usize };
+        const Row = struct { text_start: usize, wrapped: bool };
         text: std.ArrayList(u8) = .empty,
         starts: std.ArrayList(u32) = .empty,
         rows: std.ArrayList(Row) = .empty,
@@ -1148,7 +1148,7 @@ pub const Terminal = struct {
     /// callers can bound terminal lock time and continue processing PTY output.
     pub fn searchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         if (query.len == 0) return;
-        try self.reconstructSearchRow(allocator, scratch, row_index);
+        _ = try self.reconstructSearchRow(allocator, scratch, row_index);
         try searchCachedRow(allocator, scratch, row_index, query, output);
     }
 
@@ -1158,24 +1158,23 @@ pub const Terminal = struct {
         if (query.len == 0) return;
         // Scans are sequential, so a missing row is always appended once.
         if (cache.rows.items.len <= row_index) {
-            try self.reconstructSearchRow(allocator, &cache.scratch, row_index);
+            const wrapped = try self.reconstructSearchRow(allocator, &cache.scratch, row_index);
             const text_start = cache.text.items.len;
             try cache.text.ensureUnusedCapacity(allocator, cache.scratch.text.items.len);
             try cache.starts.ensureUnusedCapacity(allocator, cache.scratch.starts.items.len);
             try cache.rows.ensureUnusedCapacity(allocator, 1);
             cache.text.appendSliceAssumeCapacity(cache.scratch.text.items);
             cache.starts.appendSliceAssumeCapacity(cache.scratch.starts.items);
-            cache.rows.appendAssumeCapacity(.{ .text_start = text_start });
+            cache.rows.appendAssumeCapacity(.{ .text_start = text_start, .wrapped = wrapped });
         }
-        const row = cache.rows.items[row_index];
         const next_row: usize = @as(usize, row_index) + 1;
-        const text_end = if (next_row < cache.rows.items.len) cache.rows.items[next_row].text_start else cache.text.items.len;
-        const starts_per_row = @as(usize, self.columns) + 1;
-        const starts_start = @as(usize, row_index) * starts_per_row;
-        try searchRowText(allocator, cache.text.items[row.text_start..text_end], cache.starts.items[starts_start..][0..starts_per_row], row_index, query, output);
+        if (cache.rows.items[row_index].wrapped and next_row < self.totalRows() catch return) return;
+        var first_row = row_index;
+        while (first_row > 0 and cache.rows.items[first_row - 1].wrapped) first_row -= 1;
+        try searchLogicalRows(allocator, cache, self.columns, first_row, row_index, query, output);
     }
 
-    fn reconstructSearchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32) !void {
+    fn reconstructSearchRow(self: *Terminal, allocator: std.mem.Allocator, scratch: *SearchScratch, row_index: u32) !bool {
         scratch.text.clearRetainingCapacity();
         scratch.starts.clearRetainingCapacity();
         try scratch.starts.ensureTotalCapacity(allocator, @as(usize, self.columns) + 1);
@@ -1204,6 +1203,14 @@ pub const Terminal = struct {
             }
         }
         starts[self.columns] = @intCast(scratch.text.items.len);
+        var reference = std.mem.zeroes(vt.GhosttyGridRef);
+        reference.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = 0, .y = row_index } } }, &reference));
+        var row: vt.GhosttyRow = 0;
+        try check(vt.ghostty_grid_ref_row(&reference, &row));
+        var wrapped = false;
+        try check(vt.ghostty_row_get(row, vt.GHOSTTY_ROW_DATA_WRAP, &wrapped));
+        return wrapped;
     }
 
     fn searchCachedRow(allocator: std.mem.Allocator, scratch: *const SearchScratch, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
@@ -1212,13 +1219,75 @@ pub const Terminal = struct {
 
     fn searchRowText(allocator: std.mem.Allocator, text: []const u8, starts: []const u32, row_index: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
         var from: usize = 0;
-        while (std.mem.indexOfPos(u8, text, from, query)) |at| {
+        const sensitive = hasUppercaseAscii(query);
+        while (indexOfSmartCase(text, from, query, sensitive)) |at| {
             const finish = at + query.len;
             const start_column = searchStartColumn(starts[0 .. starts.len - 1], @intCast(at));
             const end_column = searchEndColumn(starts, @intCast(finish));
-            try output.append(allocator, .{ .row = row_index, .start = start_column, .end = @max(end_column, start_column + 1) });
+            try insertSearchMatch(allocator, output, .{ .row = row_index, .start = start_column, .end = @max(end_column, start_column + 1) });
             from = at + @max(query.len, 1);
         }
+    }
+
+    fn searchLogicalRows(allocator: std.mem.Allocator, cache: *const SearchCache, columns: u16, first_row: u32, last_row: u32, query: []const u8, output: *std.ArrayList(SearchMatch)) !void {
+        const text_start = cache.rows.items[first_row].text_start;
+        const text_end = if (@as(usize, last_row) + 1 < cache.rows.items.len) cache.rows.items[last_row + 1].text_start else cache.text.items.len;
+        const sensitive = hasUppercaseAscii(query);
+        var from = text_start;
+        while (indexOfSmartCase(cache.text.items[0..text_end], from, query, sensitive)) |at| {
+            if (at < text_start) {
+                from = at + @max(query.len, 1);
+                continue;
+            }
+            const finish = at + query.len;
+            var row = first_row;
+            while (row <= last_row) : (row += 1) {
+                const row_start = cache.rows.items[row].text_start;
+                const row_end = if (@as(usize, row) + 1 < cache.rows.items.len) cache.rows.items[row + 1].text_start else cache.text.items.len;
+                const segment_start = @max(at, row_start);
+                const segment_end = @min(finish, row_end);
+                if (segment_start < segment_end) {
+                    const starts_per_row = @as(usize, columns) + 1;
+                    const starts = cache.starts.items[@as(usize, row) * starts_per_row ..][0..starts_per_row];
+                    const start_column = searchStartColumn(starts[0 .. starts.len - 1], @intCast(segment_start - row_start));
+                    const end_column = searchEndColumn(starts, @intCast(segment_end - row_start));
+                    try insertSearchMatch(allocator, output, .{ .row = row, .start = start_column, .end = @max(end_column, start_column + 1) });
+                }
+            }
+            from = at + @max(query.len, 1);
+        }
+    }
+
+    fn hasUppercaseAscii(query: []const u8) bool {
+        for (query) |byte| if (std.ascii.isUpper(byte)) return true;
+        return false;
+    }
+
+    fn indexOfSmartCase(text: []const u8, from: usize, query: []const u8, sensitive: bool) ?usize {
+        if (sensitive) return std.mem.indexOfPos(u8, text, from, query);
+        if (query.len == 0 or from > text.len) return null;
+        var at = from;
+        while (at + query.len <= text.len) : (at += 1) {
+            var equal = true;
+            for (text[at..][0..query.len], query) |actual, expected| {
+                if (std.ascii.toLower(actual) != std.ascii.toLower(expected)) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) return at;
+        }
+        return null;
+    }
+
+    fn insertSearchMatch(allocator: std.mem.Allocator, output: *std.ArrayList(SearchMatch), value: SearchMatch) !void {
+        var index = output.items.len;
+        while (index > 0) {
+            const previous = output.items[index - 1];
+            if (previous.row < value.row or previous.row == value.row and previous.start <= value.start) break;
+            index -= 1;
+        }
+        try output.insert(allocator, index, value);
     }
 
     fn searchStartColumn(starts: []const u32, offset: u32) u16 {
@@ -1959,7 +2028,7 @@ pub const Terminal = struct {
             options.start = f;
             options.end = a;
             try check(vt.ghostty_terminal_select_word_between(self.terminal, &options, &last));
-        } else {
+        } else if (unit == .logical_line) {
             var options = std.mem.zeroes(vt.GhosttyTerminalSelectLineOptions);
             options.size = @sizeOf(vt.GhosttyTerminalSelectLineOptions);
             // Let line selection cross prompt boundaries so it follows the
@@ -1969,10 +2038,69 @@ pub const Terminal = struct {
             try check(vt.ghostty_terminal_select_line(self.terminal, &options, &first));
             options.ref = f;
             try check(vt.ghostty_terminal_select_line(self.terminal, &options, &last));
+        } else {
+            first = try self.selectVisualUnit(a, unit);
+            last = try self.selectVisualUnit(f, unit);
         }
         selection.start = if (forward) first.start else first.end;
         selection.end = if (forward) last.end else last.start;
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SELECTION, &selection));
+    }
+
+    fn selectVisualUnit(self: *Terminal, reference: vt.GhosttyGridRef, unit: SelectionUnit) !vt.GhosttySelection {
+        var point = std.mem.zeroes(vt.GhosttyPointCoordinate);
+        try check(vt.ghostty_terminal_point_from_grid_ref(self.terminal, &reference, vt.GHOSTTY_POINT_TAG_SCREEN, &point));
+        var start_column: u16 = 0;
+        var end_column: u16 = self.columns -| 1;
+        if (unit == .whitespace or unit == .quote) {
+            var scratch = SearchScratch{};
+            defer scratch.deinit(std.heap.c_allocator);
+            _ = try self.reconstructSearchRow(std.heap.c_allocator, &scratch, @intCast(point.y));
+            const starts = scratch.starts.items;
+            const column: usize = @intCast(@min(point.x, self.columns -| 1));
+            const offset = @as(usize, starts[column]);
+            if (unit == .whitespace) {
+                if (offset >= scratch.text.items.len or !std.ascii.isWhitespace(scratch.text.items[offset]))
+                    return self.selectWord(reference);
+                var start = column;
+                while (start > 0 and std.ascii.isWhitespace(scratch.text.items[starts[start - 1]])) start -= 1;
+                var end = column + 1;
+                while (end < self.columns and std.ascii.isWhitespace(scratch.text.items[starts[end]])) end += 1;
+                start_column = @intCast(start);
+                end_column = @intCast(end - 1);
+            } else {
+                var best_start: ?usize = null;
+                var best_end: ?usize = null;
+                for ("'\"`") |quote| {
+                    const before = std.mem.lastIndexOfScalar(u8, scratch.text.items[0..@min(offset + 1, scratch.text.items.len)], quote) orelse continue;
+                    const after_relative = std.mem.indexOfScalarPos(u8, scratch.text.items, @min(offset + 1, scratch.text.items.len), quote) orelse continue;
+                    if (best_start == null or after_relative - before < best_end.? - best_start.?) {
+                        best_start = before;
+                        best_end = after_relative;
+                    }
+                }
+                if (best_start == null or best_end.? <= best_start.? + 1) return self.selectVisualUnit(reference, .line);
+                start_column = searchStartColumn(starts[0 .. starts.len - 1], @intCast(best_start.? + 1));
+                end_column = searchStartColumn(starts[0 .. starts.len - 1], @intCast(best_end.? - 1));
+            }
+        }
+        var result = std.mem.zeroes(vt.GhosttySelection);
+        result.size = @sizeOf(vt.GhosttySelection);
+        result.start.size = @sizeOf(vt.GhosttyGridRef);
+        result.end.size = @sizeOf(vt.GhosttyGridRef);
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = start_column, .y = point.y } } }, &result.start));
+        try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = end_column, .y = point.y } } }, &result.end));
+        return result;
+    }
+
+    fn selectWord(self: *Terminal, reference: vt.GhosttyGridRef) !vt.GhosttySelection {
+        var options = std.mem.zeroes(vt.GhosttyTerminalSelectWordOptions);
+        options.size = @sizeOf(vt.GhosttyTerminalSelectWordOptions);
+        options.ref = reference;
+        var result = std.mem.zeroes(vt.GhosttySelection);
+        result.size = @sizeOf(vt.GhosttySelection);
+        try check(vt.ghostty_terminal_select_word(self.terminal, &options, &result));
+        return result;
     }
 
     pub fn mouseTracking(self: *Terminal) bool {
@@ -2494,6 +2622,46 @@ test "cached search rows preserve text and byte-to-column mappings across querie
     try terminal.searchRowCached(std.testing.allocator, &cache, 0, "changed", &matches);
     try std.testing.expectEqual(@as(usize, 1), matches.items.len);
     try std.testing.expectEqual(@as(u16, 0), matches.items[0].start);
+}
+
+test "cached search uses smart case and crosses soft wraps" {
+    var terminal = try Terminal.init(6, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("HelloWorld");
+    var matches = std.ArrayList(SearchMatch).empty;
+    defer matches.deinit(std.testing.allocator);
+    var cache = Terminal.SearchCache{};
+    defer cache.deinit(std.testing.allocator);
+    const total = try terminal.totalRows();
+    for (0..total) |row| try terminal.searchRowCached(std.testing.allocator, &cache, @intCast(row), "lowo", &matches);
+    try std.testing.expectEqual(@as(usize, 2), matches.items.len);
+    try std.testing.expectEqual(@as(u32, 0), matches.items[0].row);
+    try std.testing.expectEqual(@as(u32, 1), matches.items[1].row);
+
+    matches.clearRetainingCapacity();
+    for (0..total) |row| try terminal.searchRowCached(std.testing.allocator, &cache, @intCast(row), "hello", &matches);
+    try std.testing.expect(matches.items.len != 0);
+    matches.clearRetainingCapacity();
+    for (0..total) |row| try terminal.searchRowCached(std.testing.allocator, &cache, @intCast(row), "HELLO", &matches);
+    try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+}
+
+test "quote and logical line units derive stable selections" {
+    var terminal = try Terminal.init(8, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("say 'hi'abcdefgh");
+    try terminal.beginSelectionAnchor(.{ .x = 5, .y = 0 });
+    try terminal.setDerivedSelection(.{ .x = 5, .y = 0 }, .quote, false);
+    var selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    try std.testing.expectEqualStrings("hi", selected);
+    std.testing.allocator.free(selected);
+    terminal.endSelectionAnchor();
+
+    try terminal.beginSelectionAnchor(.{ .x = 2, .y = 1 });
+    try terminal.setDerivedSelection(.{ .x = 2, .y = 1 }, .logical_line, false);
+    selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expect(std.mem.indexOf(u8, selected, "abcdefgh") != null);
 }
 
 test "wide cell tails do not add spaces to viewport text" {

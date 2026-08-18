@@ -43,6 +43,7 @@ bool zigonaut_core_navigate_prompt(zigonaut_core *, bool forward);
 /* Returns required bytes. Copying occurs only when the complete value fits. */
 size_t zigonaut_core_last_command_output(zigonaut_core *, uint8_t *output, size_t capacity);
 size_t zigonaut_core_working_directory(zigonaut_core *, uint8_t *output, size_t capacity);
+/* unit: 0 cell, 1 word, 2 visual line, 3 whitespace run, 4 enclosing quote, 5 logical line. */
 void zigonaut_core_selection_begin(zigonaut_core *, uint16_t column, uint16_t row, uint8_t unit, bool rectangle);
 void zigonaut_core_selection_update(zigonaut_core *, uint16_t column, uint16_t row);
 void zigonaut_core_selection_end(zigonaut_core *);

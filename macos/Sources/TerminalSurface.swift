@@ -776,7 +776,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
     selecting = true
     selectionShouldCopy = event.clickCount >= 2
-    let unit: UInt8 = event.clickCount >= 3 ? 2 : event.clickCount == 2 ? 1 : 0
+    let unit: UInt8 = event.clickCount >= 4 ? 5
+      : event.clickCount == 3 ? 4
+      : event.clickCount == 2 && event.modifierFlags.contains(.shift) ? 3
+      : event.clickCount == 2 ? 1 : 0
     model.selectionBegin(point.0, point.1, unit: unit,
       rectangle: unit == 0 && event.modifierFlags.contains(.option))
     model.refresh()

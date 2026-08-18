@@ -1465,7 +1465,7 @@ export fn zigonaut_core_working_directory(self: ?*Core, output: ?[*]u8, capacity
 
 export fn zigonaut_core_selection_begin(self: ?*Core, column: u16, row: u16, unit: u8, rectangle: bool) void {
     const core = self orelse return;
-    if (unit > @intFromEnum(Terminal.SelectionUnit.line)) return;
+    if (unit > @intFromEnum(Terminal.SelectionUnit.logical_line)) return;
     core.mutex.lock();
     defer core.mutex.unlock();
     core.selection_unit = @enumFromInt(unit);
