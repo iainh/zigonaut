@@ -1891,7 +1891,7 @@ struct TerminalSurface: NSViewRepresentable {
     view.resizeTerminal()
     view.needsDisplay = true
     view.updateAccessibilityValue()
-    view.setAccessibilityFocused(focused)
+    view.setAccessibilityFocused(wantsKeyboardFocus)
     if shouldClaimKeyboardFocus {
       view.window?.makeFirstResponder(view)
     }
