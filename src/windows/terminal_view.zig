@@ -1375,6 +1375,8 @@ pub const View = struct {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.renderer_failed_message, 0, 0);
             return true;
         };
+        const latency = if (self.boundRuntime()) |runtime| runtime.latencyTrace() else SessionRuntime.LatencyTrace{ .pane_id = self.tracePaneId(), .request_id = 0 };
+        if (latency.request_id != 0) scroll_trace.write(.native_raster_completed, latency.pane_id, latency.request_id, @intFromEnum(result), 0);
         scroll_trace.write(.paint_completed, self.tracePaneId(), request_id, @intFromEnum(result), 0);
         if (result == .retry) {
             self.present_pending = true;
@@ -1384,6 +1386,10 @@ pub const View = struct {
             if (!self.armPresentRetry()) return true;
         } else {
             scroll_trace.write(.present_succeeded, self.tracePaneId(), request_id, 0, 0);
+            if (latency.request_id != 0) {
+                scroll_trace.write(.present_submitted, latency.pane_id, latency.request_id, 0, 0);
+                if (self.boundRuntime()) |runtime| runtime.endLatencyTrace(latency.request_id);
+            }
             self.present_stall_recovery_attempted = false;
             if (self.render_dirty.load(.acquire)) self.armFrameWait();
         }
@@ -1547,6 +1553,19 @@ pub const View = struct {
             self.present_retry_count,
             @intCast(win.GetTickCount64() -% self.present_retry_started_tick),
         );
+        if (self.boundRuntime()) |runtime| {
+            const latency = runtime.latencyTrace();
+            if (latency.request_id != 0) {
+                scroll_trace.write(
+                    .present_submitted,
+                    latency.pane_id,
+                    latency.request_id,
+                    self.present_retry_count,
+                    @intCast(win.GetTickCount64() -% self.present_retry_started_tick),
+                );
+                runtime.endLatencyTrace(latency.request_id);
+            }
+        }
         self.present_pending = false;
         self.present_retry_delay_ms = present_retry_initial_ms;
         self.present_retry_armed_delay_ms = 0;
@@ -1639,6 +1658,10 @@ pub const View = struct {
         const key_runtime = self.key_runtimes[index] orelse return true;
         if (event.action == .release) self.key_runtimes[index] = null;
         if (!self.runtimeIsLive(key_runtime)) return true;
+        if (event.action == .press and scroll_trace.enabled()) {
+            const request_id = key_runtime.beginLatencyTrace(self.tracePaneId());
+            scroll_trace.write(.key_received, self.tracePaneId(), request_id, @intFromEnum(event.action), @intFromEnum(event.key));
+        }
         const encoded = key_runtime.sendKey(
             event.key,
             event.action,

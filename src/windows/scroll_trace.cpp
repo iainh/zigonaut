@@ -62,6 +62,16 @@ extern "C" void zigonaut_scroll_trace_write(
         name = L"PresentRetry"; fields = L"retry=%lld delay_ms=%lld"; break;
     case ZIGONAUT_SCROLL_TRACE_PRESENT_SUCCEEDED:
         name = L"PresentSucceeded"; fields = L"retries=%lld elapsed_ms=%lld"; break;
+    case ZIGONAUT_SCROLL_TRACE_KEY_RECEIVED:
+        name = L"KeyReceived"; fields = L"action=%lld key=%lld"; break;
+    case ZIGONAUT_SCROLL_TRACE_PARSER_COMPLETED:
+        name = L"ParserCompleted"; fields = L"bytes=%lld generation=%lld"; break;
+    case ZIGONAUT_SCROLL_TRACE_SNAPSHOT_COMPLETED:
+        name = L"SnapshotCompleted"; fields = L"generation=%lld reserved=%lld"; break;
+    case ZIGONAUT_SCROLL_TRACE_NATIVE_RASTER_COMPLETED:
+        name = L"NativeRasterCompleted"; fields = L"result=%lld reserved=%lld"; break;
+    case ZIGONAUT_SCROLL_TRACE_PRESENT_SUBMITTED:
+        name = L"PresentationSubmitted"; fields = L"retries=%lld elapsed_ms=%lld"; break;
     default:
         break;
     }

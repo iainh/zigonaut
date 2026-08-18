@@ -1102,6 +1102,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
     drawMetalCursor(snapshot.frame, encoder: encoder, pipeline: cursorPipeline)
     encoder.endEncoding()
+    if let trace = model.takeLatencyTrace() {
+      TerminalLatencyTrace.signposter.emitEvent("NativeRasterCompleted", id: trace)
+      drawable.addPresentedHandler { _ in
+        TerminalLatencyTrace.signposter.emitEvent("CompositorPresented", id: trace)
+      }
+    }
     command.present(drawable)
     command.commit()
     presentation.isHidden = false

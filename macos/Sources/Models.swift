@@ -1,10 +1,17 @@
 import AppKit
 import Combine
+import OSLog
 import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
 import ZigonautPaneLayout
 import ZigonautRestoration
+
+enum TerminalLatencyTrace {
+  static let signposter = OSSignposter(
+    subsystem: Bundle.main.bundleIdentifier ?? "com.zigonaut.terminal",
+    category: "InputLatency")
+}
 
 extension NSColor {
   convenience init(rgb: UInt32) {
@@ -399,6 +406,7 @@ struct TerminalPalette: Equatable {
   private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
   private var imageCache: [TerminalImageKey: CGImage] = [:]
+  private var latencySignpostID: OSSignpostID?
   private var currentColumns = 80
   private var currentRows = 24
   private var currentPixelWidth = 0
@@ -462,7 +470,13 @@ struct TerminalPalette: Equatable {
       cellBuffer = [zigonaut_render_cell_v1](
         repeating: zigonaut_render_cell_v1(), count: desiredCells)
     }
+    if let id = latencySignpostID {
+      TerminalLatencyTrace.signposter.emitEvent("ParserCompleted", id: id)
+    }
     retrieveSnapshot(core: core.pointer, retry: true)
+    if let id = latencySignpostID {
+      TerminalLatencyTrace.signposter.emitEvent("SnapshotCompleted", id: id)
+    }
     let generation = zigonaut_core_output_generation(core.pointer)
     if generation != outputGeneration { outputGeneration = generation }
     if !exited, zigonaut_core_exited(core.pointer) { exited = true }
@@ -824,6 +838,11 @@ struct TerminalPalette: Equatable {
     unshiftedCodepoint: UInt32, utf8: [UInt8])
   {
     guard let core else { return }
+    if action == 0, TerminalLatencyTrace.signposter.isEnabled {
+      let id = TerminalLatencyTrace.signposter.makeSignpostID()
+      latencySignpostID = id
+      TerminalLatencyTrace.signposter.emitEvent("KeyReceived", id: id)
+    }
     writer.async {
       utf8.withUnsafeBufferPointer { buffer in
         var event = zigonaut_key_event_v1()
@@ -839,6 +858,11 @@ struct TerminalPalette: Equatable {
         _ = zigonaut_core_key(core.pointer, &event)
       }
     }
+  }
+  func takeLatencyTrace() -> OSSignpostID? {
+    guard let id = latencySignpostID else { return nil }
+    latencySignpostID = nil
+    return id
   }
   private func enqueue(_ value: String, paste: Bool) {
     guard let core else { return }

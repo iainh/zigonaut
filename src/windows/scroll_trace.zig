@@ -15,11 +15,16 @@ pub const Event = enum(c_uint) {
     paint_failed,
     present_retry,
     present_succeeded,
+    key_received,
+    parser_completed,
+    snapshot_completed,
+    native_raster_completed,
+    present_submitted,
 };
 
 comptime {
     if (@intFromEnum(Event.input) != win.ZIGONAUT_SCROLL_TRACE_INPUT or
-        @intFromEnum(Event.present_succeeded) != win.ZIGONAUT_SCROLL_TRACE_PRESENT_SUCCEEDED)
+        @intFromEnum(Event.present_submitted) != win.ZIGONAUT_SCROLL_TRACE_PRESENT_SUBMITTED)
         @compileError("scroll trace event IDs disagree with scroll_trace.h");
 }
 

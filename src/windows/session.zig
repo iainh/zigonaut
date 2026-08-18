@@ -22,6 +22,8 @@ const writer_idle_timeout_100ns: std.os.windows.LARGE_INTEGER = -10_000_000;
 /// Heap-owned runtime with a stable address shared by Win32 and the reader thread.
 /// Call `retire` only after no caller can submit input or rendering work.
 pub const SessionRuntime = struct {
+    pub const LatencyTrace = struct { pane_id: u64, request_id: u64 };
+
     allocator: std.mem.Allocator,
     terminal: Terminal,
     pty: ?Pty = null,
@@ -41,6 +43,9 @@ pub const SessionRuntime = struct {
     reader_stopped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     content_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     output_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    latency_sequence: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    latency_request_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    latency_pane_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     synchronized_output: SynchronizedOutput = .{},
     search_content_generation: u64 = 0,
     title: std.ArrayList(u8) = .empty,
@@ -488,6 +493,25 @@ pub const SessionRuntime = struct {
         return self.terminal.linkHintsAlloc(allocator);
     }
 
+    pub fn beginLatencyTrace(self: *SessionRuntime, pane_id: u64) u64 {
+        var request_id = self.latency_sequence.fetchAdd(1, .monotonic) +% 1;
+        if (request_id == 0) request_id = self.latency_sequence.fetchAdd(1, .monotonic) +% 1;
+        self.latency_pane_id.store(pane_id, .monotonic);
+        self.latency_request_id.store(request_id, .release);
+        return request_id;
+    }
+
+    pub fn latencyTrace(self: *const SessionRuntime) LatencyTrace {
+        return .{
+            .pane_id = self.latency_pane_id.load(.monotonic),
+            .request_id = self.latency_request_id.load(.acquire),
+        };
+    }
+
+    pub fn endLatencyTrace(self: *SessionRuntime, request_id: u64) void {
+        _ = self.latency_request_id.cmpxchgStrong(request_id, 0, .acq_rel, .acquire);
+    }
+
     pub const RenderCapture = union(enum) {
         prepared: struct { content_generation: u64 },
         synchronized_output,
@@ -520,6 +544,14 @@ pub const SessionRuntime = struct {
             return err;
         };
         self.render_handoff.unlock(&self.terminal_mutex);
+        const latency = self.latencyTrace();
+        if (latency.request_id != 0) scroll_trace.write(
+            .snapshot_completed,
+            latency.pane_id,
+            latency.request_id,
+            @intCast(generation),
+            0,
+        );
         return .{ .prepared = .{ .content_generation = generation } };
     }
 
@@ -1151,7 +1183,15 @@ pub const SessionRuntime = struct {
         const mode_changed = self.synchronized_output.update(synchronized, now);
         self.search_content_generation +%= 1;
         _ = self.output_generation.fetchAdd(1, .monotonic);
-        _ = self.content_generation.fetchAdd(1, .monotonic);
+        const generation = self.content_generation.fetchAdd(1, .monotonic) +% 1;
+        const latency = self.latencyTrace();
+        if (latency.request_id != 0) scroll_trace.write(
+            .parser_completed,
+            latency.pane_id,
+            latency.request_id,
+            @intCast(bytes.len),
+            @intCast(generation),
+        );
         return !synchronized or mode_changed;
     }
 
@@ -1350,6 +1390,25 @@ test "synchronized output arms once and releases when disabled" {
     try std.testing.expect(state.update(false, 600));
     try std.testing.expectEqual(@as(?u32, null), state.remaining(600));
     try std.testing.expect(!state.update(false, 700));
+}
+
+test "latency traces keep newer key correlation when an older frame completes" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+
+    const first = runtime.beginLatencyTrace(41);
+    const second = runtime.beginLatencyTrace(41);
+    try std.testing.expect(first != second);
+    runtime.endLatencyTrace(first);
+    try std.testing.expectEqual(second, runtime.latencyTrace().request_id);
+    runtime.endLatencyTrace(second);
+    try std.testing.expectEqual(@as(u64, 0), runtime.latencyTrace().request_id);
 }
 
 test "render handoff gives a waiting snapshot lock its turn" {
