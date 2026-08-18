@@ -13,6 +13,7 @@ const shared = @import("shared");
 const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;
 const search = shared.search;
+const Search = search.State;
 const hint = shared.hint;
 const theme = shared.theme;
 const Mutex = @import("platform_sync").Mutex;
@@ -96,13 +97,7 @@ const Core = struct {
     clipboard_max_bytes: u32 = clipboard_default_max_bytes,
     next_clipboard_token: u64 = 1,
     search_cache: Terminal.SearchCache = .{},
-    search_query: std.ArrayList(u8) = .empty,
-    search_matches: std.ArrayList(search.Match) = .empty,
-    search_active: ?usize = null,
-    search_saved_offset: ?u64 = null,
-    search_next_row: u32 = 0,
-    search_scanning: bool = false,
-    search_generation: u64 = 0,
+    search: Search = .{},
     selection_unit: Terminal.SelectionUnit = .cell,
     selection_rectangle: bool = false,
     progress_active: bool = false,
@@ -907,8 +902,8 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
         return;
     }
     var collector = SnapshotCollector{ .frame = output_frame, .cells = cell_slice, .text = text_slice, .result = output };
-    collector.search_matches = core.search_matches.items;
-    collector.search_active = core.search_active;
+    collector.search_matches = core.search.matches.items;
+    collector.search_active = core.search.active;
     collector.viewport_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
     output.viewport_offset = collector.viewport_offset;
     core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
@@ -925,7 +920,7 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
         var selection_collector = SelectionCollector{ .ranges = selection_ranges };
         core.render_snapshot.replay(&selection_collector);
     }
-    visualRowHashes(&core.render_snapshot, selection_ranges, core.search_matches.items, core.search_active, collector.viewport_offset, visual);
+    visualRowHashes(&core.render_snapshot, selection_ranges, core.search.matches.items, core.search.active, collector.viewport_offset, visual);
     const previous = if (previous_hashes) |pointer| pointer[0..previous_count] else &.{};
     dirtyRows(previous, visual, dirty);
     collector.dirty_rows = dirty;
@@ -1309,10 +1304,10 @@ fn fillSearchStatus(core: *Core, output: *SearchStatus, status: u8) void {
     output.* = .{
         .version = 1,
         .size = @sizeOf(SearchStatus),
-        .matches = @intCast(@min(core.search_matches.items.len, std.math.maxInt(u32))),
-        .active = if (core.search_active) |active| @intCast(active) else -1,
+        .matches = @intCast(@min(core.search.matches.items.len, std.math.maxInt(u32))),
+        .active = if (core.search.active) |active| @intCast(active) else -1,
         .status = status,
-        .scanning = @intFromBool(core.search_scanning),
+        .scanning = @intFromBool(core.search.scanning),
         .reserved = @splat(0),
     };
 }
@@ -1334,17 +1329,15 @@ export fn zigonaut_core_search_set(self: ?*Core, bytes: ?[*]const u8, len: usize
     }
     core.mutex.lock();
     defer core.mutex.unlock();
-    if (core.search_saved_offset == null) {
-        if (core.terminal.scrollbar()) |state| core.search_saved_offset = state.offset else |_| {}
+    if (core.search.saved_offset == null) {
+        if (core.terminal.scrollbar()) |state| core.search.saved_offset = state.offset else |_| {}
     }
-    core.search_query.clearRetainingCapacity();
-    core.search_matches.clearRetainingCapacity();
-    core.search_active = null;
-    core.search_next_row = 0;
-    core.search_scanning = len != 0;
-    core.search_generation = core.output_generation;
+    core.search.query.clearRetainingCapacity();
+    core.search.reset();
+    core.search.scanned_generation = core.output_generation;
     core.search_cache.clear(std.heap.c_allocator);
-    core.search_query.appendSlice(std.heap.c_allocator, input[0..len]) catch return;
+    core.search.query.appendSlice(std.heap.c_allocator, input[0..len]) catch return;
+    core.search.scanning = len != 0;
     fillSearchStatus(core, output, 0);
 }
 
@@ -1358,15 +1351,12 @@ export fn zigonaut_core_search_tick(self: ?*Core, time_budget_ns: u64, result: ?
     const core = self orelse return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    if (core.search_generation != core.output_generation) {
-        core.search_matches.clearRetainingCapacity();
-        core.search_active = null;
-        core.search_next_row = 0;
-        core.search_scanning = core.search_query.items.len != 0;
-        core.search_generation = core.output_generation;
+    if (core.search.scanned_generation != core.output_generation) {
+        core.search.reset();
+        core.search.scanned_generation = core.output_generation;
         core.search_cache.clear(std.heap.c_allocator);
     }
-    if (!core.search_scanning) {
+    if (!core.search.scanning) {
         fillSearchStatus(core, output, 0);
         return;
     }
@@ -1376,17 +1366,17 @@ export fn zigonaut_core_search_tick(self: ?*Core, time_budget_ns: u64, result: ?
     };
     const start_ns = monotonicNanos();
     var scanned: usize = 0;
-    while (core.search_next_row < total) {
-        core.terminal.searchRowCached(std.heap.c_allocator, &core.search_cache, core.search_next_row, core.search_query.items, &core.search_matches) catch {
-            core.search_scanning = false;
+    while (core.search.next_row < total) {
+        core.terminal.searchRowCached(std.heap.c_allocator, &core.search_cache, core.search.next_row, core.search.query.items, &core.search.matches) catch {
+            core.search.scanning = false;
             fillSearchStatus(core, output, 2);
             return;
         };
-        core.search_next_row += 1;
+        core.search.next_row += 1;
         scanned += 1;
         if (scanned != 0 and monotonicNanos() -| start_ns >= time_budget_ns) break;
     }
-    core.search_scanning = core.search_next_row < total;
+    core.search.scanning = core.search.next_row < total;
     fillSearchStatus(core, output, 0);
 }
 
@@ -1410,10 +1400,7 @@ export fn zigonaut_core_search_navigate(self: ?*Core, forward: bool, result: ?*S
     };
     core.mutex.lock();
     defer core.mutex.unlock();
-    if (core.search_matches.items.len != 0) {
-        const current = core.search_active orelse if (forward) core.search_matches.items.len - 1 else 0;
-        core.search_active = if (forward) (current + 1) % core.search_matches.items.len else if (current == 0) core.search_matches.items.len - 1 else current - 1;
-        const match = core.search_matches.items[core.search_active.?];
+    if (core.search.navigate(forward)) |match| {
         const state = core.terminal.scrollbar() catch null;
         if (state) |scrollbar| {
             const target = @min(@as(u64, match.row), scrollbar.total -| scrollbar.len);
@@ -1428,16 +1415,13 @@ export fn zigonaut_core_search_clear(self: ?*Core) void {
     const core = self orelse return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    if (core.search_saved_offset) |target| if (core.terminal.scrollbar()) |state| {
+    if (core.search.saved_offset) |target| if (core.terminal.scrollbar()) |state| {
         const delta: isize = if (target >= state.offset) @intCast(target - state.offset) else -@as(isize, @intCast(state.offset - target));
         core.terminal.scrollViewport(delta);
     } else |_| {};
-    core.search_saved_offset = null;
-    core.search_query.clearRetainingCapacity();
-    core.search_matches.clearRetainingCapacity();
-    core.search_active = null;
-    core.search_next_row = 0;
-    core.search_scanning = false;
+    core.search.saved_offset = null;
+    core.search.query.clearRetainingCapacity();
+    core.search.reset();
     core.search_cache.clear(std.heap.c_allocator);
 }
 
@@ -1569,8 +1553,7 @@ export fn zigonaut_core_destroy(self: ?*Core) void {
     _ = c.close(core.master);
     reapBounded(core.child);
     core.search_cache.deinit(std.heap.c_allocator);
-    core.search_query.deinit(std.heap.c_allocator);
-    core.search_matches.deinit(std.heap.c_allocator);
+    core.search.deinit(std.heap.c_allocator);
     for (core.notifications.items) |item| std.heap.c_allocator.free(item.payload);
     core.notifications.deinit(std.heap.c_allocator);
     for (core.clipboard_writes.items) |item| std.heap.c_allocator.free(item.payload);
