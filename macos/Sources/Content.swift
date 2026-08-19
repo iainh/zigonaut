@@ -357,9 +357,17 @@ enum SettingsPane: String, CaseIterable {
 
   var contentSize: NSSize {
     switch self {
-    case .appearance: NSSize(width: 650, height: 390)
-    case .terminal: NSSize(width: 700, height: 410)
-    case .advanced: NSSize(width: 700, height: 300)
+    case .appearance: NSSize(width: 680, height: 570)
+    case .terminal: NSSize(width: 700, height: 560)
+    case .advanced: NSSize(width: 680, height: 440)
+    }
+  }
+
+  var subtitle: String {
+    switch self {
+    case .appearance: "Personalize how Zigonaut looks and presents terminal content."
+    case .terminal: "Choose how new terminals start, fit and retain output."
+    case .advanced: "Control integrations, security-sensitive features and defaults."
     }
   }
 }
@@ -382,14 +390,19 @@ struct SettingsView: View {
 
   var body: some View {
     ScrollView {
-      Group {
-        switch model.pane {
-        case .appearance: appearance
-        case .terminal: terminal
-        case .advanced: advanced
+      VStack(alignment: .leading, spacing: 24) {
+        SettingsPaneHeader(pane: model.pane)
+        Group {
+          switch model.pane {
+          case .appearance: appearance
+          case .terminal: terminal
+          case .advanced: advanced
+          }
         }
       }
-      .scenePadding()
+      .padding(.horizontal, 28)
+      .padding(.top, 24)
+      .padding(.bottom, 28)
     }
     .frame(width: model.pane.contentSize.width, height: model.pane.contentSize.height)
     .alert("Restore Defaults?", isPresented: $confirmRestore) {
@@ -401,70 +414,77 @@ struct SettingsView: View {
   }
 
   private var appearance: some View {
-    Form {
-      Section("Application") {
-        Picker("Colour scheme", selection: $preferences.colourScheme) {
-          ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+    VStack(alignment: .leading, spacing: 20) {
+      TerminalAppearancePreview(preferences: preferences)
+      Form {
+        Section("Window") {
+          Picker("Colour scheme", selection: $preferences.colourScheme) {
+            ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+          }
+          .pickerStyle(.segmented)
+          .frame(width: 240)
+          Picker("Material", selection: $preferences.windowMaterial) {
+            Text("Standard").tag("Window")
+            Text("Translucent").tag("Under Window")
+            Text("Sidebar").tag("Sidebar")
+            Text("Heads-up display").tag("HUD")
+          }
+          LabeledContent("Background opacity") {
+            HStack(spacing: 10) {
+              Slider(value: $preferences.opacity, in: 0.5...1, step: 0.05)
+                .frame(width: 180)
+              Text(preferences.opacity, format: .percent.precision(.fractionLength(0)))
+                .monospacedDigit()
+                .frame(width: 38, alignment: .trailing)
+            }
+          }
         }
-        .pickerStyle(.segmented)
-        Picker("Window material", selection: $preferences.windowMaterial) {
-          Text("Window").tag("Window")
-          Text("Under Window").tag("Under Window")
-          Text("Sidebar").tag("Sidebar")
-          Text("HUD").tag("HUD")
+        Section("Terminal theme") {
+          Picker("Dark appearance", selection: $preferences.darkTerminalTheme) {
+            ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
+          }
+          Picker("Light appearance", selection: $preferences.lightTerminalTheme) {
+            ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
+          }
+          Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
         }
-        LabeledContent("Background opacity") {
-          HStack {
-            Slider(value: $preferences.opacity, in: 0.5...1, step: 0.05)
-            Text(preferences.opacity, format: .percent.precision(.fractionLength(0)))
-              .monospacedDigit()
-              .frame(width: 42, alignment: .trailing)
+        Section("Typography") {
+          Picker("Typeface", selection: $preferences.fontFamily) {
+            ForEach(fontFamilies, id: \.self) { Text($0) }
+          }
+          LabeledContent("Size") {
+            HStack(spacing: 10) {
+              Slider(value: $preferences.fontSize, in: 9...32, step: 1)
+                .frame(width: 180)
+              Text("\(Int(preferences.fontSize)) pt")
+                .monospacedDigit()
+                .frame(width: 38, alignment: .trailing)
+            }
+          }
+          Picker("Regular text", selection: $preferences.fontWeight) {
+            ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+          }
+          Picker("Intense text", selection: $preferences.intenseFontWeight) {
+            ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+          }
+          Picker("Intensity treatment", selection: $preferences.intenseTextStyle) {
+            Text("Weight only").tag("bold")
+            Text("Weight and bright colours").tag("all")
+            Text("Bright colours only").tag("bright")
           }
         }
       }
-      Section("Terminal themes") {
-        Picker("Dark appearance", selection: $preferences.darkTerminalTheme) {
-          ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
-        }
-        Picker("Light appearance", selection: $preferences.lightTerminalTheme) {
-          ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
-        }
-        Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
-      }
-      Section("Font") {
-        Picker("Family", selection: $preferences.fontFamily) {
-          ForEach(fontFamilies, id: \.self) { Text($0) }
-        }
-        LabeledContent("Size") {
-          HStack {
-            Slider(value: $preferences.fontSize, in: 9...32, step: 1)
-            Text("\(Int(preferences.fontSize)) pt")
-              .monospacedDigit()
-              .frame(width: 42, alignment: .trailing)
-          }
-        }
-        Picker("Normal weight", selection: $preferences.fontWeight) {
-          ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
-        }
-        Picker("Intense weight", selection: $preferences.intenseFontWeight) {
-          ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
-        }
-        Picker("Intense text style", selection: $preferences.intenseTextStyle) {
-          Text("Bold font").tag("bold")
-          Text("Bold font with bright colours").tag("all")
-          Text("Bright colours").tag("bright")
-        }
-      }
+      .formStyle(.columns)
     }
-    .formStyle(.columns)
   }
 
   private var terminal: some View {
     Form {
       Section("Shell") {
         LabeledContent("Executable") {
-          HStack {
+          HStack(spacing: 8) {
             TextField("/bin/zsh", text: $preferences.shellPath)
+              .frame(minWidth: 280)
             Button("Choose…", action: chooseShell)
           }
         }
@@ -479,22 +499,24 @@ struct SettingsView: View {
       }
       Section("Layout") {
         LabeledContent("Horizontal padding") {
-          HStack {
+          HStack(spacing: 10) {
             Slider(value: $preferences.paddingHorizontal, in: 0...64, step: 1)
+              .frame(width: 180)
             Text("\(Int(preferences.paddingHorizontal)) pt")
               .monospacedDigit()
-              .frame(width: 42, alignment: .trailing)
+              .frame(width: 38, alignment: .trailing)
           }
         }
         LabeledContent("Vertical padding") {
-          HStack {
+          HStack(spacing: 10) {
             Slider(value: $preferences.paddingVertical, in: 0...64, step: 1)
+              .frame(width: 180)
             Text("\(Int(preferences.paddingVertical)) pt")
               .monospacedDigit()
-              .frame(width: 42, alignment: .trailing)
+              .frame(width: 38, alignment: .trailing)
           }
         }
-        Picker("Grid alignment", selection: $preferences.paddingBalance) {
+        Picker("Content position", selection: $preferences.paddingBalance) {
           Text("Top Left").tag("Top Left")
           Text("Centered").tag("Centered")
         }
@@ -504,28 +526,35 @@ struct SettingsView: View {
           Text("Always Extend Edge Colours").tag("Always Extend")
         }
       }
-      Section("History and initial size") {
+      Section("History") {
         LabeledContent("Scrollback lines") {
           Stepper(value: $preferences.scrollbackSize, in: 0...1_000_000, step: 1_000) {
             Text(preferences.scrollbackSize.formatted())
               .monospacedDigit()
+              .frame(minWidth: 64, alignment: .trailing)
           }
         }
-        LabeledContent("New window") {
-          HStack {
-            Stepper("\(preferences.initialColumns) columns", value: $preferences.initialColumns,
-              in: 10...1_000)
-            Stepper("\(preferences.initialRows) rows", value: $preferences.initialRows,
-              in: 4...1_000)
+      }
+      Section("New window size") {
+        LabeledContent("Columns") {
+          Stepper(value: $preferences.initialColumns, in: 10...1_000) {
+            Text(preferences.initialColumns.formatted())
+              .monospacedDigit()
+              .frame(minWidth: 44, alignment: .trailing)
+          }
+        }
+        LabeledContent("Rows") {
+          Stepper(value: $preferences.initialRows, in: 4...1_000) {
+            Text(preferences.initialRows.formatted())
+              .monospacedDigit()
+              .frame(minWidth: 44, alignment: .trailing)
           }
         }
       }
       Section("Palette overrides") {
         PaletteEditor(preferences: preferences)
       }
-      Text("Shell changes apply to new tabs and panes. Appearance changes apply immediately.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      SettingsNote("Shell and window-size changes apply to new terminals. Other changes apply immediately.")
     }
     .formStyle(.columns)
   }
@@ -544,19 +573,16 @@ struct SettingsView: View {
           }
         }
         .disabled(!preferences.terminalClipboardWrites)
-        Label {
-          Text("Terminal programs can replace the system clipboard when this is enabled.")
-            .foregroundStyle(.secondary)
-        } icon: {
-          Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
-        }
+        SettingsNote("Terminal programs can replace the system clipboard when this is enabled.",
+          symbol: "exclamationmark.shield.fill", colour: .orange)
       }
       Section("Shell integration") {
-        TextField("Pipe command output", text: $preferences.pipeCommandOutput,
-          prompt: Text("Copy output to the clipboard"))
-        Text("The command receives the latest OSC 133 command output on standard input. Leave empty to copy it.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        LabeledContent("Output command") {
+          TextField("", text: $preferences.pipeCommandOutput,
+            prompt: Text("Copy to clipboard"))
+            .frame(minWidth: 300)
+        }
+        SettingsNote("Zigonaut sends the latest command output to this command on standard input. Leave it empty to copy the output.")
       }
       Section("Defaults") {
         LabeledContent("All settings") {
@@ -587,6 +613,123 @@ struct SettingsView: View {
     panel.allowsMultipleSelection = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
     preferences.shellPath = url.path
+  }
+}
+
+private struct SettingsPaneHeader: View {
+  let pane: SettingsPane
+
+  var body: some View {
+    HStack(spacing: 14) {
+      Image(systemName: pane.symbol)
+        .font(.system(size: 22, weight: .medium))
+        .symbolRenderingMode(.hierarchical)
+        .foregroundStyle(.tint)
+        .frame(width: 40, height: 40)
+        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+      VStack(alignment: .leading, spacing: 2) {
+        Text(pane.title)
+          .font(.title2.weight(.semibold))
+        Text(pane.subtitle)
+          .font(.callout)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .accessibilityElement(children: .combine)
+  }
+}
+
+private struct SettingsNote: View {
+  let text: String
+  let symbol: String?
+  let colour: Color
+
+  init(_ text: String, symbol: String? = nil, colour: Color = .secondary) {
+    self.text = text
+    self.symbol = symbol
+    self.colour = colour
+  }
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 6) {
+      if let symbol {
+        Image(systemName: symbol)
+          .foregroundStyle(colour)
+      }
+      Text(text)
+        .foregroundStyle(.secondary)
+    }
+    .font(.caption)
+    .fixedSize(horizontal: false, vertical: true)
+  }
+}
+
+private struct TerminalAppearancePreview: View {
+  @ObservedObject var preferences: Preferences
+  @Environment(\.colorScheme) private var systemColourScheme
+
+  private var isDark: Bool {
+    switch preferences.colourScheme {
+    case "Light": false
+    case "Dark": true
+    default: systemColourScheme == .dark
+    }
+  }
+
+  private var palette: TerminalPalette {
+    preferences.terminalPalette(dark: isDark, seed: 0)
+  }
+
+  private func colour(_ value: UInt32) -> Color {
+    Color(nsColor: NSColor(rgb: value))
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack(spacing: 7) {
+        Circle().fill(.red.opacity(0.85))
+          .frame(width: 10, height: 10)
+        Circle().fill(.yellow.opacity(0.85))
+          .frame(width: 10, height: 10)
+        Circle().fill(.green.opacity(0.85))
+          .frame(width: 10, height: 10)
+        Spacer()
+        Text("Preview")
+          .font(.caption.weight(.medium))
+          .foregroundStyle(colour(palette.foreground).opacity(0.6))
+        Spacer()
+        Color.clear.frame(width: 35)
+      }
+      .frame(height: 30)
+      .padding(.horizontal, 12)
+      Divider().overlay(colour(palette.foreground).opacity(0.12))
+      VStack(alignment: .leading, spacing: 5) {
+        Text("Last login: today on ttys001")
+          .foregroundStyle(colour(palette.foreground).opacity(0.65))
+        HStack(spacing: 0) {
+          Text("~/Projects/zigonaut ").foregroundStyle(colour(palette.ansi[4]))
+          Text("git:").foregroundStyle(colour(palette.foreground).opacity(0.65))
+          Text("main ").foregroundStyle(colour(palette.ansi[5]))
+          Text("❯ ").foregroundStyle(colour(palette.ansi[2]))
+          Text("zig build")
+        }
+        Text("Build completed successfully")
+          .foregroundStyle(colour(palette.ansi[2]))
+      }
+      .font(Font(preferences.terminalFont(size: min(preferences.fontSize, 15))))
+      .foregroundStyle(colour(palette.foreground))
+      .padding(14)
+      .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+    }
+    .background(colour(palette.background).opacity(preferences.opacity))
+    .clipShape(RoundedRectangle(cornerRadius: 9))
+    .overlay {
+      RoundedRectangle(cornerRadius: 9)
+        .stroke(.primary.opacity(0.14), lineWidth: 1)
+    }
+    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Terminal appearance preview")
   }
 }
 
