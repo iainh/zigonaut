@@ -231,6 +231,11 @@ jobs:
             throw 'Release build did not produce the themes directory.'
           }
           Copy-Item $themes $staging -Recurse
+          $shellIntegration = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\shell-integration'
+          if (-not (Test-Path (Join-Path $shellIntegration 'zigonaut.ps1') -PathType Leaf)) {
+            throw 'Release build did not produce the PowerShell integration script.'
+          }
+          Copy-Item $shellIntegration $staging -Recurse
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'README.md') $staging
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'LICENSE') $staging
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'licenses') $staging -Recurse
@@ -269,6 +274,9 @@ jobs:
         run: |
           $smoke = Join-Path $env:RUNNER_TEMP 'zigonaut-smoke-test'
           Expand-Archive -Path $env:ARCHIVE -DestinationPath $smoke
+          if (-not (Test-Path (Join-Path $smoke 'shell-integration\zigonaut.ps1') -PathType Leaf)) {
+            throw 'Packaged application is missing PowerShell shell integration.'
+          }
           $process = Start-Process `
             -FilePath (Join-Path $smoke 'zigonaut.exe') `
             -WorkingDirectory $smoke `
@@ -394,6 +402,8 @@ jobs:
           test -x "$smoke/Zigonaut.app/Contents/MacOS/ZigonautMac"
           test -x "$smoke/Zigonaut.app/Contents/MacOS/zigonaut-pty-helper"
           test -f "$smoke/Zigonaut.app/Contents/Frameworks/libzigonaut-core.dylib"
+          test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/zsh/.zshenv"
+          test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/zsh/zigonaut.zsh"
           codesign --verify --deep --strict --verbose=2 "$smoke/Zigonaut.app"
 
       - name: Upload tested package to draft release

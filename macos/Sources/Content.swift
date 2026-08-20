@@ -496,6 +496,8 @@ struct SettingsView: View {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
           }
         }
+        Toggle("Automatic shell integration", isOn: $preferences.automaticShellIntegration)
+        SettingsNote("Adds prompt and working-directory reporting to supported shells. Changes apply to new terminals only.")
       }
       Section("Layout") {
         LabeledContent("Horizontal padding") {

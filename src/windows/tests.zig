@@ -12,6 +12,7 @@ const modules = .{
     @import("pty.zig"),
     shared.search,
     @import("session.zig"),
+    @import("shell_integration.zig"),
     @import("shell_quote.zig"),
     shared.terminal,
     @import("terminal_view.zig"),

@@ -360,6 +360,7 @@ const Application = struct {
         result.model.setIntenseTextStyle(loaded.value.intense_text_style);
         result.model.applyClipboardWriteSettings(loaded.value.osc52_clipboard_write, loaded.value.osc52_clipboard_max_bytes);
         result.model.setDefaultScrollbackSize(loaded.value.scrollback_size);
+        result.model.setShellIntegrationEnabled(loaded.value.shell_integration_enabled);
         return result;
     }
 
@@ -2156,6 +2157,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     self.model.setIntenseTextStyle(self.settings.intense_text_style);
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
+    self.model.setShellIntegrationEnabled(self.settings.shell_integration_enabled);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);
     self.updateTheme(changed.theme);
     if (new_font != null) _ = win.DeleteObject(old_font);

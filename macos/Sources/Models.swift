@@ -228,6 +228,7 @@ struct TerminalPalette: Equatable {
   @AppStorage("paletteOverrides") var paletteOverrides = "{}"
   @AppStorage("randomizeTabBackground") var randomizeTabBackground = true
   @AppStorage("shellPath") var shellPath = "/bin/zsh"
+  @AppStorage("automaticShellIntegration") var automaticShellIntegration = true
   @AppStorage("opacity") var opacity = 1.0
   @AppStorage("fontWeight") var fontWeight = "Regular"
   @AppStorage("intenseFontWeight") var intenseFontWeight = "Bold"
@@ -371,6 +372,7 @@ struct TerminalPalette: Equatable {
     paletteOverrides = "{}"
     randomizeTabBackground = true
     shellPath = "/bin/zsh"
+    automaticShellIntegration = true
     opacity = 1
     fontWeight = "Regular"
     intenseFontWeight = "Bold"
@@ -443,14 +445,26 @@ struct TerminalPalette: Equatable {
       return
     }
     box.model = self
+    let integrationPath = Bundle.main.resourceURL?.appendingPathComponent(
+      "ShellIntegration/zsh", isDirectory: true).path
     core = helper.path.withCString { helperPath in
       shell.withCString { shellPath in
-        if let workingDirectory {
-          return workingDirectory.withCString { directory in
-            zigonaut_core_create(helperPath, shellPath, directory, terminalWake, callbackBox.toOpaque())
-          }
+        let create: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> OpaquePointer? = {
+          directory, integration in
+          zigonaut_core_create(helperPath, shellPath, directory,
+            self.preferences.automaticShellIntegration, integration, terminalWake, self.callbackBox.toOpaque())
         }
-        return zigonaut_core_create(helperPath, shellPath, nil, terminalWake, callbackBox.toOpaque())
+        return integrationPath?.withCString { integration in
+          if let workingDirectory {
+            return workingDirectory.withCString { directory in create(directory, integration) }
+          }
+          return create(nil, integration)
+        } ?? {
+          if let workingDirectory {
+            return workingDirectory.withCString { directory in create(directory, nil) }
+          }
+          return create(nil, nil)
+        }()
       }
     }.map(TerminalCoreHandle.init)
     if core == nil {

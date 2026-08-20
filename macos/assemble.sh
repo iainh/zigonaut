@@ -29,6 +29,9 @@ else
 fi
 mkdir -p "$app/Resources/Themes"
 cp "$root/themes/"*.json "$app/Resources/Themes/"
+mkdir -p "$app/Resources/ShellIntegration/zsh"
+cp "$root/assets/shell-integration/zsh/.zshenv" "$root/assets/shell-integration/zsh/zigonaut.zsh" \
+    "$app/Resources/ShellIntegration/zsh/"
 cp "$root/macos/Info.plist" "$app/Info.plist"
 if [ "$configuration" = release ]; then
     plutil -replace CFBundleIdentifier -string com.spiralpoint.zigonaut "$app/Info.plist"

@@ -131,6 +131,12 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "themes",
     });
     b.getInstallStep().dependOn(&install_themes.step);
+    const install_shell_integration = b.addInstallDirectory(.{
+        .source_dir = b.path("assets/shell-integration/powershell"),
+        .install_dir = .bin,
+        .install_subdir = "shell-integration",
+    });
+    b.getInstallStep().dependOn(&install_shell_integration.step);
 
     const run_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, "zigonaut.exe")});
     run_cmd.step.dependOn(b.getInstallStep());
@@ -329,6 +335,10 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     }) });
     helper_tests.root_module.link_libc = true;
     core_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+    const shell_integration_tests = b.addSystemCommand(&.{"python3"});
+    shell_integration_tests.addFileArg(b.path("assets/shell-integration/test_shell_integration.py"));
+    shell_integration_tests.addArtifactArg(helper);
+    core_test_step.dependOn(&shell_integration_tests.step);
     const abi_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/macos/abi_test.zig"),
         .target = target,

@@ -4,6 +4,8 @@ const directwrite_renderer = @import("directwrite_renderer.zig");
 const shared = @import("shared");
 const pane_tree = shared.pane_tree;
 const SessionRuntime = @import("session.zig").SessionRuntime;
+const shell_integration = @import("shell_integration.zig");
+const win32 = @import("win32.zig");
 
 pub const max_tabs = 256;
 const theme = shared.theme;
@@ -16,23 +18,6 @@ test {
 
 pub const Shell = config.Shell;
 
-fn appendWindowsArgument(allocator: std.mem.Allocator, output: *std.ArrayList(u8), argument: []const u8) !void {
-    try output.append(allocator, '"');
-    var backslashes: usize = 0;
-    for (argument) |byte| {
-        if (byte == '\\') {
-            backslashes += 1;
-            continue;
-        }
-        const count = if (byte == '"') backslashes * 2 + 1 else backslashes;
-        for (0..count) |_| try output.append(allocator, '\\');
-        backslashes = 0;
-        try output.append(allocator, byte);
-    }
-    for (0..backslashes * 2) |_| try output.append(allocator, '\\');
-    try output.append(allocator, '"');
-}
-
 fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []const u8, working_directory: []const u8) !?[]u8 {
     if (shell != .wsl or !(std.mem.eql(u8, working_directory, "~") or
         std.mem.startsWith(u8, working_directory, "~/") or
@@ -44,7 +29,7 @@ fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, command);
     try result.appendSlice(allocator, " --cd ");
-    try appendWindowsArgument(allocator, &result, working_directory);
+    try shell_integration.appendWindowsArgument(allocator, &result, working_directory);
     return try result.toOwnedSlice(allocator);
 }
 
@@ -167,6 +152,7 @@ pub const App = struct {
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
     scrollback_size: u32 = 10_000,
+    shell_integration_enabled: bool = true,
     tabs: std.ArrayList(Tab) = .empty,
     active_tab: ?usize = null,
     next_object_id: u64 = 1,
@@ -267,12 +253,28 @@ pub const App = struct {
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
-        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
+        defer if (launch_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse command, if (wsl_command != null) "" else working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         runtime.setIntenseTextStyle(self.intense_text_style);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background, background_seed);
         self.activeSession().?.hold_on_exit = hold_on_exit;
         self.resizeActiveSession();
         return index;
+    }
+
+    fn launchCommandAlloc(self: *App, shell: Shell, command: []const u8) !?[]u8 {
+        if (!self.shell_integration_enabled or shell != .powershell) return null;
+        const wide_path = win32.applicationFilePathAlloc(
+            self.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("shell-integration\\zigonaut.ps1"),
+        ) catch return null;
+        defer self.allocator.free(wide_path);
+        const attributes = win32.c.GetFileAttributesW(wide_path.ptr);
+        if (attributes == win32.c.INVALID_FILE_ATTRIBUTES or attributes & win32.c.FILE_ATTRIBUTE_DIRECTORY != 0) return null;
+        const path = std.unicode.utf16LeToUtf8Alloc(self.allocator, wide_path[0..wide_path.len]) catch return null;
+        defer self.allocator.free(path);
+        return shell_integration.planAlloc(self.allocator, command, path);
     }
 
     fn addSessionRecord(self: *App, shell: Shell, profile_title: []const u8, command: []const u8, working_directory: []const u8, runtime: ?*SessionRuntime, background: theme.Color, background_seed: u16) !usize {
@@ -377,7 +379,9 @@ pub const App = struct {
         const working_directory = reported_directory orelse source.session.workingDirectory();
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, source.session.shell, source.session.command(), working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
-        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse source.session.command(), if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        const launch_command = try self.launchCommandAlloc(source.session.shell, wsl_command orelse source.session.command());
+        defer if (launch_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse source.session.command(), if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         runtime.setIntenseTextStyle(self.intense_text_style);
         return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
@@ -391,7 +395,9 @@ pub const App = struct {
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
         const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
         defer if (wsl_command) |value| self.allocator.free(value);
-        const runtime = try SessionRuntime.create(self.allocator, wsl_command orelse command, if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
+        defer if (launch_command) |value| self.allocator.free(value);
+        const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse command, if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
         runtime.setIntenseTextStyle(self.intense_text_style);
         return self.insertFocusedSessionRecord(axis, shell, profile_title, command, working_directory, hold_on_exit, runtime, session_theme.background, background_seed);
     }
@@ -756,6 +762,10 @@ pub const App = struct {
 
     pub fn setDefaultScrollbackSize(self: *App, size: u32) void {
         self.scrollback_size = size;
+    }
+
+    pub fn setShellIntegrationEnabled(self: *App, enabled: bool) void {
+        self.shell_integration_enabled = enabled;
     }
 
     pub fn titlesGeneration(self: *const App) u64 {

@@ -26,7 +26,7 @@ typedef struct { uint32_t target_offset, target_length; uint16_t row, start_colu
 typedef struct { uint32_t version, size, required_hints, required_bytes, written_hints, written_bytes; uint8_t status, reserved[7]; } zigonaut_hint_result_v1;
 /* action: 0 press, 1 repeat, 2 release. UTF-8 is optional and limited to 64 bytes. */
 typedef struct { uint32_t version, size; uint16_t key_code, modifiers, consumed_modifiers, utf8_length; uint8_t action, reserved0[3]; uint32_t unshifted_codepoint; const uint8_t *utf8; uint8_t reserved[8]; } zigonaut_key_event_v1;
-zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, zigonaut_wake_fn wake, void *context);
+zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, bool shell_integration, const char *shell_integration_path, zigonaut_wake_fn wake, void *context);
 void zigonaut_core_resize(zigonaut_core *, uint16_t columns, uint16_t rows, uint16_t pixel_width, uint16_t pixel_height, uint32_t cell_width, uint32_t cell_height);
 void zigonaut_core_request_stop(zigonaut_core *);
 void zigonaut_core_write(zigonaut_core *, const uint8_t *bytes, size_t length);

@@ -27,6 +27,7 @@ pub const default_contents =
     \\    "holdOnExit": false
     \\  },
     \\  "advanced": {
+    \\    "automaticShellIntegration": true,
     \\    "clipboard": { "terminalWrites": false, "maximumBytes": 1048576 },
     \\    "pipeCommandOutput": ""
     \\  }
@@ -132,6 +133,7 @@ const JsonConfig = struct {
         holdOnExit: bool,
     },
     advanced: struct {
+        automaticShellIntegration: bool = true,
         clipboard: struct {
             terminalWrites: bool,
             maximumBytes: u32,
@@ -170,6 +172,7 @@ pub const Config = struct {
     osc52_clipboard_write: bool = false,
     osc52_clipboard_max_bytes: u32 = 1024 * 1024,
     pipe_command_output: []const u8 = "",
+    shell_integration_enabled: bool = true,
 
     pub fn profileSlice(self: *const Config) []const Profile {
         return self.profiles[0..self.profile_count];
@@ -391,6 +394,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.osc52_clipboard_write = json.advanced.clipboard.terminalWrites;
     result.osc52_clipboard_max_bytes = json.advanced.clipboard.maximumBytes;
     result.pipe_command_output = json.advanced.pipeCommandOutput;
+    result.shell_integration_enabled = json.advanced.automaticShellIntegration;
     if (json.appearance.palette.foreground) |color| result.palette.foreground = theme.parseColor(color) orelse return error.InvalidColor;
     if (json.appearance.palette.background) |color| result.palette.background = theme.parseColor(color) orelse return error.InvalidColor;
     if (json.appearance.palette.cursor) |color| result.palette.cursor = theme.parseColor(color) orelse return error.InvalidColor;
@@ -454,6 +458,7 @@ test "configuration parses structured JSON" {
     try std.testing.expect(value.osc52_clipboard_write);
     try std.testing.expectEqual(@as(u32, 65536), value.osc52_clipboard_max_bytes);
     try std.testing.expectEqualStrings("jq . > latest.json", value.pipe_command_output);
+    try std.testing.expect(value.shell_integration_enabled);
 }
 
 test "default JSON configuration parses" {
@@ -468,6 +473,15 @@ test "default JSON configuration parses" {
     try std.testing.expectEqualStrings("fluent-light", value.light_theme);
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
+    try std.testing.expect(value.shell_integration_enabled);
+}
+
+test "automatic shell integration can be disabled" {
+    const contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, "\"automaticShellIntegration\": true", "\"automaticShellIntegration\": false");
+    defer std.testing.allocator.free(contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expect(!(try configFromJson(parsed.value)).shell_integration_enabled);
 }
 
 test "native ClearType parses and is a font reload change" {

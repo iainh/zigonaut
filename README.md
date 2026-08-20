@@ -20,6 +20,7 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 - Horizontal and vertical splits with draggable, cell-snapped dividers
 - Directional keyboard navigation between panes
 - Configurable profiles for PowerShell, Command Prompt, WSL, and custom commands
+- Automatic prompt and working-directory integration for directly launched Windows PowerShell 5.1 and PowerShell 7
 - Shell-provided tab titles and OSC 7 working-directory tracking
 - Live scrollback search and OSC 133 prompt navigation
 
@@ -71,6 +72,8 @@ Zigonaut creates its configuration file on first launch at:
 ```
 
 The versioned JSON document is managed by the settings window and uses ordered profile objects so profile definitions can grow without introducing another line-based mini-language.
+
+Automatic shell integration is enabled by default and can be disabled under Advanced. It applies only to new terminals. Zigonaut injects its bundled script only when a PowerShell profile directly launches `powershell.exe` or `pwsh.exe` with no arguments or with supported startup flags (`-NoLogo`, `-NoProfile`, and PowerShell 7's `-Login`). Commands that run scripts or inline code, Command Prompt, WSL, custom commands, and nested shells are unchanged. Zigonaut never edits PowerShell profiles or bypasses execution policy.
 
 ## Keyboard shortcuts
 

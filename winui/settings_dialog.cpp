@@ -149,6 +149,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
     values["default_profile"] = to_string(profiles.GetNamedString(L"default"));
     values["hold_on_exit"] = profiles.GetNamedBoolean(L"holdOnExit") ? "true" : "false";
+    values["automatic_shell_integration"] = advanced.GetNamedBoolean(L"automaticShellIntegration", true) ? "true" : "false";
     values["osc52_clipboard_write"] = clipboard.GetNamedBoolean(L"terminalWrites") ? "true" : "false";
     values["osc52_clipboard_max_bytes"] = number(clipboard.GetNamedNumber(L"maximumBytes"));
     values["pipe_command_output"] = to_string(advanced.GetNamedString(L"pipeCommandOutput"));
@@ -647,7 +648,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool updating_profiles{};
     bool updating_explorer{};
     ToggleSwitch hold_on_exit{nullptr};
-    ToggleSwitch clipboard_write{nullptr};
+    ToggleSwitch automatic_shell_integration{nullptr}, clipboard_write{nullptr};
     NumberBox clipboard_limit{nullptr};
     Border clipboard_limit_card{nullptr};
     TextBox pipe_command{nullptr};
@@ -1157,6 +1158,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     ScrollViewer makeAdvanced(std::map<std::string, std::string> const& values) {
+        automatic_shell_integration = toggle(value(values, "automatic_shell_integration", "true"));
         clipboard_write = toggle(value(values, "osc52_clipboard_write", "false"));
         double clipboard_kib = 1024;
         try { clipboard_kib = std::stod(value(values, "osc52_clipboard_max_bytes", "1048576")) / 1024; } catch (...) {}
@@ -1165,6 +1167,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         clipboard_limit_card = card(L"Clipboard payload limit (KiB)", L"Maximum decoded terminal clipboard payload, in kibibytes.", clipboard_limit);
         clipboard_limit.IsEnabled(clipboard_write.IsOn());
         return page(L"Advanced", L"Security-sensitive terminal integration settings.", {
+            card(L"Automatic shell integration", L"Enable prompt and working-directory reporting in supported shells. Changes apply to new terminals only.", automatic_shell_integration),
             card(L"Terminal clipboard writes", L"Allow OSC 52 and OSC 1337 Copy sequences to write to the Windows clipboard.", clipboard_write),
             clipboard_limit_card,
             card(L"Pipe command output", L"Windows command that receives the latest OSC 133 command output on stdin. Leave empty to copy it.", pipe_command),
@@ -1403,6 +1406,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         root.Insert(L"profiles", profile_settings);
 
         JsonObject advanced;
+        advanced.Insert(L"automaticShellIntegration", boolean(automatic_shell_integration.IsOn()));
         JsonObject clipboard;
         clipboard.Insert(L"terminalWrites", boolean(clipboard_write.IsOn()));
         clipboard.Insert(L"maximumBytes", number(clipboard_limit_value));

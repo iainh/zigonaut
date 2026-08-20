@@ -343,7 +343,7 @@ fn terminalWritePty(context: ?*anyopaque, bytes: []const u8) void {
     writeSerialized(self, bytes);
 }
 
-export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]const u8, working_directory: ?[*:0]const u8, wake: Wake, context: ?*anyopaque) ?*Core {
+export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]const u8, working_directory: ?[*:0]const u8, shell_integration: bool, shell_integration_path: ?[*:0]const u8, wake: Wake, context: ?*anyopaque) ?*Core {
     const helper = helper_path orelse return null;
     const shell = shell_path orelse return null;
     if (shell[0] != '/') return null;
@@ -383,7 +383,17 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     const close_fds = [_]c_int{ slave, self.master, self.cancel_read, self.cancel_write };
     for (close_fds) |fd| if (fd != 10 and std.c.posix_spawn_file_actions_addclose(&actions, fd) != 0) return failCreate(self, slave);
     if (working_directory) |directory| if (directory[0] != '/') return failCreate(self, slave);
-    var argv = [_:null]?[*:0]u8{ @constCast(helper), @constCast(shell), @constCast(working_directory) };
+    const empty: [*:0]const u8 = "";
+    const integration_path = if (shell_integration and shell_integration_path != null and shell_integration_path.?[0] == '/')
+        shell_integration_path.?
+    else
+        empty;
+    var argv = [_:null]?[*:0]u8{
+        @constCast(helper),
+        @constCast(shell),
+        @constCast(working_directory orelse empty),
+        @constCast(integration_path),
+    };
     if (std.c.posix_spawn(&self.child, helper, &actions, null, &argv, environ) != 0) return failCreate(self, slave);
     _ = c.close(slave);
     const flags = c.fcntl(self.master, c.F_GETFL);
