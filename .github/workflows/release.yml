@@ -404,6 +404,8 @@ jobs:
           test -f "$smoke/Zigonaut.app/Contents/Frameworks/libzigonaut-core.dylib"
           test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/zsh/.zshenv"
           test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/zsh/zigonaut.zsh"
+          test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/bash/zigonaut.bash"
+          test -f "$smoke/Zigonaut.app/Contents/Resources/ShellIntegration/fish/zigonaut.fish"
           codesign --verify --deep --strict --verbose=2 "$smoke/Zigonaut.app"
 
       - name: Upload tested package to draft release

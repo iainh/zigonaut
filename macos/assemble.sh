@@ -32,6 +32,9 @@ cp "$root/themes/"*.json "$app/Resources/Themes/"
 mkdir -p "$app/Resources/ShellIntegration/zsh"
 cp "$root/assets/shell-integration/zsh/.zshenv" "$root/assets/shell-integration/zsh/zigonaut.zsh" \
     "$app/Resources/ShellIntegration/zsh/"
+mkdir -p "$app/Resources/ShellIntegration/bash" "$app/Resources/ShellIntegration/fish"
+cp "$root/assets/shell-integration/bash/zigonaut.bash" "$app/Resources/ShellIntegration/bash/"
+cp "$root/assets/shell-integration/fish/zigonaut.fish" "$app/Resources/ShellIntegration/fish/"
 cp "$root/macos/Info.plist" "$app/Info.plist"
 if [ "$configuration" = release ]; then
     plutil -replace CFBundleIdentifier -string com.spiralpoint.zigonaut "$app/Info.plist"

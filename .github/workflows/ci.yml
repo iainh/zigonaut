@@ -43,8 +43,19 @@ jobs:
             sleep $((10 * attempt))
           done
 
+      - name: Install additional test shells
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: brew install bash fish
+
       - name: Run required checks
         run: zig build ci -Dtarget=aarch64-macos
+
+      - name: Test Bash and fish integration
+        run: |
+          prefix="$(brew --prefix)"
+          python3 assets/shell-integration/test_additional_shells.py \
+            zig-out/bin/zigonaut-pty-helper "$prefix/bin/bash" "$prefix/bin/fish"
 
       - name: Build complete application bundle
         run: zig build macos-app -Dtarget=aarch64-macos
@@ -54,6 +65,9 @@ jobs:
           test -x zig-out/Zigonaut.app/Contents/MacOS/ZigonautMac
           test -x zig-out/Zigonaut.app/Contents/MacOS/zigonaut-pty-helper
           test -f zig-out/Zigonaut.app/Contents/Frameworks/libzigonaut-core.dylib
+          test -f zig-out/Zigonaut.app/Contents/Resources/ShellIntegration/zsh/.zshenv
+          test -f zig-out/Zigonaut.app/Contents/Resources/ShellIntegration/bash/zigonaut.bash
+          test -f zig-out/Zigonaut.app/Contents/Resources/ShellIntegration/fish/zigonaut.fish
           plutil -lint zig-out/Zigonaut.app/Contents/Info.plist
           codesign --verify --deep --strict --verbose=2 zig-out/Zigonaut.app
 

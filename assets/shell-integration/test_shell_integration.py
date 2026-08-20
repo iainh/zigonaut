@@ -54,7 +54,7 @@ def main() -> None:
                 os.dup2(slave, 10)
                 os.close(fd)
                 os.close(slave)
-                os.execve(str(HELPER), [str(HELPER), "/bin/zsh", "", str(ZSH)], env)
+                os.execve(str(HELPER), [str(HELPER), "/bin/zsh", "", str(ROOT)], env)
             os.close(fd)
             for standard in range(3):
                 os.dup2(slave, standard)

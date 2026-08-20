@@ -12,6 +12,7 @@ function _zigonaut_zshenv_trampoline {
     unset ZDOTDIR
   fi
   unset ZIGONAUT_ZSH_ORIGINAL_ZDOTDIR
+  unset ZIGONAUT_SHELL_INTEGRATION
 
   local user_zshenv=${ZDOTDIR:-$HOME}/.zshenv
   if [[ -r $user_zshenv && ${user_zshenv:A} != $trampoline_path ]]; then

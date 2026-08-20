@@ -446,7 +446,7 @@ struct TerminalPalette: Equatable {
     }
     box.model = self
     let integrationPath = Bundle.main.resourceURL?.appendingPathComponent(
-      "ShellIntegration/zsh", isDirectory: true).path
+      "ShellIntegration", isDirectory: true).path
     core = helper.path.withCString { helperPath in
       shell.withCString { shellPath in
         let create: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> OpaquePointer? = {
