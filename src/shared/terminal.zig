@@ -1001,13 +1001,15 @@ pub const Terminal = struct {
     }
 
     pub fn synchronizedOutput(self: *Terminal) bool {
-        var enabled = false;
-        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2026, false), &enabled)) catch return false;
-        return enabled;
+        return self.modeEnabled(vt.ghostty_mode_new(2026, false)) catch false;
     }
 
     pub fn setSynchronizedOutput(self: *Terminal, enabled: bool) !void {
-        try check(vt.ghostty_terminal_mode_set(self.terminal, vt.ghostty_mode_new(2026, false), enabled));
+        var config = vt.GhosttyTerminalModeConfig{
+            .mode = vt.ghostty_mode_new(2026, false),
+            .value = enabled,
+        };
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_MODE, &config));
     }
 
     pub fn encodeFocusReport(self: *Terminal, focused: bool, output: []u8) []const u8 {
@@ -1017,9 +1019,7 @@ pub const Terminal = struct {
     }
 
     fn focusReporting(self: *Terminal) bool {
-        var enabled = false;
-        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(1004, false), &enabled)) catch return false;
-        return enabled;
+        return self.modeEnabled(vt.ghostty_mode_new(1004, false)) catch false;
     }
 
     pub fn setFocused(self: *Terminal, focused: bool) void {
@@ -1033,11 +1033,18 @@ pub const Terminal = struct {
     pub fn setVisible(self: *Terminal, visible: bool) void {
         if (self.visible == visible) return;
         self.visible = visible;
-        var enabled = false;
-        check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2033, false), &enabled)) catch return;
-        if (!enabled) return;
+        if (!(self.modeEnabled(vt.ghostty_mode_new(2033, false)) catch return)) return;
         const callback = self.write_pty orelse return;
         callback(self.write_pty_context, if (visible) "\x1b[?999;1n" else "\x1b[?999;2n");
+    }
+
+    fn modeEnabled(self: *Terminal, mode: vt.GhosttyMode) !bool {
+        var config = vt.GhosttyTerminalModeConfig{
+            .mode = mode,
+            .value = false,
+        };
+        try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_MODE, &config));
+        return config.value;
     }
 
     pub fn scrollbar(self: *Terminal) !Scrollbar {
@@ -1330,8 +1337,7 @@ pub const Terminal = struct {
     }
 
     pub fn encodePasteAlloc(self: *Terminal, allocator: std.mem.Allocator, data: []u8) ![]u8 {
-        var bracketed = false;
-        try check(vt.ghostty_terminal_mode_get(self.terminal, vt.ghostty_mode_new(2004, false), &bracketed));
+        const bracketed = try self.modeEnabled(vt.ghostty_mode_new(2004, false));
 
         var required: usize = data.len + 12;
         var encoded = try allocator.alloc(u8, required);
@@ -1523,7 +1529,7 @@ pub const Terminal = struct {
 
         var colors = std.mem.zeroes(vt.GhosttyRenderStateColors);
         colors.size = @sizeOf(vt.GhosttyRenderStateColors);
-        try check(vt.ghostty_render_state_colors_get(self.render_state, &colors));
+        try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_COLORS, &colors));
         var cursor_visible = false;
         var cursor_has_position = false;
         var cursor_x: u16 = 0;
