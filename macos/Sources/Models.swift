@@ -257,7 +257,7 @@ struct TerminalPalette: Equatable {
     return selected
   }
 
-  func terminalPalette(dark: Bool, seed: UInt64) -> TerminalPalette {
+  func terminalPalette(dark: Bool, seed: UInt64? = nil) -> TerminalPalette {
     var palette = TerminalPalette.load(dark ? darkTerminalTheme : lightTerminalTheme)
     for (key, value) in overrideValues() {
       guard let rgb = TerminalPalette.rgb(value) else { continue }
@@ -271,7 +271,7 @@ struct TerminalPalette: Equatable {
         }
       }
     }
-    if randomizeTabBackground {
+    if randomizeTabBackground, let seed {
       let accent = Self.hue(seed)
       let background = palette.background
       let red = (((background >> 16) & 0xff) * 7 + accent.0 + 4) / 8

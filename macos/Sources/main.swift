@@ -19,17 +19,22 @@ private final class TerminalWindow: NSWindow {
     var terminalBackgroundColor: (() -> NSColor?)?
 
     func updateTitlebarColor() {
-        guard let color = terminalBackgroundColor?() else { return }
-        backgroundColor = color
-        titlebarAppearsTransparent = true
+        let color = terminalBackgroundColor?()
+        backgroundColor = color ?? .windowBackgroundColor
+        titlebarAppearsTransparent = color != nil
 
         guard let frameView = contentView?.superview,
               let container = frameView.firstDescendant(named: "NSTitlebarContainerView") else { return }
         let target = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
             ? container.firstDescendant(named: "NSTitlebarView") ?? container
             : container
-        target.wantsLayer = true
-        target.layer?.backgroundColor = color.cgColor
+        if let color {
+            target.wantsLayer = true
+            target.layer?.backgroundColor = color.cgColor
+        } else {
+            target.layer?.backgroundColor = nil
+            target.wantsLayer = false
+        }
     }
 
     override func update() {
@@ -79,9 +84,6 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
                 self.updateTerminalTitle()
                 window.setAccessibilityHelp("New terminal output")
             }
-            model.$focusedPane.sink { [weak window] _ in
-                (window as? TerminalWindow)?.updateTitlebarColor()
-            }.store(in: &backgroundObservations)
             model.preferences.objectWillChange.sink { [weak window] _ in
                 DispatchQueue.main.async {
                     (window as? TerminalWindow)?.updateTitlebarColor()
@@ -387,15 +389,13 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
         )
         window.terminalBackgroundColor = { [weak window, weak model] in
             guard let window, let model else { return nil }
+            guard !model.preferences.randomizeTabBackground else { return nil }
             let dark = switch model.preferences.colourScheme {
             case "Dark": true
             case "Light": false
             default: window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             }
-            let pane = model.focused ?? model.panes.first
-            return pane.map {
-                NSColor(rgb: model.preferences.terminalPalette(dark: dark, seed: $0.themeSeed).background)
-            }
+            return NSColor(rgb: model.preferences.terminalPalette(dark: dark).background)
         }
         window.title = model.title
         window.titleVisibility = .visible
