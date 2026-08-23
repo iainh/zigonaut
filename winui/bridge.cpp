@@ -1603,9 +1603,12 @@ struct Bridge {
             } else if (n.kind == ZIGONAUT_LAYOUT_SPLIT) {
                 if ((n.axis != ZIGONAUT_AXIS_LEFT_RIGHT && n.axis != ZIGONAUT_AXIS_TOP_BOTTOM) ||
                     !n.ratio || n.ratio >= 65535 || n.subtree_size < 3) throw hresult_invalid_argument();
+                auto const subtree_end = i + n.subtree_size;
                 auto const left = i + 1;
-                auto const right = left + nodes[left].subtree_size;
-                if (right >= i + n.subtree_size || right + nodes[right].subtree_size != i + n.subtree_size)
+                auto const left_size = nodes[left].subtree_size;
+                if (!left_size || left_size >= n.subtree_size) throw hresult_invalid_argument();
+                auto const right = left + left_size;
+                if (right >= subtree_end || nodes[right].subtree_size != subtree_end - right)
                     throw hresult_invalid_argument();
             } else throw hresult_invalid_argument();
         }
