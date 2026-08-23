@@ -235,6 +235,8 @@ test "catalog parses a host-provided resource directory" {
     const catalog = Catalog.loadDirectory(std.testing.allocator, std.testing.io, directory);
     try std.testing.expect(catalog.count >= 5);
     try std.testing.expectEqual(hex(0xffffff), catalog.find("fluent-light").background);
+    try std.testing.expectEqual(hex(0x000000), catalog.find("ottosson-dark").background);
+    try std.testing.expectEqual(hex(0xffffff), catalog.find("ottosson-light").background);
 }
 
 test "Fluent themes meet WCAG AA contrast against their backgrounds" {

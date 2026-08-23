@@ -209,7 +209,10 @@ struct TerminalPalette: Equatable {
   static let defaultFontFamily = "System Monospaced"
   static let defaultFontSize = 14.0
   static let defaultPadding = 8.0
-  static let themeNames = ["rasmus", "campbell", "campbell-light", "fluent-dark", "fluent-light", "solarized-dark"]
+  static let themeNames = Set(
+    ["rasmus"] + (Bundle.main.urls(forResourcesWithExtension: "json", subdirectory: "Themes") ?? [])
+      .map { $0.deletingPathExtension().lastPathComponent }
+  ).sorted()
   static let fontWeights = ["Thin", "Ultra Light", "Light", "Regular", "Medium", "Semibold", "Bold", "Heavy", "Black"]
   static let monospacedFontFamilies = NSFontManager.shared.availableFontFamilies.filter { family in
     NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 13)?.isFixedPitch == true

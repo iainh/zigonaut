@@ -1064,6 +1064,14 @@ pub const Terminal = struct {
         });
     }
 
+    pub fn scrollToBottom(self: *Terminal) !bool {
+        const state = try self.scrollbar();
+        const bottom = state.total -| state.len;
+        if (state.offset >= bottom) return false;
+        self.scrollViewport(@intCast(@min(bottom - state.offset, std.math.maxInt(isize))));
+        return true;
+    }
+
     pub fn navigatePrompt(self: *Terminal, forward: bool) !bool {
         const state = try self.scrollbar();
         const limit = state.total -| state.len;
@@ -2587,6 +2595,11 @@ test "scrollbar tracks and scrolls the viewport" {
     terminal.scrollViewport(-1);
     const scrolled = try terminal.scrollbar();
     try std.testing.expectEqual(@as(u64, 1), scrolled.offset);
+
+    try std.testing.expect(try terminal.scrollToBottom());
+    const restored = try terminal.scrollbar();
+    try std.testing.expectEqual(bottom.offset, restored.offset);
+    try std.testing.expect(!try terminal.scrollToBottom());
 }
 
 test "OSC 133 primary prompts navigate through scrollback" {
