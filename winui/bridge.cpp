@@ -17,7 +17,6 @@
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
 #include <winrt/Microsoft.UI.Xaml.Media.h>
-#include <winrt/Microsoft.UI.Xaml.Media.Animation.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.System.h>
@@ -49,7 +48,6 @@ using namespace winrt;
 using namespace winrt::Microsoft::UI;
 using namespace winrt::Microsoft::UI::Xaml;
 using namespace winrt::Microsoft::UI::Xaml::Controls;
-using namespace winrt::Microsoft::UI::Xaml::Media::Animation;
 using namespace winrt::Microsoft::Windows::AppNotifications;
 using namespace winrt::Microsoft::Windows::AppNotifications::Builder;
 
@@ -238,7 +236,6 @@ struct Bridge {
     Grid root{nullptr};
     Grid app_title_bar{nullptr};
     Grid content_root{nullptr};
-    Storyboard content_entrance{nullptr};
     Border find_border{nullptr};
     TextBox find_box{nullptr};
     TextBlock find_status{nullptr};
@@ -307,7 +304,6 @@ struct Bridge {
     bool handlers_detached = false;
     bool updating = false;
     uint64_t presented_tab_id{};
-    uint64_t content_entrance_tab_id{};
     uint64_t pressed_tab_id{};
     uint64_t dragged_tab_id{};
     uint64_t drag_destination_tab_id{};
@@ -2330,34 +2326,6 @@ struct Bridge {
         item.ContextFlyout(flyout);
     }
 
-    void animateNewTabContent(uint64_t tab_id) {
-        if (content_entrance) content_entrance.Stop();
-        content_root.Opacity(1);
-        content_entrance_tab_id = 0;
-
-        BOOL animations_enabled = true;
-        if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations_enabled, 0) || !animations_enabled) {
-            content_entrance = nullptr;
-            return;
-        }
-
-        // Fluent choreography gives the inserted tab priority, then brings in
-        // its large top-level surface with the shortest standard opacity fade.
-        // The 167 ms offset and 83 ms fade finish with TabView's 250 ms motion.
-        auto fade = DoubleAnimation{};
-        fade.From(0.0);
-        fade.To(1.0);
-        fade.BeginTime(Windows::Foundation::TimeSpan{std::chrono::milliseconds(167)});
-        fade.Duration(DurationHelper::FromTimeSpan(
-            Windows::Foundation::TimeSpan{std::chrono::milliseconds(83)}));
-        Storyboard::SetTarget(fade, content_root);
-        Storyboard::SetTargetProperty(fade, L"Opacity");
-        content_entrance = Storyboard{};
-        content_entrance.Children().Append(fade);
-        content_entrance_tab_id = tab_id;
-        content_entrance.Begin();
-    }
-
     void update(uint64_t const* tab_ids, char const* const* titles, uint32_t const* title_lengths, uint32_t const* colors, uint8_t const* activity, uint32_t count, int32_t active, bool show_colors) {
         updating = true;
         struct ResetUpdating {
@@ -2365,9 +2333,7 @@ struct Bridge {
             ~ResetUpdating() { value = false; }
         } reset{updating};
         auto items = tabs.TabItems();
-        auto const had_tabs = items.Size() != 0;
         auto changed = false;
-        auto inserted_selected = false;
         auto rearranging = dragged_tab_id != 0;
         if (rearranging) {
             auto sequence_matches = items.Size() == count;
@@ -2453,8 +2419,6 @@ struct Bridge {
                 ToolTipService::SetToolTip(item, box_value(title));
                 items.InsertAt(i, item);
                 changed = true;
-                inserted_selected = inserted_selected ||
-                    (had_tabs && static_cast<int32_t>(i) == active);
             } else {
                 auto header = item.Header().as<StackPanel>();
                 auto marker = header.Children().GetAt(0).as<Border>();
@@ -2491,12 +2455,6 @@ struct Bridge {
         }
         auto const selected = active >= 0 && active < static_cast<int32_t>(count) ? active : -1;
         presented_tab_id = selected >= 0 ? tab_ids[selected] : 0;
-        if (content_entrance && content_entrance_tab_id != presented_tab_id) {
-            content_entrance.Stop();
-            content_root.Opacity(1);
-            content_entrance = nullptr;
-            content_entrance_tab_id = 0;
-        }
         if (!rearranging && tabs.SelectedIndex() != selected) {
             tabs.SelectedIndex(selected);
             changed = true;
@@ -2504,7 +2462,6 @@ struct Bridge {
         if (changed) {
             tabs.UpdateLayout();
         }
-        if (inserted_selected) animateNewTabContent(presented_tab_id);
     }
 
     void updateProfiles(char const* const* names, uint32_t const* name_lengths, uint32_t count) {
@@ -2640,9 +2597,6 @@ struct Bridge {
         accelerators.clear();
         cleanup(L"stop TSF", [&] { if (tsf) { auto service=std::move(tsf); service->Shutdown(); service=nullptr; } }, result);
         cleanup(L"detach pane swap chains", [&] { for(auto& [_,p]:pane_hosts){if(p->timer)p->timer.Stop();p->panel.as<ISwapChainPanelNative>()->SetSwapChain(nullptr);} }, result);
-        cleanup(L"stop content entrance", [&] { if (content_entrance) content_entrance.Stop(); }, result);
-        content_entrance = nullptr;
-        content_entrance_tab_id = 0;
         cleanup(L"clear content root", [&] { content_root.Children().Clear(); }, result);
         pane_hosts.clear(); split_hosts.clear(); attachments.clear();
         cleanup(L"clear root content", [&] { root.Children().Clear(); }, result);

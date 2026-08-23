@@ -2,7 +2,8 @@
 <Application
     x:Class="ZigonautWinUIBridge.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -32,6 +33,19 @@
             <x:Double x:Key="TitleBarMinDragRegionWidth">46</x:Double>
             <Thickness x:Key="TabViewHeaderPadding">0</Thickness>
             <Thickness x:Key="TabViewItemBorderThickness">1,1,1,0</Thickness>
+
+            <!-- Show inserted tabs immediately instead of waiting for the
+                 default add/delete transition. -->
+            <Style TargetType="primitives:TabViewListView">
+                <Setter Property="ItemContainerTransitions">
+                    <Setter.Value>
+                        <TransitionCollection>
+                            <ContentThemeTransition />
+                            <ReorderThemeTransition />
+                        </TransitionCollection>
+                    </Setter.Value>
+                </Setter>
+            </Style>
 
             <Style x:Key="ZigonautTitleBarButtonStyle"
                    TargetType="Button"
