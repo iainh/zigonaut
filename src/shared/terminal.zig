@@ -1512,6 +1512,7 @@ pub const Terminal = struct {
         var pwd = std.mem.zeroes(vt.GhosttyString);
         try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_PWD, &pwd));
         if (pwd.len == 0) return null;
+        if (pwd.ptr == null) return error.LibGhosttyFailure;
         return @as(?[]u8, try allocator.dupe(u8, pwd.ptr[0..pwd.len]));
     }
 
@@ -2227,7 +2228,8 @@ fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
 fn writePty(_: vt.GhosttyTerminal, userdata: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.write_pty orelse return;
-    const bytes = data[0..len];
+    if (len != 0 and data == null) return;
+    const bytes = if (len == 0) "" else data[0..len];
     callback(
         self.write_pty_context,
         if (!self.visible and std.mem.eql(u8, bytes, "\x1b[?999;1n")) "\x1b[?999;2n" else bytes,
@@ -2245,7 +2247,8 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
     const callback = self.title_changed orelse return;
     var title = std.mem.zeroes(vt.GhosttyString);
     if (vt.ghostty_terminal_get(terminal, vt.GHOSTTY_TERMINAL_DATA_TITLE, &title) != vt.GHOSTTY_SUCCESS) return;
-    callback(self.title_context, title.ptr[0..title.len]);
+    if (title.len != 0 and title.ptr == null) return;
+    callback(self.title_context, if (title.len == 0) "" else title.ptr[0..title.len]);
 }
 
 fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notification: [*c]const vt.GhosttyTerminalDesktopNotification) callconv(.c) void {
@@ -2420,6 +2423,9 @@ test "libghostty returns terminal queries and in-band size reports" {
     listener.bytes.clearRetainingCapacity();
     terminal.feed("\x1b[?2048h");
     try terminal.resize(100, 40, 9, 18);
+    try std.testing.expectEqualStrings("\x1b[48;40;100;720;900t", listener.bytes.items);
+
+    writePty(null, &terminal, null, 1);
     try std.testing.expectEqualStrings("\x1b[48;40;100;720;900t", listener.bytes.items);
 }
 
