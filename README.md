@@ -48,7 +48,7 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 - Light, dark, and system color modes
 - Mica, acrylic, or opaque window backdrops
 - Configurable fonts, centered grid padding, edge-color extension, opacity, palettes, and working directory
-- Bundled Campbell, Campbell Light, Fluent Light, Fluent Dark, Solarized Dark, and Rasmus themes
+- Bundled Campbell, Campbell Light, Fluent Light, Fluent Dark, Ottosson Light, Ottosson Dark, Solarized Dark, and Rasmus themes
 - Full-window Fluent settings page with automatic saving
 
 ### Windows integration
