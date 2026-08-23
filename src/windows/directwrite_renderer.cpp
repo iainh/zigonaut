@@ -171,7 +171,7 @@ struct RowCell {
     bool search_background = false;
     enum class Kind : uint8_t { font, builtin } kind = Kind::font;
     uint32_t builtin_codepoint = 0;
-    const uint8_t* builtin_mask = nullptr;
+    std::vector<uint8_t> builtin_mask;
     uint32_t builtin_width = 0, builtin_height = 0, builtin_stride = 0;
 };
 
@@ -2463,7 +2463,7 @@ HRESULT ZigonautTextEngine::endRow() {
                 const BuiltinKey key{cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,span,atlas_generation};
                 auto found = builtin_placements.find(key);
                 if (found == builtin_placements.end()) {
-                    if (!cell.builtin_mask || !cell.builtin_width || !cell.builtin_height ||
+                    if (cell.builtin_mask.empty() || !cell.builtin_width || !cell.builtin_height ||
                         cell.builtin_stride < cell.builtin_width) { batched=false; break; }
                     GlyphAtlasAllocator::Rect slot{};
                     if (!atlas_allocator->reserve(cell.builtin_width,cell.builtin_height,slot)) {
@@ -2473,7 +2473,7 @@ HRESULT ZigonautTextEngine::endRow() {
                     const auto props=D2D1::BitmapProperties(D2D1::PixelFormat(
                         DXGI_FORMAT_A8_UNORM,D2D1_ALPHA_MODE_STRAIGHT),96,96);
                     HRESULT upload=atlas_context->CreateBitmap(D2D1::SizeU(cell.builtin_width,cell.builtin_height),
-                        cell.builtin_mask,cell.builtin_stride,props,&mask);
+                        cell.builtin_mask.data(),cell.builtin_stride,props,&mask);
                     if (SUCCEEDED(upload)) upload=beginAtlasDraw();
                     if (SUCCEEDED(upload)) {
                         const auto destination=D2D1::RectF(static_cast<float>(slot.x),static_cast<float>(slot.y),
@@ -2589,7 +2589,7 @@ native_fallback:
                 ID2D1Bitmap* bitmap=nullptr;
                 const uint32_t span=cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
                 hr=getBuiltinBitmap(cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,
-                    span,cell.builtin_mask,cell.builtin_stride,&bitmap);
+                    span,cell.builtin_mask.data(),cell.builtin_stride,&bitmap);
                 if (SUCCEEDED(hr)) {
                     brush->SetColor(color(cell.foreground));
                     const float left=row_origin_x+cell.column*row_cell_width;
@@ -4302,9 +4302,15 @@ extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
     if (engine->row_active) {
         if (engine->row_cells.empty()) return E_UNEXPECTED;
         auto& cell=engine->row_cells.back();
+        try {
+            cell.builtin_mask.assign(mask,
+                mask + static_cast<size_t>(mask_stride) * mask_height);
+        } catch (...) {
+            return E_OUTOFMEMORY;
+        }
         cell.kind=RowCell::Kind::builtin;
         cell.foreground=foreground;
-        cell.builtin_codepoint=codepoint; cell.builtin_mask=mask;
+        cell.builtin_codepoint=codepoint;
         cell.builtin_width=mask_width; cell.builtin_height=mask_height; cell.builtin_stride=mask_stride;
         return S_OK;
     }
