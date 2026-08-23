@@ -512,6 +512,10 @@ export fn zigonaut_core_write(self: ?*Core, bytes: ?[*]const u8, len: usize) voi
     const core = self orelse return;
     if (len == 0) return;
     const input = bytes orelse return;
+    core.mutex.lock();
+    const viewport_changed = core.terminal.scrollToBottom() catch false;
+    core.mutex.unlock();
+    if (viewport_changed) wakeHost(core);
     writeSerialized(core, input[0..len]);
 }
 
@@ -663,7 +667,9 @@ export fn zigonaut_core_key(self: ?*Core, event: ?*const KeyEvent) bool {
         core.mutex.unlock();
         return false;
     };
+    const viewport_changed = value.action != 2 and encoded.len != 0 and (core.terminal.scrollToBottom() catch false);
     core.mutex.unlock();
+    if (viewport_changed) wakeHost(core);
     writeSerialized(core, encoded);
     return true;
 }
@@ -1508,7 +1514,7 @@ export fn zigonaut_core_mouse(self: ?*Core, action: u8, button: u8, x: i32, y: i
     };
     const length = encoded.len;
     core.mutex.unlock();
-    zigonaut_core_write(core, &buffer, length);
+    writeSerialized(core, buffer[0..length]);
     return true;
 }
 
