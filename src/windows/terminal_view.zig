@@ -3053,19 +3053,21 @@ fn setClipboardText(hwnd: win.HWND, text: []const u8) !void {
     const windows_text = try windowsClipboardTextAlloc(allocator, text);
     defer allocator.free(windows_text);
 
-    const wide = try allocator.alloc(u16, windows_text.len + 1);
+    const wide = try allocator.alloc(u16, try std.math.add(usize, windows_text.len, 1));
     defer allocator.free(wide);
     const length = try std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], windows_text);
     wide[length] = 0;
 
-    const memory = win.GlobalAlloc(win.GMEM_MOVEABLE, (length + 1) * @sizeOf(u16)) orelse return error.ClipboardAllocationFailed;
+    const terminated_length = try std.math.add(usize, length, 1);
+    const memory_bytes = try std.math.mul(usize, terminated_length, @sizeOf(u16));
+    const memory = win.GlobalAlloc(win.GMEM_MOVEABLE, memory_bytes) orelse return error.ClipboardAllocationFailed;
     var transferred = false;
     defer if (!transferred) {
         _ = win.GlobalFree(memory);
     };
     const raw = win.GlobalLock(memory) orelse return error.ClipboardLockFailed;
     const destination: [*]u16 = @ptrCast(@alignCast(raw));
-    @memcpy(destination[0 .. length + 1], wide[0 .. length + 1]);
+    @memcpy(destination[0..terminated_length], wide[0..terminated_length]);
     _ = win.GlobalUnlock(memory);
 
     if (win.OpenClipboard(hwnd) == 0) return error.OpenClipboardFailed;
@@ -3084,9 +3086,9 @@ fn clearClipboard(hwnd: win.HWND) !void {
 fn windowsClipboardTextAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var extra: usize = 0;
     for (text, 0..) |byte, index| if (byte == '\n' and (index == 0 or text[index - 1] != '\r')) {
-        extra += 1;
+        extra = try std.math.add(usize, extra, 1);
     };
-    const windows_text = try allocator.alloc(u8, text.len + extra);
+    const windows_text = try allocator.alloc(u8, try std.math.add(usize, text.len, extra));
     var output: usize = 0;
     for (text, 0..) |byte, index| {
         if (byte == '\n' and (index == 0 or text[index - 1] != '\r')) {

@@ -1339,7 +1339,7 @@ pub const Terminal = struct {
     pub fn encodePasteAlloc(self: *Terminal, allocator: std.mem.Allocator, data: []u8) ![]u8 {
         const bracketed = try self.modeEnabled(vt.ghostty_mode_new(2004, false));
 
-        var required: usize = data.len + 12;
+        var required = try std.math.add(usize, data.len, 12);
         var encoded = try allocator.alloc(u8, required);
         errdefer allocator.free(encoded);
         const result = vt.ghostty_paste_encode(data.ptr, data.len, bracketed, encoded.ptr, encoded.len, &required);

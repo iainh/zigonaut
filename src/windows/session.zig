@@ -406,7 +406,7 @@ pub const SessionRuntime = struct {
 
     pub fn sendMouseWheel(self: *SessionRuntime, button: Terminal.MouseButton, count: usize, position: Terminal.PixelPoint, modifiers: u16, geometry: Terminal.MouseGeometry) !bool {
         if (count == 0) return true;
-        const output = try self.allocator.alloc(u8, count * 128);
+        const output = try self.allocator.alloc(u8, try std.math.mul(usize, count, 128));
         defer self.allocator.free(output);
         var written: usize = 0;
         self.terminal_mutex.lock();

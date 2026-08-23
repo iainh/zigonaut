@@ -43,10 +43,12 @@ const LaunchMetadata = struct {
     fn create(allocator: std.mem.Allocator, profile_title: []const u8, command: []const u8, working_directory: []const u8) !*LaunchMetadata {
         const self = try allocator.create(LaunchMetadata);
         errdefer allocator.destroy(self);
-        const payload = try allocator.alloc(u8, profile_title.len + command.len + working_directory.len);
+        const working_directory_offset = try std.math.add(usize, profile_title.len, command.len);
+        const payload_len = try std.math.add(usize, working_directory_offset, working_directory.len);
+        const payload = try allocator.alloc(u8, payload_len);
         @memcpy(payload[0..profile_title.len], profile_title);
         @memcpy(payload[profile_title.len..][0..command.len], command);
-        @memcpy(payload[profile_title.len + command.len ..], working_directory);
+        @memcpy(payload[working_directory_offset..], working_directory);
         self.* = .{
             .allocator = allocator,
             .payload = payload,
