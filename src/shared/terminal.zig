@@ -1393,6 +1393,7 @@ pub const Terminal = struct {
         scratch: *LinkScratch,
         point: Point,
     ) !?Link {
+        if (point.x >= self.columns or point.y >= self.rows) return null;
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
         reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
@@ -2798,6 +2799,15 @@ test "resolves OSC 8 and detected links at viewport cells" {
     const detected = (try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 12, .y = 1 })).?;
     defer std.testing.allocator.free(detected.uri);
     try std.testing.expectEqualStrings("https://ziglang.org/docs", detected.uri);
+}
+
+test "link lookup rejects points outside the viewport" {
+    var terminal = try Terminal.init(80, 4, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("https://example.com");
+
+    try std.testing.expect(try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 80, .y = 0 }) == null);
+    try std.testing.expect(try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 0, .y = 4 }) == null);
 }
 
 test "link hints label visible OSC and detected links from bottom to top" {
