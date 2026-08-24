@@ -2,6 +2,43 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.8.0] - 2026-08-24
+
+### Added
+
+- Automatic shell integration for PowerShell, zsh, Bash, and fish, including
+  command-boundary reporting and terminal focus and visibility updates.
+- Keyboard link hints, Windows terminal bell handling, and unread-output markers
+  for inactive macOS tabs.
+- Native macOS pane drag reorganization, command-link hover feedback, and a
+  redesigned settings window.
+- Configurable intense-text rendering and explicit cell opacity, plus Ottosson
+  light and dark themes and symbol-font fallback.
+- Windows keyboard shortcut documentation and dormant key-to-present latency
+  tracing.
+
+### Changed
+
+- Moved macOS text and image compositing to Metal and retained scenes while
+  scrolling to reduce rendering work.
+- Improved search and selection semantics with incremental macOS scanning,
+  incomplete-result counts, rounded highlights and selections, and copied-selection
+  feedback.
+- Improved pane navigation and layout controls, made new tabs visible immediately,
+  and honoured Windows wheel scrolling preferences.
+- Coalesced Windows cell background fills and updated libghostty.
+
+### Fixed
+
+- Closed panes when their shells exit and revealed new terminal input after
+  scrolling.
+- Preserved macOS search focus and native title bars, forwarded control-character
+  keys, and reliably discovered bundled themes.
+- Suppressed synchronized output correctly on macOS and shared its watchdog across
+  hosts.
+- Hardened terminal, rendering, and layout boundaries against invalid pointers,
+  allocation sizes, child indexes, and link lookups.
+
 ## [0.7.2] - 2026-08-12
 
 ### Added
@@ -245,6 +282,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.8.0]: https://github.com/iainh/zigonaut/releases/tag/v0.8.0
 [0.7.2]: https://github.com/iainh/zigonaut/releases/tag/v0.7.2
 [0.7.1]: https://github.com/iainh/zigonaut/releases/tag/v0.7.1
 [0.7.0]: https://github.com/iainh/zigonaut/releases/tag/v0.7.0
