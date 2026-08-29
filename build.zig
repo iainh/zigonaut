@@ -378,10 +378,14 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     swift.step.dependOn(b.getInstallStep());
     const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh", swift_configuration });
+    bundle.addDirectoryArg(b.path(if (optimize == .Debug)
+        "assets/icons/macos/ZigonautDebug.icon"
+    else
+        "assets/icons/macos/Zigonaut.icon"));
     bundle.step.dependOn(&swift.step);
     const app_step = b.step("macos-app", "Build the native macOS frontend");
     app_step.dependOn(&bundle.step);
-    const run = b.addSystemCommand(&.{ "open", "zig-out/Zigonaut.app" });
+    const run = b.addSystemCommand(&.{ "open", "-n", "zig-out/Zigonaut.app" });
     run.step.dependOn(&bundle.step);
     const run_step = b.step("macos-run", "Run the native macOS frontend");
     run_step.dependOn(&run.step);

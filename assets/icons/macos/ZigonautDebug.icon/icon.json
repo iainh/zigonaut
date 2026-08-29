@@ -1,0 +1,99 @@
+{
+  "features": [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "display-p3:0.21176,0.01176,0.01961,1.00000",
+          "display-p3:0.03529,0.00000,0.00392,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.2,
+            "y": 0.0
+          },
+          "stop": {
+            "x": 0.8,
+            "y": 1.0
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "display-p3:0.09020,0.00392,0.00784,1.00000",
+          "display-p3:0.01176,0.00000,0.00000,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.2,
+            "y": 0.0
+          },
+          "stop": {
+            "x": 0.8,
+            "y": 1.0
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Weathered helmet",
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "01-helmet.png",
+          "name": "Dirty red helmet"
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "specular-highlight-placement": "automatic",
+      "blur-material": 0.08,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.34
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.05
+      }
+    },
+    {
+      "name": "Red visor",
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "02-visor.png",
+          "name": "Visor and debug prompt"
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "specular-highlight-placement": "inside",
+      "blur-material": 0.14,
+      "refractivity": {
+        "enabled": true,
+        "strength": 0.28,
+        "depth": 0.34
+      },
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.16
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
