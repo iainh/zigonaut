@@ -1,99 +1,60 @@
 {
-  "features": [
-    "refractivity",
-    "specular-location"
-  ],
-  "fill-specializations": [
+  "fill-specializations" : [
     {
-      "value": {
-        "linear-gradient": [
-          "display-p3:0.00392,0.05098,0.24314,1.00000",
-          "display-p3:0.00000,0.00392,0.04706,1.00000"
-        ],
-        "orientation": {
-          "start": {
-            "x": 0.2,
-            "y": 0.0
-          },
-          "stop": {
-            "x": 0.8,
-            "y": 1.0
-          }
+      "value" : "automatic"
+    },
+    {
+      "appearance" : "dark",
+      "value" : "automatic"
+    }
+  ],
+  "groups" : [
+    {
+      "blur-material" : 0.12,
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "01-helmet.png",
+          "name" : "Helmet"
         }
+      ],
+      "lighting" : "combined",
+      "name" : "Helmet",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.28
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.08
       }
     },
     {
-      "appearance": "dark",
-      "value": {
-        "linear-gradient": [
-          "display-p3:0.00000,0.01569,0.09412,1.00000",
-          "display-p3:0.00000,0.00000,0.01961,1.00000"
-        ],
-        "orientation": {
-          "start": {
-            "x": 0.2,
-            "y": 0.0
-          },
-          "stop": {
-            "x": 0.8,
-            "y": 1.0
-          }
+      "blur-material" : 0.18,
+      "layers" : [
+        {
+          "blend-mode" : "plus-lighter",
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "02-visor.png",
+          "name" : "Visor and terminal prompt"
         }
+      ],
+      "lighting" : "combined",
+      "name" : "Visor",
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.22
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
       }
     }
   ],
-  "groups": [
-    {
-      "name": "Helmet",
-      "layers": [
-        {
-          "glass": true,
-          "image-name": "01-helmet.png",
-          "name": "Helmet"
-        }
-      ],
-      "lighting": "combined",
-      "specular": true,
-      "specular-highlight-placement": "automatic",
-      "blur-material": 0.12,
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.28
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.08
-      }
-    },
-    {
-      "name": "Visor",
-      "layers": [
-        {
-          "glass": true,
-          "image-name": "02-visor.png",
-          "name": "Visor and terminal prompt"
-        }
-      ],
-      "lighting": "combined",
-      "specular": true,
-      "specular-highlight-placement": "inside",
-      "blur-material": 0.18,
-      "refractivity": {
-        "enabled": true,
-        "strength": 0.32,
-        "depth": 0.38
-      },
-      "shadow": {
-        "kind": "layer-color",
-        "opacity": 0.22
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.2
-      }
-    }
-  ],
-  "supported-platforms": {
-    "squares": "shared"
+  "supported-platforms" : {
+    "squares" : "shared"
   }
 }
