@@ -45,6 +45,8 @@ private final class TerminalWindow: NSWindow {
 
 @MainActor
 final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+    private static let settingsTabsIdentifier = NSToolbarItem.Identifier("SettingsTabs")
+
     enum Kind {
         case terminal(WindowModel)
         case settings(SettingsModel)
@@ -60,6 +62,7 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     private var progressObservation: AnyCancellable?
     private var activityObservation: AnyCancellable?
     private var backgroundObservations = Set<AnyCancellable>()
+    private var settingsTabGroup: NSToolbarItemGroup?
     private var terminalTitle = "Terminal"
     private var hasUnreadOutput = false
 
@@ -93,9 +96,8 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
             configureSettingsToolbar(model)
             titleObservation = model.$pane.sink { [weak self, weak window] pane in
                 window?.title = pane.title
-                // Let NSToolbar complete its native selection tracking before
-                // changing window geometry. The toolbar selects clicked items
-                // automatically via toolbarSelectableItemIdentifiers(_:).
+                self?.settingsTabGroup?.selectedIndex = SettingsPane.allCases.firstIndex(of: pane) ?? 0
+                // Let NSToolbar complete its native selection tracking before changing geometry.
                 DispatchQueue.main.async { [weak self] in
                     self?.resizeSettingsWindow(to: pane.contentSize)
                 }
@@ -157,9 +159,29 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
         toolbar.displayMode = .iconAndLabel
-        toolbar.selectedItemIdentifier = NSToolbarItem.Identifier(model.pane.rawValue)
+        if #available(macOS 27.0, *) {
+            settingsTabGroup = makeSettingsTabGroup(selectedPane: model.pane)
+        } else {
+            toolbar.selectedItemIdentifier = NSToolbarItem.Identifier(model.pane.rawValue)
+        }
         window.toolbar = toolbar
         window.toolbarStyle = .preference
+    }
+
+    @available(macOS 27.0, *)
+    private func makeSettingsTabGroup(selectedPane: SettingsPane) -> NSToolbarItemGroup {
+        let panes = SettingsPane.allCases
+        let images = panes.map {
+            NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.title)!
+        }
+        let group = NSToolbarItemGroup(itemIdentifier: Self.settingsTabsIdentifier, images: images,
+            selectionMode: .selectOne, labels: panes.map(\.title), target: self,
+            action: #selector(selectSettingsTab(_:)))
+        group.controlRepresentation = .expanded
+        // NSToolbarItemGroup.Role is not exposed by this SDK's Swift module yet.
+        group.setValue(1, forKey: "role") // NSToolbarItemGroupRoleTabs
+        group.selectedIndex = panes.firstIndex(of: selectedPane) ?? 0
+        return group
     }
 
     private func resizeSettingsWindow(to size: NSSize) {
@@ -178,8 +200,15 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
         model.pane = pane
     }
 
+    @objc private func selectSettingsTab(_ sender: NSToolbarItemGroup) {
+        guard case .settings(let model) = kind,
+              SettingsPane.allCases.indices.contains(sender.selectedIndex) else { return }
+        model.pane = SettingsPane.allCases[sender.selectedIndex]
+    }
+
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        SettingsPane.allCases.map { NSToolbarItem.Identifier($0.rawValue) }
+        if #available(macOS 27.0, *) { return [Self.settingsTabsIdentifier] }
+        return SettingsPane.allCases.map { NSToolbarItem.Identifier($0.rawValue) }
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -187,11 +216,15 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     }
 
     func toolbarSelectableItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        if #available(macOS 27.0, *) { return [] }
+        return toolbarDefaultItemIdentifiers(toolbar)
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if #available(macOS 27.0, *), itemIdentifier == Self.settingsTabsIdentifier {
+            return settingsTabGroup
+        }
         guard let pane = SettingsPane(rawValue: itemIdentifier.rawValue) else { return nil }
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
         item.label = pane.title
