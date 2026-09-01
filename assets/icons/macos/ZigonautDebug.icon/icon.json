@@ -1,8 +1,4 @@
 {
-  "features": [
-    "refractivity",
-    "specular-location"
-  ],
   "fill-specializations": [
     {
       "value": {
