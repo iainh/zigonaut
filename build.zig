@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
         .@"emit-lib-vt" = true,
         .simd = true,
     });
+    const apple_sdk = findAppleSdk(b, target, ghostty);
     const shared_module = b.createModule(.{
         .root_source_file = b.path("src/shared/root.zig"),
         .target = target,
@@ -43,12 +44,12 @@ pub fn build(b: *std.Build) void {
     });
     shared_module.link_libc = true;
     configureGhostty(shared_module, ghostty);
-    const shared_test_step = addSharedTests(b, target, optimize, ghostty);
+    const shared_test_step = addSharedTests(b, target, optimize, ghostty, apple_sdk);
 
     // Keep native products in separate build graphs: the macOS embedded core
     // must never inherit Win32 resources, C++ sources, or system libraries.
     if (target.result.os.tag == .macos) {
-        buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step, fmt_step);
+        buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step, fmt_step, apple_sdk);
         return;
     }
     if (target.result.os.tag != .windows) {
@@ -267,7 +268,7 @@ pub fn build(b: *std.Build) void {
     conpty_benchmark_step.dependOn(&run_conpty_benchmark.step);
 }
 
-fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency) *std.Build.Step {
+fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, apple_sdk: ?AppleSdk) *std.Build.Step {
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/shared/tests.zig"),
         .target = target,
@@ -275,12 +276,13 @@ fn addSharedTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     }) });
     tests.root_module.link_libc = true;
     configureGhostty(tests.root_module, ghostty);
+    applyAppleSdk(tests, apple_sdk);
     const test_step = b.step("test-shared", "Run shared terminal kernel tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     return test_step;
 }
 
-fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
+fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step, fmt_step: *std.Build.Step, apple_sdk: ?AppleSdk) void {
     const platform_sync = b.createModule(.{
         .root_source_file = b.path("src/support/platform_sync.zig"),
         .target = target,
@@ -308,6 +310,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     module.addIncludePath(b.path("macos/include"));
     configureGhostty(module, ghostty);
     const library = b.addLibrary(.{ .name = "zigonaut-core", .root_module = module, .linkage = .dynamic });
+    applyAppleSdk(library, apple_sdk);
     b.installArtifact(library);
     const core_step = b.step("macos-core", "Build the macOS embedded Zig core");
     core_step.dependOn(&library.step);
@@ -326,6 +329,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     tests.root_module.link_libc = true;
     tests.root_module.addIncludePath(b.path("macos/include"));
     configureGhostty(tests.root_module, ghostty);
+    applyAppleSdk(tests, apple_sdk);
     const core_test_step = b.step("test-macos-core", "Run macOS Zig core and ABI tests");
     core_test_step.dependOn(&b.addRunArtifact(tests).step);
     const helper_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -402,6 +406,59 @@ fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) v
     module.addIncludePath(ghostty.path("include"));
     module.addCMacro("GHOSTTY_STATIC", "1");
     module.linkLibrary(ghostty.artifact("ghostty-vt-static"));
+}
+
+const AppleSdk = struct {
+    libc: std.Build.LazyPath,
+    framework: []const u8,
+    system_include: []const u8,
+    library: []const u8,
+};
+
+fn findAppleSdk(b: *std.Build, resolved_target: std.Build.ResolvedTarget, ghostty: *std.Build.Dependency) ?AppleSdk {
+    if (comptime builtin.os.tag != .macos) return null;
+    if (resolved_target.result.os.tag != .macos) return null;
+
+    var target = resolved_target.result;
+    var libc = std.zig.LibCInstallation.findNative(
+        b.allocator,
+        b.graph.io,
+        .{
+            .environ_map = &b.graph.environ_map,
+            .target = &target,
+            .verbose = false,
+        },
+    ) catch return null;
+
+    // Xcode 27's math.h and Zig 0.16's bundled float.h disagree about the
+    // __need_infinity_nan protocol. Overlay math.h using Ghostty's workaround.
+    libc.include_dir = ghostty.path("pkg/apple-sdk/include").getPath(b);
+
+    var stream: std.Io.Writer.Allocating = .init(b.allocator);
+    defer stream.deinit();
+    libc.render(&stream.writer) catch @panic("unable to render the Apple SDK libc configuration");
+    const libc_file = b.addWriteFiles().add("macos-libc.txt", stream.written());
+
+    const sdk_usr = std.fs.path.dirname(libc.sys_include_dir.?) orelse
+        @panic("Apple SDK system include directory has no parent");
+    const sdk_root = std.fs.path.dirname(sdk_usr) orelse
+        @panic("Apple SDK usr directory has no parent");
+
+    return .{
+        .libc = libc_file,
+        .framework = b.pathJoin(&.{ sdk_root, "System", "Library", "Frameworks" }),
+        .system_include = libc.sys_include_dir.?,
+        .library = b.pathJoin(&.{ sdk_usr, "lib" }),
+    };
+}
+
+fn applyAppleSdk(step: *std.Build.Step.Compile, apple_sdk: ?AppleSdk) void {
+    const sdk = apple_sdk orelse return;
+    step.setLibCFile(sdk.libc);
+    step.root_module.addCMacro("_LIBCPP_HAS_VENDOR_AVAILABILITY_ANNOTATIONS", "1");
+    step.root_module.addSystemFrameworkPath(.{ .cwd_relative = sdk.framework });
+    step.root_module.addSystemIncludePath(.{ .cwd_relative = sdk.system_include });
+    step.root_module.addLibraryPath(.{ .cwd_relative = sdk.library });
 }
 
 fn generatedManifest(b: *std.Build, version: []const u8) std.Build.LazyPath {
