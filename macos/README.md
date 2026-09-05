@@ -36,8 +36,12 @@ Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`.
 | Equalize panes | Control-Option-= | Gives panes equal space along each split axis |
 | Toggle focused-pane zoom | Control-Shift-Return | Preserves the underlying layout |
 | Find / copy / paste | Command-F / Command-C / Command-V | Standard macOS convention |
+| Scroll history by a page | Shift-Page Up / Shift-Page Down | Shift-Fn-Up / Shift-Fn-Down on compact keyboards |
+| Jump to history beginning/end | Shift-Home / Shift-End | Shift-Fn-Left / Shift-Fn-Right on compact keyboards |
 | Zoom in/out/reset | Command-Plus / Command-Minus / Command-0 | Standard macOS convention |
 | Settings | Command-Comma | Standard macOS convention |
+
+History shortcuts are passed through while an application uses the alternate screen.
 
 ## Remaining parity gaps
 

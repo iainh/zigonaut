@@ -28,9 +28,13 @@ These shortcuts apply to Zigonaut on Windows. Shortcuts that operate on terminal
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy the current selection. |
 | `Ctrl+Shift+V` / `Shift+Insert` | Paste text from the clipboard. |
 | `Ctrl+Shift+F` | Open scrollback search for the focused pane. |
+| `Shift+Page Up` / `Shift+Page Down` | Scroll history up or down by one page. |
+| `Shift+Home` / `Shift+End` | Jump to the beginning or end of history. |
 | `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Move to the previous or next shell prompt. This requires OSC 133 shell integration. |
 | `Ctrl+Shift+G` | Copy the latest command output, or send it to the command configured under **Settings > Advanced**. This requires OSC 133 shell integration. |
 | `Application` / `Shift+F10` | Open the terminal context menu. |
+
+History shortcuts are passed through to applications using the alternate screen, such as editors and full-screen terminal interfaces.
 
 ## Scrollback search
 

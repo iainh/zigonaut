@@ -658,12 +658,22 @@ export fn zigonaut_core_key(self: ?*Core, event: ?*const KeyEvent) bool {
     if (!std.unicode.utf8ValidateSlice(utf8)) return false;
     var buffer: [128]u8 = undefined;
     core.mutex.lock();
-    const encoded = core.terminal.encodeKey(key, switch (value.action) {
+    const action: Terminal.KeyAction = switch (value.action) {
         0 => .press,
         1 => .repeat,
         2 => .release,
         else => unreachable,
-    }, value.modifiers, value.consumed_modifiers, utf8, value.unshifted_codepoint, &buffer) catch {
+    };
+    const scrolled = core.terminal.handleScrollbackKey(key, action, value.modifiers) catch {
+        core.mutex.unlock();
+        return false;
+    };
+    if (scrolled) {
+        core.mutex.unlock();
+        wakeHost(core);
+        return true;
+    }
+    const encoded = core.terminal.encodeKey(key, action, value.modifiers, value.consumed_modifiers, utf8, value.unshifted_codepoint, &buffer) catch {
         core.mutex.unlock();
         return false;
     };
@@ -1671,6 +1681,39 @@ test "mapped Mac keys preserve repeat and protocol release actions" {
     try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .press, 0, 0, "a", 'a', &buffer));
     try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .repeat, 0, 0, "a", 'a', &buffer));
     try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(macKey(0).?, .release, 0, 0, "", 'a', &buffer));
+}
+
+test "Mac key ABI scrolls history and wakes the host without jumping back to input" {
+    const Observer = struct {
+        fn wake(context: ?*anyopaque) callconv(.c) void {
+            const count: *usize = @ptrCast(@alignCast(context.?));
+            count.* += 1;
+        }
+    };
+    var wakes: usize = 0;
+    var core: Core = .{
+        .terminal = try Terminal.init(20, 2, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = Observer.wake,
+        .context = &wakes,
+    };
+    defer core.terminal.deinit();
+    core.terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    var event = std.mem.zeroes(KeyEvent);
+    event.version = 1;
+    event.size = @sizeOf(KeyEvent);
+    event.key_code = 116; // Page Up, including Fn-Up on compact keyboards.
+    event.modifiers = 1;
+    try std.testing.expect(zigonaut_core_key(&core, &event));
+    try std.testing.expectEqual(@as(u64, 1), (try core.terminal.scrollbar()).offset);
+    try std.testing.expectEqual(@as(usize, 1), wakes);
+    event.action = 2;
+    event.modifiers = 0;
+    try std.testing.expect(zigonaut_core_key(&core, &event));
+    try std.testing.expectEqual(@as(u64, 1), (try core.terminal.scrollbar()).offset);
 }
 
 test "mapped Mac control keys use logical text rather than AppKit commands or control characters" {

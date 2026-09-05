@@ -932,6 +932,15 @@ pub const SessionRuntime = struct {
     pub fn sendKey(self: *SessionRuntime, key: Terminal.Key, action: Terminal.KeyAction, modifiers: u16, consumed_modifiers: u16, utf8: []const u8, unshifted_codepoint: u32) !bool {
         var buffer: [128]u8 = undefined;
         self.terminal_mutex.lock();
+        const scrolled = self.terminal.handleScrollbackKey(key, action, modifiers) catch |err| {
+            self.terminal_mutex.unlock();
+            return err;
+        };
+        if (scrolled) {
+            self.terminal_mutex.unlock();
+            self.requestRefresh();
+            return false;
+        }
         const encoded = self.terminal.encodeKey(key, action, modifiers, consumed_modifiers, utf8, unshifted_codepoint, &buffer) catch |err| {
             self.terminal_mutex.unlock();
             return err;

@@ -41,6 +41,7 @@ pub const Terminal = struct {
     progress_report_context: ?*anyopaque = null,
     visible: bool = true,
     focused: bool = false,
+    scrollback_keys: [4]bool = .{false} ** 4,
     columns: u16,
     rows: u16,
     intense_text_style: IntenseTextStyle = .all,
@@ -1023,6 +1024,7 @@ pub const Terminal = struct {
     }
 
     pub fn setFocused(self: *Terminal, focused: bool) void {
+        if (!focused) self.scrollback_keys = .{false} ** 4;
         if (self.focused == focused) return;
         self.focused = focused;
         var buffer: [3]u8 = undefined;
@@ -1062,6 +1064,38 @@ pub const Terminal = struct {
             .tag = vt.GHOSTTY_SCROLL_VIEWPORT_DELTA,
             .value = .{ .delta = delta },
         });
+    }
+
+    /// Shift-navigation belongs to history only on the primary screen. Keep
+    /// ownership through modifier/screen changes so applications never receive
+    /// a release for a press we consumed (or lose one we forwarded).
+    pub fn handleScrollbackKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16) !bool {
+        const index: usize = switch (key) {
+            .page_up => 0,
+            .page_down => 1,
+            .home => 2,
+            .end => 3,
+            else => return false,
+        };
+        const owned = self.scrollback_keys[index];
+        if (action == .release) {
+            self.scrollback_keys[index] = false;
+            return owned;
+        }
+        if (action == .repeat and !owned) return false;
+        var screen: vt.GhosttyTerminalScreen = undefined;
+        try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen));
+        if (modifiers != 1 or screen != vt.GHOSTTY_TERMINAL_SCREEN_PRIMARY) return owned;
+        self.scrollback_keys[index] = true;
+        const state = try self.scrollbar();
+        const distance = switch (key) {
+            .home => state.offset,
+            .end => state.total -| state.len -| state.offset,
+            else => state.len,
+        };
+        const delta: isize = @intCast(@min(distance, std.math.maxInt(isize)));
+        self.scrollViewport(if (key == .page_up or key == .home) -delta else delta);
+        return true;
     }
 
     pub fn scrollToBottom(self: *Terminal) !bool {
@@ -2600,6 +2634,43 @@ test "scrollbar tracks and scrolls the viewport" {
     const restored = try terminal.scrollbar();
     try std.testing.expectEqual(bottom.offset, restored.offset);
     try std.testing.expect(!try terminal.scrollToBottom());
+}
+
+test "shift navigation pages and clamps history without leaking releases" {
+    var terminal = try Terminal.init(20, 2, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .press, 1));
+    try std.testing.expectEqual(@as(u64, 3), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .repeat, 1));
+    try std.testing.expectEqual(@as(u64, 1), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .release, 0));
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_down, .press, 1));
+    try std.testing.expectEqual(@as(u64, 3), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.handleScrollbackKey(.home, .press, 1));
+    try std.testing.expectEqual(@as(u64, 0), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .press, 1));
+    try std.testing.expectEqual(@as(u64, 0), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.handleScrollbackKey(.end, .press, 1));
+    try std.testing.expectEqual(@as(u64, 5), (try terminal.scrollbar()).offset);
+}
+
+test "scrollback shortcuts preserve application key ownership and alternate screen input" {
+    var terminal = try Terminal.init(20, 2, theme.rasmus);
+    defer terminal.deinit();
+    try std.testing.expect(!try terminal.handleScrollbackKey(.home, .press, 0));
+    try std.testing.expect(!try terminal.handleScrollbackKey(.home, .repeat, 1));
+    try std.testing.expect(!try terminal.handleScrollbackKey(.home, .release, 1));
+    try std.testing.expect(!try terminal.handleScrollbackKey(.end, .press, 3));
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .press, 1));
+    terminal.feed("\x1b[?1049h");
+    try std.testing.expect(try terminal.handleScrollbackKey(.page_up, .release, 1));
+    try std.testing.expect(!try terminal.handleScrollbackKey(.page_down, .press, 1));
+    terminal.feed("\x1b[?1049l");
+    try std.testing.expect(!try terminal.handleScrollbackKey(.page_down, .release, 1));
+    try std.testing.expect(try terminal.handleScrollbackKey(.home, .press, 1));
+    terminal.setFocused(false);
+    try std.testing.expect(!try terminal.handleScrollbackKey(.home, .release, 1));
 }
 
 test "OSC 133 primary prompts navigate through scrollback" {
