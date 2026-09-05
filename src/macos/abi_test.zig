@@ -12,6 +12,7 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_key",
     "zigonaut_core_paste",
     "zigonaut_core_scroll",
+    "zigonaut_core_compress",
     "zigonaut_core_search_set",
     "zigonaut_core_search_status",
     "zigonaut_core_search_navigate",

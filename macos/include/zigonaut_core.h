@@ -35,6 +35,9 @@ void zigonaut_core_set_focused(zigonaut_core *, bool focused);
 bool zigonaut_core_key(zigonaut_core *, const zigonaut_key_event_v1 *);
 void zigonaut_core_paste(zigonaut_core *, const uint8_t *bytes, size_t length);
 void zigonaut_core_scroll(zigonaut_core *, ptrdiff_t rows);
+/* Call on a background queue after terminal activity. Returns the next idle
+   delay in milliseconds, or zero when complete. Never waits for a busy core. */
+uint32_t zigonaut_core_compress(zigonaut_core *);
 void zigonaut_core_search_set(zigonaut_core *, const uint8_t *query, size_t length, zigonaut_search_status_v1 *);
 void zigonaut_core_search_tick(zigonaut_core *, uint64_t time_budget_ns, zigonaut_search_status_v1 *);
 void zigonaut_core_search_status(zigonaut_core *, zigonaut_search_status_v1 *);

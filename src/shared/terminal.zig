@@ -1059,6 +1059,20 @@ pub const Terminal = struct {
         };
     }
 
+    pub fn compressionActivity(self: *Terminal) !u64 {
+        var activity: u64 = undefined;
+        try check(vt.ghostty_terminal_compression_activity(self.terminal, &activity));
+        return activity;
+    }
+
+    /// Returns whether another bounded step is needed. Unsupported hosts and
+    /// completed passes both stop; no borrowed terminal data may be used here.
+    pub fn compressIncremental(self: *Terminal) !bool {
+        var result: vt.GhosttyTerminalCompressionResult = undefined;
+        try check(vt.ghostty_terminal_compress(self.terminal, vt.GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL, &result));
+        return result == vt.GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING;
+    }
+
     pub fn scrollViewport(self: *Terminal, delta: isize) void {
         vt.ghostty_terminal_scroll_viewport(self.terminal, .{
             .tag = vt.GHOSTTY_SCROLL_VIEWPORT_DELTA,
@@ -2634,6 +2648,38 @@ test "scrollbar tracks and scrolls the viewport" {
     const restored = try terminal.scrollbar();
     try std.testing.expectEqual(bottom.offset, restored.offset);
     try std.testing.expect(!try terminal.scrollToBottom());
+}
+
+test "incremental compression preserves cold history selection search and viewport" {
+    var terminal = try Terminal.init(80, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("marker 中\r\n");
+    try terminal.beginSelectionAnchor(.{ .x = 0, .y = 0 });
+    defer terminal.endSelectionAnchor();
+    try terminal.setDerivedSelection(.{ .x = 5, .y = 0 }, .cell, false);
+    for (0..2000) |_| terminal.feed("repeated history with enough rows to occupy cold pages\r\n");
+    const before = try terminal.scrollbar();
+    const activity = try terminal.compressionActivity();
+    var steps: usize = 0;
+    while (try terminal.compressIncremental()) : (steps += 1) {
+        try std.testing.expect(steps < 1000);
+    }
+    if (@import("builtin").os.tag == .macos) try std.testing.expect(steps > 0);
+    try std.testing.expectEqual(activity, try terminal.compressionActivity());
+    try std.testing.expectEqual(before, try terminal.scrollbar());
+    const selected = try terminal.selectedTextAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("marker", selected);
+    terminal.scrollViewport(-std.math.maxInt(isize));
+    var text: [1024]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, try terminal.writeViewportText(&text), "marker 中\n"));
+    var matches: std.ArrayList(SearchMatch) = .empty;
+    defer matches.deinit(std.testing.allocator);
+    var cache: Terminal.SearchCache = .{};
+    defer cache.deinit(std.testing.allocator);
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "marker", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(u32, 0), matches.items[0].row);
 }
 
 test "shift navigation pages and clamps history without leaking releases" {

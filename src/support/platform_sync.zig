@@ -7,6 +7,14 @@ pub const Mutex = struct {
         std.debug.assert(std.c.pthread_mutex_lock(&self.value) == .SUCCESS);
     }
 
+    pub fn tryLock(self: *@This()) bool {
+        return switch (std.c.pthread_mutex_trylock(&self.value)) {
+            .SUCCESS => true,
+            .BUSY => false,
+            else => unreachable,
+        };
+    }
+
     pub fn unlock(self: *@This()) void {
         std.debug.assert(std.c.pthread_mutex_unlock(&self.value) == .SUCCESS);
     }

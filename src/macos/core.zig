@@ -31,6 +31,24 @@ const clipboard_queue_capacity = 16;
 const clipboard_default_max_bytes: u32 = 1024 * 1024;
 const key_utf8_max_bytes = 64;
 
+const Compression = struct {
+    activity: ?u64 = null,
+    deadline_ms: ?u64 = null,
+
+    fn delay(self: *Compression, activity: u64, now_ms: u64) ?u32 {
+        if (self.activity != activity) {
+            self.activity = activity;
+            self.deadline_ms = now_ms +| 250;
+        }
+        const deadline = self.deadline_ms orelse return null;
+        return @intCast(@min(deadline -| now_ms, 250));
+    }
+
+    fn stepped(self: *Compression, pending: bool, now_ms: u64) void {
+        self.deadline_ms = if (pending) now_ms +| 1 else null;
+    }
+};
+
 const QueuedNotification = struct { payload: []u8, title_len: u16 };
 const QueuedClipboard = struct { payload: []u8, token: u64, clear: bool };
 
@@ -79,6 +97,7 @@ const Core = struct {
     progress_generation: u64 = 0,
     output_generation: u64 = 0,
     synchronized_output: SynchronizedOutput = .{},
+    compression: Compression = .{},
     render_snapshot: Terminal.RenderSnapshot = .{},
 };
 
@@ -1286,6 +1305,21 @@ export fn zigonaut_core_scroll(self: ?*Core, rows: isize) void {
     core.terminal.scrollViewport(rows);
 }
 
+/// Background maintenance only: yield to terminal users and never wake the UI.
+/// Zero stops scheduling; otherwise return the next idle delay in milliseconds.
+export fn zigonaut_core_compress(self: ?*Core) u32 {
+    const core = self orelse return 0;
+    if (core.stopping.load(.acquire)) return 0;
+    if (!core.mutex.tryLock()) return 250;
+    defer core.mutex.unlock();
+    const activity = core.terminal.compressionActivity() catch return 0;
+    const delay = core.compression.delay(activity, monotonicMillis()) orelse return 0;
+    if (delay != 0) return delay;
+    const pending = core.terminal.compressIncremental() catch false;
+    core.compression.stepped(pending, monotonicMillis());
+    return if (pending) 1 else 0;
+}
+
 const maximum_search_query_bytes = 256;
 
 fn fillSearchStatus(core: *Core, output: *SearchStatus, status: u8) void {
@@ -1681,6 +1715,51 @@ test "mapped Mac keys preserve repeat and protocol release actions" {
     try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .press, 0, 0, "a", 'a', &buffer));
     try std.testing.expectEqualStrings("a", try terminal.encodeKey(macKey(0).?, .repeat, 0, 0, "a", 'a', &buffer));
     try std.testing.expectEqualStrings("\x1b[97;1:3u", try terminal.encodeKey(macKey(0).?, .release, 0, 0, "", 'a', &buffer));
+}
+
+test "compression waits for idle restarts on token changes and stops on completion" {
+    var state: Compression = .{};
+    try std.testing.expectEqual(@as(?u32, 250), state.delay(10, 0));
+    try std.testing.expectEqual(@as(?u32, 1), state.delay(10, 249));
+    try std.testing.expectEqual(@as(?u32, 250), state.delay(11, 249));
+    try std.testing.expectEqual(@as(?u32, 0), state.delay(11, 499));
+    state.stepped(true, 499);
+    try std.testing.expectEqual(@as(?u32, 1), state.delay(11, 499));
+    try std.testing.expectEqual(@as(?u32, 0), state.delay(11, 500));
+    state.stepped(false, 500);
+    try std.testing.expectEqual(@as(?u32, null), state.delay(11, 1000));
+    // Tokens are opaque: a decreasing/wrapped token is activity too.
+    try std.testing.expectEqual(@as(?u32, 250), state.delay(0, 1000));
+}
+
+test "compression ABI yields to a busy core and stops during teardown" {
+    var core: Core = .{
+        .terminal = try Terminal.init(20, 2, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = null,
+        .context = null,
+    };
+    defer core.terminal.deinit();
+    core.mutex.lock();
+    const busy_delay = zigonaut_core_compress(&core);
+    core.mutex.unlock();
+    try std.testing.expectEqual(@as(u32, 250), busy_delay);
+    try std.testing.expectEqual(@as(u32, 250), zigonaut_core_compress(&core));
+    var steps: usize = 0;
+    while (true) : (steps += 1) {
+        try std.testing.expect(steps < 10);
+        core.compression.deadline_ms = 0;
+        const delay = zigonaut_core_compress(&core);
+        if (delay == 0) break;
+        try std.testing.expectEqual(@as(u32, 1), delay);
+    }
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_compress(&core));
+    core.stopping.store(true, .release);
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_compress(&core));
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_compress(null));
 }
 
 test "Mac key ABI scrolls history and wakes the host without jumping back to input" {

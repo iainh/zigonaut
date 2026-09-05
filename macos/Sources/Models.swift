@@ -423,6 +423,7 @@ struct TerminalPalette: Equatable {
   private var currentScale: CGFloat = 1
   private var progressGeneration: UInt64 = 0
   private var searchRequestGeneration: UInt64 = 0
+  private var compressionRequestGeneration: UInt64 = 0
   private let maximumCells = 500_000
   private let maximumTextBytes = 8_000_000
   private let maximumImages = 256
@@ -503,6 +504,24 @@ struct TerminalPalette: Equatable {
     retrieveProgress(core: core.pointer)
     drainNotifications(core: core.pointer)
     drainClipboard(core: core.pointer)
+    scheduleCompression()
+  }
+
+  private func scheduleCompression(after delay: UInt32 = 0) {
+    // Fresh snapshots supersede delayed work. Only the current request may
+    // continue, and completion leaves no recurring timer or display wakeup.
+    compressionRequestGeneration &+= 1
+    let request = compressionRequestGeneration
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(delay))) { [weak self] in
+      guard let self, self.compressionRequestGeneration == request, let core = self.core else { return }
+      self.writer.async { [weak self] in
+        let nextDelay = zigonaut_core_compress(core.pointer)
+        DispatchQueue.main.async { [weak self] in
+          guard let self, self.compressionRequestGeneration == request, nextDelay != 0 else { return }
+          self.scheduleCompression(after: nextDelay)
+        }
+      }
+    }
   }
 
   private func retrieveProgress(core: OpaquePointer) {
