@@ -461,6 +461,17 @@ struct SettingsView: View {
                 .frame(width: 38, alignment: .trailing)
             }
           }
+          LabeledContent("Line height") {
+            HStack(spacing: 10) {
+              Slider(value: $preferences.lineHeightPercent, in: 75...200, step: 1)
+                .accessibilityLabel("Line height")
+                .frame(width: 180)
+              Text("\(Int(preferences.lineHeightPercent))%")
+                .monospacedDigit()
+                .frame(width: 38, alignment: .trailing)
+            }
+            .help("100% uses the font’s natural spacing. Smaller values may clip tall glyphs.")
+          }
           Picker("Regular text", selection: $preferences.fontWeight) {
             ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
           }

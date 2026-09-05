@@ -670,6 +670,7 @@ struct ZigonautTextEngine {
     uint32_t font_size = 18;
     DWRITE_FONT_WEIGHT font_weight = DWRITE_FONT_WEIGHT_NORMAL;
     DWRITE_FONT_WEIGHT intense_font_weight = DWRITE_FONT_WEIGHT_BOLD;
+    uint16_t line_height_percent = 100;
     uint32_t dpi = 96;
     ZigonautCellMetrics metrics = {9, 18, 14, 1};
     float row_origin_x = 0.0f;
@@ -1592,14 +1593,19 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             static_cast<int32_t>(font_metrics.ascent) +
                 static_cast<int32_t>(font_metrics.descent) +
                 static_cast<int32_t>(font_metrics.lineGap));
-        metrics.height = std::max(
+        const uint32_t natural_height = std::max(
             1u,
             static_cast<uint32_t>(std::lround(
                 static_cast<float>(line_units) * scale)));
-        metrics.baseline = std::min(
-            metrics.height,
-            static_cast<uint32_t>(std::lround(
-                static_cast<float>(font_metrics.ascent) * scale)));
+        metrics.height = std::max(1u, static_cast<uint32_t>(std::lround(
+            static_cast<float>(natural_height) * line_height_percent / 100.0f)));
+        const int32_t natural_baseline = static_cast<int32_t>(std::lround(
+            static_cast<float>(font_metrics.ascent) * scale));
+        const int32_t centred_baseline = natural_baseline +
+            static_cast<int32_t>(std::lround((static_cast<int32_t>(metrics.height) -
+                static_cast<int32_t>(natural_height)) / 2.0f));
+        metrics.baseline = static_cast<uint32_t>(std::clamp(
+            centred_baseline, 0, static_cast<int32_t>(metrics.height)));
         const uint32_t underline_thickness = static_cast<uint32_t>(std::lround(
             static_cast<float>(font_metrics.underlineThickness) * scale));
         const uint32_t proportional_thickness = (metrics.height + 8) / 16;
@@ -2631,12 +2637,14 @@ extern "C" HRESULT zigonaut_text_engine_create(
     uint32_t font_size,
     uint16_t font_weight,
     uint16_t intense_font_weight,
+    uint16_t line_height_percent,
     uint32_t dpi,
     int32_t antialiasing,
     ZigonautTextEngine** result) {
     if (font_family == nullptr || result == nullptr || font_size == 0 ||
         font_weight < 1 || font_weight > 999 || intense_font_weight < 1 ||
-        intense_font_weight > 999 || dpi == 0 ||
+        intense_font_weight > 999 || line_height_percent < 75 ||
+        line_height_percent > 200 || dpi == 0 ||
         (antialiasing != ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE &&
             antialiasing != ZIGONAUT_TEXT_AA_NATIVE_CLEARTYPE)) {
         return E_INVALIDARG;
@@ -2648,6 +2656,7 @@ extern "C" HRESULT zigonaut_text_engine_create(
     engine->font_size = font_size;
     engine->font_weight = static_cast<DWRITE_FONT_WEIGHT>(font_weight);
     engine->intense_font_weight = static_cast<DWRITE_FONT_WEIGHT>(intense_font_weight);
+    engine->line_height_percent = line_height_percent;
     engine->dpi = dpi;
     engine->text_antialiasing = static_cast<ZigonautTextAntialiasing>(antialiasing);
     const HRESULT hr = engine->initialize(font_family);
@@ -2677,7 +2686,7 @@ extern "C" HRESULT zigonaut_benchmark_layout_cache(
     *result = {};
     ZigonautTextEngine* engine = nullptr;
     HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 100, 96,
         ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
     if (FAILED(hr)) return hr;
 
@@ -2743,7 +2752,7 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     if (window == nullptr) return HRESULT_FROM_WIN32(GetLastError());
     ZigonautTextEngine* engine = nullptr;
     HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 100, 96,
         ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(engine,
         reinterpret_cast<uintptr_t>(window));
@@ -2980,7 +2989,7 @@ extern "C" HRESULT zigonaut_benchmark_directwrite_pipeline(
     ZigonautTextEngine* pipeline_engine = engine;
     ZigonautTextEngine* paced_engine = nullptr;
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_create(L"Consolas", 18,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 100, 96,
         ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &paced_engine);
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(paced_engine,
         reinterpret_cast<uintptr_t>(window));
@@ -3260,7 +3269,7 @@ extern "C" HRESULT zigonaut_test_damage_aware_transfer(
     if (window == nullptr) return HRESULT_FROM_WIN32(GetLastError());
     ZigonautTextEngine* engine = nullptr;
     HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 100, 96,
         ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(engine,
         reinterpret_cast<uintptr_t>(window));
@@ -3538,7 +3547,7 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
     HRESULT hr = S_OK;
 
     const auto create = [&](int32_t policy, ZigonautTextEngine** result) -> HRESULT {
-        HRESULT value = zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 96,
+        HRESULT value = zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 100, 96,
             policy, result);
         if (SUCCEEDED(value)) value = zigonaut_text_engine_set_window(*result,
             reinterpret_cast<uintptr_t>(window));
@@ -3883,9 +3892,9 @@ extern "C" HRESULT zigonaut_test_atlas_policy_and_faults() {
     if (FAILED(hr)) { DestroyWindow(window); return hr; }
 
     ZigonautTextEngine* invalid = nullptr;
-    if (SUCCEEDED(hr) && zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 96,
+    if (SUCCEEDED(hr) && zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 100, 96,
             -1, &invalid) != E_INVALIDARG) hr = E_FAIL;
-    if (SUCCEEDED(hr) && zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 96,
+    if (SUCCEEDED(hr) && zigonaut_text_engine_create(L"Consolas", 18, 400, 700, 100, 96,
             2, &invalid) != E_INVALIDARG) hr = E_FAIL;
 
     // Exhaustion is only setup; real rows request and real begin_frame calls consume resets.
@@ -3955,7 +3964,7 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     if (window == nullptr) return HRESULT_FROM_WIN32(GetLastError());
     ZigonautTextEngine* engine = nullptr;
     HRESULT hr = zigonaut_text_engine_create(L"Consolas", 18,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 96,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_BOLD, 100, 96,
         ZIGONAUT_TEXT_AA_ACCELERATED_GRAYSCALE, &engine);
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_set_window(engine,
         reinterpret_cast<uintptr_t>(window));

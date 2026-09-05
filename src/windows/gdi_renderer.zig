@@ -24,6 +24,7 @@ pub const Context = struct {
     runtime: ?*SessionRuntime,
     cell_width: u32,
     cell_height: u32,
+    text_offset_y: i32,
     columns: u16,
     rows: u16,
     focused: bool,
@@ -208,7 +209,7 @@ const CellRenderer = struct {
         _ = win.SetBkColor(self.dc, background);
         var wide: [32]u16 = undefined;
         const length = encodeUtf16(cell.codepoints, &wide);
-        _ = win.ExtTextOutW(self.dc, left, top, win.ETO_CLIPPED | win.ETO_OPAQUE, &rect, &wide, @intCast(length), null);
+        _ = win.ExtTextOutW(self.dc, left, top + self.context.text_offset_y, win.ETO_CLIPPED | win.ETO_OPAQUE, &rect, &wide, @intCast(length), null);
         const hovered = self.context.hover_row == cell.y and cell.x >= self.context.hover_start and cell.x < self.context.hover_end;
         if (cell.underline != 0 or hovered) {
             fill(self.dc, .{ .left = rect.left, .top = rect.bottom - 2, .right = rect.right, .bottom = rect.bottom - 1 }, decoration);

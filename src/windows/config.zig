@@ -6,7 +6,7 @@ pub const default_contents =
     \\{
     \\  "version": 1,
     \\  "appearance": {
-    \\    "font": { "family": "Cascadia Mono", "symbolFallbackFamily": "", "size": 18, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
+    \\    "font": { "family": "Cascadia Mono", "symbolFallbackFamily": "", "size": 18, "lineHeightPercent": 100, "weight": "regular", "intenseWeight": "bold", "intenseTextStyle": "all", "antialiasing": "acceleratedGrayscale" },
     \\    "themes": { "dark": "fluent-dark", "light": "fluent-light", "colorScheme": "system" },
     \\    "padding": { "horizontal": 8, "vertical": 8, "balance": "none", "color": "background" },
     \\    "background": { "opacity": 100, "opacityCells": false, "backdrop": "mica" },
@@ -90,6 +90,7 @@ const JsonConfig = struct {
             family: []const u8,
             symbolFallbackFamily: []const u8 = "",
             size: u16,
+            lineHeightPercent: u16 = 100,
             weight: FontWeight = .regular,
             intenseWeight: FontWeight = .bold,
             intenseTextStyle: IntenseTextStyle = .all,
@@ -146,6 +147,7 @@ pub const Config = struct {
     font_family: []const u8 = "Cascadia Mono",
     symbol_fallback_family: []const u8 = "",
     font_size: u16 = 18,
+    line_height_percent: u16 = 100,
     font_weight: FontWeight = .regular,
     intense_font_weight: FontWeight = .bold,
     intense_text_style: IntenseTextStyle = .all,
@@ -194,6 +196,7 @@ pub const Changes = struct {
 pub fn changes(previous: Config, next: Config) Changes {
     return .{
         .font = previous.font_size != next.font_size or
+            previous.line_height_percent != next.line_height_percent or
             previous.font_weight != next.font_weight or
             previous.intense_font_weight != next.intense_font_weight or
             previous.text_antialiasing != next.text_antialiasing or
@@ -324,6 +327,7 @@ fn configFromJson(json: JsonConfig) !Config {
     if (json.appearance.font.family.len == 0 or json.appearance.font.family.len >= 128 or !validWindowsText(json.appearance.font.family) or
         json.appearance.font.symbolFallbackFamily.len >= 128 or !validWindowsText(json.appearance.font.symbolFallbackFamily) or
         json.appearance.font.size < 6 or json.appearance.font.size > 72 or
+        json.appearance.font.lineHeightPercent < 75 or json.appearance.font.lineHeightPercent > 200 or
         json.terminal.scrollbackSize > 1_000_000 or
         json.terminal.initialSize.columns < 10 or json.terminal.initialSize.columns > 1000 or
         json.terminal.initialSize.rows < 4 or json.terminal.initialSize.rows > 1000 or
@@ -343,6 +347,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.font_family = json.appearance.font.family;
     result.symbol_fallback_family = json.appearance.font.symbolFallbackFamily;
     result.font_size = json.appearance.font.size;
+    result.line_height_percent = json.appearance.font.lineHeightPercent;
     result.font_weight = json.appearance.font.weight;
     result.intense_font_weight = json.appearance.font.intenseWeight;
     result.intense_text_style = json.appearance.font.intenseTextStyle;
@@ -436,6 +441,7 @@ test "configuration parses structured JSON" {
     try std.testing.expectEqualStrings("JetBrains Mono", value.font_family);
     try std.testing.expectEqualStrings("Symbols Nerd Font Mono", value.symbol_fallback_family);
     try std.testing.expectEqual(@as(u16, 14), value.font_size);
+    try std.testing.expectEqual(@as(u16, 100), value.line_height_percent);
     try std.testing.expectEqual(FontWeight.light, value.font_weight);
     try std.testing.expectEqual(FontWeight.semiBold, value.intense_font_weight);
     try std.testing.expectEqual(IntenseTextStyle.bright, value.intense_text_style);
@@ -508,6 +514,22 @@ test "font weights default for existing configurations" {
     const value = try configFromJson(parsed.value);
     try std.testing.expectEqual(FontWeight.regular, value.font_weight);
     try std.testing.expectEqual(FontWeight.bold, value.intense_font_weight);
+}
+
+test "line height defaults, validates, and triggers font reload" {
+    const legacy_contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, ", \"lineHeightPercent\": 100", "");
+    defer std.testing.allocator.free(legacy_contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u16, 100), (try configFromJson(parsed.value)).line_height_percent);
+
+    parsed.value.appearance.font.lineHeightPercent = 74;
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.appearance.font.lineHeightPercent = 201;
+    try std.testing.expectError(error.InvalidConfig, configFromJson(parsed.value));
+    parsed.value.appearance.font.lineHeightPercent = 125;
+    const changed = try configFromJson(parsed.value);
+    try std.testing.expect(changes(Config{}, changed).font);
 }
 
 test "intense text style defaults for existing configurations" {

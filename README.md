@@ -47,9 +47,13 @@ The application is written primarily in Zig, with a code-first C++/WinRT bridge 
 
 - Light, dark, and system color modes
 - Mica, acrylic, or opaque window backdrops
-- Configurable fonts, centered grid padding, edge-color extension, opacity, palettes, and working directory
+- Configurable fonts, line height, centered grid padding, edge-color extension, opacity, palettes, and working directory
 - Bundled Campbell, Campbell Light, Fluent Light, Fluent Dark, Ottosson Light, Ottosson Dark, Solarized Dark, and Rasmus themes
 - Full-window Fluent settings page with automatic saving
+
+Line height is adjustable from 75% to 200% under Appearance. The default, 100%,
+uses the font’s natural spacing; glyph size stays unchanged. Tight spacing can
+clip tall glyphs. Windows stores this as `appearance.font.lineHeightPercent`.
 
 ### Windows integration
 

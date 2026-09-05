@@ -86,8 +86,9 @@ pub const Engine = struct {
         builtin_thickness: u32,
     };
 
-    pub fn init(font_family: []const u8, symbol_fallback_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, dpi: u32, antialiasing: u32) !Engine {
+    pub fn init(font_family: []const u8, symbol_fallback_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, line_height_percent: u16, dpi: u32, antialiasing: u32) !Engine {
         if (antialiasing > 1) return error.InvalidTextAntialiasing;
+        if (line_height_percent < 75 or line_height_percent > 200) return error.InvalidLineHeight;
         var wide_name = [_]u16{0} ** 128;
         _ = @import("std").unicode.utf8ToUtf16Le(
             wide_name[0 .. wide_name.len - 1],
@@ -99,6 +100,7 @@ pub const Engine = struct {
             font_size,
             font_weight,
             intense_font_weight,
+            line_height_percent,
             dpi,
             @intCast(antialiasing),
             &handle,
@@ -497,8 +499,29 @@ test "damage-aware transfer stays coherent across rotating buffers" {
 }
 
 test "invalid numeric antialias policy is rejected before enum conversion" {
-    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 96, 2));
-    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 96, std.math.maxInt(u32)));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 100, 96, 2));
+    try std.testing.expectError(error.InvalidTextAntialiasing, Engine.init("Consolas", "", 18, 400, 700, 100, 96, std.math.maxInt(u32)));
+}
+
+test "invalid line height is rejected before native initialization" {
+    try std.testing.expectError(error.InvalidLineHeight, Engine.init("Consolas", "", 18, 400, 700, 74, 96, 0));
+    try std.testing.expectError(error.InvalidLineHeight, Engine.init("Consolas", "", 18, 400, 700, 201, 96, 0));
+}
+
+test "line height changes row geometry without widening glyph cells" {
+    var standard = try Engine.init("Consolas", "", 18, 400, 700, 100, 96, 0);
+    defer standard.deinit();
+    const natural = standard.metrics();
+    var loose = try Engine.init("Consolas", "", 18, 400, 700, 200, 96, 0);
+    defer loose.deinit();
+    try std.testing.expectEqual(natural.width, loose.metrics().width);
+    try std.testing.expectEqual(natural.height * 2, loose.metrics().height);
+    try std.testing.expect(loose.metrics().baseline > natural.baseline);
+    var tight = try Engine.init("Consolas", "", 18, 400, 700, 75, 96, 0);
+    defer tight.deinit();
+    try std.testing.expectEqual(natural.width, tight.metrics().width);
+    try std.testing.expect(tight.metrics().height < natural.height);
+    try std.testing.expect(tight.metrics().baseline < natural.baseline);
 }
 
 test "layout cache retains hot entries when crossing capacity" {

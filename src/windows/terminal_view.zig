@@ -389,6 +389,8 @@ pub const View = struct {
     key_runtimes: [std.enums.values(Terminal.Key).len]?*SessionRuntime = @splat(null),
     cell_width: u32,
     cell_height: u32,
+    line_height_percent: u16,
+    gdi_text_offset_y: i32,
     columns: u16 = 0,
     rows: u16 = 0,
     focused: bool = false,
@@ -471,6 +473,7 @@ pub const View = struct {
         font_size: u16,
         font_weight: u16,
         intense_font_weight: u16,
+        line_height_percent: u16,
         text_antialiasing: u32,
         dpi: u32,
         padding_horizontal: u16,
@@ -489,17 +492,22 @@ pub const View = struct {
         search_status_changed_message: win.UINT,
         chrome_message: win.UINT,
     ) View {
-        const text_engine = TextEngine.init(font_family, symbol_fallback_family, font_size, font_weight, intense_font_weight, dpi, text_antialiasing) catch null;
+        const text_engine = TextEngine.init(font_family, symbol_fallback_family, font_size, font_weight, intense_font_weight, line_height_percent, dpi, text_antialiasing) catch null;
         const cell_size = if (text_engine) |engine| size: {
             const metrics = engine.metrics();
             break :size CellSize{ .width = metrics.width, .height = metrics.height };
-        } else measureCell(parent, font);
+        } else measureCell(parent, font, line_height_percent);
         return .{
             .model = model,
             .font = font,
             .text_engine = text_engine,
             .cell_width = cell_size.width,
             .cell_height = cell_size.height,
+            .line_height_percent = line_height_percent,
+            .gdi_text_offset_y = if (line_height_percent == 100) 0 else @divTrunc(
+                @as(i32, @intCast(cell_size.height)) - @as(i32, @intCast(measureCell(parent, font, 100).height)),
+                2,
+            ),
             .padding_horizontal = padding_horizontal,
             .padding_vertical = padding_vertical,
             .balance_padding = padding_balance == .equal,
@@ -655,6 +663,7 @@ pub const View = struct {
     pub const PreparedReload = struct {
         engine: TextEngine,
         font: win.HFONT,
+        line_height_percent: u16,
 
         pub fn deinit(self: *PreparedReload) void {
             self.engine.deinit();
@@ -669,13 +678,14 @@ pub const View = struct {
         font_size: u16,
         font_weight: u16,
         intense_font_weight: u16,
+        line_height_percent: u16,
         text_antialiasing: u32,
         dpi: u32,
     ) !PreparedReload {
-        var engine = try TextEngine.init(font_family, symbol_fallback_family, font_size, font_weight, intense_font_weight, dpi, text_antialiasing);
+        var engine = try TextEngine.init(font_family, symbol_fallback_family, font_size, font_weight, intense_font_weight, line_height_percent, dpi, text_antialiasing);
         errdefer engine.deinit();
         try engine.setWindow(self.hwnd);
-        return .{ .engine = engine, .font = font };
+        return .{ .engine = engine, .font = font, .line_height_percent = line_height_percent };
     }
 
     pub fn commitReload(self: *View, prepared: PreparedReload) void {
@@ -685,6 +695,7 @@ pub const View = struct {
         self.renderer_failed = false;
         self.retained_scroll_offset = null;
         self.font = prepared.font;
+        self.line_height_percent = prepared.line_height_percent;
         self.updateCellSize(prepared.font);
     }
 
@@ -692,9 +703,15 @@ pub const View = struct {
         const cell_size = if (self.text_engine) |engine| size: {
             const metrics = engine.metrics();
             break :size CellSize{ .width = metrics.width, .height = metrics.height };
-        } else measureCell(self.hwnd, font);
+        } else measureCell(self.hwnd, font, self.line_height_percent);
         self.cell_width = cell_size.width;
         self.cell_height = cell_size.height;
+        // GDI may paint a failed DirectWrite scene without discarding its
+        // engine. Centre the GDI font in the actual grid in either case.
+        self.gdi_text_offset_y = if (self.line_height_percent == 100) 0 else @divTrunc(
+            @as(i32, @intCast(cell_size.height)) - @as(i32, @intCast(measureCell(self.hwnd, font, 100).height)),
+            2,
+        );
         self.columns = 0;
         self.rows = 0;
         self.resizeSessions();
@@ -1319,6 +1336,7 @@ pub const View = struct {
             .runtime = if (session) |active| active.runtime else null,
             .cell_width = self.cell_width,
             .cell_height = self.cell_height,
+            .text_offset_y = self.gdi_text_offset_y,
             .columns = self.columns,
             .rows = self.rows,
             .focused = self.focused,
@@ -2916,7 +2934,7 @@ fn calculateGridGeometry(
     };
 }
 
-fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
+fn measureCell(hwnd: win.HWND, font: win.HFONT, line_height_percent: u16) CellSize {
     const dc = win.GetDC(hwnd);
     if (dc == null) return .{ .width = 9, .height = 18 };
     defer _ = win.ReleaseDC(hwnd, dc);
@@ -2925,9 +2943,11 @@ fn measureCell(hwnd: win.HWND, font: win.HFONT) CellSize {
     defer _ = win.SelectObject(dc, previous);
     var metrics: win.TEXTMETRICW = undefined;
     if (win.GetTextMetricsW(dc, &metrics) == 0) return .{ .width = 9, .height = 18 };
+    const natural_height: u32 = @intCast(@max(metrics.tmHeight + metrics.tmExternalLeading, 1));
+    const adjusted_height: u32 = @max(1, @divTrunc(natural_height * @as(u32, line_height_percent) + 50, 100));
     return .{
         .width = @intCast(@max(metrics.tmAveCharWidth, 1)),
-        .height = @intCast(@max(metrics.tmHeight + metrics.tmExternalLeading, 1)),
+        .height = adjusted_height,
     };
 }
 

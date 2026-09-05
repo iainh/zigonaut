@@ -220,6 +220,7 @@ struct TerminalPalette: Equatable {
 
   @AppStorage("fontFamily") var fontFamily = defaultFontFamily
   @AppStorage("fontSize") var fontSize = 14.0
+  @AppStorage("lineHeightPercent") var lineHeightPercent = 100.0
   @AppStorage("paddingHorizontal") var paddingHorizontal = 8.0
   @AppStorage("paddingVertical") var paddingVertical = 8.0
   @AppStorage("paddingBalance") var paddingBalance = "Top Left"
@@ -364,6 +365,7 @@ struct TerminalPalette: Equatable {
   func restoreDefaults() {
     fontFamily = Self.defaultFontFamily
     fontSize = Self.defaultFontSize
+    lineHeightPercent = 100
     paddingHorizontal = Self.defaultPadding
     paddingVertical = Self.defaultPadding
     paddingBalance = "Top Left"

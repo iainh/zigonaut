@@ -168,6 +168,7 @@ HRESULT zigonaut_text_engine_create(
     uint32_t font_size,
     uint16_t font_weight,
     uint16_t intense_font_weight,
+    uint16_t line_height_percent,
     uint32_t dpi,
     int32_t antialiasing,
     ZigonautTextEngine** result);

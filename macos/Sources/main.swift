@@ -3,6 +3,7 @@ import Combine
 import SwiftUI
 @preconcurrency import UserNotifications
 import ZigonautPaneLayout
+import ZigonautRenderSupport
 import ZigonautRestoration
 
 private extension NSView {
@@ -409,7 +410,8 @@ final class Delegate: NSObject, NSApplicationDelegate, NSMenuItemValidation,
           ?? WindowModel(preferences: preferences)
         let font = preferences.terminalFont(size: preferences.fontSize)
         let cellWidth = ceil(("M" as NSString).size(withAttributes: [.font: font]).width)
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        let lineHeight = LineHeight(naturalHeight: font.ascender - font.descender + font.leading,
+            percent: preferences.lineHeightPercent).height
         let contentSize = NSSize(
             width: max(320, CGFloat(preferences.initialColumns) * cellWidth + 2 * preferences.paddingHorizontal),
             height: max(180, CGFloat(preferences.initialRows) * lineHeight + 2 * preferences.paddingVertical)

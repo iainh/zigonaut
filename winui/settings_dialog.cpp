@@ -129,6 +129,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["font_family"] = to_string(font.GetNamedString(L"family"));
     values["symbol_fallback_family"] = to_string(font.GetNamedString(L"symbolFallbackFamily", L""));
     values["font_size"] = number(font.GetNamedNumber(L"size"));
+    values["line_height_percent"] = number(font.GetNamedNumber(L"lineHeightPercent", 100));
     values["font_weight"] = to_string(font.GetNamedString(L"weight", L"regular"));
     values["intense_font_weight"] = to_string(font.GetNamedString(L"intenseWeight", L"bold"));
     values["intense_text_style"] = to_string(font.GetNamedString(L"intenseTextStyle", L"all"));
@@ -623,7 +624,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool updating_font_weights = false;
 
     ComboBox dark_theme{nullptr}, light_theme{nullptr}, font_family{nullptr}, symbol_fallback_family{nullptr}, font_weight{nullptr}, intense_font_weight{nullptr}, intense_text_style{nullptr}, text_antialiasing{nullptr};
-    NumberBox font_size{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
+    NumberBox font_size{nullptr}, line_height_percent{nullptr}, scrollback_size{nullptr}, initial_columns{nullptr}, initial_rows{nullptr}, padding_horizontal{nullptr}, padding_vertical{nullptr}, opacity{nullptr};
     ComboBox color_scheme{nullptr}, backdrop{nullptr}, padding_balance{nullptr}, padding_color{nullptr};
     ToggleSwitch random_background{nullptr}, opacity_cells{nullptr};
     std::vector<TextBox> colors;
@@ -807,6 +808,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto const style = value(values, "intense_text_style", "all");
         intense_text_style.SelectedIndex(style == "bold" ? 0 : style == "bright" ? 2 : 1);
         font_size = numberBox(value(values, "font_size", "18"), 18, 6, 72);
+        line_height_percent = numberBox(value(values, "line_height_percent", "100"), 100, 75, 200);
         text_antialiasing = combo("", {L"Accelerated grayscale (recommended)", L"Native ClearType"});
         text_antialiasing.SelectedIndex(value(values, "text_antialiasing", "acceleratedGrayscale") == "nativeClearType" ? 1 : 0);
 
@@ -821,6 +823,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         appendLabeled(font, L"Intense weight", intense_font_weight);
         appendLabeled(font, L"Intense text style", intense_text_style);
         appendLabeled(font, L"Size (points)", font_size);
+        appendLabeled(font, L"Line height (%)", line_height_percent);
         appendLabeled(font, L"Text antialiasing", text_antialiasing);
         return page(L"Appearance", L"Choose how Zigonaut and terminal sessions look.", {
             card(L"Application theme", L"Follow Windows or always use a light or dark color scheme.", color_scheme),
@@ -1291,6 +1294,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             return value;
         };
         auto const font_size_value = integer(font_size, 6, 72);
+        auto const line_height_percent_value = integer(line_height_percent, 75, 200);
         auto const scrollback_value = integer(scrollback_size, 0, 1000000);
         auto const columns_value = integer(initial_columns, 10, 1000);
         auto const rows_value = integer(initial_rows, 4, 1000);
@@ -1347,6 +1351,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         font.Insert(L"family", text(selected_font));
         font.Insert(L"symbolFallbackFamily", text(selected_symbol_fallback));
         font.Insert(L"size", number(font_size_value));
+        font.Insert(L"lineHeightPercent", number(line_height_percent_value));
         font.Insert(L"weight", text(selected_font_weight));
         font.Insert(L"intenseWeight", text(selected_intense_font_weight));
         font.Insert(L"intenseTextStyle", text(selected_intense_text_style));
@@ -1453,7 +1458,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         pipe_command.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {font_size, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
+        for (auto const& editor : {font_size, line_height_percent, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
             editor.ValueChanged(number_changed);
         auto selection_changed = [this](auto const&, auto const&) { save(); };
         color_scheme.SelectionChanged(selection_changed);

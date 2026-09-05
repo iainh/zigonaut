@@ -87,11 +87,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var hoveredLink: HoveredLink?
   private var cachedFontFamily = ""
   private var cachedFontSize = 0.0
+  private var cachedLineHeightPercent = 0.0
   private var cachedFontWeight = ""
   private var cachedIntenseFontWeight = ""
   private var cachedFonts: [UInt: NSFont] = [:]
   private var cachedCellWidth: CGFloat = 1
   private var cachedLineHeight: CGFloat = 1
+  private var textOffsetY: CGFloat = 0
   private var cachedFontAdvances: [UInt: CGFloat] = [:]
   private var clipboardEnabled: Bool?
   private var clipboardMaximumBytes = 0
@@ -138,12 +140,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   func updateFont() {
     guard cachedFontFamily != preferences.fontFamily || cachedFontSize != preferences.fontSize
+      || cachedLineHeightPercent != preferences.lineHeightPercent
       || cachedFontWeight != preferences.fontWeight
       || cachedIntenseFontWeight != preferences.intenseFontWeight else {
       return
     }
     cachedFontFamily = preferences.fontFamily
     cachedFontSize = preferences.fontSize
+    cachedLineHeightPercent = preferences.lineHeightPercent
     cachedFontWeight = preferences.fontWeight
     cachedIntenseFontWeight = preferences.intenseFontWeight
     cachedFonts.removeAll(keepingCapacity: true)
@@ -154,7 +158,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let base = preferences.terminalFont(size: preferences.fontSize)
     cachedFonts[0] = base
     cachedCellWidth = ceil(("M" as NSString).size(withAttributes: [.font: base]).width)
-    cachedLineHeight = ceil(base.ascender - base.descender + base.leading)
+    let metrics = LineHeight(naturalHeight: base.ascender - base.descender + base.leading,
+      percent: preferences.lineHeightPercent)
+    cachedLineHeight = metrics.height
+    textOffsetY = metrics.textOffset
   }
 
   private func styledFont(traits: NSFontTraitMask) -> NSFont {
@@ -1001,6 +1008,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let snapshot = model.renderSnapshot
     let appearance = [
       preferences.fontFamily, String(preferences.fontSize), preferences.fontWeight,
+      String(preferences.lineHeightPercent),
       preferences.intenseFontWeight, preferences.intenseTextStyle, String(preferences.paddingHorizontal),
       String(preferences.paddingVertical), preferences.paddingBalance, preferences.paddingColor,
       String(preferences.opacity), String(copyFlash),
@@ -1247,7 +1255,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let target = NSRect(x: 0, y: 0, width: CGFloat(key.columns) * cellWidth, height: lineHeight)
     NSBezierPath(rect: target).addClip()
     NSAttributedString(string: key.text, attributes: attributes).draw(
-      at: NSPoint(x: 0, y: font.ascender - glyphFont.ascender))
+      at: NSPoint(x: 0, y: textOffsetY + font.ascender - glyphFont.ascender))
     NSGraphicsContext.restoreGraphicsState()
     guard let image = bitmap.makeImage() else { return nil }
     return try? loader.newTexture(cgImage: image, options: [
@@ -1760,9 +1768,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
     let origin = NSPoint(
       x: originX + CGFloat(x) * cellWidth,
-      y: originY + CGFloat(y) * lineHeight + font.ascender - styledFont.ascender)
-    let target = NSRect(x: origin.x, y: origin.y, width: CGFloat(columns) * cellWidth,
-      height: max(lineHeight, styledFont.ascender - styledFont.descender + styledFont.leading))
+      y: originY + CGFloat(y) * lineHeight + textOffsetY + font.ascender - styledFont.ascender)
+    let target = NSRect(x: origin.x, y: originY + CGFloat(y) * lineHeight,
+      width: CGFloat(columns) * cellWidth, height: lineHeight)
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: target).addClip()
     NSAttributedString(string: text, attributes: attributes).draw(at: origin)
@@ -1773,7 +1781,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     guard markedText.length > 0 else { return }
     let point = NSPoint(
       x: originX + CGFloat(frame.cursorX) * cellWidth,
-      y: originY + CGFloat(frame.cursorY) * lineHeight)
+      y: originY + CGFloat(frame.cursorY) * lineHeight + textOffsetY)
     markedText.addAttributes(
       [
         .font: font, .foregroundColor: NSColor.textColor,
