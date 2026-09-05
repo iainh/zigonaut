@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) u8 {
     while (fd < descriptor_limit) : (fd += 1) _ = c.close(fd);
 
     if (c.getenv("TERM") == null and c.setenv("TERM", "xterm-256color", 0) != 0) return 71;
-    if (c.getenv("COLORTERM") == null and c.setenv("COLORTERM", "truecolor", 0) != 0) return 71;
+    if (c.setenv("COLORTERM", "truecolor", 1) != 0) return 71;
     if (c.setenv("TERM_PROGRAM", "Zigonaut", 1) != 0) return 71;
 
     configureZshIntegration(init.gpa, args.items[1], args.items[3]);

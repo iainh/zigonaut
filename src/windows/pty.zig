@@ -144,14 +144,18 @@ pub const Pty = struct {
         const current_directory = if (launch_directory.len == 0) null else try std.unicode.utf8ToUtf16LeAllocZ(allocator, launch_directory);
         defer if (current_directory) |directory| allocator.free(directory);
 
+        const inherited = win.GetEnvironmentStringsW() orelse return windowsError();
+        defer _ = win.FreeEnvironmentStringsW(inherited);
+        const environment = try terminalEnvironment(allocator, .{ .ptr = inherited });
+        defer environment.deinit(allocator);
         if (win.CreateProcessW(
             null,
             command_line.ptr,
             null,
             null,
             0,
-            win.EXTENDED_STARTUPINFO_PRESENT,
-            null,
+            win.EXTENDED_STARTUPINFO_PRESENT | win.CREATE_UNICODE_ENVIRONMENT,
+            @ptrCast(@constCast(environment.slice.ptr)),
             if (current_directory) |directory| directory.ptr else null,
             &startup.StartupInfo,
             &process_info,
@@ -244,6 +248,30 @@ pub const Pty = struct {
     }
 };
 
+fn terminalEnvironment(allocator: std.mem.Allocator, inherited: std.process.Environ.WindowsBlock.View) !std.process.Environ.WindowsBlock {
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.putWindowsBlock(inherited);
+    // Canonical spelling matters when WSL exports the Windows environment to
+    // case-sensitive Unix applications. Never mutate the host's environment.
+    _ = environment.swapRemove("COLORTERM");
+    try environment.put("COLORTERM", "truecolor");
+    var wslenv: std.ArrayList(u8) = .empty;
+    defer wslenv.deinit(allocator);
+    var entries = std.mem.splitScalar(u8, environment.get("WSLENV") orelse "", ':');
+    while (entries.next()) |entry| {
+        const name = entry[0 .. std.mem.indexOfScalar(u8, entry, '/') orelse entry.len];
+        if (entry.len == 0 or std.ascii.eqlIgnoreCase(name, "COLORTERM")) continue;
+        try wslenv.appendSlice(allocator, entry);
+        try wslenv.append(allocator, ':');
+    }
+    // Export as plain text only when entering WSL, not as a path/list and not
+    // back into Windows. Preserve all unrelated WSLENV entries and flags.
+    try wslenv.appendSlice(allocator, "COLORTERM/u");
+    try environment.put("WSLENV", wslenv.items);
+    return environment.createWindowsBlock(allocator, .{});
+}
+
 fn symbol(comptime T: type, module: win.HMODULE, name: [*:0]const u8) ?T {
     const address = win.GetProcAddress(module, name) orelse return null;
     return @ptrCast(address);
@@ -270,4 +298,30 @@ test "empty working directory defaults to the user profile" {
     try std.testing.expectEqualStrings("C:\\Users\\test", resolveWorkingDirectory("", "C:\\Users\\test"));
     try std.testing.expectEqualStrings("C:\\work", resolveWorkingDirectory("C:\\work", "C:\\Users\\test"));
     try std.testing.expectEqualStrings("", resolveWorkingDirectory("", ""));
+}
+
+test "terminal environment replaces stale colour capability and preserves WSL exports" {
+    const inherited = std.unicode.utf8ToUtf16LeStringLiteral("=C:=C:\\work\x00Path=C:\\工具\x00ColorTerm=256color\x00WSLENV=EDITOR/u:COLORTERM/pw:PROJECT/p:colorterm/l\x00");
+    const block = try terminalEnvironment(std.testing.allocator, .{ .ptr = inherited });
+    defer block.deinit(std.testing.allocator);
+    var parsed = std.process.Environ.Map.init(std.testing.allocator);
+    defer parsed.deinit();
+    try parsed.putWindowsBlock(block.view());
+    try std.testing.expectEqualStrings("truecolor", parsed.get("COLORTERM").?);
+    try std.testing.expectEqualStrings("EDITOR/u:PROJECT/p:COLORTERM/u", parsed.get("WSLENV").?);
+    try std.testing.expectEqualStrings("C:\\工具", parsed.get("Path").?);
+    try std.testing.expectEqualStrings("C:\\work", parsed.get("=C:").?);
+    try std.testing.expectEqual(@as(usize, 4), parsed.count());
+    try std.testing.expect(std.mem.indexOf(u16, block.slice, std.unicode.utf8ToUtf16LeStringLiteral("COLORTERM=truecolor")) != null);
+}
+
+test "terminal environment advertises true colour without inherited variables" {
+    const block = try terminalEnvironment(std.testing.allocator, .{ .ptr = &.{ 0, 0 } });
+    defer block.deinit(std.testing.allocator);
+    var parsed = std.process.Environ.Map.init(std.testing.allocator);
+    defer parsed.deinit();
+    try parsed.putWindowsBlock(block.view());
+    try std.testing.expectEqualStrings("truecolor", parsed.get("COLORTERM").?);
+    try std.testing.expectEqualStrings("COLORTERM/u", parsed.get("WSLENV").?);
+    try std.testing.expectEqual(@as(u16, 0), block.slice[block.slice.len - 1]);
 }

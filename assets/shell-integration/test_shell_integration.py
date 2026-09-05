@@ -51,6 +51,7 @@ def main() -> None:
                 TERM="xterm-256color",
             )
             if HELPER:
+                env["COLORTERM"] = "256color"
                 os.dup2(slave, 10)
                 os.close(fd)
                 os.close(slave)
@@ -70,6 +71,11 @@ def main() -> None:
             startup = read_until(fd, b"VISIBLE> ")
             assert b"\x1b]133;A\x07VISIBLE> \x1b]133;B\x07" in startup, repr(startup)
             assert startup.count(b"\x1b]133;A\x07") == 1
+
+            if HELPER:
+                os.write(fd, b"print -r -- $COLORTERM\n")
+                capability = read_until(fd, b"VISIBLE> ")
+                assert b"\x1b]133;C\x07truecolor\r\n" in capability, repr(capability)
 
             os.write(fd, b"print -r -- $ZDOTDIR; true\n")
             success = read_until(fd, b"VISIBLE> ")
