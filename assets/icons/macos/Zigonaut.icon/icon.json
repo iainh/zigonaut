@@ -1,56 +1,145 @@
 {
   "fill-specializations" : [
     {
-      "value" : "automatic"
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.28000,0.43000,0.58000,1.00000",
+          "srgb:0.06000,0.12000,0.22000,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.2,
+            "y" : 0
+          },
+          "stop" : {
+            "x" : 0.8,
+            "y" : 1
+          }
+        }
+      }
     },
     {
       "appearance" : "dark",
-      "value" : "automatic"
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.06000,0.20000,0.40000,1.00000",
+          "srgb:0.01000,0.03000,0.10000,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.2,
+            "y" : 0
+          },
+          "stop" : {
+            "x" : 0.8,
+            "y" : 1
+          }
+        }
+      }
     }
   ],
   "groups" : [
     {
-      "blur-material" : 0.12,
+      "blur-material" : 0,
       "layers" : [
         {
+          "blend-mode-specializations" : [
+            { "value" : "normal" },
+            { "appearance" : "tinted", "value" : "multiply" }
+          ],
+          "fill-specializations" : [
+            { "value" : "automatic" },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.04,1"
+              }
+            }
+          ],
           "glass" : true,
-          "image-name" : "01-helmet.png",
-          "name" : "Helmet"
+          "image-name" : "03-visor.svg",
+          "name" : "Blue optical coating",
+          "opacity-specializations" : [
+            {
+              "value" : 0.3
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.3
+            }
+          ]
         }
       ],
       "lighting" : "combined",
-      "name" : "Helmet",
+      "name" : "Glass visor",
+      "refractivity" : {
+        "enabled" : true,
+        "strength" : 0.25,
+        "depth" : 0.2
+      },
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.28
+        "opacity" : 0.08
       },
       "specular" : true,
+      "specular-highlight-placement" : "inside",
       "translucency" : {
         "enabled" : true,
-        "value" : 0.08
+        "value" : 0.8
       }
     },
     {
-      "blur-material" : 0.18,
+      "blur-material" : 0,
       "layers" : [
         {
-          "blend-mode" : "plus-lighter",
-          "glass" : true,
-          "hidden" : false,
-          "image-name" : "02-visor.png",
-          "name" : "Visor and terminal prompt"
+          "blend-mode-specializations" : [
+            { "value" : "normal" },
+            { "appearance" : "tinted", "value" : "plus-lighter" }
+          ],
+          "fill-specializations" : [
+            { "value" : "automatic" },
+            { "appearance" : "tinted", "value" : { "solid" : "extended-gray:1,1" } }
+          ],
+          "glass" : false,
+          "image-name" : "04-prompt.svg",
+          "name" : "Chevron and cursor"
         }
       ],
       "lighting" : "combined",
-      "name" : "Visor",
+      "name" : "Terminal display behind glass",
       "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.22
+        "kind" : "neutral",
+        "opacity" : 0
       },
-      "specular" : true,
+      "specular" : false,
       "translucency" : {
-        "enabled" : true,
-        "value" : 0.2
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "blur-material" : 0,
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "01-helmet.png",
+          "name" : "Detailed shell, seals and hardware"
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Cosmonaut pressure helmet",
+      "opacity-specializations" : [
+        { "value" : 1 },
+        { "appearance" : "dark", "value" : 0.9 }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.3
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
       }
     }
   ],
