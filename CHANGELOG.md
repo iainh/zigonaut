@@ -2,6 +2,29 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.9.0] - 2026-09-08
+
+### Added
+
+- Keyboard scrollback navigation on Windows and macOS, including compact Mac
+  keyboard equivalents.
+- Adjustable terminal line height from 75% to 200% in the native settings.
+- Liquid Glass app icons for macOS, with a distinct weathered variant for debug
+  builds.
+
+### Changed
+
+- Compressed idle macOS scrollback history in bounded background passes to reduce
+  memory use without interrupting active terminals.
+- Added compatibility with the Xcode 27 SDK and refined macOS app icon rendering.
+
+### Fixed
+
+- Advertised true-colour support reliably to child shells on Windows and macOS.
+- Rendered Kitty virtual image placements used by inline terminal images.
+- Used native macOS settings tabs and restored debug icon compilation with Xcode
+  26.
+
 ## [0.8.0] - 2026-08-24
 
 ### Added
@@ -282,6 +305,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.9.0]: https://github.com/iainh/zigonaut/releases/tag/v0.9.0
 [0.8.0]: https://github.com/iainh/zigonaut/releases/tag/v0.8.0
 [0.7.2]: https://github.com/iainh/zigonaut/releases/tag/v0.7.2
 [0.7.1]: https://github.com/iainh/zigonaut/releases/tag/v0.7.1
