@@ -172,17 +172,39 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
     @available(macOS 27.0, *)
     private func makeSettingsTabGroup(selectedPane: SettingsPane) -> NSToolbarItemGroup {
         let panes = SettingsPane.allCases
-        let images = panes.map {
-            NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.title)!
-        }
-        let group = NSToolbarItemGroup(itemIdentifier: Self.settingsTabsIdentifier, images: images,
-            selectionMode: .selectOne, labels: panes.map(\.title), target: self,
+        let group = NSToolbarItemGroup(itemIdentifier: Self.settingsTabsIdentifier,
+            images: panes.map(settingsTabImage), selectionMode: .selectOne, labels: nil, target: self,
             action: #selector(selectSettingsTab(_:)))
         group.controlRepresentation = .expanded
         // NSToolbarItemGroup.Role is not exposed by this SDK's Swift module yet.
         group.setValue(1, forKey: "role") // NSToolbarItemGroupRoleTabs
+        if let control = group.view as? NSSegmentedControl {
+            for (index, pane) in panes.enumerated() {
+                control.setToolTip(pane.title, forSegment: index)
+                control.setImageScaling(.scaleNone, forSegment: index)
+                control.setWidth(112, forSegment: index)
+            }
+        }
         group.selectedIndex = panes.firstIndex(of: selectedPane) ?? 0
         return group
+    }
+
+    private func settingsTabImage(_ pane: SettingsPane) -> NSImage {
+        let size = NSSize(width: 100, height: 42)
+        let symbol = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.title)!
+        let image = NSImage(size: size, flipped: false) { _ in
+            symbol.draw(in: NSRect(x: 41, y: 20, width: 18, height: 18))
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.labelColor,
+            ]
+            let titleSize = pane.title.size(withAttributes: attributes)
+            pane.title.draw(at: NSPoint(x: (size.width - titleSize.width) / 2, y: 2),
+                withAttributes: attributes)
+            return true
+        }
+        image.accessibilityDescription = pane.title
+        return image
     }
 
     private func resizeSettingsWindow(to size: NSSize) {
