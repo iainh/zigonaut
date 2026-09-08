@@ -12,6 +12,58 @@ const vt = @cImport({
 // Bound both encoded and decoded images. Terminal output is untrusted and can
 // otherwise make the process retain an unbounded amount of image data.
 const kitty_image_limit: usize = 32 * 1024 * 1024;
+const kitty_unicode_placeholder: u32 = 0x10EEEE;
+// Indexes in this protocol-defined table encode virtual image rows, columns,
+// and the high byte of a 32-bit image ID.
+const kitty_diacritics = [_]u32{
+    0x0305,  0x030D,  0x030E,  0x0310,  0x0312,  0x033D,  0x033E,  0x033F,
+    0x0346,  0x034A,  0x034B,  0x034C,  0x0350,  0x0351,  0x0352,  0x0357,
+    0x035B,  0x0363,  0x0364,  0x0365,  0x0366,  0x0367,  0x0368,  0x0369,
+    0x036A,  0x036B,  0x036C,  0x036D,  0x036E,  0x036F,  0x0483,  0x0484,
+    0x0485,  0x0486,  0x0487,  0x0592,  0x0593,  0x0594,  0x0595,  0x0597,
+    0x0598,  0x0599,  0x059C,  0x059D,  0x059E,  0x059F,  0x05A0,  0x05A1,
+    0x05A8,  0x05A9,  0x05AB,  0x05AC,  0x05AF,  0x05C4,  0x0610,  0x0611,
+    0x0612,  0x0613,  0x0614,  0x0615,  0x0616,  0x0617,  0x0657,  0x0658,
+    0x0659,  0x065A,  0x065B,  0x065D,  0x065E,  0x06D6,  0x06D7,  0x06D8,
+    0x06D9,  0x06DA,  0x06DB,  0x06DC,  0x06DF,  0x06E0,  0x06E1,  0x06E2,
+    0x06E4,  0x06E7,  0x06E8,  0x06EB,  0x06EC,  0x0730,  0x0732,  0x0733,
+    0x0735,  0x0736,  0x073A,  0x073D,  0x073F,  0x0740,  0x0741,  0x0743,
+    0x0745,  0x0747,  0x0749,  0x074A,  0x07EB,  0x07EC,  0x07ED,  0x07EE,
+    0x07EF,  0x07F0,  0x07F1,  0x07F3,  0x0816,  0x0817,  0x0818,  0x0819,
+    0x081B,  0x081C,  0x081D,  0x081E,  0x081F,  0x0820,  0x0821,  0x0822,
+    0x0823,  0x0825,  0x0826,  0x0827,  0x0829,  0x082A,  0x082B,  0x082C,
+    0x082D,  0x0951,  0x0953,  0x0954,  0x0F82,  0x0F83,  0x0F86,  0x0F87,
+    0x135D,  0x135E,  0x135F,  0x17DD,  0x193A,  0x1A17,  0x1A75,  0x1A76,
+    0x1A77,  0x1A78,  0x1A79,  0x1A7A,  0x1A7B,  0x1A7C,  0x1B6B,  0x1B6D,
+    0x1B6E,  0x1B6F,  0x1B70,  0x1B71,  0x1B72,  0x1B73,  0x1CD0,  0x1CD1,
+    0x1CD2,  0x1CDA,  0x1CDB,  0x1CE0,  0x1DC0,  0x1DC1,  0x1DC3,  0x1DC4,
+    0x1DC5,  0x1DC6,  0x1DC7,  0x1DC8,  0x1DC9,  0x1DCB,  0x1DCC,  0x1DD1,
+    0x1DD2,  0x1DD3,  0x1DD4,  0x1DD5,  0x1DD6,  0x1DD7,  0x1DD8,  0x1DD9,
+    0x1DDA,  0x1DDB,  0x1DDC,  0x1DDD,  0x1DDE,  0x1DDF,  0x1DE0,  0x1DE1,
+    0x1DE2,  0x1DE3,  0x1DE4,  0x1DE5,  0x1DE6,  0x1DFE,  0x20D0,  0x20D1,
+    0x20D4,  0x20D5,  0x20D6,  0x20D7,  0x20DB,  0x20DC,  0x20E1,  0x20E7,
+    0x20E9,  0x20F0,  0x2CEF,  0x2CF0,  0x2CF1,  0x2DE0,  0x2DE1,  0x2DE2,
+    0x2DE3,  0x2DE4,  0x2DE5,  0x2DE6,  0x2DE7,  0x2DE8,  0x2DE9,  0x2DEA,
+    0x2DEB,  0x2DEC,  0x2DED,  0x2DEE,  0x2DEF,  0x2DF0,  0x2DF1,  0x2DF2,
+    0x2DF3,  0x2DF4,  0x2DF5,  0x2DF6,  0x2DF7,  0x2DF8,  0x2DF9,  0x2DFA,
+    0x2DFB,  0x2DFC,  0x2DFD,  0x2DFE,  0x2DFF,  0xA66F,  0xA67C,  0xA67D,
+    0xA6F0,  0xA6F1,  0xA8E0,  0xA8E1,  0xA8E2,  0xA8E3,  0xA8E4,  0xA8E5,
+    0xA8E6,  0xA8E7,  0xA8E8,  0xA8E9,  0xA8EA,  0xA8EB,  0xA8EC,  0xA8ED,
+    0xA8EE,  0xA8EF,  0xA8F0,  0xA8F1,  0xAAB0,  0xAAB2,  0xAAB3,  0xAAB7,
+    0xAAB8,  0xAABE,  0xAABF,  0xAAC1,  0xFE20,  0xFE21,  0xFE22,  0xFE23,
+    0xFE24,  0xFE25,  0xFE26,  0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
+    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243,
+    0x1D244,
+};
+
+fn kittyDiacriticIndex(codepoint: u32) ?u32 {
+    const index = std.sort.binarySearch(u32, &kitty_diacritics, codepoint, (struct {
+        fn compare(context: u32, item: u32) std.math.Order {
+            return std.math.order(context, item);
+        }
+    }).compare) orelse return null;
+    return @intCast(index);
+}
 // Keep libghostty's upstream default allocation ceiling alongside Zigonaut's
 // user-configurable line limit. A line limit alone does not bound style,
 // grapheme, hyperlink, and other page-owned allocations.
@@ -98,6 +150,7 @@ pub const Terminal = struct {
         selected: bool,
         background_is_default: bool = false,
         background_matches_default: bool = false,
+        underline_color_is_default: bool = false,
         powerline: bool = false,
     };
 
@@ -219,6 +272,19 @@ pub const Terminal = struct {
             z: i32,
         };
 
+        const VirtualPlacement = struct {
+            image_index: usize,
+            image_id: u32,
+            placement_id: u32,
+            source_x: u32,
+            source_y: u32,
+            source_width: u32,
+            source_height: u32,
+            grid_cols: u32,
+            grid_rows: u32,
+            z: i32,
+        };
+
         const Row = struct {
             graphemes: std.ArrayList(u32) = .empty,
             dirty: bool = false,
@@ -235,8 +301,9 @@ pub const Terminal = struct {
             extension_flags: packed struct(u8) {
                 background_is_default: bool,
                 background_matches_default: bool,
+                underline_color_is_default: bool,
                 powerline: bool,
-                reserved: u5 = 0,
+                reserved: u4 = 0,
             },
             attributes: packed struct(u16) {
                 occupancy: u2,
@@ -260,6 +327,7 @@ pub const Terminal = struct {
                     .extension_flags = .{
                         .background_is_default = cell.background_is_default,
                         .background_matches_default = cell.background_matches_default,
+                        .underline_color_is_default = cell.underline_color_is_default,
                         .powerline = cell.powerline,
                     },
                     .attributes = .{
@@ -280,11 +348,15 @@ pub const Terminal = struct {
             }
 
             fn value(self: *const OwnedCell, row: *const Row, x: u16, y: u16) Cell {
+                const stored_codepoints = self.codepoints(row);
                 return .{
                     .x = x,
                     .y = y,
                     .occupancy = @enumFromInt(self.attributes.occupancy),
-                    .codepoints = self.codepoints(row),
+                    .codepoints = if (stored_codepoints.len > 0 and stored_codepoints[0] == kitty_unicode_placeholder)
+                        stored_codepoints[0..0]
+                    else
+                        stored_codepoints,
                     .foreground = self.foreground,
                     .background = self.background,
                     .underline_color = self.underline_color,
@@ -297,6 +369,7 @@ pub const Terminal = struct {
                     .selected = self.attributes.selected,
                     .background_is_default = self.extension_flags.background_is_default,
                     .background_matches_default = self.extension_flags.background_matches_default,
+                    .underline_color_is_default = self.extension_flags.underline_color_is_default,
                     .powerline = self.extension_flags.powerline,
                 };
             }
@@ -512,6 +585,8 @@ pub const Terminal = struct {
         fn captureImages(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
             self.clearImages(allocator);
             errdefer self.clearImages(allocator);
+            var virtual_placements: std.ArrayList(VirtualPlacement) = .empty;
+            defer virtual_placements.deinit(allocator);
             var graphics: vt.GhosttyKittyGraphics = null;
             if (vt.ghostty_terminal_get(terminal.terminal, vt.GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, @ptrCast(&graphics)) != vt.GHOSTTY_SUCCESS or graphics == null) return;
             var iterator: vt.GhosttyKittyGraphicsPlacementIterator = null;
@@ -527,9 +602,9 @@ pub const Terminal = struct {
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID, &image_id));
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL, &virtual));
                 try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z, &z));
-                // Virtual placements are references only. Negative-z images
-                // must be behind text, but this renderer composites after text.
-                if (virtual or z < 0) continue;
+                // Negative-z images must be behind text, but this renderer
+                // composites after text.
+                if (z < 0) continue;
                 _ = vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET, &x_offset);
                 _ = vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET, &y_offset);
                 const handle = vt.ghostty_kitty_graphics_image(graphics, image_id) orelse continue;
@@ -549,7 +624,8 @@ pub const Terminal = struct {
                 if (format != vt.GHOSTTY_KITTY_IMAGE_FORMAT_RGBA or expected != data_len or data_len > kitty_image_limit or data_ptr == null) continue;
                 var info: vt.GhosttyKittyGraphicsPlacementRenderInfo = std.mem.zeroes(vt.GhosttyKittyGraphicsPlacementRenderInfo);
                 info.size = @sizeOf(vt.GhosttyKittyGraphicsPlacementRenderInfo);
-                if (vt.ghostty_kitty_graphics_placement_render_info(iterator, handle, terminal.terminal, &info) != vt.GHOSTTY_SUCCESS or !info.viewport_visible) continue;
+                if (vt.ghostty_kitty_graphics_placement_render_info(iterator, handle, terminal.terminal, &info) != vt.GHOSTTY_SUCCESS) continue;
+                if (!virtual and !info.viewport_visible) continue;
                 if (info.source_x > width or info.source_y > height or info.source_width > width - info.source_x or info.source_height > height - info.source_y) continue;
                 var image_index: ?usize = null;
                 for (self.images.items, 0..) |image, index| {
@@ -572,6 +648,23 @@ pub const Terminal = struct {
                     };
                     image_index = self.images.items.len - 1;
                 }
+                if (virtual) {
+                    var placement_id: u32 = 0;
+                    try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID, &placement_id));
+                    try virtual_placements.append(allocator, .{
+                        .image_index = image_index.?,
+                        .image_id = image_id,
+                        .placement_id = placement_id,
+                        .source_x = info.source_x,
+                        .source_y = info.source_y,
+                        .source_width = info.source_width,
+                        .source_height = info.source_height,
+                        .grid_cols = info.grid_cols,
+                        .grid_rows = info.grid_rows,
+                        .z = z,
+                    });
+                    continue;
+                }
                 try self.placements.append(allocator, .{
                     .image_index = image_index.?,
                     .image_id = image_id,
@@ -588,9 +681,113 @@ pub const Terminal = struct {
                     .z = z,
                 });
             }
+            try self.captureVirtualPlacements(allocator, terminal, virtual_placements.items);
             // libghostty's placement iterator is hash ordered, which is not a
             // stable compositing order. Keep equal-z images deterministic too.
             sortPlacements(self.placements.items);
+        }
+
+        fn captureVirtualPlacements(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal, virtual_placements: []const VirtualPlacement) !void {
+            if (virtual_placements.len == 0) return;
+            var width_px: u32 = 0;
+            var height_px: u32 = 0;
+            try check(vt.ghostty_terminal_get(terminal.terminal, vt.GHOSTTY_TERMINAL_DATA_WIDTH_PX, &width_px));
+            try check(vt.ghostty_terminal_get(terminal.terminal, vt.GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &height_px));
+            if (terminal.columns == 0 or terminal.rows == 0) return;
+            const cell_width = width_px / terminal.columns;
+            const cell_height = height_px / terminal.rows;
+            if (cell_width == 0 or cell_height == 0) return;
+
+            const column_count = self.columns();
+            for (self.rows.items, 0..) |*row, y| {
+                var previous: ?struct { image_id: u32, row: u32, col: u32 } = null;
+                for (self.cells.items[y * column_count ..][0..column_count], 0..) |*cell, x| {
+                    const codepoints = cell.codepoints(row);
+                    if (codepoints.len == 0 or codepoints[0] != kitty_unicode_placeholder) {
+                        previous = null;
+                        continue;
+                    }
+                    var image_id = colorId(cell.foreground);
+                    if (codepoints.len > 3) {
+                        const high = kittyDiacriticIndex(codepoints[3]) orelse continue;
+                        if (high > std.math.maxInt(u8)) continue;
+                        image_id |= high << 24;
+                    }
+                    const placement_id = if (cell.extension_flags.underline_color_is_default) 0 else colorId(cell.underline_color);
+                    const metadata = findVirtualPlacement(virtual_placements, image_id, placement_id) orelse continue;
+                    const image_row = if (codepoints.len > 1)
+                        kittyDiacriticIndex(codepoints[1]) orelse continue
+                    else if (previous) |value| if (value.image_id == image_id) value.row else 0 else 0;
+                    const image_col = if (codepoints.len > 2)
+                        kittyDiacriticIndex(codepoints[2]) orelse continue
+                    else if (previous) |value| if (value.image_id == image_id and value.row == image_row) value.col + 1 else 0 else 0;
+                    previous = .{ .image_id = image_id, .row = image_row, .col = image_col };
+                    try self.appendVirtualPlacement(allocator, metadata, @intCast(x), @intCast(y), image_col, image_row, cell_width, cell_height);
+                }
+            }
+        }
+
+        fn appendVirtualPlacement(self: *RenderSnapshot, allocator: std.mem.Allocator, metadata: VirtualPlacement, viewport_col: i32, viewport_row: i32, image_col: u32, image_row: u32, cell_width: u32, cell_height: u32) !void {
+            if (metadata.grid_cols == 0 or metadata.grid_rows == 0 or metadata.source_width == 0 or metadata.source_height == 0 or
+                image_col >= metadata.grid_cols or image_row >= metadata.grid_rows) return;
+            const box_width = std.math.mul(u32, metadata.grid_cols, cell_width) catch return;
+            const box_height = std.math.mul(u32, metadata.grid_rows, cell_height) catch return;
+            const fitted = fitImage(metadata.source_width, metadata.source_height, box_width, box_height);
+            const image_left = (box_width - fitted.width) / 2;
+            const image_top = (box_height - fitted.height) / 2;
+            const cell_left = std.math.mul(u32, image_col, cell_width) catch return;
+            const cell_top = std.math.mul(u32, image_row, cell_height) catch return;
+            const left = @max(cell_left, image_left);
+            const top = @max(cell_top, image_top);
+            const right = @min(cell_left + cell_width, image_left + fitted.width);
+            const bottom = @min(cell_top + cell_height, image_top + fitted.height);
+            if (right <= left or bottom <= top) return;
+            const source_left = scaledCoordinate(left - image_left, metadata.source_width, fitted.width);
+            const source_top = scaledCoordinate(top - image_top, metadata.source_height, fitted.height);
+            const source_right = scaledCoordinate(right - image_left, metadata.source_width, fitted.width);
+            const source_bottom = scaledCoordinate(bottom - image_top, metadata.source_height, fitted.height);
+            if (source_right <= source_left or source_bottom <= source_top) return;
+            try self.placements.append(allocator, .{
+                .image_index = metadata.image_index,
+                .image_id = metadata.image_id,
+                .source_x = metadata.source_x + source_left,
+                .source_y = metadata.source_y + source_top,
+                .source_width = source_right - source_left,
+                .source_height = source_bottom - source_top,
+                .pixel_width = right - left,
+                .pixel_height = bottom - top,
+                .viewport_col = viewport_col,
+                .viewport_row = viewport_row,
+                .x_offset = left - cell_left,
+                .y_offset = top - cell_top,
+                .z = metadata.z,
+            });
+        }
+
+        fn findVirtualPlacement(placements_to_search: []const VirtualPlacement, image_id: u32, placement_id: u32) ?VirtualPlacement {
+            for (placements_to_search) |placement| {
+                if (placement.image_id == image_id and (placement.placement_id == placement_id or placement_id == 0)) return placement;
+            }
+            return null;
+        }
+
+        fn colorId(color: theme.Color) u32 {
+            return (@as(u32, color.red) << 16) | (@as(u32, color.green) << 8) | color.blue;
+        }
+
+        fn scaledCoordinate(position: u32, source_size: u32, destination_size: u32) u32 {
+            return @intCast((@as(u64, position) * source_size + destination_size / 2) / destination_size);
+        }
+
+        fn fitImage(source_width: u32, source_height: u32, box_width: u32, box_height: u32) struct { width: u32, height: u32 } {
+            if (@as(u64, source_width) * box_height > @as(u64, source_height) * box_width) return .{
+                .width = box_width,
+                .height = @intCast(@max(1, (@as(u64, source_height) * box_width + source_width / 2) / source_width)),
+            };
+            return .{
+                .width = @intCast(@max(1, (@as(u64, source_width) * box_height + source_height / 2) / source_height)),
+                .height = box_height,
+            };
         }
 
         fn sortPlacements(placements_to_sort: []Placement) void {
@@ -1761,6 +1958,7 @@ pub const Terminal = struct {
                     .selected = has_selection and x >= selection.start_x and x <= selection.end_x,
                     .background_is_default = background_is_default,
                     .background_matches_default = background_matches_default,
+                    .underline_color_is_default = style.underline_color.tag == vt.GHOSTTY_STYLE_COLOR_NONE,
                     .powerline = codepoint_count <= codepoints.len and count != 0 and isPowerline(codepoints[0]),
                 });
                 if (comptime @TypeOf(draw_result) != void) try draw_result;
@@ -3245,6 +3443,63 @@ test "Kitty placements sort by z then image ID" {
     try std.testing.expectEqual(@as(i32, 1), placements[0].z);
     try std.testing.expectEqual(@as(u32, 3), placements[1].image_id);
     try std.testing.expectEqual(@as(u32, 4), placements[2].image_id);
+}
+
+test "render snapshots resolve Kitty Unicode placeholders" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(4, 2, 8, 16);
+    terminal.feed("\x1b_Gf=32,s=1,v=1,a=t,i=1;/wAA/w==\x1b\\");
+    terminal.feed("\x1b_Ga=p,i=1,U=1,c=1,r=1\x1b\\");
+    terminal.feed("\x1b[38;2;0;0;1m\xf4\x8e\xbb\xae\xcc\x85\xcc\x85\x1b[39m");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.placements.items.len);
+    const image = snapshot.images.items[0];
+    const placement = snapshot.placements.items[0];
+    try std.testing.expectEqual(@as(u32, 1), image.image_id);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.pixels);
+    try std.testing.expectEqual(@as(i32, 0), placement.viewport_col);
+    try std.testing.expectEqual(@as(i32, 0), placement.viewport_row);
+    try std.testing.expectEqual(@as(u32, 1), placement.source_width);
+    try std.testing.expectEqual(@as(u32, 1), placement.source_height);
+    try std.testing.expectEqual(@as(u32, 8), placement.pixel_width);
+    try std.testing.expectEqual(@as(u32, 8), placement.pixel_height);
+    try std.testing.expectEqual(@as(u32, 0), placement.x_offset);
+    try std.testing.expectEqual(@as(u32, 4), placement.y_offset);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.cells.items[0].value(&snapshot.rows.items[0], 0, 0).codepoints.len);
+}
+
+test "Kitty Unicode placeholders resolve 32-bit image and placement IDs across cells" {
+    var terminal = try Terminal.init(4, 3, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(4, 3, 8, 16);
+    terminal.feed("\x1b_Gf=32,s=4,v=2,a=t,i=16777217;/wAA/wD/AP8AAP//////////AP8A/////wD//wAAAP8=\x1b\\");
+    terminal.feed("\x1b_Ga=p,i=16777217,p=2,U=1,c=2,r=2\x1b\\");
+    terminal.feed("\x1b[38;2;0;0;1;58;2;0;0;2m");
+    terminal.feed("\xf4\x8e\xbb\xae\xcc\x85\xcc\x85\xcc\x8d\xf4\x8e\xbb\xae\xcc\x85\xcc\x8d\xcc\x8d\r\n");
+    terminal.feed("\xf4\x8e\xbb\xae\xcc\x8d\xcc\x85\xcc\x8d\xf4\x8e\xbb\xae\xcc\x8d\xcc\x8d\xcc\x8d\x1b[39;59m");
+
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(u32, 16_777_217), snapshot.images.items[0].image_id);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.placements.items.len);
+    for (snapshot.placements.items, 0..) |placement, index| {
+        try std.testing.expectEqual(@as(u32, 2), placement.source_width);
+        try std.testing.expectEqual(@as(u32, 1), placement.source_height);
+        try std.testing.expectEqual(@as(u32, 8), placement.pixel_width);
+        try std.testing.expectEqual(@as(u32, 4), placement.pixel_height);
+        try std.testing.expectEqual(@as(i32, @intCast(index % 2)), placement.viewport_col);
+        try std.testing.expectEqual(@as(i32, @intCast(index / 2)), placement.viewport_row);
+        try std.testing.expectEqual(@as(u32, if (index < 2) 12 else 0), placement.y_offset);
+    }
 }
 
 test "render snapshots preserve clean rows during incremental capture" {
