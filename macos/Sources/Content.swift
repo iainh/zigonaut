@@ -357,7 +357,7 @@ enum SettingsPane: String, CaseIterable {
 
   var contentSize: NSSize {
     switch self {
-    case .appearance: NSSize(width: 680, height: 570)
+    case .appearance: NSSize(width: 760, height: 700)
     case .terminal: NSSize(width: 700, height: 560)
     case .advanced: NSSize(width: 680, height: 440)
     }
@@ -415,14 +415,16 @@ struct SettingsView: View {
 
   private var appearance: some View {
     VStack(alignment: .leading, spacing: 20) {
-      TerminalAppearancePreview(preferences: preferences)
       Form {
-        Section("Window") {
-          Picker("Colour scheme", selection: $preferences.colourScheme) {
-            ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+        Section("Appearance") {
+          LabeledContent("Colour scheme") {
+            Picker("Colour scheme", selection: $preferences.colourScheme) {
+              ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 240)
           }
-          .pickerStyle(.segmented)
-          .frame(width: 240)
           Picker("Material", selection: $preferences.windowMaterial) {
             Text("Standard").tag("Window")
             Text("Translucent").tag("Under Window")
@@ -439,15 +441,22 @@ struct SettingsView: View {
             }
           }
         }
-        Section("Terminal theme") {
-          Picker("Dark appearance", selection: $preferences.darkTerminalTheme) {
-            ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
-          }
-          Picker("Light appearance", selection: $preferences.lightTerminalTheme) {
-            ForEach(Preferences.themeNames, id: \.self) { Text(themeTitle($0)).tag($0) }
-          }
-          Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
-        }
+      }
+      .formStyle(.columns)
+      VStack(alignment: .leading, spacing: 14) {
+        Text("Terminal themes")
+          .font(.headline)
+        ThemePicker(
+          title: "Light theme",
+          themes: themes(dark: false, including: preferences.lightTerminalTheme),
+          selection: $preferences.lightTerminalTheme)
+        ThemePicker(
+          title: "Dark theme",
+          themes: themes(dark: true, including: preferences.darkTerminalTheme),
+          selection: $preferences.darkTerminalTheme)
+        Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
+      }
+      Form {
         Section("Typography") {
           Picker("Typeface", selection: $preferences.fontFamily) {
             ForEach(fontFamilies, id: \.self) { Text($0) }
@@ -612,8 +621,10 @@ struct SettingsView: View {
     return [Preferences.defaultFontFamily] + selected.filter { $0 != Preferences.defaultFontFamily } + installed
   }
 
-  private func themeTitle(_ name: String) -> String {
-    name.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+  private func themes(dark: Bool, including selected: String) -> [String] {
+    Preferences.themeNames.filter {
+      $0 == selected || TerminalPalette.load($0).isDark == dark
+    }
   }
 
   private func chooseShell() {
@@ -677,20 +688,38 @@ private struct SettingsNote: View {
   }
 }
 
-private struct TerminalAppearancePreview: View {
-  @ObservedObject var preferences: Preferences
-  @Environment(\.colorScheme) private var systemColourScheme
+private struct ThemePicker: View {
+  let title: String
+  let themes: [String]
+  @Binding var selection: String
 
-  private var isDark: Bool {
-    switch preferences.colourScheme {
-    case "Light": false
-    case "Dark": true
-    default: systemColourScheme == .dark
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(title)
+        .font(.body)
+      ScrollView(.horizontal) {
+        HStack(alignment: .top, spacing: 12) {
+          ForEach(themes, id: \.self) { theme in
+            ThemePreviewCard(name: theme, isSelected: selection == theme) {
+              selection = theme
+            }
+          }
+        }
+        .padding(3)
+      }
+      .scrollIndicators(.hidden)
     }
   }
+}
 
-  private var palette: TerminalPalette {
-    preferences.terminalPalette(dark: isDark, seed: 0)
+private struct ThemePreviewCard: View {
+  let name: String
+  let isSelected: Bool
+  let select: () -> Void
+
+  private var palette: TerminalPalette { TerminalPalette.load(name) }
+  private var title: String {
+    name.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
   }
 
   private func colour(_ value: UInt32) -> Color {
@@ -698,51 +727,51 @@ private struct TerminalAppearancePreview: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      HStack(spacing: 7) {
-        Circle().fill(.red.opacity(0.85))
-          .frame(width: 10, height: 10)
-        Circle().fill(.yellow.opacity(0.85))
-          .frame(width: 10, height: 10)
-        Circle().fill(.green.opacity(0.85))
-          .frame(width: 10, height: 10)
-        Spacer()
-        Text("Preview")
-          .font(.caption.weight(.medium))
-          .foregroundStyle(colour(palette.foreground).opacity(0.6))
-        Spacer()
-        Color.clear.frame(width: 35)
-      }
-      .frame(height: 30)
-      .padding(.horizontal, 12)
-      Divider().overlay(colour(palette.foreground).opacity(0.12))
-      VStack(alignment: .leading, spacing: 5) {
-        Text("Last login: today on ttys001")
-          .foregroundStyle(colour(palette.foreground).opacity(0.65))
-        HStack(spacing: 0) {
-          Text("~/Projects/zigonaut ").foregroundStyle(colour(palette.ansi[4]))
-          Text("git:").foregroundStyle(colour(palette.foreground).opacity(0.65))
-          Text("main ").foregroundStyle(colour(palette.ansi[5]))
-          Text("❯ ").foregroundStyle(colour(palette.ansi[2]))
-          Text("zig build")
+    Button(action: select) {
+      VStack(spacing: 7) {
+        VStack(spacing: 8) {
+          HStack(alignment: .center) {
+            Text("Aa")
+              .font(.system(size: 23, weight: .medium, design: .rounded))
+            Spacer()
+            Text("~/")
+              .font(.system(size: 15, weight: .semibold, design: .monospaced))
+              .padding(.horizontal, 6)
+              .padding(.vertical, 4)
+              .background(colour(palette.foreground).opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+            RoundedRectangle(cornerRadius: 4)
+              .fill(colour(palette.cursor))
+              .frame(width: 12, height: 28)
+          }
+          HStack(spacing: -2) {
+            ForEach(0..<8, id: \.self) { index in
+              Circle()
+                .fill(colour(palette.ansi[index]))
+                .frame(width: 18, height: 18)
+                .overlay(Circle().stroke(colour(palette.background), lineWidth: 2))
+            }
+          }
         }
-        Text("Build completed successfully")
-          .foregroundStyle(colour(palette.ansi[2]))
+        .foregroundStyle(colour(palette.foreground))
+        .padding(10)
+        .frame(width: 154, height: 82)
+        .background(colour(palette.background), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+          RoundedRectangle(cornerRadius: 10)
+            .stroke(isSelected ? Color.accentColor : .primary.opacity(0.16),
+              lineWidth: isSelected ? 3 : 1)
+        }
+        Text(title)
+          .font(.caption.weight(isSelected ? .semibold : .regular))
+          .foregroundStyle(isSelected ? .primary : .secondary)
+          .lineLimit(1)
+          .frame(width: 154)
       }
-      .font(Font(preferences.terminalFont(size: min(preferences.fontSize, 15))))
-      .foregroundStyle(colour(palette.foreground))
-      .padding(14)
-      .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+      .contentShape(Rectangle())
     }
-    .background(colour(palette.background).opacity(preferences.opacity))
-    .clipShape(RoundedRectangle(cornerRadius: 9))
-    .overlay {
-      RoundedRectangle(cornerRadius: 9)
-        .stroke(.primary.opacity(0.14), lineWidth: 1)
-    }
-    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Terminal appearance preview")
+    .buttonStyle(.plain)
+    .accessibilityLabel("\(title) theme")
+    .accessibilityAddTraits(isSelected ? .isSelected : [])
   }
 }
 

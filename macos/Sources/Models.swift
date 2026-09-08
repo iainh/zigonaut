@@ -171,6 +171,13 @@ struct TerminalPalette: Equatable {
   var cursor: UInt32
   var ansi: [UInt32]
 
+  var isDark: Bool {
+    let red = Double((background >> 16) & 0xff) / 255
+    let green = Double((background >> 8) & 0xff) / 255
+    let blue = Double(background & 0xff) / 255
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.5
+  }
+
   static let rasmus = TerminalPalette(
     foreground: 0xd1d1d1, background: 0x1a1a19, cursor: 0xd1d1d1,
     ansi: [0x333332, 0xff968c, 0x61957f, 0xffc591, 0x8db4d4, 0xde9bc8, 0x7bb099, 0xd1d1d1,
