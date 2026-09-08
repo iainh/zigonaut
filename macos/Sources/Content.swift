@@ -414,10 +414,10 @@ struct SettingsView: View {
   }
 
   private var appearance: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      Form {
-        Section("Appearance") {
-          LabeledContent("Colour scheme") {
+    VStack(alignment: .leading, spacing: 24) {
+      SettingsCard {
+        VStack(alignment: .leading, spacing: 0) {
+          SettingsRow("Colour scheme") {
             Picker("Colour scheme", selection: $preferences.colourScheme) {
               ForEach(["System", "Light", "Dark"], id: \.self) { Text($0) }
             }
@@ -425,76 +425,103 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .frame(width: 240)
           }
-          Picker("Material", selection: $preferences.windowMaterial) {
-            Text("Standard").tag("Window")
-            Text("Translucent").tag("Under Window")
-            Text("Sidebar").tag("Sidebar")
-            Text("Heads-up display").tag("HUD")
+          SettingsDivider()
+          SettingsRow("Material") {
+            Picker("Material", selection: $preferences.windowMaterial) {
+              Text("Standard").tag("Window")
+              Text("Translucent").tag("Under Window")
+              Text("Sidebar").tag("Sidebar")
+              Text("Heads-up display").tag("HUD")
+            }
+            .labelsHidden()
+            .frame(width: 240)
           }
-          LabeledContent("Background opacity") {
+          SettingsDivider()
+          SettingsRow("Background opacity") {
             HStack(spacing: 10) {
               Slider(value: $preferences.opacity, in: 0.5...1, step: 0.05)
                 .frame(width: 180)
               Text(preferences.opacity, format: .percent.precision(.fractionLength(0)))
                 .monospacedDigit()
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
             }
           }
+          SettingsDivider()
+          VStack(alignment: .leading, spacing: 14) {
+            ThemePicker(
+              title: "Light theme",
+              themes: themes(dark: false, including: preferences.lightTerminalTheme),
+              selection: $preferences.lightTerminalTheme)
+            ThemePicker(
+              title: "Dark theme",
+              themes: themes(dark: true, including: preferences.darkTerminalTheme),
+              selection: $preferences.darkTerminalTheme)
+          }
+          .padding(.vertical, 14)
+          SettingsDivider()
+          Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
+            .padding(.vertical, 12)
         }
       }
-      .formStyle(.columns)
-      VStack(alignment: .leading, spacing: 14) {
-        Text("Terminal themes")
-          .font(.headline)
-        ThemePicker(
-          title: "Light theme",
-          themes: themes(dark: false, including: preferences.lightTerminalTheme),
-          selection: $preferences.lightTerminalTheme)
-        ThemePicker(
-          title: "Dark theme",
-          themes: themes(dark: true, including: preferences.darkTerminalTheme),
-          selection: $preferences.darkTerminalTheme)
-        Toggle("Gently tint each tab background", isOn: $preferences.randomizeTabBackground)
-      }
-      Form {
-        Section("Typography") {
-          Picker("Typeface", selection: $preferences.fontFamily) {
-            ForEach(fontFamilies, id: \.self) { Text($0) }
+      SettingsCard(title: "Typography") {
+        VStack(alignment: .leading, spacing: 0) {
+          SettingsRow("Typeface") {
+            Picker("Typeface", selection: $preferences.fontFamily) {
+              ForEach(fontFamilies, id: \.self) { Text($0) }
+            }
+            .labelsHidden()
+            .frame(width: 260)
           }
-          LabeledContent("Size") {
+          SettingsDivider()
+          SettingsRow("Size") {
             HStack(spacing: 10) {
               Slider(value: $preferences.fontSize, in: 9...32, step: 1)
                 .frame(width: 180)
               Text("\(Int(preferences.fontSize)) pt")
                 .monospacedDigit()
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
             }
           }
-          LabeledContent("Line height") {
+          SettingsDivider()
+          SettingsRow("Line height") {
             HStack(spacing: 10) {
               Slider(value: $preferences.lineHeightPercent, in: 75...200, step: 1)
                 .accessibilityLabel("Line height")
                 .frame(width: 180)
               Text("\(Int(preferences.lineHeightPercent))%")
                 .monospacedDigit()
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 42, alignment: .trailing)
             }
             .help("100% uses the font’s natural spacing. Smaller values may clip tall glyphs.")
           }
-          Picker("Regular text", selection: $preferences.fontWeight) {
-            ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+          SettingsDivider()
+          SettingsRow("Regular text") {
+            Picker("Regular text", selection: $preferences.fontWeight) {
+              ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+            }
+            .labelsHidden()
+            .frame(width: 180)
           }
-          Picker("Intense text", selection: $preferences.intenseFontWeight) {
-            ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+          SettingsDivider()
+          SettingsRow("Intense text") {
+            Picker("Intense text", selection: $preferences.intenseFontWeight) {
+              ForEach(Preferences.fontWeights, id: \.self) { Text($0) }
+            }
+            .labelsHidden()
+            .frame(width: 180)
           }
-          Picker("Intensity treatment", selection: $preferences.intenseTextStyle) {
-            Text("Weight only").tag("bold")
-            Text("Weight and bright colours").tag("all")
-            Text("Bright colours only").tag("bright")
+          SettingsDivider()
+          SettingsRow("Intensity treatment") {
+            Picker("Intensity treatment", selection: $preferences.intenseTextStyle) {
+              Text("Weight only").tag("bold")
+              Text("Weight and bright colours").tag("all")
+              Text("Bright colours only").tag("bright")
+            }
+            .labelsHidden()
+            .frame(width: 260)
           }
         }
       }
-      .formStyle(.columns)
     }
   }
 
@@ -644,22 +671,8 @@ private struct SettingsPaneHeader: View {
   let pane: SettingsPane
 
   var body: some View {
-    HStack(spacing: 14) {
-      Image(systemName: pane.symbol)
-        .font(.system(size: 22, weight: .medium))
-        .symbolRenderingMode(.hierarchical)
-        .foregroundStyle(.tint)
-        .frame(width: 40, height: 40)
-        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-      VStack(alignment: .leading, spacing: 2) {
-        Text(pane.title)
-          .font(.title2.weight(.semibold))
-        Text(pane.subtitle)
-          .font(.callout)
-          .foregroundStyle(.secondary)
-      }
-    }
-    .accessibilityElement(children: .combine)
+    Text(pane.title)
+      .font(.title2.weight(.semibold))
   }
 }
 
@@ -707,8 +720,60 @@ private struct ThemePicker: View {
         }
         .padding(3)
       }
-      .scrollIndicators(.hidden)
+      .scrollIndicators(.never)
     }
+  }
+}
+
+private struct SettingsCard<Content: View>: View {
+  let title: String?
+  let content: Content
+
+  init(title: String? = nil, @ViewBuilder content: () -> Content) {
+    self.title = title
+    self.content = content()
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      if let title {
+        Text(title)
+          .font(.headline)
+      }
+      content
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+          RoundedRectangle(cornerRadius: 14)
+            .stroke(.primary.opacity(0.06), lineWidth: 1)
+        }
+    }
+  }
+}
+
+private struct SettingsRow<Content: View>: View {
+  let title: String
+  @ViewBuilder let content: Content
+
+  init(_ title: String, @ViewBuilder content: () -> Content) {
+    self.title = title
+    self.content = content()
+  }
+
+  var body: some View {
+    HStack(spacing: 20) {
+      Text(title)
+      Spacer(minLength: 20)
+      content
+    }
+    .padding(.vertical, 10)
+  }
+}
+
+private struct SettingsDivider: View {
+  var body: some View {
+    Divider().overlay(.primary.opacity(0.05))
   }
 }
 
