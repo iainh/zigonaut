@@ -710,17 +710,26 @@ private struct ThemePicker: View {
     VStack(alignment: .leading, spacing: 8) {
       Text(title)
         .font(.body)
-      ScrollView(.horizontal) {
-        HStack(alignment: .top, spacing: 12) {
-          ForEach(themes, id: \.self) { theme in
-            ThemePreviewCard(name: theme, isSelected: selection == theme) {
-              selection = theme
+      ScrollViewReader { proxy in
+        ScrollView(.horizontal) {
+          HStack(alignment: .top, spacing: 12) {
+            ForEach(themes, id: \.self) { theme in
+              ThemePreviewCard(name: theme, isSelected: selection == theme) {
+                selection = theme
+              }
+              .id(theme)
             }
           }
+          .padding(3)
         }
-        .padding(3)
+        .scrollIndicators(.never)
+        .onAppear {
+          DispatchQueue.main.async { proxy.scrollTo(selection, anchor: .center) }
+        }
+        .onChange(of: selection) { _, theme in
+          withAnimation { proxy.scrollTo(theme, anchor: .center) }
+        }
       }
-      .scrollIndicators(.never)
     }
   }
 }
