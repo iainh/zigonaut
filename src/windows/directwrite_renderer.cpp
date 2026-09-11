@@ -1613,6 +1613,37 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             std::max(underline_thickness, proportional_thickness)));
     }
 
+    void drawCurlyUnderline(float left, float width, float underline_y) {
+        if (d2d_factory == nullptr || target == nullptr || brush == nullptr || width <= 0.0f)
+            return;
+        ID2D1PathGeometry* geometry = nullptr;
+        HRESULT hr = d2d_factory->CreatePathGeometry(&geometry);
+        ID2D1GeometrySink* sink = nullptr;
+        if (SUCCEEDED(hr)) hr = geometry->Open(&sink);
+        if (SUCCEEDED(hr)) {
+            const auto point = [](float x, float y) { return D2D1::Point2F(x, y); };
+            const int cycles = std::max(1, static_cast<int>(std::lround(width / 8.0f)));
+            const float half_wave = width / static_cast<float>(cycles * 2);
+            const float center_y = underline_y - 1.0f;
+            float x = left;
+            float direction = 1.0f;
+            sink->BeginFigure(point(x, center_y), D2D1_FIGURE_BEGIN_HOLLOW);
+            for (int segment = 0; segment < cycles * 2; ++segment) {
+                const float end = x + half_wave;
+                sink->AddBezier(D2D1::BezierSegment(
+                    point(x + half_wave / 3.0f, center_y + 2.0f * direction),
+                    point(x + 2.0f * half_wave / 3.0f, center_y + 2.0f * direction),
+                    point(end, center_y)));
+                x = end;
+                direction *= -1.0f;
+            }
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            hr = sink->Close();
+        }
+        if (SUCCEEDED(hr)) target->DrawGeometry(geometry, brush, 1.0f);
+        release(sink);
+        release(geometry);
+    }
 
     HRESULT drawCell(
         const uint16_t* text,
@@ -1710,20 +1741,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                         brush, 1.0f);
                 }
             } else if (underline == 3) {
-                for (float x = left; x < left + width; x += 8.0f) {
-                    target->DrawLine(D2D1::Point2F(x, underline_y - 2.0f),
-                        D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
-                        brush, 1.0f);
-                    target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
-                        D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
-                        brush, 1.0f);
-                    target->DrawLine(D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
-                        D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
-                        brush, 1.0f);
-                    target->DrawLine(D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
-                        D2D1::Point2F(std::min(x + 8.0f, left + width), underline_y - 2.0f),
-                        brush, 1.0f);
-                }
+                drawCurlyUnderline(left, width, underline_y);
             } else {
                 target->DrawLine(D2D1::Point2F(left, underline_y),
                     D2D1::Point2F(left + width, underline_y), brush, 1.0f);
@@ -2342,20 +2360,7 @@ HRESULT ZigonautTextEngine::endRow() {
                     D2D1::Point2F(std::min(x + 3.0f, left + width), underline_y),
                     brush, 1.0f);
         } else if (cell.underline == 3) {
-            for (float x = left; x < left + width; x += 8.0f) {
-                target->DrawLine(D2D1::Point2F(x, underline_y - 2.0f),
-                    D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
-                    brush, 1.0f);
-                target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
-                    D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
-                    brush, 1.0f);
-                target->DrawLine(D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
-                    D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
-                    brush, 1.0f);
-                target->DrawLine(D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
-                    D2D1::Point2F(std::min(x + 8.0f, left + width), underline_y - 2.0f),
-                    brush, 1.0f);
-            }
+            drawCurlyUnderline(left, width, underline_y);
         } else if (cell.underline != 0) {
             target->DrawLine(D2D1::Point2F(left, underline_y),
                 D2D1::Point2F(left + width, underline_y), brush, 1.0f);
