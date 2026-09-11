@@ -3402,6 +3402,29 @@ test "render state exposes text decorations and wide occupancy" {
     try std.testing.expectEqual(@as(usize, 1), renderer.wide_tails);
 }
 
+test "render state exposes every underline style" {
+    const cases = [_]struct {
+        sequence: []const u8,
+        expected: u8,
+    }{
+        .{ .sequence = "\x1b[4mX", .expected = 1 },
+        .{ .sequence = "\x1b[4:2mX", .expected = 2 },
+        .{ .sequence = "\x1b[4:3mX", .expected = 3 },
+        .{ .sequence = "\x1b[4:4mX", .expected = 4 },
+        .{ .sequence = "\x1b[4:5mX", .expected = 5 },
+    };
+
+    for (cases) |case| {
+        var terminal = try Terminal.init(2, 1, theme.rasmus);
+        defer terminal.deinit();
+        terminal.feed(case.sequence);
+
+        var renderer = TestRenderer{};
+        try terminal.renderViewport(&renderer);
+        try std.testing.expectEqual(case.expected, renderer.x_underline);
+    }
+}
+
 test "render snapshots own cell graphemes" {
     var terminal = try Terminal.init(4, 2, theme.rasmus);
     defer terminal.deinit();

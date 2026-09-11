@@ -1710,12 +1710,18 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                         brush, 1.0f);
                 }
             } else if (underline == 3) {
-                for (float x = left; x < left + width; x += 4.0f) {
-                    target->DrawLine(D2D1::Point2F(x, underline_y - 1.0f),
-                        D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+                for (float x = left; x < left + width; x += 8.0f) {
+                    target->DrawLine(D2D1::Point2F(x, underline_y - 2.0f),
+                        D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
                         brush, 1.0f);
-                    target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
-                        D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 1.0f),
+                    target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
+                        D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
+                        brush, 1.0f);
+                    target->DrawLine(D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
+                        D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
+                        brush, 1.0f);
+                    target->DrawLine(D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
+                        D2D1::Point2F(std::min(x + 8.0f, left + width), underline_y - 2.0f),
                         brush, 1.0f);
                 }
             } else {
@@ -2336,12 +2342,18 @@ HRESULT ZigonautTextEngine::endRow() {
                     D2D1::Point2F(std::min(x + 3.0f, left + width), underline_y),
                     brush, 1.0f);
         } else if (cell.underline == 3) {
-            for (float x = left; x < left + width; x += 4.0f) {
-                target->DrawLine(D2D1::Point2F(x, underline_y - 1.0f),
-                    D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
+            for (float x = left; x < left + width; x += 8.0f) {
+                target->DrawLine(D2D1::Point2F(x, underline_y - 2.0f),
+                    D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
                     brush, 1.0f);
-                target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y),
-                    D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 1.0f),
+                target->DrawLine(D2D1::Point2F(std::min(x + 2.0f, left + width), underline_y - 4.0f),
+                    D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
+                    brush, 1.0f);
+                target->DrawLine(D2D1::Point2F(std::min(x + 4.0f, left + width), underline_y - 2.0f),
+                    D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
+                    brush, 1.0f);
+                target->DrawLine(D2D1::Point2F(std::min(x + 6.0f, left + width), underline_y),
+                    D2D1::Point2F(std::min(x + 8.0f, left + width), underline_y - 2.0f),
                     brush, 1.0f);
             }
         } else if (cell.underline != 0) {

@@ -110,6 +110,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var metalQueue: MTLCommandQueue?
   private var metalPipeline: MTLRenderPipelineState?
   private var metalImagePipeline: MTLRenderPipelineState?
+  private var metalGlyphPipeline: MTLRenderPipelineState?
   private var metalOverlayPipeline: MTLRenderPipelineState?
   private var metalCursorPipeline: MTLRenderPipelineState?
   private var retainedTexture: MTLTexture?
@@ -357,7 +358,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
     guard let imagePipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
     descriptor.colorAttachments[0].sourceRGBBlendFactor = .one
+    guard let glyphPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    descriptor.vertexFunction = vertex
     guard let overlayPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
+    descriptor.vertexFunction = placementVertex
     descriptor.fragmentFunction = cursorFragment
     descriptor.colorAttachments[0].isBlendingEnabled = false
     guard let cursorPipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return }
@@ -372,6 +376,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     metalQueue = queue
     metalPipeline = pipeline
     metalImagePipeline = imagePipeline
+    metalGlyphPipeline = glyphPipeline
     metalOverlayPipeline = overlayPipeline
     metalCursorPipeline = cursorPipeline
   }
@@ -964,7 +969,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func renderMetal() -> Bool {
     guard let presentation = metalLayer, let queue = metalQueue, let pipeline = metalPipeline,
       let imagePipeline = metalImagePipeline, let overlayPipeline = metalOverlayPipeline,
-      let cursorPipeline = metalCursorPipeline, let device = presentation.device,
+      let glyphPipeline = metalGlyphPipeline, let cursorPipeline = metalCursorPipeline,
+      let device = presentation.device,
       let geometry = updateMetalGeometry() else { return false }
     let scale = geometry.scale
     let pixelWidth = geometry.width
@@ -1096,7 +1102,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentTexture(texture, index: 0)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-    drawMetalText(textPlacements, encoder: encoder, pipeline: overlayPipeline, scale: scale)
+    drawMetalText(textPlacements, encoder: encoder, pipeline: glyphPipeline, scale: scale)
     if hasDecorations {
       encoder.setRenderPipelineState(overlayPipeline)
       encoder.setFragmentTexture(decorationTexture, index: 0)
@@ -1805,7 +1811,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       strokeLine(y: rect.maxY - 1, rect: rect, width: 1)
       strokeLine(y: rect.maxY - 3, rect: rect, width: 1)
     case 3:
-      strokeWavyLine(y: rect.maxY - 2, rect: rect)
+      strokeWavyLine(y: rect.maxY - 2.5, rect: rect)
     case 4:
       strokePattern(y: rect.maxY - 1.5, rect: rect, pattern: [1, 2], rounded: true)
     case 5:
@@ -1842,11 +1848,18 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func strokeWavyLine(y: CGFloat, rect: NSRect) {
     let path = NSBezierPath()
     path.move(to: NSPoint(x: rect.minX, y: y))
-    var x = rect.minX + 1
-    while x <= rect.maxX {
-      let offset = sin((x - rect.minX) * .pi / 2)
-      path.line(to: NSPoint(x: x, y: y + offset))
-      x += 1
+    let cycles = max(1, Int((rect.width / 8).rounded()))
+    let halfWave = rect.width / CGFloat(cycles * 2)
+    var x = rect.minX
+    var direction: CGFloat = 1
+    for _ in 0..<(cycles * 2) {
+      let end = x + halfWave
+      path.curve(
+        to: NSPoint(x: end, y: y),
+        controlPoint1: NSPoint(x: x + halfWave / 3, y: y + 2 * direction),
+        controlPoint2: NSPoint(x: x + 2 * halfWave / 3, y: y + 2 * direction))
+      x = end
+      direction *= -1
     }
     path.lineWidth = 1
     path.stroke()
