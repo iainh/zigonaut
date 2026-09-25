@@ -2540,26 +2540,27 @@ fn progressValue(value: i8) ?u8 {
     return if (value < 0) null else @intCast(@min(value, 100));
 }
 
-fn clipboardWrite(_: vt.GhosttyTerminal, userdata: ?*anyopaque, write: [*c]const vt.GhosttyClipboardWrite) callconv(.c) vt.GhosttyClipboardWriteResult {
-    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR));
-    const callback = self.clipboard_write orelse return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
-    const minimum_size = @offsetOf(vt.GhosttyClipboardWrite, "contents_len") + @sizeOf(usize);
-    if (write == null or write[0].size < minimum_size) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
-    if (write[0].contents_len == 0) return clipboardWriteResult(callback(self.clipboard_context, .clear));
-    if (write[0].contents == null or write[0].contents_len > std.math.maxInt(usize) / @sizeOf(vt.GhosttyClipboardContent)) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+fn clipboardWrite(_: vt.GhosttyTerminal, userdata: ?*anyopaque, write: [*c]const vt.GhosttyClipboardWrite) callconv(.c) void {
+    if (write == null) return;
+    const minimum_size = @offsetOf(vt.GhosttyClipboardWrite, "reply") + @sizeOf(vt.GhosttyClipboardWriteReplyFn);
+    if (write[0].size < minimum_size or write[0].reply == null) return;
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return clipboardWriteReply(write, .io_error)));
+    const callback = self.clipboard_write orelse return clipboardWriteReply(write, .unsupported);
+    if (write[0].contents_len == 0) return clipboardWriteReply(write, callback(self.clipboard_context, .clear));
+    if (write[0].contents == null or write[0].contents_len > std.math.maxInt(usize) / @sizeOf(vt.GhosttyClipboardContent)) return clipboardWriteReply(write, .invalid_data);
 
     for (write[0].contents[0..write[0].contents_len]) |content| {
-        if ((content.mime.len != 0 and content.mime.ptr == null) or (content.data.len != 0 and content.data.ptr == null)) return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA;
+        if ((content.mime.len != 0 and content.mime.ptr == null) or (content.data.len != 0 and content.data.ptr == null)) return clipboardWriteReply(write, .invalid_data);
         const mime = if (content.mime.len == 0) "" else content.mime.ptr[0..content.mime.len];
         if (!std.mem.eql(u8, mime, "text/plain") and !std.mem.eql(u8, mime, "text/plain;charset=utf-8")) continue;
         const data = if (content.data.len == 0) "" else content.data.ptr[0..content.data.len];
-        return clipboardWriteResult(callback(self.clipboard_context, .{ .text = data }));
+        return clipboardWriteReply(write, callback(self.clipboard_context, .{ .text = data }));
     }
-    return vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED;
+    clipboardWriteReply(write, .unsupported);
 }
 
-fn clipboardWriteResult(result: Terminal.ClipboardWriteResult) vt.GhosttyClipboardWriteResult {
-    return switch (result) {
+fn clipboardWriteReply(write: [*c]const vt.GhosttyClipboardWrite, result: Terminal.ClipboardWriteResult) void {
+    const raw_result: vt.GhosttyClipboardWriteResult = switch (result) {
         .success => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS,
         .denied => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED,
         .unsupported => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED,
@@ -2567,6 +2568,11 @@ fn clipboardWriteResult(result: Terminal.ClipboardWriteResult) vt.GhosttyClipboa
         .invalid_data => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_INVALID_DATA,
         .io_error => vt.GHOSTTY_CLIPBOARD_WRITE_RESULT_IO_ERROR,
     };
+    write[0].reply.?(write, &.{
+        .size = @sizeOf(vt.GhosttyClipboardWriteReply),
+        .result = raw_result,
+        .remember = false,
+    });
 }
 
 fn currentCellOccupancy(cells: vt.GhosttyRenderStateRowCells) !Terminal.Cell.Occupancy {
