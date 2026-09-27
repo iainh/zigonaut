@@ -1,11 +1,11 @@
 {
   "background": "#1c161a",
   "foreground": "#f4e4ec",
-  "cursor": "#e386a3",
+  "cursor": "#f577a2",
   "ansi": [
-    "#211b20", "#d47789", "#95b993", "#d6b17d",
-    "#9294d3", "#c487c0", "#8fb5b5", "#bfafb9",
-    "#564d53", "#dc92a2", "#adc4a9", "#debe99",
-    "#aaa8d9", "#d09ecb", "#a8c1c3", "#ccbcc6"
+    "#211b20", "#e66884", "#8bbd89", "#e0ae64",
+    "#9090e6", "#cf7dcb", "#83b8b8", "#bfafb9",
+    "#564d53", "#eb889f", "#a7c7a2", "#e7bb88",
+    "#a9a5e8", "#da96d4", "#a1c3c6", "#ccbcc6"
   ]
 }
