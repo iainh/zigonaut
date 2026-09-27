@@ -2,6 +2,28 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.10.0] - 2026-09-27
+
+### Added
+
+- A visual macOS theme picker with live palette previews.
+- Nine light and dark terminal themes inspired by the macOS settings design.
+
+### Changed
+
+- Refined the macOS appearance settings and separated its toolbar items for a
+  clearer native layout.
+- Increased the vibrancy of the new terminal palettes while preserving their
+  lightness and neutral colours.
+- Updated libghostty to the latest compatible revision.
+
+### Fixed
+
+- Improved text decorations on Windows and macOS, including smoother, more
+  visible curly underlines.
+- Kept macOS settings labels visible inside their tabs.
+- Adapted terminal clipboard-write replies to libghostty's asynchronous callback.
+
 ## [0.9.0] - 2026-09-08
 
 ### Added
@@ -305,6 +327,7 @@ All notable changes to Zigonaut will be documented in this file.
 - Automated tests, a terminal performance benchmark, and Windows x64 and ARM64
   CI and release packaging.
 
+[0.10.0]: https://github.com/iainh/zigonaut/releases/tag/v0.10.0
 [0.9.0]: https://github.com/iainh/zigonaut/releases/tag/v0.9.0
 [0.8.0]: https://github.com/iainh/zigonaut/releases/tag/v0.8.0
 [0.7.2]: https://github.com/iainh/zigonaut/releases/tag/v0.7.2
