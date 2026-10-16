@@ -2,6 +2,31 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.11.0] - 2026-10-16
+
+### Added
+
+- Opt-in notifications for commands lasting at least five seconds that finish in
+  an unfocused pane, using OSC 133 shell integration.
+- Native program-status indicators from OSC 7501 reports, shown as macOS pane
+  badges and Windows tab status text.
+- Native mouse pointer shapes requested by terminal applications through OSC 22
+  on Windows and macOS, including updates while the pointer is stationary.
+
+### Changed
+
+- Updated libghostty to the latest compatible revision.
+
+### Fixed
+
+- Captured complete synchronized-output frames so Windows and macOS retain a
+  consistent display until output is released or the watchdog expires.
+- Restored fallback terminal titles after a full terminal reset without clearing
+  titles on a soft reset.
+- Improved Windows screen and cursor alignment when growing the terminal by
+  disabling ConPTY resize scrollback pulling while retaining local scrollback
+  and ordinary column reflow.
+
 ## [0.10.0] - 2026-09-27
 
 ### Added
