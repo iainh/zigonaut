@@ -246,6 +246,7 @@ pub const SessionRuntime = struct {
         // recommended policy; this does not guarantee identical resize reflow.
         try self.terminal.setResizePullScrollback(false);
         try self.terminal.setTitleChanged(titleChanged, self);
+        try self.terminal.setReset(terminalReset, self);
         try self.terminal.setWritePty(writePty, self);
         try self.terminal.setBell(bell, self);
         try self.terminal.setClipboardWrite(clipboardWrite, self);
@@ -1229,6 +1230,12 @@ pub const SessionRuntime = struct {
         _ = self.title_generation.fetchAdd(1, .release);
     }
 
+    /// Runs under `terminal_mutex`, like titleChanged. Publishing an empty title
+    /// advances the generation so App.syncTitles restores the profile fallback.
+    fn terminalReset(context: ?*anyopaque) void {
+        titleChanged(context, "");
+    }
+
     /// Ghostty invokes this synchronously while `terminal_mutex` is held. PTY
     /// writes use a separate mutex so replies cannot interleave with user input.
     fn writePty(context: ?*anyopaque, bytes: []const u8) void {
@@ -1445,6 +1452,41 @@ test "session defers synchronized chunks and prepares once mode ends" {
     try std.testing.expect(runtime.processOutputChunk("final\x1b[?2026l", 300));
     try std.testing.expectEqual(@as(u64, 3), runtime.outputGeneration());
     try std.testing.expect(try runtime.prepareRender());
+}
+
+test "session publishes an empty fallback title on RIS but not soft reset" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+    try runtime.terminal.setTitleChanged(SessionRuntime.titleChanged, &runtime);
+    try runtime.terminal.setReset(SessionRuntime.terminalReset, &runtime);
+    var title: std.ArrayList(u8) = .empty;
+    defer title.deinit(std.testing.allocator);
+
+    _ = runtime.processOutputChunk("\x1b]2;project shell\x07", 100);
+    const explicit_generation = try runtime.copyTitle(std.testing.allocator, &title);
+    try std.testing.expectEqualStrings("project shell", title.items);
+    _ = runtime.processOutputChunk("\x1b[!p", 200);
+    try std.testing.expectEqual(explicit_generation, try runtime.copyTitle(std.testing.allocator, &title));
+    try std.testing.expectEqualStrings("project shell", title.items);
+
+    _ = runtime.processOutputChunk("\x1b", 300);
+    try std.testing.expect(runtime.processOutputChunk("c", 400));
+    try std.testing.expect(runtime.titleGeneration() != explicit_generation);
+    _ = try runtime.copyTitle(std.testing.allocator, &title);
+    try std.testing.expectEqualStrings("", title.items);
+
+    _ = runtime.processOutputChunk("\x1b]2;new title\x07", 500);
+    _ = try runtime.copyTitle(std.testing.allocator, &title);
+    try std.testing.expectEqualStrings("new title", title.items);
+    _ = runtime.processOutputChunk("\x1bc\x1bc", 600);
+    _ = try runtime.copyTitle(std.testing.allocator, &title);
+    try std.testing.expectEqualStrings("", title.items);
 }
 
 test "session consumes Ghostty progress and notification effects" {

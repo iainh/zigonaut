@@ -305,6 +305,12 @@ fn titleChanged(context: ?*anyopaque, title: []const u8) void {
     self.title_explicit = true;
 }
 
+// Invoked during feed with Core.mutex held. The reader publishes its normal
+// output wake after feed, so the host then queries the usual fallback title.
+fn terminalReset(context: ?*anyopaque) void {
+    titleChanged(context, "");
+}
+
 fn desktopNotification(context: ?*anyopaque, title: []const u8, body: []const u8) void {
     const self: *Core = @ptrCast(@alignCast(context orelse return));
     if (!std.unicode.utf8ValidateSlice(title) or !std.unicode.utf8ValidateSlice(body)) return;
@@ -377,6 +383,7 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     self.default_title_len = @intCast(@min(initial_title.len, self.default_title.len));
     @memcpy(self.default_title[0..self.default_title_len], initial_title[0..self.default_title_len]);
     self.terminal.setTitleChanged(titleChanged, self) catch return failCreate(self, -1);
+    self.terminal.setReset(terminalReset, self) catch return failCreate(self, -1);
     self.terminal.setWritePty(terminalWritePty, self) catch return failCreate(self, -1);
     self.terminal.setDesktopNotification(desktopNotification, self) catch return failCreate(self, -1);
     self.terminal.setClipboardWrite(clipboardWrite, self) catch return failCreate(self, -1);
@@ -1946,6 +1953,44 @@ test "null search and mouse APIs and bounded queries are safe" {
     try std.testing.expect(!zigonaut_core_mouse_tracking(null));
     try std.testing.expect(!zigonaut_core_mouse(null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false));
     try std.testing.expectEqual(@as(usize, 256), maximum_search_query_bytes);
+}
+
+test "full reset restores the public fallback title but soft reset preserves the explicit title" {
+    var core: Core = .{
+        .terminal = try Terminal.init(20, 2, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = null,
+        .context = null,
+        .default_title_len = 4,
+    };
+    defer core.terminal.deinit();
+    @memcpy(core.default_title[0..4], "zsh!");
+    try core.terminal.setTitleChanged(titleChanged, &core);
+    try core.terminal.setReset(terminalReset, &core);
+
+    var title: [64]u8 = undefined;
+    var pwd: [64]u8 = undefined;
+    core.terminal.feed("\x1b]2;project shell\x07\x1b]7;file:///tmp/project\x07");
+    try std.testing.expectEqualStrings("project shell", title[0..zigonaut_core_title(&core, &title, title.len)]);
+    try std.testing.expectEqualStrings("file:///tmp/project", pwd[0..zigonaut_core_working_directory(&core, &pwd, pwd.len)]);
+
+    core.terminal.feed("\x1b[!p");
+    try std.testing.expectEqualStrings("project shell", title[0..zigonaut_core_title(&core, &title, title.len)]);
+    try std.testing.expectEqualStrings("file:///tmp/project", pwd[0..zigonaut_core_working_directory(&core, &pwd, pwd.len)]);
+
+    // RIS can be split across PTY reads.
+    core.terminal.feed("\x1b");
+    core.terminal.feed("c");
+    try std.testing.expectEqualStrings("zsh!", title[0..zigonaut_core_title(&core, &title, title.len)]);
+    try std.testing.expectEqual(@as(usize, 0), zigonaut_core_working_directory(&core, &pwd, pwd.len));
+
+    core.terminal.feed("\x1b]2;new title\x07");
+    try std.testing.expectEqualStrings("new title", title[0..zigonaut_core_title(&core, &title, title.len)]);
+    core.terminal.feed("\x1bc\x1bc");
+    try std.testing.expectEqualStrings("zsh!", title[0..zigonaut_core_title(&core, &title, title.len)]);
 }
 
 test "title callback validates and bounds UTF-8 storage" {
