@@ -242,6 +242,9 @@ pub const SessionRuntime = struct {
             .rows = rows,
         };
         errdefer self.terminal.deinit();
+        // ConPTY owns a screen buffer without scrollback. Use libghostty's
+        // recommended policy; this does not guarantee identical resize reflow.
+        try self.terminal.setResizePullScrollback(false);
         try self.terminal.setTitleChanged(titleChanged, self);
         try self.terminal.setWritePty(writePty, self);
         try self.terminal.setBell(bell, self);
