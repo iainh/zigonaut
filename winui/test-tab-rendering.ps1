@@ -6,6 +6,15 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type @'
+using System.Runtime.InteropServices;
+public static class TabTestPointer {
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, System.UIntPtr extra);
+}
+'@
 
 $executablePath = (Resolve-Path $Executable).Path
 $process = Start-Process -FilePath $executablePath -PassThru
@@ -102,7 +111,64 @@ try {
         throw "Focus moved to '$($focused.Current.AutomationId)' instead of the selected terminal."
     }
 
-    Write-Host 'WinUI tab rendering and input routing passed.'
+    # Keep the reporting process alive so shell integration does not end its status.
+    $report = '[Console]::Write([string][char]27 + "]7501;state=error:id=tab-test" + [char]7); Start-Sleep -Seconds 60'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($report)).Replace('+', '{+}')
+    $keyboard.SendKeys("powershell.exe -NoProfile -EncodedCommand $encoded{ENTER}")
+    $tabCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $statusTab = $null
+    do {
+        foreach ($tab in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCondition)) {
+            if ($tab.Current.HelpText -eq 'Program status in this tab: Error') {
+                $statusTab = $tab
+                break
+            }
+        }
+        if ($null -eq $statusTab) { Start-Sleep -Milliseconds 100 }
+    } while ($null -eq $statusTab -and [DateTime]::UtcNow -lt $deadline)
+    if ($null -eq $statusTab) { throw 'OSC 7501 status was not exposed in tab help text.' }
+
+    $textStatusCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Error'
+    )
+    if ($statusTab.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textStatusCondition).Count -ne 0) {
+        throw 'The tab still displays a text status label instead of a glyph.'
+    }
+    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button
+    )
+    $close = $statusTab.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+    if ($null -eq $close -or [string]::IsNullOrEmpty($close.Current.Name)) {
+        throw 'The status tab has no accessible close button.'
+    }
+    $bounds = $statusTab.Current.BoundingRectangle
+    $slot = $close.Current.BoundingRectangle
+    if ($slot.IsEmpty -or $slot.Width -le 0) { throw 'The status/close slot is not visible.' }
+    $title = $statusTab.Current.Name
+    # Enter the slot, leave over the title, then re-enter and click the native button.
+    foreach ($x in @(($slot.Left + $slot.Width / 2), ($bounds.Left + 12), ($slot.Left + $slot.Width / 2))) {
+        [void][TabTestPointer]::SetCursorPos([int]$x, [int]($slot.Top + $slot.Height / 2))
+        Start-Sleep -Milliseconds 150
+        if ($statusTab.Current.BoundingRectangle -ne $bounds -or $statusTab.Current.Name -ne $title) {
+            throw 'Hovering the status/close slot changed the tab title or layout.'
+        }
+    }
+    $tabCount = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCondition).Count
+    [TabTestPointer]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    [TabTestPointer]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 100
+        $remaining = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCondition).Count
+    } while ($remaining -eq $tabCount -and [DateTime]::UtcNow -lt $deadline)
+    if ($remaining -ne $tabCount - 1) { throw 'Clicking the hovered status slot did not close exactly one tab.' }
+
+    Write-Host 'WinUI tab rendering, input routing and status-slot closing passed.'
 } finally {
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force

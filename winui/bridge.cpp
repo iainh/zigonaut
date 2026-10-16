@@ -510,7 +510,7 @@ struct Bridge {
         tabs.HorizontalContentAlignment(HorizontalAlignment::Stretch);
         tabs.Background(Microsoft::UI::Xaml::Media::SolidColorBrush{Windows::UI::Colors::Transparent()});
         tabs.TabWidthMode(TabViewWidthMode::SizeToContent);
-        tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Auto);
+        tabs.CloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
         // Native TabView dragging does not initiate reliably inside a custom
         // non-client title bar, so pointer handlers below own the interaction.
         tabs.CanReorderTabs(false);
@@ -558,6 +558,13 @@ struct Bridge {
                 auto const point = args.GetCurrentPoint(item);
                 switch (point.Properties().PointerUpdateKind()) {
                 case Microsoft::UI::Input::PointerUpdateKind::LeftButtonPressed:
+                    // The status/close slot is still a native button. Do not
+                    // steal its pointer capture to start a tab drag.
+                    for (auto source = args.OriginalSource().try_as<DependencyObject>();
+                         source && source != item;
+                         source = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetParent(source)) {
+                        if (source.try_as<Microsoft::UI::Xaml::Controls::Primitives::ButtonBase>()) return;
+                    }
                     pressed_tab_id = tabId(item);
                     drag_destination_tab_id = presented_tab_id;
                     drag_destination_pane_id = active_pane;
@@ -2305,8 +2312,50 @@ struct Bridge {
         if (tabs.TabItems().IndexOf(item, index)) notify(command, index);
     }
 
+    static void updateTabStatusGlyph(TabViewItem const& item) {
+        // Keep the native button, hit target, tooltip and close-request wiring.
+        // Discover it again after retemplating rather than retaining a stale part.
+        item.ApplyTemplate();
+        if (!Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChildrenCount(item)) return;
+        auto const template_root = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChild(item, 0).try_as<FrameworkElement>();
+        auto const button = template_root ? template_root.FindName(L"CloseButton").try_as<Button>() : nullptr;
+        if (!button) return;
+        if (!button.Tag()) {
+            button.Tag(box_value(UINT32_MAX));
+            auto refresh = [weak = make_weak(item)](auto&&, auto&&) {
+                if (auto const current = weak.get()) updateTabStatusGlyph(current);
+            };
+            button.RegisterPropertyChangedCallback(
+                Microsoft::UI::Xaml::Controls::Primitives::ButtonBase::IsPointerOverProperty(), refresh);
+            button.RegisterPropertyChangedCallback(Control::FocusStateProperty(), refresh);
+        }
+        auto const status = unbox_value<uint32_t>(item.Header().as<StackPanel>().Tag());
+        auto const show_close = button.IsPointerOver() ||
+            button.FocusState() == FocusState::Keyboard || item.FocusState() == FocusState::Keyboard;
+        auto const displayed = show_close ? 0u : status;
+        if (unbox_value<uint32_t>(button.Tag()) == displayed) return;
+        button.Tag(box_value(displayed));
+        if (displayed == 2) {
+            // A small, static open ring: no animation or colour needed to read it.
+            button.Content(Microsoft::UI::Xaml::Markup::XamlReader::Load(
+                LR"(<PathIcon xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    Width="12" Height="12" IsHitTestVisible="False"
+                    Data="M13.657,2.343 A8,8 0 1 0 16,8 L14.5,8 A6.5,6.5 0 1 1 12.596,3.404 Z" />)"));
+        } else {
+            // Segoe Fluent Icons: Remove, Accept, Important, Warning; native X.
+            auto const glyph = displayed == 1 ? L"\xE738" : displayed == 3 ? L"\xE8FB"
+                : displayed == 4 ? L"\xE8C9" : displayed == 5 ? L"\xE7BA" : L"\xE711";
+            button.Content(box_value(glyph));
+        }
+    }
+
     void configureTabItem(TabViewItem const& item) {
         auto const weak = make_weak(item);
+        auto refresh_status = [weak](auto&&, auto&&) {
+            if (auto const current = weak.get()) updateTabStatusGlyph(current);
+        };
+        item.Loaded(refresh_status);
+        item.RegisterPropertyChangedCallback(Control::FocusStateProperty(), refresh_status);
         item.AddHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler, true);
         item.AddHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler, true);
         item.AddHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler, true);
@@ -2410,12 +2459,7 @@ struct Bridge {
                 text.VerticalAlignment(VerticalAlignment::Center);
                 header.Children().Append(marker);
                 header.Children().Append(text);
-                auto status_label = TextBlock{};
-                status_label.VerticalAlignment(VerticalAlignment::Center);
-                status_label.FontSize(11);
-                status_label.Margin(Thickness{6, 0, 0, 0});
-                status_label.Visibility(Visibility::Collapsed);
-                header.Children().Append(status_label);
+                header.Tag(box_value(0u));
                 item.Header(header);
                 item.Tag(box_value(tab_ids[i]));
                 // TabView resolves a dragged item through its Content. Distinct,
@@ -2458,12 +2502,12 @@ struct Bridge {
                     changed = true;
                 }
             }
-            auto status_label = item.Header().as<StackPanel>().Children().GetAt(2).as<TextBlock>();
-            if (status_label.Text() != status_text) {
-                status_label.Text(status_text);
-                status_label.Visibility(status == 0 ? Visibility::Collapsed : Visibility::Visible);
+            auto const header = item.Header().as<StackPanel>();
+            if (unbox_value<uint32_t>(header.Tag()) != status) {
+                header.Tag(box_value(static_cast<uint32_t>(status)));
                 changed = true;
             }
+            updateTabStatusGlyph(item);
             // Native text and UI Automation, not color alone. Never replace
             // the title; make the scope explicit when a split has attention.
             auto help = status == 0 ? (has_activity ? hstring{L"New terminal output"} : hstring{})

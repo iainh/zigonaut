@@ -9,7 +9,8 @@ All notable changes to Zigonaut will be documented in this file.
 - Opt-in notifications for commands lasting at least five seconds that finish in
   an unfocused pane, using OSC 133 shell integration.
 - Native program-status indicators from OSC 7501 reports, shown as macOS pane
-  badges and Windows tab status text.
+  badges and monochrome Windows tab glyphs. Windows glyphs share the close-button
+  slot and switch to the close icon on hover or keyboard focus.
 - Native mouse pointer shapes requested by terminal applications through OSC 22
   on Windows and macOS, including updates while the pointer is stationary.
 
