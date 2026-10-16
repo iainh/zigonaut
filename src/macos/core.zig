@@ -172,7 +172,8 @@ pub const RenderFrame = extern struct {
     cursor_visible: u8,
     cursor_has_position: u8,
     images_skipped: u8,
-    reserved: [7]u8,
+    mouse_shape: u8,
+    reserved: [6]u8,
 };
 
 pub const RenderCell = extern struct {
@@ -775,6 +776,7 @@ const SnapshotCollector = struct {
             .cursor_visible = @intFromBool(frame.cursor_visible),
             .cursor_has_position = @intFromBool(frame.cursor_has_position),
             .images_skipped = 0,
+            .mouse_shape = @intFromEnum(frame.mouse_shape),
             .reserved = @splat(0),
         };
     }
@@ -1843,6 +1845,24 @@ test "snapshot with null handle is bounded" {
     var bytes = [_]u8{0xaa};
     try std.testing.expectEqual(@as(usize, 0), zigonaut_core_snapshot(null, &bytes, 1));
     try std.testing.expectEqual(@as(u8, 0xaa), bytes[0]);
+}
+
+test "OSC 22 reaches the native frame ABI independently of the text cursor" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    var frame = std.mem.zeroes(RenderFrame);
+    var cells: [8]RenderCell = undefined;
+    var text: [32]u8 = undefined;
+    var result = std.mem.zeroes(RenderSnapshotResult);
+    var collector = SnapshotCollector{ .frame = &frame, .cells = &cells, .text = &text, .result = &result };
+    try terminal.renderViewport(&collector);
+    try std.testing.expectEqual(@as(u8, 8), frame.mouse_shape);
+    const text_cursor = frame.cursor_style;
+    terminal.feed("\x1b]22;pointer\x07");
+    try terminal.renderViewport(&collector);
+    try std.testing.expectEqual(@as(u8, 3), frame.mouse_shape);
+    try std.testing.expectEqual(text_cursor, frame.cursor_style);
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(RenderFrame));
 }
 
 test "styled snapshot collector preserves UTF-8 styles and reports bounds" {

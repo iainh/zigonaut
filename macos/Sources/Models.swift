@@ -86,6 +86,7 @@ struct TerminalRenderFrame {
   var cursorColumns: Int = 1
   var cursorStyle: UInt8 = 1
   var cursorVisible = false
+  var mouseShape: UInt8 = 8
 }
 
 struct TerminalRenderCell: Identifiable {
@@ -746,7 +747,8 @@ struct TerminalPalette: Equatable {
         cursorY: Int(frame.cursor_y),
         cursorColumns: Int(frame.cursor_columns),
         cursorStyle: frame.cursor_style,
-        cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0
+        cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0,
+        mouseShape: frame.mouse_shape
       ),
       cells: retainedCellsByRow.flatMap { $0 },
       cellsByRow: retainedCellsByRow,

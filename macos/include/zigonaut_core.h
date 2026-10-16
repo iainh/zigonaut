@@ -5,7 +5,9 @@
 #include <stdint.h>
 typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
-typedef struct { uint32_t version, size; uint32_t foreground_rgb, background_rgb, cursor_rgb; uint16_t cursor_x, cursor_y; uint8_t cursor_columns, cursor_style, cursor_visible, cursor_has_position, images_skipped; uint8_t reserved[7]; } zigonaut_render_frame_v1;
+/* mouse_shape uses public GhosttyMouseShape values (0 default, 8 text initially).
+   It occupies a formerly reserved byte; record size and existing offsets are unchanged. */
+typedef struct { uint32_t version, size; uint32_t foreground_rgb, background_rgb, cursor_rgb; uint16_t cursor_x, cursor_y; uint8_t cursor_columns, cursor_style, cursor_visible, cursor_has_position, images_skipped, mouse_shape; uint8_t reserved[6]; } zigonaut_render_frame_v1;
 /* text_offset/text_length reference the caller-owned UTF-8 arena passed with this cell array. */
 typedef struct { uint32_t version, size, text_offset, text_length; uint32_t foreground_rgb, background_rgb, underline_rgb; uint16_t x, y; uint8_t occupancy, underline_style, bold, italic, faint, strikethrough, overline, selected, background_is_default, search_highlight; uint8_t reserved[6]; } zigonaut_render_cell_v1;
 /* data_offset/data_length reference the caller-owned RGBA arena. */

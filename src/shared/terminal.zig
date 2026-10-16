@@ -105,6 +105,45 @@ pub const Terminal = struct {
     render_hold_error: ?anyerror = null,
     held_snapshot: RenderSnapshot = .{},
     held_scrollbar: Scrollbar = .{ .total = 0, .offset = 0, .len = 0 },
+    mouse_shape: MouseShape = .text,
+
+    // Public libghostty values, also used by the native snapshot ABI.
+    pub const MouseShape = enum(u8) {
+        default = vt.GHOSTTY_MOUSE_SHAPE_DEFAULT,
+        context_menu = vt.GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU,
+        help = vt.GHOSTTY_MOUSE_SHAPE_HELP,
+        pointer = vt.GHOSTTY_MOUSE_SHAPE_POINTER,
+        progress = vt.GHOSTTY_MOUSE_SHAPE_PROGRESS,
+        wait = vt.GHOSTTY_MOUSE_SHAPE_WAIT,
+        cell = vt.GHOSTTY_MOUSE_SHAPE_CELL,
+        crosshair = vt.GHOSTTY_MOUSE_SHAPE_CROSSHAIR,
+        text = vt.GHOSTTY_MOUSE_SHAPE_TEXT,
+        vertical_text = vt.GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT,
+        alias = vt.GHOSTTY_MOUSE_SHAPE_ALIAS,
+        copy = vt.GHOSTTY_MOUSE_SHAPE_COPY,
+        move = vt.GHOSTTY_MOUSE_SHAPE_MOVE,
+        no_drop = vt.GHOSTTY_MOUSE_SHAPE_NO_DROP,
+        not_allowed = vt.GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED,
+        grab = vt.GHOSTTY_MOUSE_SHAPE_GRAB,
+        grabbing = vt.GHOSTTY_MOUSE_SHAPE_GRABBING,
+        all_scroll = vt.GHOSTTY_MOUSE_SHAPE_ALL_SCROLL,
+        col_resize = vt.GHOSTTY_MOUSE_SHAPE_COL_RESIZE,
+        row_resize = vt.GHOSTTY_MOUSE_SHAPE_ROW_RESIZE,
+        n_resize = vt.GHOSTTY_MOUSE_SHAPE_N_RESIZE,
+        e_resize = vt.GHOSTTY_MOUSE_SHAPE_E_RESIZE,
+        s_resize = vt.GHOSTTY_MOUSE_SHAPE_S_RESIZE,
+        w_resize = vt.GHOSTTY_MOUSE_SHAPE_W_RESIZE,
+        ne_resize = vt.GHOSTTY_MOUSE_SHAPE_NE_RESIZE,
+        nw_resize = vt.GHOSTTY_MOUSE_SHAPE_NW_RESIZE,
+        se_resize = vt.GHOSTTY_MOUSE_SHAPE_SE_RESIZE,
+        sw_resize = vt.GHOSTTY_MOUSE_SHAPE_SW_RESIZE,
+        ew_resize = vt.GHOSTTY_MOUSE_SHAPE_EW_RESIZE,
+        ns_resize = vt.GHOSTTY_MOUSE_SHAPE_NS_RESIZE,
+        nesw_resize = vt.GHOSTTY_MOUSE_SHAPE_NESW_RESIZE,
+        nwse_resize = vt.GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE,
+        zoom_in = vt.GHOSTTY_MOUSE_SHAPE_ZOOM_IN,
+        zoom_out = vt.GHOSTTY_MOUSE_SHAPE_ZOOM_OUT,
+    };
 
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const Bell = *const fn (?*anyopaque) void;
@@ -212,6 +251,7 @@ pub const Terminal = struct {
         cursor_y: u16,
         cursor_columns: u8,
         intense_text_style: IntenseTextStyle,
+        mouse_shape: MouseShape = .text,
     };
 
     pub const Image = struct {
@@ -1228,6 +1268,9 @@ pub const Terminal = struct {
         }
         const focus_reporting = self.focusReporting();
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+        var shape: vt.GhosttyMouseShape = undefined;
+        if (vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE, &shape) == vt.GHOSTTY_SUCCESS)
+            self.mouse_shape = @enumFromInt(shape);
         if (!focus_reporting and self.focusReporting()) {
             var buffer: [3]u8 = undefined;
             const encoded = self.encodeFocusReport(self.focused, &buffer);
@@ -1876,6 +1919,7 @@ pub const Terminal = struct {
             .cursor_y = cursor_y,
             .cursor_columns = if (cursor_wide_tail) 2 else 1,
             .intense_text_style = self.intense_text_style,
+            .mouse_shape = self.mouse_shape,
         };
         renderer.beginFrame(frame);
         const global_appearance_changed = if (previous_frame) |previous|
@@ -3896,6 +3940,34 @@ test "incremental snapshots refresh cursor-only frame changes" {
     try std.testing.expectEqual(@as(u16, 1), snapshot.frame.?.cursor_y);
     try std.testing.expect(!snapshot.frame.?.cursor_visible);
     try std.testing.expectEqual(@as(u32, 'A'), snapshot.cells.items[0].codepoints(&snapshot.rows.items[0])[0]);
+}
+
+test "OSC 22 preserves accepted mouse shapes and refreshes snapshots without cell changes" {
+    var terminal = try Terminal.init(4, 2, theme.rasmus);
+    defer terminal.deinit();
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(Terminal.MouseShape.text, snapshot.frame.?.mouse_shape);
+    const original_hash = snapshot.row_hashes.items[0];
+    const original_cursor = snapshot.frame.?.cursor_style;
+
+    terminal.feed("\x1b]22;cross");
+    try std.testing.expectEqual(Terminal.MouseShape.text, terminal.mouse_shape);
+    terminal.feed("hair\x1b\\");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(Terminal.MouseShape.crosshair, snapshot.frame.?.mouse_shape);
+    try std.testing.expectEqual(original_hash, snapshot.row_hashes.items[0]);
+    try std.testing.expectEqual(original_cursor, snapshot.frame.?.cursor_style);
+
+    terminal.feed("\x1b]22;not-a-cursor\x07");
+    try std.testing.expectEqual(Terminal.MouseShape.crosshair, terminal.mouse_shape);
+    terminal.feed("\x1b]22;default\x07");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(Terminal.MouseShape.default, snapshot.frame.?.mouse_shape);
+    terminal.feed("\x1b]22;\x07");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(Terminal.MouseShape.text, snapshot.frame.?.mouse_shape);
 }
 
 test "incremental snapshots refresh all cells after global color changes" {

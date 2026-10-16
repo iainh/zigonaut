@@ -1082,6 +1082,7 @@ pub const View = struct {
     }
 
     fn refreshIfNeeded(self: *View) void {
+        _ = self.updateMouseCursor();
         if (self.model.takePendingBell()) self.ringBell();
         if (self.model.hasExitedSession()) {
             _ = win.PostMessageW(win.GetParent(self.hwnd), self.shell_exited_message, 0, 0);
@@ -2280,7 +2281,27 @@ pub const View = struct {
         self.scrollToBottom();
     }
 
+    fn updateMouseCursor(self: *View) bool {
+        var point: win.POINT = undefined;
+        if (win.GetCursorPos(&point) == 0 or win.WindowFromPoint(point) != self.hwnd or
+            win.GetAncestor(self.hwnd, win.GA_ROOT) != win.GetForegroundWindow()) return false;
+        if (win.ScreenToClient(self.hwnd, &point) == 0) return false;
+        const x: u16 = @bitCast(@as(i16, @intCast(std.math.clamp(point.x, -32768, 32767))));
+        const y: u16 = @bitCast(@as(i16, @intCast(std.math.clamp(point.y, -32768, 32767))));
+        self.updateHoveredLink(@intCast(@as(u32, x) | (@as(u32, y) << 16)));
+        return true;
+    }
+
+    fn applyMouseCursor(self: *View) void {
+        const runtime = self.boundRuntime() orelse return;
+        const shape = runtime.mouseShape();
+        const id = if (self.hovered_link != null) @as(u16, 32649) else mouseCursorId(shape);
+        const cursor = win.LoadCursorW(null, win32.handleFromInt(win.LPCWSTR, id));
+        if (cursor != null and win.GetCursor() != cursor) _ = win.SetCursor(cursor);
+    }
+
     fn updateHoveredLink(self: *View, lparam: win.LPARAM) void {
+        defer self.applyMouseCursor();
         if (win.GetKeyState(win.VK_CONTROL) >= 0) {
             self.clearHoveredLink();
             return;
@@ -2307,7 +2328,6 @@ pub const View = struct {
             .point = point,
             .link = found,
         };
-        _ = win.SetCursor(win.LoadCursorW(null, win32.handleFromInt(win.LPCWSTR, 32649)));
         self.invalidate();
     }
 
@@ -2694,6 +2714,14 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
             return 0;
         },
         win.WM_CREATE => return 0,
+        win.WM_SETCURSOR => {
+            // Only claim this terminal's client area. WinUI divider thumbs keep
+            // their own ProtectedCursor, and non-client sizing stays native.
+            if (@as(u16, @truncate(@as(usize, @bitCast(lparam)))) == win.HTCLIENT) {
+                if (view) |current| if (current.updateMouseCursor()) return 1;
+            }
+            return win.DefWindowProcW(hwnd, message, wparam, lparam);
+        },
         win.WM_LBUTTONDOWN, win.WM_LBUTTONDBLCLK => {
             if (view) |current| current.beginSelection(lparam);
             return 0;
@@ -2780,6 +2808,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
         win.WM_KEYDOWN, win.WM_SYSKEYDOWN => {
             if (isContextMenuShortcut(wparam)) return 0;
             if (view) |current| {
+                _ = current.updateMouseCursor();
                 if (current.handleKey(wparam, lparam, false)) return 0;
             }
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
@@ -2790,6 +2819,7 @@ fn windowProc(hwnd: win.HWND, message: win.UINT, wparam: win.WPARAM, lparam: win
                 return 0;
             }
             if (view) |current| {
+                _ = current.updateMouseCursor();
                 if (current.handleKey(wparam, lparam, true)) return 0;
             }
             return win.DefWindowProcW(hwnd, message, wparam, lparam);
@@ -2942,6 +2972,25 @@ fn measureCell(hwnd: win.HWND, font: win.HFONT, line_height_percent: u16) CellSi
 
 fn scaled(value: i32, dpi: u32) i32 {
     return win.MulDiv(value, @intCast(dpi), 96);
+}
+
+// Shared system resources: unsupported CSS shapes fall back to the native arrow.
+fn mouseCursorId(shape: Terminal.MouseShape) u16 {
+    return switch (shape) {
+        .text, .vertical_text => 32513, // IDC_IBEAM
+        .wait => 32514, // IDC_WAIT
+        .cell, .crosshair => 32515, // IDC_CROSS
+        .nw_resize, .se_resize, .nwse_resize => 32642, // IDC_SIZENWSE
+        .ne_resize, .sw_resize, .nesw_resize => 32643, // IDC_SIZENESW
+        .e_resize, .w_resize, .ew_resize, .col_resize => 32644, // IDC_SIZEWE
+        .n_resize, .s_resize, .ns_resize, .row_resize => 32645, // IDC_SIZENS
+        .move, .all_scroll, .grab, .grabbing => 32646, // IDC_SIZEALL
+        .no_drop, .not_allowed => 32648, // IDC_NO
+        .pointer => 32649, // IDC_HAND
+        .progress => 32650, // IDC_APPSTARTING
+        .help => 32651, // IDC_HELP
+        else => 32512, // IDC_ARROW (including explicit DEFAULT)
+    };
 }
 
 fn mouseCoordinate(lparam: win.LPARAM, shift: u6) i32 {
