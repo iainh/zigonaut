@@ -3,6 +3,7 @@
 #include <evntrace.h>
 #include <evntprov.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 // Zigonaut.Scroll: {B0B70986-9D2A-4B52-A8CC-693BF873D56B}
 static const GUID provider_id = {
