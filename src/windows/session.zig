@@ -575,6 +575,12 @@ pub const SessionRuntime = struct {
         return self.render_scroll_offset;
     }
 
+    pub fn mouseShape(self: *SessionRuntime) Terminal.MouseShape {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.mouse_shape;
+    }
+
     /// Returns the delay before a synchronized-output frame may render. Once
     /// the watchdog expires, clear mode 2026 so subsequent output is visible.
     pub fn synchronizedOutputDelay(self: *SessionRuntime, now: u64) ?u32 {
@@ -1444,7 +1450,7 @@ test "session defers synchronized chunks and prepares once mode ends" {
     try std.testing.expect(try runtime.prepareRender());
 }
 
-test "session consumes Ghostty progress and notification effects" {
+test "session consumes Ghostty progress, notification and mouse shape effects" {
     var runtime = SessionRuntime{
         .allocator = std.testing.allocator,
         .terminal = try Terminal.init(80, 24, theme.rasmus),
@@ -1456,9 +1462,11 @@ test "session consumes Ghostty progress and notification effects" {
     try runtime.terminal.setProgressReport(SessionRuntime.progressReport, &runtime);
     try runtime.terminal.setDesktopNotification(SessionRuntime.desktopNotification, &runtime);
 
+    try std.testing.expectEqual(Terminal.MouseShape.text, runtime.mouseShape());
     _ = runtime.processOutputChunk("plain\x1b]9;4;", 100);
     try std.testing.expectEqual(@as(?SessionRuntime.TaskbarProgress, null), runtime.taskbarProgress());
-    _ = runtime.processOutputChunk("1;47\x07\x1b]777;notify;Build;finished successfully\x1b\\", 200);
+    _ = runtime.processOutputChunk("1;47\x07\x1b]777;notify;Build;finished successfully\x1b\\\x1b]22;pointer\x07", 200);
+    try std.testing.expectEqual(Terminal.MouseShape.pointer, runtime.mouseShape());
     const determinate = runtime.taskbarProgress().?;
     try std.testing.expectEqual(Terminal.ProgressState.normal, determinate.state);
     try std.testing.expectEqual(@as(u8, 47), determinate.value);

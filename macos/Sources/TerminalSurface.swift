@@ -85,6 +85,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var trackingArea: NSTrackingArea?
   private var lastMousePoint: NSPoint?
   private var hoveredLink: HoveredLink?
+  private var appliedMouseShape: UInt8?
   private var cachedFontFamily = ""
   private var cachedFontSize = 0.0
   private var cachedLineHeightPercent = 0.0
@@ -438,7 +439,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   override func updateTrackingAreas() {
     if let trackingArea { removeTrackingArea(trackingArea) }
     let area = NSTrackingArea(rect: bounds,
-      options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
+      options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .cursorUpdate, .inVisibleRect],
       owner: self, userInfo: nil)
     addTrackingArea(area)
     trackingArea = area
@@ -450,14 +451,68 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     updateLinkCursor(event.modifierFlags)
   }
 
+  override func mouseEntered(with event: NSEvent) {
+    mouseMoved(with: event)
+  }
+
+  override func cursorUpdate(with event: NSEvent) {
+    mouseMoved(with: event)
+  }
+
+  override func resetCursorRects() {
+    addCursorRect(bounds, cursor: Self.mouseCursor(model.renderSnapshot.frame.mouseShape))
+  }
+
+  // Use public AppKit pointers only. Shapes without a native equivalent use arrow.
+  // Numeric values are the public GhosttyMouseShape ABI, not the text cursor style.
+  static func mouseCursor(_ shape: UInt8) -> NSCursor {
+    switch shape {
+    case 1: return .contextualMenu
+    case 3: return .pointingHand
+    case 6, 7: return .crosshair
+    case 8: return .iBeam
+    case 9: return .iBeamCursorForVerticalLayout
+    case 10: return .dragLink
+    case 11: return .dragCopy
+    case 13, 14: return .operationNotAllowed
+    case 15: return .openHand
+    case 12, 16, 17: return .closedHand
+    case 18, 28: return .columnResize
+    case 19, 29: return .rowResize
+    case 20: return .resizeUp
+    case 21: return .resizeRight
+    case 22: return .resizeDown
+    case 23: return .resizeLeft
+    case 24, 27, 30: return .frameResize(position: .topRight, directions: .all)
+    case 25, 26, 31: return .frameResize(position: .topLeft, directions: .all)
+    case 32: return .zoomIn
+    case 33: return .zoomOut
+    default: return .arrow
+    }
+  }
+
+  func updateMouseCursor(_ flags: NSEvent.ModifierFlags = NSEvent.modifierFlags) {
+    let shape = model.renderSnapshot.frame.mouseShape
+    if appliedMouseShape != shape {
+      appliedMouseShape = shape
+      window?.invalidateCursorRects(for: self)
+    }
+    // Output can change the pointer without a mouse event. Never set the global
+    // cursor from a background pane or while a divider/overlay owns the hit.
+    guard let window, window.isKeyWindow, let content = window.contentView else { return }
+    let location = window.mouseLocationOutsideOfEventStream
+    guard content.hitTest(content.convert(location, from: nil)) === self else { return }
+    lastMousePoint = convert(location, from: nil)
+    updateLinkCursor(flags)
+  }
+
   override func mouseExited(with event: NSEvent) {
     lastMousePoint = nil
     setHoveredLink(nil)
-    NSCursor.arrow.set()
   }
 
   override func flagsChanged(with event: NSEvent) {
-    updateLinkCursor(event.modifierFlags)
+    updateMouseCursor(event.modifierFlags)
     let code = event.keyCode
     guard Self.modifierKeyCodes.contains(code) else { return }
     let releasing = pressedModifiers.contains(code)
@@ -466,23 +521,25 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func updateLinkCursor(_ flags: NSEvent.ModifierFlags) {
-    guard flags.contains(.command), let point = lastMousePoint else {
+    guard let point = lastMousePoint else { return }
+    let requested = Self.mouseCursor(model.renderSnapshot.frame.mouseShape)
+    guard flags.contains(.command) else {
       setHoveredLink(nil)
-      NSCursor.arrow.set()
+      requested.set()
       return
     }
     let grid = NSRect(x: originX, y: originY,
       width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)
     guard grid.contains(point) else {
       setHoveredLink(nil)
-      NSCursor.arrow.set()
+      requested.set()
       return
     }
     let column = max(0, Int((point.x - originX) / cellWidth))
     let row = max(0, Int((point.y - originY) / lineHeight))
     guard let link = model.link(column: column, row: row) else {
       setHoveredLink(nil)
-      NSCursor.arrow.set()
+      requested.set()
       return
     }
     setHoveredLink(HoveredLink(
@@ -1912,6 +1969,7 @@ struct TerminalSurface: NSViewRepresentable {
     view.resizeTerminal()
     view.needsDisplay = true
     view.updateAccessibilityValue()
+    view.updateMouseCursor()
     view.setAccessibilityFocused(wantsKeyboardFocus)
     if shouldClaimKeyboardFocus {
       view.window?.makeFirstResponder(view)
