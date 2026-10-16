@@ -99,6 +99,12 @@ pub const Terminal = struct {
     columns: u16,
     rows: u16,
     intense_text_style: IntenseTextStyle = .all,
+    render_hold_registered: bool = false,
+    render_held: bool = false,
+    render_hold_generation: u64 = 0,
+    render_hold_error: ?anyerror = null,
+    held_snapshot: RenderSnapshot = .{},
+    held_scrollbar: Scrollbar = .{ .total = 0, .offset = 0, .len = 0 },
 
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const Bell = *const fn (?*anyopaque) void;
@@ -588,6 +594,19 @@ pub const Terminal = struct {
         fn captureImages(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
             self.clearImages(allocator);
             errdefer self.clearImages(allocator);
+            if (terminal.render_held) {
+                // Pixels and placement geometry must come from the same
+                // boundary as the text, not the live, partially drawn screen.
+                const held = &terminal.held_snapshot;
+                try self.images.ensureTotalCapacity(allocator, held.images.items.len);
+                for (held.images.items) |image| {
+                    var owned = image;
+                    owned.pixels = try allocator.dupe(u8, image.pixels);
+                    self.images.appendAssumeCapacity(owned);
+                }
+                try self.placements.appendSlice(allocator, held.placements.items);
+                return;
+            }
             var virtual_placements: std.ArrayList(VirtualPlacement) = .empty;
             defer virtual_placements.deinit(allocator);
             var graphics: vt.GhosttyKittyGraphics = null;
@@ -1155,6 +1174,7 @@ pub const Terminal = struct {
     }
 
     pub fn deinit(self: *Terminal) void {
+        self.held_snapshot.deinit(std.heap.c_allocator);
         vt.ghostty_tracked_grid_ref_free(self.selection_anchor);
         vt.ghostty_mouse_event_free(self.mouse_event);
         vt.ghostty_mouse_encoder_free(self.mouse_encoder);
@@ -1198,6 +1218,14 @@ pub const Terminal = struct {
     }
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
+        // init returns by value; install userdata only once the Terminal has
+        // its stable address. The callback runs under the caller's terminal
+        // lock and never acquires a host snapshot lock.
+        if (!self.render_hold_registered) {
+            check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self)) catch unreachable;
+            check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(vt.GhosttyTerminalRenderHoldFn, renderHold))) catch unreachable;
+            self.render_hold_registered = true;
+        }
         const focus_reporting = self.focusReporting();
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
         if (!focus_reporting and self.focusReporting()) {
@@ -1217,6 +1245,12 @@ pub const Terminal = struct {
             .value = enabled,
         };
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_MODE, &config));
+        // OPT_MODE deliberately does not invoke the render-hold callback.
+        // In particular, a watchdog reset must stop replaying the held frame.
+        if (!enabled) {
+            self.render_held = false;
+            self.render_hold_error = null;
+        }
     }
 
     pub fn encodeFocusReport(self: *Terminal, focused: bool, output: []u8) []const u8 {
@@ -1791,10 +1825,14 @@ pub const Terminal = struct {
         try self.renderViewportInternal(renderer, null);
     }
 
-    /// Updates the render state and emits either all rows or only rows marked
-    /// dirty by libghostty. Dirty flags are consumed after a successful pass.
+    /// Capture live state only outside a hold; otherwise replay the RenderState
+    /// captured at hold-begin. Consume dirty flags after a successful pass.
     fn renderViewportInternal(self: *Terminal, renderer: anytype, previous_frame: ?Frame) !void {
-        try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
+        if (self.render_held) {
+            if (self.render_hold_error) |err| return err;
+        } else {
+            try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
+        }
 
         var dirty: vt.GhosttyRenderStateDirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
         try check(vt.ghostty_render_state_get(self.render_state, vt.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty));
@@ -2182,7 +2220,11 @@ pub const Terminal = struct {
     }
 
     pub fn writeViewportText(self: *Terminal, output: []u8) ![]const u8 {
-        try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
+        if (self.render_held) {
+            if (self.render_hold_error) |err| return err;
+        } else {
+            try check(vt.ghostty_render_state_update(self.render_state, self.terminal));
+        }
         try check(vt.ghostty_render_state_get(
             self.render_state,
             vt.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
@@ -2497,6 +2539,27 @@ fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
     };
 }
 
+fn renderHold(_: vt.GhosttyTerminal, userdata: ?*anyopaque, held: bool) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    self.render_held = false;
+    self.render_hold_error = null;
+    if (!held) return;
+
+    self.render_hold_generation +%= 1;
+    // A host may have consumed the render-state dirty flags since our last
+    // boundary. Capture all rows, synchronously before any held bytes parse.
+    self.held_snapshot.frame = null;
+    self.held_snapshot.capture(std.heap.c_allocator, self) catch |err| {
+        self.render_hold_error = err;
+    };
+    self.held_scrollbar = self.scrollbar() catch .{ .total = 0, .offset = 0, .len = 0 };
+    // The boundary capture is not consumption by the native snapshot. Keep
+    // its rows invalidated even if the hold ends before that host renders.
+    var dirty: vt.GhosttyRenderStateDirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
+    check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY, &dirty)) catch unreachable;
+    self.render_held = true;
+}
+
 fn writePty(_: vt.GhosttyTerminal, userdata: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.write_pty orelse return;
@@ -2731,6 +2794,75 @@ test "libghostty exposes synchronized output mode" {
     try terminal.setSynchronizedOutput(true);
     try terminal.setSynchronizedOutput(false);
     try std.testing.expect(!terminal.synchronizedOutput());
+}
+
+test "render snapshots capture every hold boundary across writes and split sequences" {
+    const stream = "AAAA\x1b[?2026h\rBBBB\x1b[?2026l\x1b[?2026h\rCCCC";
+    for (0..stream.len + 1) |split| {
+        var terminal = try Terminal.init(8, 2, theme.rasmus);
+        defer terminal.deinit();
+        var snapshot = Terminal.RenderSnapshot{};
+        defer snapshot.deinit(std.testing.allocator);
+        // Consume a prior native snapshot so the boundary cannot rely on
+        // initial dirty flags, or on the host having rendered frame B.
+        try snapshot.capture(std.testing.allocator, &terminal);
+        terminal.feed(stream[0..split]);
+        try snapshot.capture(std.testing.allocator, &terminal);
+        terminal.feed(stream[split..]);
+        var viewport_text: [32]u8 = undefined;
+        const visible = try terminal.writeViewportText(&viewport_text);
+        try std.testing.expectEqualStrings("BBBB", visible[0..4]);
+        try snapshot.capture(std.testing.allocator, &terminal);
+        for (snapshot.cells.items[0..4]) |cell|
+            try std.testing.expectEqualSlices(u32, &.{'B'}, cell.codepoints(&snapshot.rows.items[0]));
+        try std.testing.expectEqual(@as(u16, 4), snapshot.frame.?.cursor_x);
+
+        terminal.feed("\x1b[?2026h\rDDDD"); // repeated enable is not a new frame
+        try snapshot.capture(std.testing.allocator, &terminal);
+        for (snapshot.cells.items[0..4]) |cell|
+            try std.testing.expectEqualSlices(u32, &.{'B'}, cell.codepoints(&snapshot.rows.items[0]));
+        terminal.feed("\x1b[?2026l");
+        try snapshot.capture(std.testing.allocator, &terminal);
+        for (snapshot.cells.items[0..4]) |cell|
+            try std.testing.expectEqualSlices(u32, &.{'D'}, cell.codepoints(&snapshot.rows.items[0]));
+    }
+}
+
+test "resize RIS and forced mode reset release captured frames" {
+    for (0..3) |release| {
+        var terminal = try Terminal.init(8, 2, theme.rasmus);
+        defer terminal.deinit();
+        var snapshot = Terminal.RenderSnapshot{};
+        defer snapshot.deinit(std.testing.allocator);
+        terminal.feed("AAAA\x1b[?2026h\rBBBB");
+        try snapshot.capture(std.testing.allocator, &terminal);
+        switch (release) {
+            0 => try terminal.resize(10, 3, 8, 16),
+            1 => terminal.feed("\x1bcRESET"),
+            2 => try terminal.setSynchronizedOutput(false),
+            else => unreachable,
+        }
+        try std.testing.expect(!terminal.synchronizedOutput());
+        try snapshot.capture(std.testing.allocator, &terminal);
+        const expected: u32 = if (release == 1) 'R' else 'B';
+        try std.testing.expectEqualSlices(u32, &.{expected}, snapshot.cells.items[0].codepoints(&snapshot.rows.items[0]));
+        try std.testing.expectEqual(@as(usize, if (release == 0) 3 else 2), snapshot.rows.items.len);
+    }
+}
+
+test "held snapshots own image pixels and placements before live deletion" {
+    var terminal = try Terminal.init(8, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(8, 2, 8, 16);
+    terminal.feed("\x1b_Gf=32,s=1,v=1,a=T,i=1,c=1,r=1;/wAA/w==\x1b\\\x1b[?2026h\x1b_Ga=d,d=A\x1b\\");
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(std.testing.allocator);
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.placements.items.len);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, snapshot.images.items[0].pixels);
+    terminal.feed("\x1b[?2026l");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.placements.items.len);
 }
 
 test "focus reports are emitted only when requested" {

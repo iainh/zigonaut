@@ -474,24 +474,21 @@ fn readLoop(self: *Core) void {
     };
     while (true) {
         self.mutex.lock();
-        const timeout: c_int = if (self.synchronized_output.remaining(monotonicMillis())) |remaining| @intCast(remaining) else -1;
+        const remaining = self.synchronized_output.remaining(monotonicMillis());
+        const expired = remaining == 0;
+        if (expired) {
+            self.terminal.setSynchronizedOutput(false) catch {};
+            _ = self.synchronized_output.clear();
+        }
+        const timeout: c_int = if (!expired and remaining != null) @intCast(remaining.?) else -1;
         self.mutex.unlock();
+        if (expired) wakeHost(self);
         const ready = c.poll(&fds, fds.len, timeout);
         if (ready < 0) {
             if (c.__error().* == c.EINTR) continue;
             break;
         }
-        if (ready == 0) {
-            self.mutex.lock();
-            const expired = self.synchronized_output.remaining(monotonicMillis()) == 0;
-            if (expired) {
-                self.terminal.setSynchronizedOutput(false) catch {};
-                _ = self.synchronized_output.clear();
-            }
-            self.mutex.unlock();
-            if (expired) wakeHost(self);
-            continue;
-        }
+        if (ready == 0) continue;
         if (fds[1].revents != 0) break;
         if (fds[0].revents == 0) continue;
         const count = c.read(self.master, &buffer, buffer.len);
@@ -502,16 +499,20 @@ fn readLoop(self: *Core) void {
         }
         if (count == 0) break;
         self.mutex.lock();
+        const hold_generation = self.terminal.render_hold_generation;
         self.terminal.feed(buffer[0..@intCast(count)]);
         self.output_generation +%= 1;
         const synchronized = self.terminal.synchronizedOutput();
+        const new_frame = hold_generation != self.terminal.render_hold_generation;
+        if (new_frame) _ = self.synchronized_output.clear();
         const mode_changed = self.synchronized_output.update(synchronized, monotonicMillis());
         self.mutex.unlock();
-        if (!synchronized or mode_changed) wakeHost(self);
+        if (!synchronized or mode_changed or new_frame) wakeHost(self);
     }
     if (self.stopping.load(.acquire)) return;
     self.exited.store(true, .release);
     self.mutex.lock();
+    self.terminal.setSynchronizedOutput(false) catch {};
     _ = self.synchronized_output.clear();
     self.mutex.unlock();
     wakeHost(self);
@@ -910,7 +911,7 @@ fn visualRowHashes(snapshot: *const Terminal.RenderSnapshot, selection_ranges: [
 
 /// Writes one coherent viewport into caller-owned arrays. Cell text refers to
 /// `text_arena` by offset/length and remains valid only while the caller retains it.
-/// Status 3 leaves the retained native frame untouched during synchronized output.
+/// During synchronized output, replays the completed hold-begin frame.
 export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const u64, previous_count: u32, frame: ?*RenderFrame, cells: ?[*]RenderCell, cell_capacity: u32, text_arena: ?[*]u8, text_capacity: u32, current_hashes: ?[*]u64, hash_capacity: u32, result: ?*RenderSnapshotResult) void {
     const output = result orelse return;
     output.* = .{ .version = 1, .size = @sizeOf(RenderSnapshotResult), .required_cells = 0, .written_cells = 0, .required_text_bytes = 0, .written_text_bytes = 0, .required_rows = 0, .written_rows = 0, .viewport_offset = 0, .status = 2, .reserved = @splat(0) };
@@ -922,14 +923,10 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     const text_slice = if (text_arena) |pointer| pointer[0..text_capacity] else if (text_capacity == 0) empty_text[0..] else return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    if (core.terminal.synchronizedOutput()) {
-        output.status = 3;
-        return;
-    }
     var collector = SnapshotCollector{ .frame = output_frame, .cells = cell_slice, .text = text_slice, .result = output };
     collector.search_matches = core.search.matches.items;
     collector.search_active = core.search.active;
-    collector.viewport_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
+    collector.viewport_offset = if (core.terminal.render_held) core.terminal.held_scrollbar.offset else if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
     output.viewport_offset = collector.viewport_offset;
     core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
     const row_count = core.render_snapshot.row_hashes.items.len;
@@ -959,6 +956,38 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     if (current_hashes) |destination| @memcpy(destination[0..row_count], visual);
     output.written_rows = @intCast(row_count);
     output.status = 0;
+}
+
+test "native snapshots present the completed frame during a hold and remain idle when unchanged" {
+    var core = Core{
+        .terminal = try Terminal.init(8, 2, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = null,
+        .context = null,
+    };
+    defer core.terminal.deinit();
+    defer core.render_snapshot.deinit(std.heap.c_allocator);
+    core.terminal.feed("AAAA\x1b[?2026h\rBBBB\x1b[?2026l\x1b[?2026h\rCCCC");
+    var frame: RenderFrame = undefined;
+    var cells: [16]RenderCell = undefined;
+    var text: [64]u8 = undefined;
+    var hashes: [2]u64 = undefined;
+    var result: RenderSnapshotResult = undefined;
+    zigonaut_core_render_snapshot(&core, null, 0, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expectEqualStrings("BBBB", text[0..4]);
+    try std.testing.expectEqual(@as(u16, 4), frame.cursor_x);
+    const previous = hashes;
+    zigonaut_core_render_snapshot(&core, &previous, previous.len, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expectEqual(@as(u32, 0), result.written_cells);
+    core.terminal.feed("\x1b[?2026l");
+    zigonaut_core_render_snapshot(&core, &previous, previous.len, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expectEqualStrings("CCCC", text[0..4]);
 }
 
 test "dirty rows select changes and force a complete snapshot after resize" {

@@ -72,7 +72,6 @@ const FrameWaitContext = struct {
 
 const FrameWaitOutcome = enum(u8) {
     prepared,
-    synchronized_output,
     failed,
     timed_out,
 };
@@ -149,21 +148,18 @@ fn frameWaitCallback(raw: ?*anyopaque, timed_out: win.BOOLEAN) callconv(.winapi)
         publishFrameWaitCompletion(view, context, request_id, 0, .timed_out);
         return;
     }
-    var outcome: FrameWaitOutcome = .prepared;
     var generation: u64 = 0;
     if (context.runtime) |runtime| {
         scroll_trace.write(.capture_started, view.tracePaneId(), request_id, @intCast(context.wait_id), 0);
-        switch (runtime.captureRender() catch {
+        const prepared = runtime.captureRender() catch {
             scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(FrameWaitOutcome.failed));
             publishFrameWaitCompletion(view, context, request_id, generation, .failed);
             return;
-        }) {
-            .prepared => |prepared| generation = prepared.content_generation,
-            .synchronized_output => outcome = .synchronized_output,
-        }
-        scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(outcome));
+        };
+        generation = prepared.content_generation;
+        scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(FrameWaitOutcome.prepared));
     }
-    publishFrameWaitCompletion(view, context, request_id, generation, outcome);
+    publishFrameWaitCompletion(view, context, request_id, generation, .prepared);
 }
 
 fn accessibilityText(context: ?*anyopaque, kind: u32, output: [*c]u16, capacity: u32) callconv(.c) u32 {
@@ -993,9 +989,6 @@ pub const View = struct {
             self.full_rebuild_required.store(true, .release);
             self.render_dirty.store(true, .release);
             self.armFrameWait();
-        } else if (outcome == .synchronized_output) {
-            self.render_dirty.store(true, .release);
-            _ = self.deferSynchronizedOutput();
         } else if (self.resize_render_pending) {
             self.prepared_available = true;
             self.paintPendingResize();
@@ -1057,39 +1050,35 @@ pub const View = struct {
         }
     }
 
-    fn deferSynchronizedOutput(self: *View) bool {
+    fn updateSynchronizedOutputWatchdog(self: *View) void {
         const runtime = self.boundRuntime() orelse {
             _ = win.KillTimer(self.hwnd, synchronized_output_timer);
-            return false;
+            return;
         };
         const delay = runtime.synchronizedOutputDelay(win.GetTickCount64()) orelse {
             _ = win.KillTimer(self.hwnd, synchronized_output_timer);
-            return false;
+            return;
         };
         if (!self.render_gate.enabled()) {
             _ = win.KillTimer(self.hwnd, synchronized_output_timer);
-            return true;
+            return;
         }
         if (win.SetTimer(self.hwnd, synchronized_output_timer, @max(delay, 1), null) == 0) {
             // End synchronized output if the watchdog cannot run. Otherwise,
             // one terminal mode can suppress all later rendering.
             log.warn("unable to arm synchronized-output watchdog; releasing suppression", .{});
             runtime.forceEndSynchronizedOutput();
-            return false;
         }
-        return true;
+        // Keep the one-shot watchdog, but render the completed boundary frame
+        // rather than suppressing presentation for the duration of the hold.
     }
 
     fn prepareBoundRender(self: *View) bool {
         const runtime = self.boundRuntime() orelse return true;
-        while (true) {
-            const ready = runtime.prepareRender() catch |err| {
-                log.warn("unable to prepare terminal render: {}", .{err});
-                return false;
-            };
-            if (ready) return true;
-            if (self.deferSynchronizedOutput()) return false;
-        }
+        return runtime.prepareRender() catch |err| {
+            log.warn("unable to prepare terminal render: {}", .{err});
+            return false;
+        };
     }
 
     fn refreshIfNeeded(self: *View) void {
@@ -1149,7 +1138,7 @@ pub const View = struct {
             self.notifySearchStatus();
             self.invalidate();
         }
-        if (self.deferSynchronizedOutput()) return;
+        self.updateSynchronizedOutputWatchdog();
         const generation = runtime.contentGeneration();
         if (runtime == self.last_runtime and generation == self.last_content_generation) {
             if (self.render_dirty.load(.acquire)) self.armFrameWait();
@@ -3241,5 +3230,4 @@ test "failed and timed-out frame waits retain dirt without self-scheduling" {
     try std.testing.expect(!frameWaitOutcomeCanRetry(.failed));
     try std.testing.expect(!frameWaitOutcomeCanRetry(.timed_out));
     try std.testing.expect(frameWaitOutcomeCanRetry(.prepared));
-    try std.testing.expect(frameWaitOutcomeCanRetry(.synchronized_output));
 }
