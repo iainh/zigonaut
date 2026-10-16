@@ -85,6 +85,8 @@ pub const Terminal = struct {
     bell_context: ?*anyopaque = null,
     title_changed: ?TitleChanged = null,
     title_context: ?*anyopaque = null,
+    reset_callback: ?Reset = null,
+    reset_context: ?*anyopaque = null,
     clipboard_write: ?ClipboardWrite = null,
     clipboard_context: ?*anyopaque = null,
     desktop_notification: ?DesktopNotification = null,
@@ -101,6 +103,7 @@ pub const Terminal = struct {
     pub const WritePty = *const fn (?*anyopaque, []const u8) void;
     pub const Bell = *const fn (?*anyopaque) void;
     pub const TitleChanged = *const fn (?*anyopaque, []const u8) void;
+    pub const Reset = *const fn (?*anyopaque) void;
     pub const ClipboardWrite = *const fn (?*anyopaque, ClipboardWriteOperation) ClipboardWriteResult;
     pub const ClipboardWriteOperation = union(enum) { clear, text: []const u8 };
     pub const ClipboardWriteResult = enum { success, denied, unsupported, busy, invalid_data, io_error };
@@ -1726,6 +1729,15 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(vt.GhosttyTerminalTitleChangedFn, titleChanged)));
     }
 
+    /// Runs synchronously during feed after RIS, not DECSTR. The host already
+    /// holds its terminal lock; the callback must not acquire it again.
+    pub fn setReset(self: *Terminal, callback: Reset, context: ?*anyopaque) !void {
+        self.reset_callback = callback;
+        self.reset_context = context;
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_RESET, @as(vt.GhosttyTerminalResetFn, reset)));
+    }
+
     pub fn setWritePty(self: *Terminal, callback: WritePty, context: ?*anyopaque) !void {
         self.write_pty = callback;
         self.write_pty_context = context;
@@ -2503,6 +2515,12 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
     if (vt.ghostty_terminal_get(terminal, vt.GHOSTTY_TERMINAL_DATA_TITLE, &title) != vt.GHOSTTY_SUCCESS) return;
     if (title.len != 0 and title.ptr == null) return;
     callback(self.title_context, if (title.len == 0) "" else title.ptr[0..title.len]);
+}
+
+fn reset(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    const callback = self.reset_callback orelse return;
+    callback(self.reset_context);
 }
 
 fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notification: [*c]const vt.GhosttyTerminalDesktopNotification) callconv(.c) void {
