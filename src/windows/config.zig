@@ -14,6 +14,7 @@ pub const default_contents =
     \\    "randomizeTabBackground": true
     \\  },
     \\  "terminal": {
+    \\    "commandCompletionNotifications": false,
     \\    "scrollbackSize": 10000,
     \\    "initialSize": { "columns": 80, "rows": 24 }
     \\  },
@@ -121,6 +122,7 @@ const JsonConfig = struct {
         randomizeTabBackground: bool,
     },
     terminal: struct {
+        commandCompletionNotifications: bool = false,
         scrollbackSize: u32,
         initialSize: struct {
             columns: u16,
@@ -153,6 +155,7 @@ pub const Config = struct {
     intense_text_style: IntenseTextStyle = .all,
     text_antialiasing: TextAntialiasing = .acceleratedGrayscale,
     scrollback_size: u32 = 10_000,
+    command_completion_notifications: bool = false,
     initial_columns: u16 = 80,
     initial_rows: u16 = 24,
     dark_theme: []const u8 = "fluent-dark",
@@ -353,6 +356,7 @@ fn configFromJson(json: JsonConfig) !Config {
     result.intense_text_style = json.appearance.font.intenseTextStyle;
     result.text_antialiasing = json.appearance.font.antialiasing;
     result.scrollback_size = json.terminal.scrollbackSize;
+    result.command_completion_notifications = json.terminal.commandCompletionNotifications;
     result.initial_columns = json.terminal.initialSize.columns;
     result.initial_rows = json.terminal.initialSize.rows;
     result.dark_theme = json.appearance.themes.dark;
@@ -480,6 +484,20 @@ test "default JSON configuration parses" {
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
     try std.testing.expect(value.shell_integration_enabled);
+    try std.testing.expect(!value.command_completion_notifications);
+}
+
+test "command completion alerts are opt-in and old configurations remain disabled" {
+    const contents = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, "\"commandCompletionNotifications\": false", "\"commandCompletionNotifications\": true");
+    defer std.testing.allocator.free(contents);
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expect((try configFromJson(parsed.value)).command_completion_notifications);
+    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, "\"commandCompletionNotifications\": false,", "");
+    defer std.testing.allocator.free(legacy);
+    var old = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy, .{ .ignore_unknown_fields = true });
+    defer old.deinit();
+    try std.testing.expect(!(try configFromJson(old.value)).command_completion_notifications);
 }
 
 test "automatic shell integration can be disabled" {

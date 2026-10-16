@@ -961,6 +961,12 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.unlock();
     }
 
+    pub fn setCommandNotifications(self: *SessionRuntime, enabled: bool) void {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        self.terminal.setCommandNotifications(enabled);
+    }
+
     pub fn setVisible(self: *SessionRuntime, visible: bool) void {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();

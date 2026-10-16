@@ -37,6 +37,7 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_title",
     "zigonaut_core_link_at",
     "zigonaut_core_take_notification",
+    "zigonaut_core_set_command_notifications",
     "zigonaut_core_set_clipboard_write",
     "zigonaut_core_take_clipboard_write",
     "zigonaut_core_mouse_tracking",

@@ -135,6 +135,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["intense_text_style"] = to_string(font.GetNamedString(L"intenseTextStyle", L"all"));
     values["text_antialiasing"] = to_string(font.GetNamedString(L"antialiasing", L"acceleratedGrayscale"));
     values["scrollback_size"] = number(terminal.GetNamedNumber(L"scrollbackSize"));
+    values["command_completion_notifications"] = terminal.GetNamedBoolean(L"commandCompletionNotifications", false) ? "true" : "false";
     values["initial_columns"] = number(initial_size.GetNamedNumber(L"columns"));
     values["initial_rows"] = number(initial_size.GetNamedNumber(L"rows"));
     values["dark_theme"] = to_string(themes.GetNamedString(L"dark"));
@@ -650,6 +651,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool updating_explorer{};
     ToggleSwitch hold_on_exit{nullptr};
     ToggleSwitch automatic_shell_integration{nullptr}, clipboard_write{nullptr};
+    ToggleSwitch command_completion_notifications{nullptr};
     NumberBox clipboard_limit{nullptr};
     Border clipboard_limit_card{nullptr};
     TextBox pipe_command{nullptr};
@@ -1162,6 +1164,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 
     ScrollViewer makeAdvanced(std::map<std::string, std::string> const& values) {
         automatic_shell_integration = toggle(value(values, "automatic_shell_integration", "true"));
+        command_completion_notifications = toggle(value(values, "command_completion_notifications", "false"));
         clipboard_write = toggle(value(values, "osc52_clipboard_write", "false"));
         double clipboard_kib = 1024;
         try { clipboard_kib = std::stod(value(values, "osc52_clipboard_max_bytes", "1048576")) / 1024; } catch (...) {}
@@ -1171,6 +1174,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         clipboard_limit.IsEnabled(clipboard_write.IsOn());
         return page(L"Advanced", L"Security-sensitive terminal integration settings.", {
             card(L"Automatic shell integration", L"Enable prompt and working-directory reporting in supported shells. Changes apply to new terminals only.", automatic_shell_integration),
+            card(L"Long-command completion notifications", L"Notify when a shell command takes at least five seconds and its pane is unfocused at completion. Requires shell integration.", command_completion_notifications),
             card(L"Terminal clipboard writes", L"Allow OSC 52 and OSC 1337 Copy sequences to write to the Windows clipboard.", clipboard_write),
             clipboard_limit_card,
             card(L"Pipe command output", L"Windows command that receives the latest OSC 133 command output on stdin. Leave empty to copy it.", pipe_command),
@@ -1389,6 +1393,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 
         JsonObject terminal;
         terminal.Insert(L"scrollbackSize", number(scrollback_value));
+        terminal.Insert(L"commandCompletionNotifications", boolean(command_completion_notifications.IsOn()));
         JsonObject initial_size;
         initial_size.Insert(L"columns", number(columns_value));
         initial_size.Insert(L"rows", number(rows_value));
@@ -1487,7 +1492,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             if (!updating_profiles) save();
         });
         auto toggled = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {random_background, opacity_cells, hold_on_exit}) editor.Toggled(toggled);
+        for (auto const& editor : {random_background, opacity_cells, hold_on_exit, command_completion_notifications}) editor.Toggled(toggled);
         clipboard_write.Toggled([this](auto const&, auto const&) {
             clipboard_limit.IsEnabled(clipboard_write.IsOn());
             save();

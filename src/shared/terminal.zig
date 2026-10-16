@@ -2,6 +2,7 @@ const std = @import("std");
 const hint = @import("hint.zig");
 const link = @import("link.zig");
 const theme = @import("theme.zig");
+const CommandNotifications = @import("command_notifications.zig").State;
 const SearchMatch = @import("search.zig").Match;
 
 const vt = @cImport({
@@ -91,6 +92,7 @@ pub const Terminal = struct {
     clipboard_context: ?*anyopaque = null,
     desktop_notification: ?DesktopNotification = null,
     desktop_notification_context: ?*anyopaque = null,
+    command_notifications: CommandNotifications = .{},
     progress_report: ?ProgressReport = null,
     progress_report_context: ?*anyopaque = null,
     visible: bool = true,
@@ -1847,6 +1849,38 @@ pub const Terminal = struct {
         self.desktop_notification_context = context;
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(vt.GhosttyTerminalDesktopNotificationFn, desktopNotification)));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, @as(vt.GhosttyTerminalSemanticPromptFn, semanticPrompt)));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_RESET, @as(vt.GhosttyTerminalResetFn, reset)));
+    }
+
+    pub fn setCommandNotifications(self: *Terminal, enabled: bool) void {
+        self.command_notifications.setEnabled(enabled);
+    }
+
+    pub fn resetCommandLifecycle(self: *Terminal) void {
+        self.command_notifications.reset();
+    }
+
+    fn commandEvent(self: *Terminal, kind: vt.GhosttySemanticPromptKind, primary: bool, exit_code: ?i32, now_ms: i64) void {
+        switch (kind) {
+            vt.GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START => self.command_notifications.start(now_ms),
+            vt.GHOSTTY_SEMANTIC_PROMPT_COMMAND_END => {
+                if (!self.command_notifications.finish(now_ms, self.focused)) return;
+                const callback = self.desktop_notification orelse return;
+                var buffer: [80]u8 = undefined;
+                const body = if (exit_code) |code|
+                    std.fmt.bufPrint(&buffer, "Command finished with exit status {d}.", .{code}) catch unreachable
+                else
+                    "Command finished (exit status unavailable).";
+                callback(self.desktop_notification_context, "Command completed", body);
+            },
+            vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_START => if (primary) {
+                // A new primary prompt abandons a command whose D was lost.
+                self.resetCommandLifecycle();
+            },
+            vt.GHOSTTY_SEMANTIC_PROMPT_INPUT_START => self.resetCommandLifecycle(),
+            else => {},
+        }
     }
 
     pub fn setProgressReport(self: *Terminal, callback: ProgressReport, context: ?*anyopaque) !void {
@@ -2644,11 +2678,26 @@ fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notificatio
     const title = notification[0].title;
     const body = notification[0].body;
     if ((title.len != 0 and title.ptr == null) or (body.len != 0 and body.ptr == null)) return;
+    self.command_notifications.explicitNotification();
     callback(
         self.desktop_notification_context,
         if (title.len == 0) "" else title.ptr[0..title.len],
         if (body.len == 0) "" else body.ptr[0..body.len],
     );
+}
+
+fn semanticPrompt(_: vt.GhosttyTerminal, userdata: ?*anyopaque, event: [*c]const vt.GhosttyTerminalSemanticPrompt) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    if (event == null) return;
+    const now = std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
+    self.commandEvent(event[0].kind, event[0].prompt_kind == vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY, if (event[0].has_exit_code) event[0].exit_code else null, @intCast(now.toMilliseconds()));
+}
+
+fn reset(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    self.resetCommandLifecycle();
+    const callback = self.reset_callback orelse return;
+    callback(self.reset_context);
 }
 
 fn progressReport(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const vt.GhosttyTerminalProgressReport) callconv(.c) void {
@@ -2753,6 +2802,70 @@ fn isPowerline(codepoint: u32) bool {
 
 fn check(result: vt.GhosttyResult) !void {
     if (result != vt.GHOSTTY_SUCCESS) return error.LibGhosttyFailure;
+}
+
+test "OSC 133 completion alerts survive screen changes and consume command lifetimes" {
+    const Listener = struct {
+        count: usize = 0,
+        resets: usize = 0,
+        body: [80]u8 = undefined,
+        body_len: usize = 0,
+
+        fn onReset(context: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.resets += 1;
+        }
+
+        fn notify(context: ?*anyopaque, _: []const u8, body: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.count += 1;
+            self.body_len = @min(body.len, self.body.len);
+            @memcpy(self.body[0..self.body_len], body[0..self.body_len]);
+        }
+    };
+    const Case = enum { alternate, focused_at_end, disabled, reset, prompt, explicit9, explicit777, no_status };
+    var terminals: [8]Terminal = undefined;
+    var listeners: [8]Listener = @splat(.{});
+    var initialized: usize = 0;
+    defer for (terminals[0..initialized]) |*terminal| terminal.deinit();
+    for (&terminals, &listeners, 0..) |*terminal, *listener, index| {
+        terminal.* = try Terminal.init(20, 3, theme.rasmus);
+        initialized += 1;
+        const case: Case = @enumFromInt(index);
+        if (case == .reset) try terminal.setReset(Listener.onReset, listener);
+        try terminal.setDesktopNotification(Listener.notify, listener);
+        if (case != .disabled) terminal.setCommandNotifications(true);
+        terminal.setFocused(case != .focused_at_end);
+        // Exercise a split OSC sequence through libghostty, not a second parser.
+        terminal.feed("\x1b]133;");
+        terminal.feed("C\x07");
+        switch (case) {
+            .alternate => terminal.feed("\x1b[?1049hhello\x1b[?1049l"),
+            .reset => terminal.feed("\x1bc"),
+            .prompt => terminal.feed("\x1b]133;A\x07\x1b]133;A\x07"),
+            .explicit9 => terminal.feed("\x1b]9;explicit\x07"),
+            .explicit777 => terminal.feed("\x1b]777;notify;Build;explicit\x07"),
+            else => {},
+        }
+    }
+    // One real-clock wait verifies callback/clock wiring. Exact threshold
+    // boundaries are covered by the deterministic policy tests.
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(5010), .awake);
+    for (&terminals, &listeners, 0..) |*terminal, *listener, index| {
+        const case: Case = @enumFromInt(index);
+        terminal.setFocused(case == .focused_at_end);
+        terminal.feed(if (case == .no_status) "\x1b]133;D\x07" else "\x1b]133;D;-7\x07");
+        terminal.setFocused(false);
+        terminal.feed("\x1b]133;D;0\x07"); // Duplicate/orphan ends never alert.
+        const expected: usize = switch (case) {
+            .alternate, .no_status, .explicit9, .explicit777 => 1,
+            else => 0,
+        };
+        try std.testing.expectEqual(expected, listener.count);
+        try std.testing.expectEqual(@as(usize, if (case == .reset) 1 else 0), listener.resets);
+        if (case == .alternate) try std.testing.expectEqualStrings("Command finished with exit status -7.", listener.body[0..listener.body_len]);
+        if (case == .no_status) try std.testing.expectEqualStrings("Command finished (exit status unavailable).", listener.body[0..listener.body_len]);
+    }
 }
 
 test "libghostty reports shell title changes" {

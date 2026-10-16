@@ -79,6 +79,17 @@ The versioned JSON document is managed by the settings window and uses ordered p
 
 Automatic shell integration is enabled by default and can be disabled under Advanced. It applies only to new terminals. Zigonaut injects its bundled script only when a PowerShell profile directly launches `powershell.exe` or `pwsh.exe` with no arguments or with supported startup flags (`-NoLogo`, `-NoProfile`, and PowerShell 7's `-Login`). Commands that run scripts or inline code, Command Prompt, WSL, custom commands, and nested shells are unchanged. Zigonaut never edits PowerShell profiles or bypasses execution policy.
 
+Long-command completion notifications are disabled by default. Enable them under
+Advanced on Windows (`terminal.commandCompletionNotifications` in JSON) or
+Terminal → Shell on macOS. A shell reporting OSC 133 command boundaries can then
+notify you when a command takes at least five seconds and its pane is unfocused
+at completion. Alternate-screen changes do not stop the timer. Alerts include
+the exit status when available; clicking one activates its live pane. macOS also
+suppresses notifications while any terminal window is key. Existing OS
+notification permissions still apply. Explicit OSC 9/777 notifications remain
+independent; sending one during a command suppresses its automatic completion
+alert. Enabling or disabling this setting discards any command already running.
+
 ## Keyboard shortcuts
 
 See [Windows keyboard shortcuts](docs/keyboard-shortcuts-windows.md) for the complete Windows reference, including tab selection, clipboard alternatives, and search controls.
