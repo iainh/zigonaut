@@ -1262,7 +1262,8 @@ fn windowMessageImpl(self: *Application, message: win.UINT, wparam: win.WPARAM, 
         pane_event_message => return paneEventMessageImpl(self, hwnd, wparam == pane_event_saturation_drain),
         chrome_message => return chromeMessageImpl(self, hwnd, wparam, lparam),
         titles_changed_message => {
-            if (self.model.syncTitles()) self.syncChrome();
+            _ = self.model.syncTitles();
+            self.syncChrome(); // Also carries independent OSC 7501 status changes.
             return 0;
         },
         initial_chrome_message => {
@@ -1464,7 +1465,11 @@ fn syncChromeImpl(self: *Application) void {
         self.chrome_colors.items[index] = @as(u32, color.red) << 16 |
             @as(u32, color.green) << 8 |
             color.blue;
-        self.chrome_activity.items[index] = @intFromBool(tab.has_unread_output);
+        var status: u8 = 0;
+        for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            status = @max(status, runtime.programStatusState());
+        };
+        self.chrome_activity.items[index] = @as(u8, @intFromBool(tab.has_unread_output)) | (status << 1);
     }
     if (!bridge.update(self.chrome_tab_ids.items, self.chrome_titles.items, self.chrome_title_lengths.items, self.chrome_colors.items, self.chrome_activity.items, self.model.activeTabIndex(), self.settings.randomize_tab_background)) {
         _ = win.PostMessageW(self.hwnd.?, win.WM_CLOSE, 0, 0);

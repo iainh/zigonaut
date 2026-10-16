@@ -389,6 +389,7 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
     self.terminal.setDesktopNotification(desktopNotification, self) catch return failCreate(self, -1);
     self.terminal.setClipboardWrite(clipboardWrite, self) catch return failCreate(self, -1);
     self.terminal.setProgressReport(progressReport, self) catch return failCreate(self, -1);
+    self.terminal.enableProgramStatus() catch return failCreate(self, -1);
     var slave: c_int = -1;
     var size = c.winsize{ .ws_row = 24, .ws_col = 80, .ws_xpixel = 0, .ws_ypixel = 0 };
     if (openpty(&self.master, &slave, null, null, &size) != 0) {
@@ -515,6 +516,8 @@ fn readLoop(self: *Core) void {
     self.mutex.lock();
     self.terminal.setSynchronizedOutput(false) catch {};
     _ = self.synchronized_output.clear();
+    self.terminal.resetCommandLifecycle();
+    self.terminal.program_status.endProgram();
     self.mutex.unlock();
     wakeHost(self);
 }
@@ -550,8 +553,11 @@ export fn zigonaut_core_write(self: ?*Core, bytes: ?[*]const u8, len: usize) voi
 export fn zigonaut_core_set_focused(self: ?*Core, focused: bool) void {
     const core = self orelse return;
     core.mutex.lock();
-    defer core.mutex.unlock();
+    const previous = core.terminal.program_status.generation;
     core.terminal.setFocused(focused);
+    const changed = previous != core.terminal.program_status.generation;
+    core.mutex.unlock();
+    if (changed) wakeHost(core);
 }
 
 fn macKey(key_code: u16) ?Terminal.Key {
@@ -1133,6 +1139,23 @@ export fn zigonaut_core_set_intense_text_style(self: ?*Core, style: u8) bool {
     defer core.mutex.unlock();
     core.terminal.setIntenseTextStyle(@enumFromInt(style));
     return true;
+}
+
+/// Safe plain text belonging to this pane, independent of its ordinary title.
+export fn zigonaut_core_program_status(self: ?*Core, output: ?[*]u8, capacity: u32, state: ?*u8) u32 {
+    if (state) |value| value.* = 0;
+    const core = self orelse return 0;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const store = &core.terminal.program_status;
+    const record = store.selected() orelse return 0;
+    if (state) |value| value.* = @intFromEnum(record.state) + 1;
+    var buffer: [768]u8 = undefined;
+    const label = store.label(&buffer);
+    if (output) |bytes| if (capacity >= label.len) {
+        @memcpy(bytes[0..label.len], label);
+    };
+    return @intCast(label.len);
 }
 
 export fn zigonaut_core_progress(self: ?*Core, result: ?*Progress) void {
@@ -1838,6 +1861,47 @@ test "Mac key ABI scrolls history and wakes the host without jumping back to inp
     event.modifiers = 0;
     try std.testing.expect(zigonaut_core_key(&core, &event));
     try std.testing.expectEqual(@as(u64, 1), (try core.terminal.scrollbar()).offset);
+}
+
+test "native program status ABI is bounded independent of title and OSC 9 progress and acknowledges on focus" {
+    var wakes: usize = 0;
+    const Observer = struct {
+        fn wake(context: ?*anyopaque) callconv(.c) void {
+            const count: *usize = @ptrCast(@alignCast(context.?));
+            count.* += 1;
+        }
+    };
+    var core: Core = .{
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = Observer.wake,
+        .context = &wakes,
+    };
+    defer core.terminal.deinit();
+    try core.terminal.setTitleChanged(titleChanged, &core);
+    try core.terminal.setProgressReport(progressReport, &core);
+    try core.terminal.enableProgramStatus();
+    core.terminal.feed("\x1b]2;Ordinary title\x07\x1b]9;4;1;23\x07" ++
+        "\x1b]7501;state=working:app=cargo:progress=67:title=QnVpbGQ=\x07");
+    var bytes: [768]u8 = @splat(0xaa);
+    var state: u8 = 0;
+    const required = zigonaut_core_program_status(&core, &bytes, 1, &state);
+    try std.testing.expectEqual(@as(u8, 0xaa), bytes[0]);
+    try std.testing.expectEqual(@as(u8, 2), state);
+    try std.testing.expectEqual(required, zigonaut_core_program_status(&core, &bytes, bytes.len, &state));
+    try std.testing.expectEqualStrings("Working 67% · Build (app: cargo)", bytes[0..required]);
+    try std.testing.expectEqualStrings("Ordinary title", core.title[0..core.title_len]);
+    try std.testing.expectEqual(@as(u8, 23), core.progress_value);
+    core.terminal.feed("\x1b]7501;state=error\x07\x1b]133;A\x07");
+    try std.testing.expectEqual(@as(u32, 5), zigonaut_core_program_status(&core, &bytes, bytes.len, &state));
+    try std.testing.expectEqual(@as(u8, 5), state);
+    zigonaut_core_set_focused(&core, true);
+    try std.testing.expectEqual(@as(usize, 1), wakes);
+    try std.testing.expectEqual(@as(u32, 0), zigonaut_core_program_status(&core, &bytes, bytes.len, &state));
+    try std.testing.expectEqual(@as(u8, 0), state);
 }
 
 test "mapped Mac control keys use logical text rather than AppKit commands or control characters" {

@@ -2355,7 +2355,10 @@ struct Bridge {
         auto const marker_visibility = show_colors && !high_contrast ? Visibility::Visible : Visibility::Collapsed;
         for (uint32_t i = 0; i < count; ++i) {
             auto const title = to_hstring(std::string_view{titles[i] ? titles[i] : "", title_lengths[i]});
-            auto const has_activity = activity[i] != 0 && static_cast<int32_t>(i) != active;
+            auto const has_activity = (activity[i] & 1) != 0 && static_cast<int32_t>(i) != active;
+            auto const status = (activity[i] >> 1) & 7;
+            auto const status_text = status == 1 ? L"Idle" : status == 2 ? L"Working"
+                : status == 3 ? L"Done" : status == 4 ? L"Blocked" : status == 5 ? L"Error" : L"";
             auto const text_decorations = has_activity ? Windows::UI::Text::TextDecorations::Underline : Windows::UI::Text::TextDecorations::None;
             auto const color = Windows::UI::Color{
                 0xff,
@@ -2407,6 +2410,12 @@ struct Bridge {
                 text.VerticalAlignment(VerticalAlignment::Center);
                 header.Children().Append(marker);
                 header.Children().Append(text);
+                auto status_label = TextBlock{};
+                status_label.VerticalAlignment(VerticalAlignment::Center);
+                status_label.FontSize(11);
+                status_label.Margin(Thickness{6, 0, 0, 0});
+                status_label.Visibility(Visibility::Collapsed);
+                header.Children().Append(status_label);
                 item.Header(header);
                 item.Tag(box_value(tab_ids[i]));
                 // TabView resolves a dragged item through its Content. Distinct,
@@ -2449,6 +2458,19 @@ struct Bridge {
                     changed = true;
                 }
             }
+            auto status_label = item.Header().as<StackPanel>().Children().GetAt(2).as<TextBlock>();
+            if (status_label.Text() != status_text) {
+                status_label.Text(status_text);
+                status_label.Visibility(status == 0 ? Visibility::Collapsed : Visibility::Visible);
+                changed = true;
+            }
+            // Native text and UI Automation, not color alone. Never replace
+            // the title; make the scope explicit when a split has attention.
+            auto help = status == 0 ? (has_activity ? hstring{L"New terminal output"} : hstring{})
+                : hstring{L"Program status in this tab: "} + status_text;
+            if (has_activity && status != 0) help = help + L"; new terminal output";
+            Microsoft::UI::Xaml::Automation::AutomationProperties::SetHelpText(item, help);
+            ToolTipService::SetToolTip(item, box_value(status == 0 ? title : title + L" — " + help));
         }
         if (!rearranging) {
             while (items.Size() > count) {

@@ -95,6 +95,7 @@ pub const Terminal = struct {
     command_notifications: CommandNotifications = .{},
     progress_report: ?ProgressReport = null,
     progress_report_context: ?*anyopaque = null,
+    program_status: @import("program_status.zig").Store = .{},
     visible: bool = true,
     focused: bool = false,
     scrollback_keys: [4]bool = .{false} ** 4,
@@ -1311,6 +1312,7 @@ pub const Terminal = struct {
     pub fn setFocused(self: *Terminal, focused: bool) void {
         if (!focused) self.scrollback_keys = .{false} ** 4;
         if (self.focused == focused) return;
+        if (focused) self.program_status.acknowledge();
         self.focused = focused;
         var buffer: [3]u8 = undefined;
         const encoded = self.encodeFocusReport(focused, &buffer);
@@ -1888,6 +1890,14 @@ pub const Terminal = struct {
         self.progress_report_context = context;
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT, @as(vt.GhosttyTerminalProgressReportFn, progressReport)));
+    }
+
+    /// Register only after the host consumes the owned store. Registration
+    /// advertises support. RIS arrives as a root clear through this callback.
+    pub fn enableProgramStatus(self: *Terminal) !void {
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_USERDATA, self));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, @as(vt.GhosttyTerminalSemanticPromptFn, semanticPrompt)));
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_PROGRAM_STATUS, @as(vt.GhosttyTerminalProgramStatusFn, programStatus)));
     }
 
     pub fn pwdAlloc(self: *Terminal, allocator: std.mem.Allocator) !?[]u8 {
@@ -2664,12 +2674,6 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
     callback(self.title_context, if (title.len == 0) "" else title.ptr[0..title.len]);
 }
 
-fn reset(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
-    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
-    const callback = self.reset_callback orelse return;
-    callback(self.reset_context);
-}
-
 fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notification: [*c]const vt.GhosttyTerminalDesktopNotification) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.desktop_notification orelse return;
@@ -2688,7 +2692,8 @@ fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notificatio
 
 fn semanticPrompt(_: vt.GhosttyTerminal, userdata: ?*anyopaque, event: [*c]const vt.GhosttyTerminalSemanticPrompt) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
-    if (event == null) return;
+    if (event == null or event[0].size < @sizeOf(vt.GhosttyTerminalSemanticPrompt)) return;
+    if (event[0].kind == vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_START) self.program_status.endProgram();
     const now = std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
     self.commandEvent(event[0].kind, event[0].prompt_kind == vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY, if (event[0].has_exit_code) event[0].exit_code else null, @intCast(now.toMilliseconds()));
 }
@@ -2714,6 +2719,18 @@ fn progressReport(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]cons
         else => return,
     };
     callback(self.progress_report_context, update);
+}
+
+fn programStatus(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const vt.GhosttyTerminalProgramStatus) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    if (report == null or report[0].size < @sizeOf(vt.GhosttyTerminalProgramStatus)) return;
+    const value = report[0];
+    if (value.state > vt.GHOSTTY_PROGRAM_STATUS_STATE_CLEAR) return;
+    self.program_status.put(@enumFromInt(value.state), @intCast(value.kind), value.progress, statusString(value.id), statusString(value.app), statusString(value.title), statusString(value.message));
+}
+
+fn statusString(value: vt.GhosttyString) []const u8 {
+    return if (value.len == 0 or value.ptr == null) "" else value.ptr[0..value.len];
 }
 
 fn progressValue(value: i8) ?u8 {
@@ -2833,9 +2850,13 @@ test "OSC 133 completion alerts survive screen changes and consume command lifet
         initialized += 1;
         const case: Case = @enumFromInt(index);
         if (case == .reset) try terminal.setReset(Listener.onReset, listener);
+        // Both features must survive either callback-registration order.
+        if (index % 2 == 0) try terminal.enableProgramStatus();
         try terminal.setDesktopNotification(Listener.notify, listener);
+        if (index % 2 != 0) try terminal.enableProgramStatus();
         if (case != .disabled) terminal.setCommandNotifications(true);
         terminal.setFocused(case != .focused_at_end);
+        terminal.feed("\x1b]7501;state=working:id=run\x07");
         // Exercise a split OSC sequence through libghostty, not a second parser.
         terminal.feed("\x1b]133;");
         terminal.feed("C\x07");
@@ -2865,6 +2886,8 @@ test "OSC 133 completion alerts survive screen changes and consume command lifet
         try std.testing.expectEqual(@as(usize, if (case == .reset) 1 else 0), listener.resets);
         if (case == .alternate) try std.testing.expectEqualStrings("Command finished with exit status -7.", listener.body[0..listener.body_len]);
         if (case == .no_status) try std.testing.expectEqualStrings("Command finished (exit status unavailable).", listener.body[0..listener.body_len]);
+        terminal.feed("\x1b]133;A\x07");
+        try std.testing.expectEqual(@as(usize, 0), terminal.program_status.count);
     }
 }
 
@@ -2931,6 +2954,85 @@ test "libghostty returns terminal queries and in-band size reports" {
 
     writePty(null, &terminal, null, 1);
     try std.testing.expectEqualStrings("\x1b[48;40;100;720;900t", listener.bytes.items);
+
+    listener.bytes.clearRetainingCapacity();
+    terminal.feed("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("", listener.bytes.items);
+    try terminal.enableProgramStatus();
+    terminal.feed("\x1b]7501;?\x07");
+    try std.testing.expectEqualStrings("\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x07", listener.bytes.items);
+}
+
+test "OSC 7501 replaces owned records and resolves asymmetric hierarchy safely" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.enableProgramStatus();
+    terminal.feed("\x1b]7501;state=working:app=deploy\x07" ++
+        "\x1b]7501;state=working:id=build:app=cargo:progress=37:title=QnVpbGQ=:msg=Y2hlY2s=\x07" ++
+        "\x1b]7501;state=blocked:id=build/test:kind=question:title=QeKArkI=:msg=PHRhZz4=\x07" ++
+        "\x1b]7501;state=idle:id=builder:app=other\x07");
+    const store = &terminal.program_status;
+    try std.testing.expectEqualStrings("cargo", store.appFor(store.get("build/test").?));
+    try std.testing.expectEqualStrings("AB", store.get("build/test").?.title.slice());
+    try std.testing.expectEqualStrings("<tag>", store.get("build/test").?.message.slice());
+    // Omitted values disappear, including app: the child now inherits root.
+    terminal.feed("\x1b]7501;state=done:id=build\x07");
+    const replaced = store.get("build").?;
+    try std.testing.expectEqual(@as(i8, -1), replaced.progress);
+    try std.testing.expectEqualStrings("", replaced.title.slice());
+    try std.testing.expectEqualStrings("", replaced.message.slice());
+    try std.testing.expectEqualStrings("deploy", store.appFor(store.get("build/test").?));
+    terminal.feed("\x1b]7501;state=clear:id=build\x07");
+    try std.testing.expect(store.get("build") == null);
+    try std.testing.expect(store.get("build/test") == null);
+    try std.testing.expectEqualStrings("other", store.appFor(store.get("builder").?));
+    try std.testing.expectEqual(@as(usize, 2), store.count);
+}
+
+test "OSC 7501 evicts least recently updated rather than inserted at the 64 record boundary" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.enableProgramStatus();
+    var buffer: [128]u8 = undefined;
+    for (0..63) |index| terminal.feed(try std.fmt.bufPrint(&buffer, "\x1b]7501;state=working:id=job{d}\x07", .{index}));
+    terminal.feed("\x1b]7501;state=working:id=job1/child\x07");
+    try std.testing.expectEqual(@as(usize, 64), terminal.program_status.count);
+    terminal.feed("\x1b]7501;state=done:id=job0\x07" ++
+        "\x1b]7501;state=blocked:id=extra\x07");
+    try std.testing.expectEqual(@as(usize, 64), terminal.program_status.count);
+    try std.testing.expect(terminal.program_status.get("job1") == null);
+    try std.testing.expect(terminal.program_status.get("job1/child") != null);
+    try std.testing.expect(terminal.program_status.get("job2") != null);
+    try std.testing.expectEqual(.done, terminal.program_status.get("job0").?.state);
+    try std.testing.expectEqual(.blocked, terminal.program_status.selected().?.state);
+}
+
+test "OSC 7501 prompt exit focus and RIS lifecycle retain only unseen results" {
+    var terminal = try Terminal.init(80, 24, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.enableProgramStatus();
+    terminal.setFocused(true);
+    const reports = "\x1b]7501;state=working:id=run\x07" ++
+        "\x1b]7501;state=blocked:id=ask\x07" ++
+        "\x1b]7501;state=done:id=ready\x07" ++
+        "\x1b]7501;state=error:id=failed\x07";
+    terminal.feed(reports ++ "\x1b]133;A\x07\x1b]133;A\x07");
+    try std.testing.expectEqual(@as(usize, 2), terminal.program_status.count);
+    try std.testing.expectEqual(.failed, terminal.program_status.selected().?.state);
+    terminal.setFocused(true); // Not a new focus; do not hide unread results.
+    try std.testing.expectEqual(@as(usize, 2), terminal.program_status.count);
+    terminal.setFocused(false);
+    terminal.setFocused(true);
+    try std.testing.expectEqual(@as(usize, 0), terminal.program_status.count);
+    terminal.feed(reports);
+    terminal.program_status.endProgram(); // Hosts use this on PTY/process exit.
+    try std.testing.expectEqual(@as(usize, 2), terminal.program_status.count);
+    terminal.feed("\x1b[!p"); // DECSTR is not RIS.
+    try std.testing.expectEqual(@as(usize, 2), terminal.program_status.count);
+    terminal.feed("\x1bc");
+    try std.testing.expectEqual(@as(usize, 0), terminal.program_status.count);
+    terminal.feed("\x1b]7501;state=working\x07"); // Registration survives RIS.
+    try std.testing.expectEqual(@as(usize, 1), terminal.program_status.count);
 }
 
 test "libghostty exposes synchronized output mode" {

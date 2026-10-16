@@ -252,6 +252,7 @@ pub const SessionRuntime = struct {
         try self.terminal.setClipboardWrite(clipboardWrite, self);
         try self.terminal.setDesktopNotification(desktopNotification, self);
         try self.terminal.setProgressReport(progressReport, self);
+        try self.terminal.enableProgramStatus();
 
         self.pty = Pty.spawn(allocator, command, working_directory, columns, rows) catch |err| {
             // Keep a terminal-only session so the pane can show the launch error.
@@ -759,6 +760,21 @@ pub const SessionRuntime = struct {
         return self.title_generation.load(.acquire);
     }
 
+    pub fn programStatusGeneration(self: *SessionRuntime) u64 {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        if (self.exited()) self.terminal.program_status.endProgram();
+        return self.terminal.program_status.generation;
+    }
+
+    /// Same state encoding as the native tab status: zero means absent.
+    pub fn programStatusState(self: *SessionRuntime) u8 {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        const record = self.terminal.program_status.selected() orelse return 0;
+        return @intFromEnum(record.state) + 1;
+    }
+
     pub fn progressGeneration(self: *const SessionRuntime) u64 {
         return self.progress_generation.load(.acquire);
     }
@@ -957,8 +973,11 @@ pub const SessionRuntime = struct {
 
     pub fn sendFocus(self: *SessionRuntime, focused: bool) void {
         self.terminal_mutex.lock();
+        const previous = self.terminal.program_status.generation;
         self.terminal.setFocused(focused);
+        const changed = previous != self.terminal.program_status.generation;
         self.terminal_mutex.unlock();
+        if (changed) self.requestRefresh();
     }
 
     pub fn setCommandNotifications(self: *SessionRuntime, enabled: bool) void {
@@ -995,6 +1014,8 @@ pub const SessionRuntime = struct {
         self.terminal.setSynchronizedOutput(false) catch {};
         _ = self.synchronized_output.clear();
         _ = self.content_generation.fetchAdd(1, .monotonic);
+        self.terminal.resetCommandLifecycle();
+        self.terminal.program_status.endProgram();
         self.terminal_mutex.unlock();
         self.requestRefresh();
     }
@@ -1522,6 +1543,7 @@ test "session consumes Ghostty progress, notification and mouse shape effects" {
     defer deinitTestRuntime(&runtime);
     try runtime.terminal.setProgressReport(SessionRuntime.progressReport, &runtime);
     try runtime.terminal.setDesktopNotification(SessionRuntime.desktopNotification, &runtime);
+    try runtime.terminal.enableProgramStatus();
 
     try std.testing.expectEqual(Terminal.MouseShape.text, runtime.mouseShape());
     _ = runtime.processOutputChunk("plain\x1b]9;4;", 100);
@@ -1531,6 +1553,16 @@ test "session consumes Ghostty progress, notification and mouse shape effects" {
     const determinate = runtime.taskbarProgress().?;
     try std.testing.expectEqual(Terminal.ProgressState.normal, determinate.state);
     try std.testing.expectEqual(@as(u8, 47), determinate.value);
+
+    _ = runtime.processOutputChunk("\x1b]7501;state=blo", 210);
+    try std.testing.expectEqual(@as(u8, 0), runtime.programStatusState());
+    _ = runtime.processOutputChunk("cked:id=build:progress=73\x07", 220);
+    try std.testing.expectEqual(@as(u8, 4), runtime.programStatusState());
+    try std.testing.expectEqual(@as(u64, 1), runtime.programStatusGeneration());
+    try std.testing.expectEqual(@as(u8, 47), runtime.taskbarProgress().?.value);
+    _ = runtime.processOutputChunk("\x1b]133;A\x07", 230);
+    try std.testing.expectEqual(@as(u8, 0), runtime.programStatusState());
+    try std.testing.expectEqual(@as(u64, 2), runtime.programStatusGeneration());
 
     const notification = runtime.takeNotification().?;
     defer runtime.freeNotification(notification);
