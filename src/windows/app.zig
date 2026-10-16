@@ -154,6 +154,7 @@ pub const App = struct {
     clipboard_write_enabled: bool = false,
     clipboard_write_max_bytes: u32 = 1024 * 1024,
     scrollback_size: u32 = 10_000,
+    command_completion_notifications: bool = false,
     shell_integration_enabled: bool = true,
     tabs: std.ArrayList(Tab) = .empty,
     active_tab: ?usize = null,
@@ -258,6 +259,7 @@ pub const App = struct {
         const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
         defer if (launch_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse command, if (wsl_command != null) "" else working_directory, terminal_theme, columns, rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setCommandNotifications(self.command_completion_notifications);
         runtime.setIntenseTextStyle(self.intense_text_style);
         const index = try self.addSessionRecord(shell, profile_title, command, working_directory, runtime, terminal_theme.background, background_seed);
         self.activeSession().?.hold_on_exit = hold_on_exit;
@@ -384,6 +386,7 @@ pub const App = struct {
         const launch_command = try self.launchCommandAlloc(source.session.shell, wsl_command orelse source.session.command());
         defer if (launch_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse source.session.command(), if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setCommandNotifications(self.command_completion_notifications);
         runtime.setIntenseTextStyle(self.intense_text_style);
         return self.splitFocusedRecord(axis, runtime, session_theme.background, background_seed, reported_directory);
     }
@@ -400,6 +403,7 @@ pub const App = struct {
         const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
         defer if (launch_command) |value| self.allocator.free(value);
         const runtime = try SessionRuntime.create(self.allocator, launch_command orelse wsl_command orelse command, if (wsl_command != null) "" else working_directory, session_theme, size.columns, size.rows, self.refresh, self.clipboard_write_enabled, self.clipboard_write_max_bytes, self.scrollback_size);
+        runtime.setCommandNotifications(self.command_completion_notifications);
         runtime.setIntenseTextStyle(self.intense_text_style);
         return self.insertFocusedSessionRecord(axis, shell, profile_title, command, working_directory, hold_on_exit, runtime, session_theme.background, background_seed);
     }
@@ -764,6 +768,13 @@ pub const App = struct {
 
     pub fn setDefaultScrollbackSize(self: *App, size: u32) void {
         self.scrollback_size = size;
+    }
+
+    pub fn setCommandNotifications(self: *App, enabled: bool) void {
+        self.command_completion_notifications = enabled;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
+            runtime.setCommandNotifications(enabled);
+        };
     }
 
     pub fn setShellIntegrationEnabled(self: *App, enabled: bool) void {

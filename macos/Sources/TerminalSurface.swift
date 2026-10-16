@@ -70,7 +70,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   let model: TerminalModel
   var preferences: Preferences
   var focused = false {
-    didSet { model.setFocused(focused && window?.firstResponder === self) }
+    didSet { updateFocus() }
   }
   var wantsKeyboardFocus = false
   var onFocus: () -> Void
@@ -392,9 +392,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   override func becomeFirstResponder() -> Bool {
-    model.setFocused(focused)
+    model.setFocused(focused && window?.isKeyWindow == true)
     needsDisplay = true
     return true
+  }
+
+  func updateFocus() {
+    model.setFocused(focused && window?.isKeyWindow == true && window?.firstResponder === self)
   }
 
   override func resignFirstResponder() -> Bool {
@@ -1908,6 +1912,7 @@ struct TerminalSurface: NSViewRepresentable {
     let shouldClaimKeyboardFocus = wantsKeyboardFocus && !view.wantsKeyboardFocus
     view.wantsKeyboardFocus = wantsKeyboardFocus
     view.updateClipboardSettings()
+    model.applyCommandNotificationSettings()
     view.updateTerminalSettings()
     view.resizeTerminal()
     view.needsDisplay = true

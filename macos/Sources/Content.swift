@@ -545,6 +545,8 @@ struct SettingsView: View {
         }
         Toggle("Automatic shell integration", isOn: $preferences.automaticShellIntegration)
         SettingsNote("Adds prompt and working-directory reporting to supported shells. Changes apply to new terminals only.")
+        Toggle("Long-command completion notifications", isOn: $preferences.commandCompletionNotifications)
+        SettingsNote("Notify when a shell command takes at least five seconds and its pane is unfocused at completion. Requires shell integration. Notifications are suppressed while a terminal window is key.")
       }
       Section("Layout") {
         LabeledContent("Horizontal padding") {

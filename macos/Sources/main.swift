@@ -118,10 +118,16 @@ final class ManagedWindowController: NSWindowController, NSWindowDelegate, NSToo
 
     func windowDidBecomeKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow {
+            (window.firstResponder as? TerminalSurfaceView)?.updateFocus()
             clearActivityIfSelected(window)
         }
         progressChanged?()
         stateChanged?()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        (window.firstResponder as? TerminalSurfaceView)?.updateFocus()
     }
 
     func windowDidUpdate(_ notification: Notification) {

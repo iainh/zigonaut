@@ -74,6 +74,8 @@ uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity
 uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity, uint16_t *start_column, uint16_t *end_column);
 void zigonaut_core_hint_snapshot(zigonaut_core *, zigonaut_hint_v1 *, uint32_t hint_capacity, uint8_t *bytes, uint32_t byte_capacity, zigonaut_hint_result_v1 *);
 void zigonaut_core_take_notification(zigonaut_core *, uint8_t *title, uint32_t title_capacity, uint8_t *body, uint32_t body_capacity, zigonaut_notification_result_v1 *);
+/* Opt-in OSC 133 completion alerts: at least five seconds and pane unfocused at completion. */
+void zigonaut_core_set_command_notifications(zigonaut_core *, bool enabled);
 /* Enabled means intentionally permit immediate OSC 52 writes; accepted writes are queued for the host. */
 void zigonaut_core_set_clipboard_write(zigonaut_core *, bool enabled, uint32_t max_bytes);
 void zigonaut_core_take_clipboard_write(zigonaut_core *, uint8_t *output, uint32_t capacity, zigonaut_clipboard_result_v1 *);

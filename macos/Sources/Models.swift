@@ -247,6 +247,7 @@ struct TerminalPalette: Equatable {
   @AppStorage("randomizeTabBackground") var randomizeTabBackground = true
   @AppStorage("shellPath") var shellPath = "/bin/zsh"
   @AppStorage("automaticShellIntegration") var automaticShellIntegration = true
+  @AppStorage("commandCompletionNotifications") var commandCompletionNotifications = false
   @AppStorage("opacity") var opacity = 1.0
   @AppStorage("fontWeight") var fontWeight = "Regular"
   @AppStorage("intenseFontWeight") var intenseFontWeight = "Bold"
@@ -392,6 +393,7 @@ struct TerminalPalette: Equatable {
     randomizeTabBackground = true
     shellPath = "/bin/zsh"
     automaticShellIntegration = true
+    commandCompletionNotifications = false
     opacity = 1
     fontWeight = "Regular"
     intenseFontWeight = "Bold"
@@ -492,6 +494,7 @@ struct TerminalPalette: Equatable {
       callbackBox.release()
     }
     applyClipboardSettings()
+    applyCommandNotificationSettings()
     refresh()
   }
 
@@ -590,6 +593,11 @@ struct TerminalPalette: Equatable {
       }
       return TerminalHint(url: url, label: label, row: Int(record.row),
         startColumn: Int(record.start_column), endColumn: Int(record.end_column))
+    }
+  }
+  func applyCommandNotificationSettings() {
+    if let core {
+      zigonaut_core_set_command_notifications(core.pointer, preferences.commandCompletionNotifications)
     }
   }
   func applyClipboardSettings() {

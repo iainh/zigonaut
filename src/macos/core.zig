@@ -1241,6 +1241,13 @@ export fn zigonaut_core_take_notification(self: ?*Core, title: ?[*]u8, title_cap
     output.status = 0;
 }
 
+export fn zigonaut_core_set_command_notifications(self: ?*Core, enabled: bool) void {
+    const core = self orelse return;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    core.terminal.setCommandNotifications(enabled);
+}
+
 export fn zigonaut_core_set_clipboard_write(self: ?*Core, enabled: bool, max_bytes: u32) void {
     const core = self orelse return;
     core.mutex.lock();

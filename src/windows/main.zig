@@ -361,6 +361,7 @@ const Application = struct {
         result.model.applyClipboardWriteSettings(loaded.value.osc52_clipboard_write, loaded.value.osc52_clipboard_max_bytes);
         result.model.setDefaultScrollbackSize(loaded.value.scrollback_size);
         result.model.setShellIntegrationEnabled(loaded.value.shell_integration_enabled);
+        result.model.setCommandNotifications(loaded.value.command_completion_notifications);
         return result;
     }
 
@@ -2158,6 +2159,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     self.model.applyClipboardWriteSettings(self.settings.osc52_clipboard_write, self.settings.osc52_clipboard_max_bytes);
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     self.model.setShellIntegrationEnabled(self.settings.shell_integration_enabled);
+    self.model.setCommandNotifications(self.settings.command_completion_notifications);
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);
     self.updateTheme(changed.theme);
     if (new_font != null) _ = win.DeleteObject(old_font);
