@@ -485,9 +485,8 @@ pub const SessionRuntime = struct {
         _ = self.latency_request_id.cmpxchgStrong(request_id, 0, .acq_rel, .acquire);
     }
 
-    pub const RenderCapture = union(enum) {
-        prepared: struct { content_generation: u64 },
-        synchronized_output,
+    pub const RenderCapture = struct {
+        content_generation: u64,
     };
 
     /// Captures terminal-owned render state only. This is safe on the frame
@@ -505,11 +504,7 @@ pub const SessionRuntime = struct {
             @intCast((win32.monotonicNanoseconds() orelse started) -| started),
             0,
         );
-        if (self.synchronized_output.remaining(win.GetTickCount64()) != null) {
-            self.render_handoff.unlock(&self.terminal_mutex);
-            return .synchronized_output;
-        }
-        const scroll_state = self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
+        const scroll_state = if (self.terminal.render_held) self.terminal.held_scrollbar else self.terminal.scrollbar() catch Terminal.Scrollbar{ .total = 0, .offset = 0, .len = 0 };
         self.render_scroll_offset = scroll_state.offset;
         const generation = self.content_generation.load(.monotonic);
         self.render_snapshot.capture(self.allocator, &self.terminal) catch |err| {
@@ -525,15 +520,13 @@ pub const SessionRuntime = struct {
             @intCast(generation),
             0,
         );
-        return .{ .prepared = .{ .content_generation = generation } };
+        return .{ .content_generation = generation };
     }
 
     /// Synchronous fallback used by GDI, resize, and wait-registration failure.
     pub fn prepareRender(self: *SessionRuntime) !bool {
-        return switch (try self.captureRender()) {
-            .prepared => true,
-            .synchronized_output => false,
-        };
+        _ = try self.captureRender();
+        return true;
     }
 
     pub fn replayPreparedViewport(self: *SessionRuntime, renderer: anytype) void {
@@ -592,6 +585,7 @@ pub const SessionRuntime = struct {
             };
         }
         _ = self.synchronized_output.clear();
+        _ = self.content_generation.fetchAdd(1, .monotonic);
         return null;
     }
 
@@ -602,6 +596,7 @@ pub const SessionRuntime = struct {
             log.warn("unable to clear synchronized output mode: {}", .{err});
         };
         _ = self.synchronized_output.clear();
+        _ = self.content_generation.fetchAdd(1, .monotonic);
     }
 
     pub fn scrollbar(self: *SessionRuntime) !Terminal.Scrollbar {
@@ -983,6 +978,7 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         self.terminal.setSynchronizedOutput(false) catch {};
         _ = self.synchronized_output.clear();
+        _ = self.content_generation.fetchAdd(1, .monotonic);
         self.terminal_mutex.unlock();
         self.requestRefresh();
     }
@@ -1160,8 +1156,11 @@ pub const SessionRuntime = struct {
     }
 
     fn processOutputChunkLocked(self: *SessionRuntime, bytes: []const u8, now: u64) bool {
+        const hold_generation = self.terminal.render_hold_generation;
         self.terminal.feed(bytes);
         const synchronized = self.terminal.synchronizedOutput();
+        const new_frame = hold_generation != self.terminal.render_hold_generation;
+        if (new_frame) _ = self.synchronized_output.clear();
         const mode_changed = self.synchronized_output.update(synchronized, now);
         self.search_content_generation +%= 1;
         _ = self.output_generation.fetchAdd(1, .monotonic);
@@ -1174,7 +1173,7 @@ pub const SessionRuntime = struct {
             @intCast(bytes.len),
             @intCast(generation),
         );
-        return !synchronized or mode_changed;
+        return !synchronized or mode_changed or new_frame;
     }
 
     /// Ghostty invokes this synchronously from `Terminal.feed`. Keep the same
@@ -1423,7 +1422,7 @@ test "render handoff gives a waiting snapshot lock its turn" {
     try std.testing.expectEqual(@as(u32, 0), handoff.demand.load(.monotonic));
 }
 
-test "session defers synchronized chunks and prepares once mode ends" {
+test "session presents completed frames during consecutive holds without refreshing partial output" {
     var runtime = SessionRuntime{
         .allocator = std.testing.allocator,
         .terminal = try Terminal.init(80, 24, theme.rasmus),
@@ -1436,12 +1435,23 @@ test "session defers synchronized chunks and prepares once mode ends" {
     try std.testing.expectEqual(@as(u64, 0), runtime.outputGeneration());
     try std.testing.expect(runtime.processOutputChunk("before\x1b[?2026hpartial", 100));
     try std.testing.expectEqual(@as(u64, 1), runtime.outputGeneration());
-    try std.testing.expect(!(try runtime.prepareRender()));
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(u16, 6), runtime.render_snapshot.frame.?.cursor_x);
     try std.testing.expect(!runtime.processOutputChunk("more", 200));
     try std.testing.expectEqual(@as(u64, 2), runtime.outputGeneration());
-    try std.testing.expect(runtime.processOutputChunk("final\x1b[?2026l", 300));
+    try std.testing.expect(runtime.processOutputChunk("final\x1b[?2026l\x1b[?2026h\rhidden", 300));
     try std.testing.expectEqual(@as(u64, 3), runtime.outputGeneration());
     try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(u16, 22), runtime.render_snapshot.frame.?.cursor_x);
+    // A new hold in the same read starts its own watchdog; an ordinary held
+    // chunk or repeated set must not extend it.
+    try std.testing.expectEqual(@as(?u32, 201), runtime.synchronizedOutputDelay(1099));
+    try std.testing.expect(!runtime.processOutputChunk("\x1b[?2026h", 1200));
+    try std.testing.expectEqual(@as(?u32, 1), runtime.synchronizedOutputDelay(1299));
+    try std.testing.expect(runtime.processOutputChunk("\x1bcRESET", 1300));
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(u16, 5), runtime.render_snapshot.frame.?.cursor_x);
+    try std.testing.expectEqual(@as(?u32, null), runtime.synchronizedOutputDelay(1300));
 }
 
 test "session consumes Ghostty progress and notification effects" {
@@ -1489,10 +1499,15 @@ test "session watchdog and resize release synchronized output" {
     defer deinitTestRuntime(&runtime);
 
     try std.testing.expect(runtime.processOutputChunk("\x1b[?2026hpartial", 100));
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(u16, 0), runtime.render_snapshot.frame.?.cursor_x);
     try std.testing.expectEqual(@as(?u32, 1), runtime.synchronizedOutputDelay(1099));
+    const held_generation = runtime.contentGeneration();
     try std.testing.expectEqual(@as(?u32, null), runtime.synchronizedOutputDelay(1100));
+    try std.testing.expect(runtime.contentGeneration() != held_generation);
     try std.testing.expect(!runtime.terminal.synchronizedOutput());
     try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(u16, 7), runtime.render_snapshot.frame.?.cursor_x);
 
     try std.testing.expect(runtime.processOutputChunk("\x1b[?2026hpartial", 2000));
     runtime.resize(100, 40, 9, 18);
