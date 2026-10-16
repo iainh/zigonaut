@@ -774,6 +774,7 @@ pub const App = struct {
         var generation: u64 = 0;
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| if (pane.session.runtime) |runtime| {
             generation +%= runtime.titleGeneration();
+            generation +%= runtime.programStatusGeneration();
         };
         return generation;
     }

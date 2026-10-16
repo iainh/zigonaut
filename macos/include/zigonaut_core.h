@@ -66,6 +66,9 @@ bool zigonaut_core_set_scrollback(zigonaut_core *, uint32_t lines);
 /* style: 0 bold font, 1 bold font with bright colors, 2 bright colors. */
 bool zigonaut_core_set_intense_text_style(zigonaut_core *, uint8_t style);
 void zigonaut_core_progress(zigonaut_core *, zigonaut_progress_v1 *);
+/* Plain UTF-8 pane status, never markup. Returns required bytes; copies only
+   when complete. state: 0 absent, 1 idle, 2 working, 3 done, 4 blocked, 5 error. */
+uint32_t zigonaut_core_program_status(zigonaut_core *, uint8_t *output, uint32_t capacity, uint8_t *state);
 /* True only while a foreground process group other than the login shell owns the PTY. */
 bool zigonaut_core_has_foreground_job(zigonaut_core *);
 bool zigonaut_core_exited(zigonaut_core *);

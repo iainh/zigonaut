@@ -46,6 +46,30 @@ private struct PaneLeafView: View {
       ) {
         window.focusedPane = pane.id
       }
+      .overlay(alignment: .bottomTrailing) {
+        if !pane.programStatus.isEmpty {
+          Label {
+            Text(verbatim: pane.programStatus)
+              .lineLimit(1)
+          } icon: {
+            Image(systemName: pane.programStatusState == 5 ? "exclamationmark.circle"
+              : pane.programStatusState == 4 ? "hand.raised"
+              : pane.programStatusState == 3 ? "checkmark.circle"
+              : pane.programStatusState == 2 ? "gearshape" : "pause.circle")
+          }
+          .font(.caption)
+          .foregroundStyle(pane.programStatusState >= 4 ? Color.primary : Color.secondary)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 4)
+          .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+          .frame(maxWidth: 360, alignment: .trailing)
+          .padding(6)
+          .accessibilityElement(children: .ignore)
+          .accessibilityLabel("Program status in pane \(pane.title): \(pane.programStatus)")
+          .help("Program status in this pane (\(pane.title)): \(pane.programStatus)")
+          .allowsHitTesting(false)
+        }
+      }
       .overlay(alignment: .top) {
         if window.panes.count > 1 {
           Image(systemName: "line.3.horizontal")

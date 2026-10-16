@@ -414,6 +414,8 @@ struct TerminalPalette: Equatable {
   @Published private(set) var searchActiveIndex: Int?
   @Published private(set) var searchError = false
   @Published private(set) var progress: TerminalProgress?
+  @Published private(set) var programStatus = ""
+  @Published private(set) var programStatusState: UInt8 = 0
   @Published private(set) var outputGeneration: UInt64 = 0
   @Published private(set) var exited = false
   nonisolated(unsafe) private var core: TerminalCoreHandle?
@@ -516,6 +518,13 @@ struct TerminalPalette: Equatable {
     if !exited, zigonaut_core_exited(core.pointer) { exited = true }
     retrieveTitle(core: core.pointer)
     retrieveProgress(core: core.pointer)
+    var statusBytes = [UInt8](repeating: 0, count: 768)
+    var statusState: UInt8 = 0
+    let statusLength = zigonaut_core_program_status(core.pointer, &statusBytes,
+      UInt32(statusBytes.count), &statusState)
+    let status = String(decoding: statusBytes.prefix(Int(statusLength)), as: UTF8.self)
+    if status != programStatus { programStatus = status }
+    if statusState != programStatusState { programStatusState = statusState }
     drainNotifications(core: core.pointer)
     drainClipboard(core: core.pointer)
     scheduleCompression()
