@@ -1176,6 +1176,12 @@ pub const Terminal = struct {
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
     }
 
+    /// Controls history entering the active area on resize, not column reflow.
+    /// This embedder policy survives a full terminal reset (RIS).
+    pub fn setResizePullScrollback(self: *Terminal, enabled: bool) !void {
+        try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK, &enabled));
+    }
+
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
         try check(vt.ghostty_terminal_resize(
             self.terminal,
@@ -3169,6 +3175,82 @@ test "shrinking rows and columns keeps a bottom-row cursor in bounds" {
     try terminal.resize(79, 20, 9, 18);
     try std.testing.expectEqual(@as(u16, 79), terminal.columns);
     try std.testing.expectEqual(@as(u16, 20), terminal.rows);
+}
+
+test "resize pull policy preserves history on row growth and survives RIS" {
+    // Leaving the policy unset exercises the default used by macOS.
+    for ([_]bool{ false, true }) |conpty| {
+        var terminal = try Terminal.init(8, 3, theme.rasmus);
+        defer terminal.deinit();
+        if (conpty) try terminal.setResizePullScrollback(false);
+        terminal.feed("\x1bc");
+        terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        try terminal.resize(8, 2, 9, 18);
+        try terminal.resize(8, 4, 9, 18);
+
+        var buffer: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            if (conpty) "four\nfive" else "two\nthree\nfour\nfive",
+            try terminal.writeViewportText(&buffer),
+        );
+        var renderer = TestRenderer{};
+        try terminal.renderViewport(&renderer);
+        try std.testing.expectEqual(@as(u16, 4), renderer.frame.?.cursor_x);
+        try std.testing.expectEqual(@as(u16, if (conpty) 1 else 3), renderer.frame.?.cursor_y);
+        try std.testing.expectEqual(@as(u64, if (conpty) 3 else 1), (try terminal.scrollbar()).offset);
+
+        // Suppressing pulls must retain history, not discard it.
+        terminal.scrollViewport(-100);
+        try std.testing.expectEqualStrings("one\ntwo\nthree\nfour", try terminal.writeViewportText(&buffer));
+    }
+}
+
+test "ConPTY resize reflows active text without pulling wholly historical lines" {
+    // With two rows, the wrapped line straddles history and the active area;
+    // with three, the whole wrapped line is active. Both must still reflow.
+    for ([_]u16{ 3, 2 }) |rows| {
+        var terminal = try Terminal.init(4, rows, theme.rasmus);
+        defer terminal.deinit();
+        try terminal.setResizePullScrollback(false);
+        terminal.feed("OLD\r\nabcdefgh\r\nZ");
+
+        var buffer: [256]u8 = undefined;
+        for (0..3) |_| {
+            try terminal.resize(8, rows, 9, 18);
+            try std.testing.expectEqualStrings("abcdefgh\nZ", try terminal.writeViewportText(&buffer));
+            var renderer = TestRenderer{};
+            try terminal.renderViewport(&renderer);
+            try std.testing.expectEqual(@as(u16, 1), renderer.frame.?.cursor_x);
+            try std.testing.expectEqual(@as(u16, 1), renderer.frame.?.cursor_y);
+            try std.testing.expectEqual(@as(u64, 1), (try terminal.scrollbar()).offset);
+
+            try terminal.resize(4, rows, 9, 18);
+            try std.testing.expectEqualStrings(
+                if (rows == 3) "abcd\nefgh\nZ" else "efgh\nZ",
+                try terminal.writeViewportText(&buffer),
+            );
+            try terminal.renderViewport(&renderer);
+            try std.testing.expectEqual(rows - 1, renderer.frame.?.cursor_y);
+        }
+        terminal.scrollViewport(-100);
+        try std.testing.expectEqualStrings(
+            if (rows == 3) "OLD\nabcd\nefgh" else "OLD\nabcd",
+            try terminal.writeViewportText(&buffer),
+        );
+    }
+}
+
+test "default resize policy can reveal history during column reflow" {
+    var terminal = try Terminal.init(4, 3, theme.rasmus);
+    defer terminal.deinit();
+    terminal.feed("OLD\r\nabcdefgh\r\nZ");
+    try terminal.resize(8, 3, 9, 18);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("OLD\nabcdefgh\nZ", try terminal.writeViewportText(&buffer));
+    var renderer = TestRenderer{};
+    try terminal.renderViewport(&renderer);
+    try std.testing.expectEqual(@as(u16, 1), renderer.frame.?.cursor_x);
+    try std.testing.expectEqual(@as(u16, 2), renderer.frame.?.cursor_y);
 }
 
 test "render state resolves ANSI colors through the Rasmus theme" {
