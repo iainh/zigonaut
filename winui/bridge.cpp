@@ -2315,6 +2315,8 @@ struct Bridge {
     static void updateTabStatusGlyph(TabViewItem const& item) {
         // Keep the native button, hit target, tooltip and close-request wiring.
         // Discover it again after retemplating rather than retaining a stale part.
+        // TabView must prepare the item before we apply its template.
+        if (!item.IsLoaded()) return;
         item.ApplyTemplate();
         if (!Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChildrenCount(item)) return;
         auto const template_root = Microsoft::UI::Xaml::Media::VisualTreeHelper::GetChild(item, 0).try_as<FrameworkElement>();
@@ -2327,7 +2329,7 @@ struct Bridge {
             };
             button.RegisterPropertyChangedCallback(
                 Microsoft::UI::Xaml::Controls::Primitives::ButtonBase::IsPointerOverProperty(), refresh);
-            button.RegisterPropertyChangedCallback(Control::FocusStateProperty(), refresh);
+            button.RegisterPropertyChangedCallback(UIElement::FocusStateProperty(), refresh);
         }
         auto const status = unbox_value<uint32_t>(item.Header().as<StackPanel>().Tag());
         auto const show_close = button.IsPointerOver() ||
@@ -2355,7 +2357,7 @@ struct Bridge {
             if (auto const current = weak.get()) updateTabStatusGlyph(current);
         };
         item.Loaded(refresh_status);
-        item.RegisterPropertyChangedCallback(Control::FocusStateProperty(), refresh_status);
+        item.RegisterPropertyChangedCallback(UIElement::FocusStateProperty(), refresh_status);
         item.AddHandler(UIElement::PointerPressedEvent(), tab_pointer_pressed_handler, true);
         item.AddHandler(UIElement::PointerMovedEvent(), tab_pointer_moved_handler, true);
         item.AddHandler(UIElement::PointerReleasedEvent(), tab_pointer_released_handler, true);

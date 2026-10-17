@@ -6,15 +6,35 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System.Runtime.InteropServices;
 public static class TabTestPointer {
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
+    public static extern System.IntPtr SetThreadDpiAwarenessContext(System.IntPtr context);
+    [DllImport("user32.dll")]
     public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, System.UIntPtr extra);
 }
 '@
+[void][TabTestPointer]::SetThreadDpiAwarenessContext([IntPtr](-4))
+
+function Get-SlotPixels($Button) {
+    $rect = $Button.Current.BoundingRectangle
+    $bitmap = New-Object System.Drawing.Bitmap([int]$rect.Width, [int]$rect.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $stream = New-Object System.IO.MemoryStream
+    try {
+        $graphics.CopyFromScreen([int]$rect.Left, [int]$rect.Top, 0, 0, $bitmap.Size)
+        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+        return [Convert]::ToBase64String($stream.ToArray())
+    } finally {
+        $stream.Dispose()
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
 
 $executablePath = (Resolve-Path $Executable).Path
 $process = Start-Process -FilePath $executablePath -PassThru
@@ -111,14 +131,25 @@ try {
         throw "Focus moved to '$($focused.Current.AutomationId)' instead of the selected terminal."
     }
 
-    # Keep the reporting process alive so shell integration does not end its status.
-    $report = '[Console]::Write([string][char]27 + "]7501;state=error:id=tab-test" + [char]7); Start-Sleep -Seconds 60'
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($report)).Replace('+', '{+}')
-    $keyboard.SendKeys("powershell.exe -NoProfile -EncodedCommand $encoded{ENTER}")
     $tabCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::TabItem
     )
+    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'CloseButton'
+    )
+    $firstTab = $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $tabCondition)
+    $close = $firstTab.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
+    $windowBounds = $window.Current.BoundingRectangle
+    [void][TabTestPointer]::SetCursorPos([int]($windowBounds.Left + 100), [int]($windowBounds.Top + 200))
+    [TabTestPointer]::mouse_event(1, 1, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 250
+    $closePixels = Get-SlotPixels $close
+
+    # Keep the reporting process alive so shell integration does not end its status.
+    $report = '[Console]::Write([string][char]27 + "]7501;state=error:id=tab-test" + [char]7); Start-Sleep -Seconds 60'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($report)).Replace('+', '{+}')
+    $keyboard.SendKeys("powershell.exe -NoProfile -EncodedCommand $encoded{ENTER}")
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $statusTab = $null
     do {
@@ -138,10 +169,6 @@ try {
     if ($statusTab.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textStatusCondition).Count -ne 0) {
         throw 'The tab still displays a text status label instead of a glyph.'
     }
-    $buttonCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button
-    )
     $close = $statusTab.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
     if ($null -eq $close -or [string]::IsNullOrEmpty($close.Current.Name)) {
         throw 'The status tab has no accessible close button.'
@@ -150,9 +177,22 @@ try {
     $slot = $close.Current.BoundingRectangle
     if ($slot.IsEmpty -or $slot.Width -le 0) { throw 'The status/close slot is not visible.' }
     $title = $statusTab.Current.Name
+    Start-Sleep -Milliseconds 250
+    if ((Get-SlotPixels $close) -eq $closePixels) {
+        throw 'Program status did not visibly replace the native close glyph.'
+    }
+    $statusTab.SetFocus()
+    $keyboard.SendKeys('{TAB}+{TAB}')
+    Start-Sleep -Milliseconds 250
+    if ((Get-SlotPixels $close) -ne $closePixels) {
+        throw 'Keyboard focus did not restore the native close glyph.'
+    }
+    (Get-Terminal).SetFocus()
+    Start-Sleep -Milliseconds 250
     # Enter the slot, leave over the title, then re-enter and click the native button.
     foreach ($x in @(($slot.Left + $slot.Width / 2), ($bounds.Left + 12), ($slot.Left + $slot.Width / 2))) {
         [void][TabTestPointer]::SetCursorPos([int]$x, [int]($slot.Top + $slot.Height / 2))
+        [TabTestPointer]::mouse_event(1, 1, 0, 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 150
         if ($statusTab.Current.BoundingRectangle -ne $bounds -or $statusTab.Current.Name -ne $title) {
             throw 'Hovering the status/close slot changed the tab title or layout.'
