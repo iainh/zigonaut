@@ -13,6 +13,7 @@ const Capture = struct {
     red_cell: bool = false,
     highlighted: usize = 0,
     active_highlighted: usize = 0,
+    background: u32 = 0,
 
     fn deinit(self: *Capture) void {
         self.output.deinit();
@@ -34,7 +35,8 @@ export fn zgtk_title(host: ?*anyopaque, bytes: [*]const u8, length: usize) void 
 export fn zgtk_clipboard(host: ?*anyopaque, bytes: [*]const u8, length: usize) void {
     capture(host).clipboard.writer.writeAll(bytes[0..length]) catch unreachable;
 }
-export fn zgtk_begin_frame(host: ?*anyopaque, _: u32) void {
+export fn zgtk_begin_frame(host: ?*anyopaque, background: u32) void {
+    capture(host).background = background;
     capture(host).first_row = @splat(' ');
     capture(host).highlighted = 0;
     capture(host).active_highlighted = 0;
@@ -230,4 +232,24 @@ test "Linux pane ABI preserves nested layout, focus, ratios and zoom across coll
     try std.testing.expect(c.zgtk_layout_close(layout, bottom));
     try std.testing.expectEqual(@as(u64, 0), c.zgtk_layout_focused(layout));
     try std.testing.expectEqual(@as(usize, 0), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+}
+
+test "Linux settings update live themes and enforce opt-in bounded clipboard writes" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try feed(core, "retained\x1b]52;c;b25l\x07");
+    try std.testing.expectEqualStrings("", state.clipboard.written());
+    try std.testing.expect(c.zgtk_configure(core, 1, 100, 1, true, 3));
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(u32, 0xffffff), state.background);
+    try std.testing.expectEqualStrings("retained", state.first_row[0..8]);
+    try feed(core, "\x1b]52;c;b25l\x07\x1b]52;c;Zm91cg==\x07");
+    try std.testing.expectEqualStrings("one", state.clipboard.written());
+    try std.testing.expect(c.zgtk_configure(core, 0, 0, 2, false, 3));
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(u32, 0x1a1a19), state.background);
+    try feed(core, "\x1b]52;c;dHdv\x07");
+    try std.testing.expectEqualStrings("one", state.clipboard.written());
 }

@@ -75,13 +75,13 @@ def run_shell(helper: pathlib.Path, shell: pathlib.Path, kind: str, bash_array: 
             if linux:
                 environment.pop("ZIGONAUT_SHELL_INTEGRATION", None)
                 environment["XDG_CONFIG_HOME"] = str(home / "custom-config")
-                environment["SHELL"] = str(shell)
+                environment["SHELL"] = "/bin/sh"  # The selected profile takes precedence.
                 os.chdir(working_directory)
                 for standard in range(3):
                     os.dup2(slave, standard)
                 os.close(master)
                 os.close(slave)
-                os.execve(str(helper), [str(helper), "--pty-child"], environment)
+                os.execve(str(helper), [str(helper), "--pty-child", str(shell), "", ""], environment)
             os.dup2(slave, 10)
             os.close(master)
             os.close(slave)

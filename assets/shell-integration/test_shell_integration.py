@@ -68,8 +68,8 @@ def main(custom_zdotdir: bool = True) -> None:
                         os.dup2(slave, standard)
                     os.close(fd)
                     os.close(slave)
-                    env["SHELL"] = "/bin/zsh"
-                    os.execve(str(HELPER), [str(HELPER), "--pty-child"], env)
+                    env["SHELL"] = "/bin/sh"  # The selected profile takes precedence.
+                    os.execve(str(HELPER), [str(HELPER), "--pty-child", "/bin/zsh", "", ""], env)
                 os.dup2(slave, 10)
                 os.close(fd)
                 os.close(slave)

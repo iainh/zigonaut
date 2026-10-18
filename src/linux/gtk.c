@@ -1,4 +1,5 @@
 #include "core.h"
+#include "settings.h"
 #include <adwaita.h>
 #include <glib-unix.h>
 #include <errno.h>
@@ -12,10 +13,14 @@
 
 extern char **environ;
 
+static Settings settings;
+static char *settings_warning;
+
 typedef struct {
     GtkWindow *window;
     AdwTabView *tabs;
     AdwToastOverlay *toasts;
+    GMenu *profile_menu;
     gboolean closing;
     guint pane_keys[16];
 } Window;
@@ -24,6 +29,7 @@ typedef struct {
     PaneLayout *tree;
     GtkWidget *content;
     GPtrArray *panes;
+    Profile profile; /* Snapshot: splits retain this tab's launch choices. */
     gboolean rebuilding;
 } Layout;
 
@@ -55,6 +61,7 @@ typedef struct {
 } Tab;
 
 static void new_tab(Window *window);
+static void new_profile_tab(Window *window, const Profile *profile);
 static Window *new_window(GtkApplication *app);
 static void schedule_search(Tab *tab);
 static void rebuild_layout(Layout *layout);
@@ -94,7 +101,7 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
                     uint32_t background, uint32_t underline, uint16_t flags) {
     Tab *tab = host;
-    double left = 8 + x * tab->cell_width, top = 8 + y * tab->cell_height;
+    double left = settings.padding + x * tab->cell_width, top = settings.padding + y * tab->cell_height;
     double width = columns * tab->cell_width;
     cairo_t *cr = tab->cr;
     cairo_save(cr);
@@ -122,7 +129,7 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
 void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
                       uint8_t style, uint32_t rgb) {
     Tab *tab = host;
-    double left = 8 + x * tab->cell_width, top = 8 + y * tab->cell_height;
+    double left = settings.padding + x * tab->cell_width, top = settings.padding + y * tab->cell_height;
     double width = columns * tab->cell_width, height = tab->cell_height;
     GdkRectangle location = { (int)left, (int)top, (int)width, (int)height };
     gtk_im_context_set_cursor_location(tab->im, &location);
@@ -352,8 +359,8 @@ static gboolean search_key(GtkEventControllerKey *controller, guint keyval,
 static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
     (void)area;
     Tab *tab = data;
-    int columns = CLAMP((width - 16) / tab->cell_width, 1, 65535);
-    int rows = CLAMP((height - 16) / tab->cell_height, 1, 65535);
+    int columns = CLAMP((width - 2 * settings.padding) / tab->cell_width, 1, 65535);
+    int rows = CLAMP((height - 2 * settings.padding) / tab->cell_height, 1, 65535);
     if (columns == tab->columns && rows == tab->rows) return;
     if (!zgtk_resize(tab->core, (uint16_t)columns, (uint16_t)rows,
                        (uint32_t)tab->cell_width, (uint32_t)tab->cell_height)) return;
@@ -422,6 +429,7 @@ static void set_font(Tab *tab, int size) {
     pango_layout_set_font_description(tab->layout, tab->font);
     pango_layout_set_text(tab->layout, "M", 1);
     pango_layout_get_pixel_size(tab->layout, &tab->cell_width, &tab->cell_height);
+    tab->cell_height = (tab->cell_height * settings.line_height + 99) / 100;
     if (gtk_widget_get_width(tab->area) > 0) {
         tab->columns = 0; /* Refresh pixel metrics even if the grid size is unchanged. */
         resize(GTK_DRAWING_AREA(tab->area), gtk_widget_get_width(tab->area), gtk_widget_get_height(tab->area), tab);
@@ -448,7 +456,7 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
     if (state & GDK_CONTROL_MASK) {
         if (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal) { set_font(tab, tab->font_size + 1); return TRUE; }
         if (keyval == GDK_KEY_minus) { set_font(tab, tab->font_size - 1); return TRUE; }
-        if (keyval == GDK_KEY_0) { set_font(tab, 12); return TRUE; }
+        if (keyval == GDK_KEY_0) { set_font(tab, settings.font_size); return TRUE; }
     }
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
     GdkModifierType consumed = gdk_key_event_get_consumed_modifiers(event);
@@ -517,8 +525,8 @@ static void focus_leave(GtkEventControllerFocus *controller, gpointer data) {
 }
 
 static void select_at(Tab *tab, double x, double y, bool begin) {
-    zgtk_select(tab->core, (uint16_t)CLAMP((x - 8) / tab->cell_width, 0, tab->columns - 1),
-                (uint16_t)CLAMP((y - 8) / tab->cell_height, 0, tab->rows - 1), begin, tab->rectangle);
+    zgtk_select(tab->core, (uint16_t)CLAMP((x - settings.padding) / tab->cell_width, 0, tab->columns - 1),
+                (uint16_t)CLAMP((y - settings.padding) / tab->cell_height, 0, tab->rows - 1), begin, tab->rectangle);
     gtk_widget_queue_draw(tab->area);
 }
 static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
@@ -545,6 +553,60 @@ static void new_tab_action(GSimpleAction *action, GVariant *parameter, gpointer 
     (void)action; (void)parameter;
     new_tab(data);
 }
+static void profile_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action;
+    int index = g_variant_get_int32(parameter);
+    if (index >= 0 && index < settings.profile_count) new_profile_tab(data, &settings.profiles[index]);
+}
+
+static void apply_tab_settings(Tab *tab) {
+    pango_font_description_set_family(tab->font, settings.font);
+    set_font(tab, settings.font_size);
+    int theme = adw_style_manager_get_dark(adw_style_manager_get_default()) ? settings.dark_theme : settings.light_theme;
+    if (!zgtk_configure(tab->core, theme, settings.scrollback, settings.intense,
+                        settings.clipboard, settings.clipboard_limit))
+        adw_toast_overlay_add_toast(tab->window->toasts, adw_toast_new("Unable to apply terminal settings"));
+    schedule_search(tab);
+    gtk_widget_queue_draw(tab->area);
+}
+
+static void update_profile_menu(Window *window) {
+    g_menu_remove_all(window->profile_menu);
+    for (int i = 0; i < settings.profile_count; i++) {
+        GMenuItem *item = g_menu_item_new(settings.profiles[i].name, NULL);
+        g_menu_item_set_action_and_target(item, "win.profile-tab", "i", i);
+        g_menu_append_item(window->profile_menu, item);
+        g_object_unref(item);
+    }
+}
+
+static void apply_settings(gpointer data) {
+    GtkApplication *app = data;
+    adw_style_manager_set_color_scheme(adw_style_manager_get_default(), settings.scheme == 1 ?
+        ADW_COLOR_SCHEME_FORCE_LIGHT : settings.scheme == 2 ? ADW_COLOR_SCHEME_FORCE_DARK : ADW_COLOR_SCHEME_DEFAULT);
+    for (GList *it = gtk_application_get_windows(app); it; it = it->next) {
+        Window *window = g_object_get_data(G_OBJECT(it->data), "window");
+        if (!window) continue;
+        update_profile_menu(window);
+        for (int i = 0; i < adw_tab_view_get_n_pages(window->tabs); i++) {
+            Layout *layout = page_layout(adw_tab_view_get_nth_page(window->tabs, i));
+            for (guint j = 0; j < layout->panes->len; j++)
+                apply_tab_settings(g_ptr_array_index(layout->panes, j));
+        }
+    }
+}
+
+static void appearance_changed(AdwStyleManager *manager, GParamSpec *property, gpointer data) {
+    (void)manager; (void)property;
+    apply_settings(data);
+}
+
+static void settings_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *window = data;
+    settings_present(window->window, &settings, apply_settings, gtk_window_get_application(window->window));
+}
+
 static void close_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action; (void)parameter;
     Window *window = data;
@@ -639,7 +701,7 @@ static void move_tab_action(GSimpleAction *action, GVariant *parameter, gpointer
     gtk_window_present(destination->window);
 }
 
-static gboolean spawn_shell(Tab *tab, GError **error) {
+static gboolean spawn_shell(Tab *tab, const Profile *profile, GError **error) {
     int slave;
     struct winsize size = { .ws_row = (unsigned short)tab->rows, .ws_col = (unsigned short)tab->columns };
     if (openpty(&tab->master, &slave, NULL, NULL, &size) < 0) goto fail;
@@ -657,7 +719,8 @@ static gboolean spawn_shell(Tab *tab, GError **error) {
     posix_spawnattr_setsigmask(&attributes, &signals);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
     /* Re-exec before setting up the child: no GTK or GLib code after fork. */
-    char *argv[] = { (char *)"zigonaut", (char *)"--pty-child", NULL };
+    char *argv[] = { (char *)"zigonaut", (char *)"--pty-child", (char *)profile->shell,
+                     (char *)profile->directory, (char *)profile->command, NULL };
     char **env = g_get_environ();
     env = g_environ_setenv(env, "TERM", "xterm-256color", TRUE);
     env = g_environ_setenv(env, "COLORTERM", "truecolor", TRUE);
@@ -684,7 +747,7 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     tab->window = window;
     tab->application = G_APPLICATION(gtk_window_get_application(window->window));
     tab->master = -1;
-    tab->columns = 80; tab->rows = 24;
+    tab->columns = settings.columns; tab->rows = settings.rows;
     tab->area = gtk_drawing_area_new();
     tab->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     g_object_ref_sink(tab->content); /* Retained even when hidden by pane zoom. */
@@ -734,10 +797,10 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     g_signal_connect(tab->im, "commit", G_CALLBACK(commit), tab);
     tab->layout = gtk_widget_create_pango_layout(tab->area, NULL);
     pango_layout_set_single_paragraph_mode(tab->layout, TRUE);
-    tab->font = pango_font_description_from_string("Monospace 12");
+    tab->font = pango_font_description_new();
     tab->core = zgtk_create(tab);
     if (!tab->core) g_error("Unable to initialize terminal engine");
-    set_font(tab, 12);
+    apply_tab_settings(tab);
     g_object_set_data_full(G_OBJECT(tab->area), "terminal", tab, destroy_tab);
     gtk_widget_set_focusable(tab->area, TRUE);
     gtk_widget_set_size_request(tab->area, 80, 48);
@@ -768,7 +831,7 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     gtk_widget_add_controller(tab->area, wheel);
     zgtk_title(tab, "Terminal", strlen("Terminal"));
     GError *error = NULL;
-    if (!spawn_shell(tab, &error)) {
+    if (!spawn_shell(tab, &owner->profile, &error)) {
         zgtk_title(tab, "Shell failed", strlen("Shell failed"));
         zgtk_feed(tab->core, error->message, strlen(error->message));
         adw_toast_overlay_add_toast(window->toasts, adw_toast_new(error->message));
@@ -827,7 +890,8 @@ static void divider_position(GObject *object, GParamSpec *property, gpointer dat
      * pointer, keyboard and accessibility handling for the divider. */
     Tab *focused = pane_by_id(divider->layout, zgtk_layout_focused(divider->layout->tree));
     int cell = divider->vertical ? focused->cell_height : focused->cell_width;
-    position = 16 + ((MAX(0, position - 16) + cell / 2) / cell) * cell;
+    int padding = 2 * settings.padding;
+    position = padding + ((MAX(0, position - padding) + cell / 2) / cell) * cell;
     position = CLAMP(position, MAX(1, extent / 10), MAX(1, extent * 9 / 10));
     divider->ratio = (uint16_t)CLAMP((int64_t)position * 65535 / extent, 1, 65534);
     zgtk_layout_ratio(divider->layout->tree, divider->id, divider->ratio);
@@ -888,7 +952,12 @@ static void destroy_layout(gpointer data) {
 }
 
 static void new_tab(Window *window) {
+    new_profile_tab(window, &settings.profiles[settings.default_profile]);
+}
+
+static void new_profile_tab(Window *window, const Profile *profile) {
     Layout *layout = g_new0(Layout, 1);
+    layout->profile = *profile;
     layout->tree = zgtk_layout_create();
     if (!layout->tree) g_error("Unable to initialize pane layout");
     layout->panes = g_ptr_array_new();
@@ -993,9 +1062,19 @@ static Window *new_window(GtkApplication *app) {
     window->window = GTK_WINDOW(adw_application_window_new(app));
     g_object_set_data_full(G_OBJECT(window->window), "window", window, g_free);
     gtk_window_set_title(window->window, "Zigonaut");
-    gtk_window_set_default_size(window->window, 980, 640);
+    PangoLayout *measure = gtk_widget_create_pango_layout(GTK_WIDGET(window->window), "M");
+    PangoFontDescription *font = pango_font_description_new();
+    pango_font_description_set_family(font, settings.font);
+    pango_font_description_set_size(font, settings.font_size * PANGO_SCALE);
+    pango_layout_set_font_description(measure, font);
+    int width, height;
+    pango_layout_get_pixel_size(measure, &width, &height);
+    pango_font_description_free(font);
+    g_object_unref(measure);
     const GActionEntry actions[] = {
         { .name = "new-tab", .activate = new_tab_action },
+        { .name = "profile-tab", .activate = profile_tab_action, .parameter_type = "i" },
+        { .name = "settings", .activate = settings_action },
         { .name = "close-tab", .activate = close_tab_action },
         { .name = "close-pane", .activate = close_pane_action },
         { .name = "split-right", .activate = split_action },
@@ -1047,6 +1126,11 @@ static Window *new_window(GtkApplication *app) {
     g_menu_append(menu, "New Tab", "win.new-tab");
     g_menu_append(menu, "Move Tab to New Window", "win.move-tab");
     g_menu_append(menu, "Find", "win.find");
+    window->profile_menu = g_menu_new();
+    update_profile_menu(window);
+    g_menu_append_submenu(menu, "New Tab with Profile", G_MENU_MODEL(window->profile_menu));
+    g_object_unref(window->profile_menu); /* Retained by the parent menu. */
+    g_menu_append(menu, "Settings", "win.settings");
     GMenu *panes = g_menu_new();
     g_menu_append(panes, "Split Right", "win.split-right");
     g_menu_append(panes, "Split Down", "win.split-down");
@@ -1056,7 +1140,7 @@ static Window *new_window(GtkApplication *app) {
     g_menu_append(panes, "Zoom / Restore Pane", "win.pane(11)");
     g_menu_append(panes, "Close Pane", "win.close-pane");
     g_menu_append(panes, "Close Tab", "win.close-tab");
-    g_menu_append_section(menu, NULL, G_MENU_MODEL(panes));
+    g_menu_append_submenu(menu, "Panes", G_MENU_MODEL(panes));
     g_object_unref(panes);
     g_menu_append(menu, "About Zigonaut", "app.about");
     GtkWidget *menu_button = gtk_menu_button_new();
@@ -1074,6 +1158,18 @@ static Window *new_window(GtkApplication *app) {
     gtk_box_append(GTK_BOX(content), GTK_WIDGET(window->toasts));
     gtk_widget_set_vexpand(GTK_WIDGET(window->toasts), TRUE);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window->window), content);
+    /* Account for the actual header and client border rather than stealing a
+     * row/column from the requested initial grid with guessed chrome metrics. */
+    GtkBorder border, padding;
+    GtkStyleContext *style = gtk_widget_get_style_context(GTK_WIDGET(window->window));
+    gtk_style_context_get_border(style, &border);
+    gtk_style_context_get_padding(style, &padding);
+    int header_height;
+    gtk_widget_measure(header, GTK_ORIENTATION_VERTICAL, -1, NULL, &header_height, NULL, NULL);
+    gtk_window_set_default_size(window->window,
+        settings.columns * width + 2 * settings.padding + border.left + border.right + padding.left + padding.right,
+        settings.rows * ((height * settings.line_height + 99) / 100) + 2 * settings.padding +
+            header_height + border.top + border.bottom + padding.top + padding.bottom);
     return window;
 }
 
@@ -1082,6 +1178,10 @@ static void activate(GtkApplication *app, gpointer data) {
     Window *window = new_window(app);
     new_tab(window);
     gtk_window_present(window->window);
+    if (settings_warning) {
+        adw_toast_overlay_add_toast(window->toasts, adw_toast_new(settings_warning));
+        g_clear_pointer(&settings_warning, g_free);
+    }
 }
 
 static gboolean integration_file(const char *path) {
@@ -1142,22 +1242,39 @@ failed:
 }
 
 int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "--pty-child") == 0) {
+    if ((argc == 2 || argc == 5) && strcmp(argv[1], "--pty-child") == 0) {
         if (setsid() < 0 || ioctl(STDIN_FILENO, TIOCSCTTY, 0) < 0) return 126;
-        const char *shell = getenv("SHELL");
+        const char *shell = argc == 5 ? argv[2] : getenv("SHELL");
         if (!shell || shell[0] != '/') shell = "/bin/sh";
+        if (argc == 5) {
+            if (*argv[3] && chdir(argv[3]) < 0) { perror("Unable to change directory"); return 126; }
+            if (*argv[4]) {
+                execl(shell, shell, "-c", argv[4], (char *)NULL);
+                perror("Unable to execute shell");
+                return 127;
+            }
+        }
         exec_shell(shell);
         return 127;
     }
     AdwApplication *app = adw_application_new("com.spiralpoint.zigonaut", G_APPLICATION_NON_UNIQUE);
+    GError *error = NULL;
+    if (!settings_load(&settings, &error)) {
+        settings_warning = g_strdup_printf("Settings could not be loaded; using defaults: %s", error->message);
+        g_clear_error(&error);
+    }
+    apply_settings(app);
+    g_signal_connect(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(appearance_changed), app);
     g_set_application_name("Zigonaut");
     gtk_window_set_default_icon_name("com.spiralpoint.zigonaut");
     const GActionEntry actions[] = { { .name = "about", .activate = about } };
     g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), app);
     const char *new_tab_keys[] = { "<Control><Shift>t", NULL };
     const char *find_keys[] = { "<Control><Shift>f", NULL };
+    const char *settings_keys[] = { "<Control>comma", NULL };
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-tab", new_tab_keys);
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.find", find_keys);
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.settings", settings_keys);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     int result = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

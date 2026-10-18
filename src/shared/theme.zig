@@ -164,7 +164,7 @@ const JsonTheme = struct {
     ansi: [16][]const u8,
 };
 
-fn parseJson(allocator: std.mem.Allocator, contents: []const u8) !Theme {
+pub fn parseJson(allocator: std.mem.Allocator, contents: []const u8) !Theme {
     const parsed = try std.json.parseFromSlice(JsonTheme, allocator, contents, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     var result = Theme{

@@ -27,7 +27,7 @@ def alive(pid):
 
 with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
     root = Path(directory)
-    env = dict(os.environ, SHELL="/bin/sh", PS1="$ ", GDK_BACKEND="x11",
+    env = dict(os.environ, SHELL="/bin/sh", PS1="$ ", GDK_BACKEND="x11", XDG_CONFIG_HOME=str(root / "config"),
                GTK_A11Y="none", G_DEBUG="fatal-warnings")
     with (root / "stderr").open("w+") as log:
         # A desktop launcher or build runner may ignore SIGINT. The terminal
@@ -280,7 +280,9 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             children.append(last_pane)
             xdo("key", "F10")
             time.sleep(0.1)
-            xdo("key", "Home", *(["Down"] * 10), "Return")  # Close Tab, including all panes.
+            xdo("key", *(["Down"] * 5), "Return")  # Panes submenu.
+            time.sleep(0.1)
+            xdo("key", *(["Down"] * 8), "Return")  # Back row, then Close Tab.
             assert app.wait(timeout=8) == 0
             wait_for(lambda: not alive(second), "SIGHUP-resistant shell reaped after last window closes")
             wait_for(lambda: not alive(last_pane), "whole-tab close reaps every pane")

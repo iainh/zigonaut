@@ -416,6 +416,12 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .file = b.path("src/linux/gtk.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror" },
     });
+    module.addCSourceFile(.{
+        .file = b.path("src/linux/settings.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
+    module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
+    module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
     const exe = b.addExecutable(.{ .name = "zigonaut", .root_module = module });
     b.installArtifact(exe);
     b.installFile("src/linux/com.spiralpoint.zigonaut.desktop", "share/applications/com.spiralpoint.zigonaut.desktop");
@@ -445,6 +451,8 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     }) });
     tests.root_module.addImport("shared", shared_module);
     tests.root_module.addIncludePath(b.path("src/linux"));
+    tests.root_module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
+    tests.root_module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
     configureGhostty(tests.root_module, ghostty);
     const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
     linux_tests.dependOn(&b.addRunArtifact(tests).step);
@@ -469,6 +477,11 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     ui_tests.addArg(installed_exe);
     ui_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-ui", "Test the GTK frontend on an X11 display (requires xdotool)").dependOn(&ui_tests.step);
+    const settings_tests = b.addSystemCommand(&.{ "dbus-run-session", "--", "/usr/bin/python3" });
+    settings_tests.addFileArg(b.path("src/linux/test_settings_ui.py"));
+    settings_tests.addArg(installed_exe);
+    settings_tests.step.dependOn(b.getInstallStep());
+    b.step("test-linux-settings-ui", "Test native settings and profiles (requires python3-pyatspi and X11)").dependOn(&settings_tests.step);
 }
 
 fn addCiStep(b: *std.Build, check_step: *std.Build.Step, test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {

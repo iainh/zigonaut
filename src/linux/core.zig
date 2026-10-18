@@ -104,6 +104,21 @@ const Core = struct {
     search_cache: Terminal.SearchCache = .{},
     search_failed: bool = false,
     viewport_offset: u64 = 0,
+    clipboard_enabled: bool = false,
+    clipboard_limit: u32 = 1048576,
+
+    fn clipboard(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperation) Terminal.ClipboardWriteResult {
+        const self: *Core = @ptrCast(@alignCast(context.?));
+        if (!self.clipboard_enabled) return .denied;
+        const bytes = switch (operation) {
+            .clear => "",
+            .text => |text| text,
+        };
+        if (bytes.len > self.clipboard_limit) return .denied;
+        if (!std.unicode.utf8ValidateSlice(bytes) or std.mem.indexOfScalar(u8, bytes, 0) != null) return .invalid_data;
+        zgtk_clipboard(self.host, bytes.ptr, bytes.len);
+        return .success;
+    }
 
     fn invalidateSearch(self: *Core) void {
         self.search_cache.clear(allocator);
@@ -189,7 +204,30 @@ export fn zgtk_create(host: ?*anyopaque) ?*Core {
         zgtk_destroy(core);
         return null;
     };
+    core.terminal.setClipboardWrite(Core.clipboard, core) catch {
+        zgtk_destroy(core);
+        return null;
+    };
     return core;
+}
+
+export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, clipboard: bool, limit: u32) bool {
+    const palette = switch (theme) {
+        1 => shared.theme.parseJson(allocator, @embedFile("fluent-light")) catch return false,
+        2 => shared.theme.parseJson(allocator, @embedFile("fluent-dark")) catch return false,
+        else => shared.theme.rasmus,
+    };
+    core.terminal.setTheme(palette) catch return false;
+    core.terminal.setScrollbackSize(scrollback) catch return false;
+    core.terminal.setIntenseTextStyle(switch (intense) {
+        1 => .bold,
+        2 => .bright,
+        else => .all,
+    });
+    core.clipboard_enabled = clipboard;
+    core.clipboard_limit = limit;
+    if (core.search.enabled) core.invalidateSearch();
+    return true;
 }
 
 export fn zgtk_destroy(core: *Core) void {

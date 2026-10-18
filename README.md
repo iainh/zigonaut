@@ -140,17 +140,43 @@ is on your desktop session's `PATH`. No Windows or Apple SDK is needed.
 The GTK/libadwaita frontend puts reorderable, detachable tabs directly in the
 header bar alongside native window controls. It follows the desktop's light/dark
 appearance for window chrome, uses Adwaita toasts for failed actions, and includes
-an About window in the main menu. The terminal keeps its Rasmus palette.
+an About window and native Settings window in the main menu.
 It provides an independent POSIX PTY per pane, Pango/Cairo text rendering with font fallback,
 true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
 with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
-titles, scrollback search, shell-prompt navigation, and font zoom. It starts
-`$SHELL` interactively, falling back to `/bin/sh` when unset or not an absolute
-path, and inherits the launcher's working directory. Shell exit leaves its final
-output visible until you close the pane.
+titles, scrollback search, shell-prompt navigation, and font zoom. The initial
+Default profile starts `$SHELL` interactively, falling back to `/bin/sh` when it
+is unset, relative or not executable, and inherits the launcher's working directory.
+Shell exit leaves its final output visible until you close the pane.
+
+Open **Settings** (`Ctrl+,`) to edit font family/size, line height, padding,
+colour scheme, light/dark terminal themes (Rasmus or Fluent), intense text,
+scrollback, initial window grid, and bounded terminal clipboard writes. **Apply**
+saves and updates every open terminal without restarting shells. Initial grid
+dimensions affect new windows; zoom is temporary and `Ctrl+0` restores the saved
+font size. System colour scheme follows desktop appearance changes.
+
+The **Profiles** page supports up to 32 named profiles, with add, rename, remove
+and default selection. Each profile has an absolute executable shell path, an
+optional command and an optional absolute working directory. An empty command
+starts `shell -i`; otherwise Zigonaut runs `shell -c command`, so the command may
+use that shell's syntax. An empty directory inherits the launcher directory.
+Startup and `Ctrl+Shift+T` use the default profile. **New Tab with Profile** in
+the main menu launches a selected profile. Edits affect only future sessions.
+Names must be unique ignoring case; the last profile cannot be removed.
+
+Linux settings use a versioned GLib key file at
+`$XDG_CONFIG_HOME/zigonaut/settings.ini` (normally
+`~/.config/zigonaut/settings.ini`). The file is created on **Apply**, using an
+atomic, durable replacement with mode `0600`; new configuration directories use
+`0700`. Closing Settings discards unapplied edits. Invalid settings show an
+error and are not saved. Invalid files at startup produce a warning and defaults
+without overwriting the file. Edit files only while Zigonaut is closed: settings
+are loaded at startup, not watched, and concurrent instances use last-save-wins.
+Windows JSON and macOS preferences are separate and are not imported.
 
 Split the focused pane right with the header's split button, or right/down from
-the main menu. Tabs support up to 64 panes, including nested splits. Drag native
+the main menu's **Panes** submenu. Tabs support up to 64 panes, including nested splits. Drag native
 GTK dividers to resize panes; dragging snaps to the
 focused terminal's cell size. Click a terminal or use directional/cyclic focus
 shortcuts to choose a pane. An accent border marks the focused pane, whose shell
@@ -161,8 +187,11 @@ focus changes and restores the layout when toggled off. Splitting or resizing
 exits zoom. Closing a pane collapses its split and focuses the preceding pane
 (or the following pane if there is no preceding one); closing the last pane
 closes the tab/window. The tab's close button and **Close Tab** menu action close
-all its panes. New panes use the launcher's shell and working directory, not a
-running sibling's current directory.
+all its panes. Splits inherit the tab's launch profile and the focused pane's
+font size. Profile edits affect new tabs, not existing tabs or their future
+splits. An empty profile directory inherits the launcher's directory, not a
+running sibling's current directory. Desktop-global shortcuts can reserve
+pane key combinations; use the pane menu actions or adjust desktop bindings.
 
 The main menu's **Move Tab to New Window** preserves every running shell, split
 ratio, focused/zoomed pane and open search in the tab.
@@ -201,6 +230,7 @@ Nested shells are not automatically injected.
 | `Ctrl+Page Up` / `Ctrl+Page Down` | Switch tabs |
 | `Ctrl+Shift+Page Up` / `Ctrl+Shift+Page Down` | Reorder the current tab |
 | `F10` | Open the main menu |
+| `Ctrl+,` | Open Settings |
 | `Ctrl+Shift+C` | Copy selected text |
 | `Ctrl+Shift+V` / `Shift+Insert` | Paste using the terminal's bracketed-paste mode |
 | `Shift+Page Up` / `Shift+Page Down` | Scroll history |
@@ -211,11 +241,13 @@ Nested shells are not automatically injected.
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
-not yet include persistent settings/profiles,
-terminal mouse reporting, Kitty image presentation, or a
-screen-reader text interface. It uses the built-in Rasmus palette and does not
-read the Windows or macOS settings files. OSC clipboard writes are not enabled;
-clipboard changes require an explicit copy shortcut.
+not yet include terminal mouse reporting, Kitty image presentation, or a
+screen-reader text interface. Settings cover the supported Linux subset, not
+Windows backdrop materials, palette overrides, notifications or output piping.
+OSC clipboard writes are disabled by default; enabling them allows terminal
+programs to replace your clipboard up to the configured byte limit. Clipboard
+reads are not exposed to terminal programs. Explicit copy shortcuts work
+regardless of that setting.
 
 ```sh
 zig build ci
@@ -225,6 +257,9 @@ zig build test-linux-shell-integration
 # Real GTK/PTY integration checks, without needing a desktop:
 sudo apt-get install xvfb xdotool xclip
 xvfb-run -a zig build test-linux-ui
+# Native preferences, persistence, and real profile-launch checks:
+sudo apt-get install python3-pyatspi dbus-x11
+xvfb-run -a zig build test-linux-settings-ui
 ```
 
 Linux sources live in `src/linux`: a small Zig bridge owns the shared terminal

@@ -7,6 +7,9 @@
  * Byte spans and draw arguments are borrowed for the duration of the call. */
 typedef struct TerminalCore TerminalCore;
 TerminalCore *zgtk_create(void *host);
+/* Themes: 0 Rasmus, 1 Fluent Light, 2 Fluent Dark. Intense: 0 all, 1 bold, 2 bright. */
+bool zgtk_configure(TerminalCore *core, uint8_t theme, uint32_t scrollback,
+                    uint8_t intense, bool clipboard, uint32_t clipboard_limit);
 void zgtk_destroy(TerminalCore *core);
 void zgtk_feed(TerminalCore *core, const char *bytes, size_t length);
 bool zgtk_resize(TerminalCore *core, uint16_t columns, uint16_t rows,
