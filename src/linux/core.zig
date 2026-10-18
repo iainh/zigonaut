@@ -9,12 +9,37 @@ extern fn zgtk_write(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_title(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_clipboard(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_begin_frame(?*anyopaque, u32) void;
-extern fn zgtk_draw_cell(?*anyopaque, u16, u16, u8, [*]const u8, usize, u32, u32, u32, u8) void;
+extern fn zgtk_draw_cell(?*anyopaque, u16, u16, u8, [*]const u8, usize, u32, u32, u32, u16) void;
 extern fn zgtk_draw_cursor(?*anyopaque, u16, u16, u8, u8, u32) void;
 
 const Core = struct {
     terminal: Terminal,
     host: ?*anyopaque,
+    search: shared.search.State = .{},
+    search_cache: Terminal.SearchCache = .{},
+    search_failed: bool = false,
+    viewport_offset: u64 = 0,
+
+    fn invalidateSearch(self: *Core) void {
+        self.search_cache.clear(allocator);
+        self.search.reset();
+    }
+
+    fn searchStatus(self: *Core) SearchStatus {
+        return .{
+            .matches = @intCast(self.search.matches.items.len),
+            .active = if (self.search.active) |active| @intCast(active) else -1,
+            .scanning = self.search.scanning,
+            .failed = self.search_failed,
+        };
+    }
+
+    fn scrollTo(self: *Core, target: u64) void {
+        const state = self.terminal.scrollbar() catch return;
+        const offset = @min(target, state.total -| state.len);
+        const delta: isize = if (offset >= state.offset) @intCast(offset - state.offset) else -@as(isize, @intCast(state.offset - offset));
+        self.terminal.scrollViewport(delta);
+    }
 
     fn write(context: ?*anyopaque, bytes: []const u8) void {
         const self: *Core = @ptrCast(@alignCast(context.?));
@@ -27,6 +52,7 @@ const Core = struct {
     }
 
     pub fn beginFrame(self: *Core, frame: Terminal.Frame) void {
+        self.viewport_offset = if (self.terminal.scrollbar()) |state| state.offset else |_| 0;
         zgtk_begin_frame(self.host, colour(frame.background));
     }
 
@@ -43,13 +69,15 @@ const Core = struct {
             const scalar = std.math.cast(u21, codepoint) orelse continue;
             length += std.unicode.utf8Encode(scalar, buffer[length..][0..4]) catch continue;
         }
-        const flags: u8 = @as(u8, @intFromBool(cell.bold)) |
-            (@as(u8, @intFromBool(cell.italic)) << 1) |
-            (@as(u8, @intFromBool(cell.underline != 0)) << 2) |
-            (@as(u8, @intFromBool(cell.strikethrough)) << 3) |
-            (@as(u8, @intFromBool(cell.faint)) << 4) |
-            (@as(u8, @intFromBool(cell.selected)) << 5) |
-            (@as(u8, @intFromBool(cell.overline)) << 6);
+        const highlight = shared.search.highlight(self.search.matches.items, self.search.active, self.viewport_offset + cell.y, cell.x);
+        const flags: u16 = @as(u16, @intFromBool(cell.bold)) |
+            (@as(u16, @intFromBool(cell.italic)) << 1) |
+            (@as(u16, @intFromBool(cell.underline != 0)) << 2) |
+            (@as(u16, @intFromBool(cell.strikethrough)) << 3) |
+            (@as(u16, @intFromBool(cell.faint)) << 4) |
+            (@as(u16, @intFromBool(cell.selected)) << 5) |
+            (@as(u16, @intFromBool(cell.overline)) << 6) |
+            (@as(u16, highlight) << 7);
         zgtk_draw_cell(self.host, cell.x, cell.y, if (cell.occupancy == .wide) 2 else 1, &buffer, length, colour(cell.foreground), colour(cell.background), colour(cell.underline_color), flags);
     }
 
@@ -80,16 +108,20 @@ export fn zgtk_create(host: ?*anyopaque) ?*Core {
 }
 
 export fn zgtk_destroy(core: *Core) void {
+    core.search.deinit(allocator);
+    core.search_cache.deinit(allocator);
     core.terminal.deinit();
     allocator.destroy(core);
 }
 
 export fn zgtk_feed(core: *Core, bytes: [*]const u8, length: usize) void {
     core.terminal.feed(bytes[0..length]);
+    if (core.search.enabled) core.invalidateSearch();
 }
 
 export fn zgtk_resize(core: *Core, columns: u16, rows: u16, cell_width: u32, cell_height: u32) bool {
     core.terminal.resize(columns, rows, cell_width, cell_height) catch return false;
+    if (core.search.enabled) core.invalidateSearch();
     return true;
 }
 
@@ -186,4 +218,63 @@ export fn zgtk_copy(core: *Core) void {
     const text = core.terminal.selectedTextAlloc(allocator) catch return;
     defer allocator.free(text);
     zgtk_clipboard(core.host, text.ptr, text.len);
+}
+
+const SearchStatus = extern struct {
+    matches: u32,
+    active: i32,
+    scanning: bool,
+    failed: bool,
+};
+
+export fn zgtk_search_set(core: *Core, query: [*]const u8, length: usize) bool {
+    if (!core.search.enabled) {
+        core.search.saved_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| null;
+        core.search.enabled = true;
+    }
+    core.search.query.clearRetainingCapacity();
+    core.search_failed = length > 256 or !std.unicode.utf8ValidateSlice(query[0..length]);
+    if (!core.search_failed) core.search.query.appendSlice(allocator, query[0..length]) catch {
+        core.search_failed = true;
+    };
+    core.search.reset();
+    return !core.search_failed;
+}
+
+// Scan a bounded batch per GTK idle callback, leaving PTY I/O and input live.
+export fn zgtk_search_tick(core: *Core) SearchStatus {
+    if (!core.search.scanning or core.search_failed) return core.searchStatus();
+    const total = core.terminal.totalRows() catch {
+        core.search.scanning = false;
+        core.search_failed = true;
+        return core.searchStatus();
+    };
+    const limit = @min(total, @as(u64, core.search.next_row) + 32);
+    while (core.search.next_row < limit) : (core.search.next_row += 1) {
+        core.terminal.searchRowCached(allocator, &core.search_cache, core.search.next_row, core.search.query.items, &core.search.matches) catch {
+            core.search.scanning = false;
+            core.search_failed = true;
+            break;
+        };
+    }
+    core.search.scanning = !core.search_failed and core.search.next_row < total;
+    return core.searchStatus();
+}
+
+export fn zgtk_search_navigate(core: *Core, forward: bool) SearchStatus {
+    if (core.search.navigate(forward)) |match| core.scrollTo(match.row);
+    return core.searchStatus();
+}
+
+export fn zgtk_search_clear(core: *Core) void {
+    if (core.search.saved_offset) |offset| core.scrollTo(offset);
+    core.search.deinit(allocator);
+    core.search = .{};
+    core.search_cache.deinit(allocator);
+    core.search_failed = false;
+}
+
+export fn zgtk_navigate_prompt(core: *Core, forward: bool) bool {
+    core.terminal.setSelection(null) catch return false;
+    return core.terminal.navigatePrompt(forward) catch false;
 }

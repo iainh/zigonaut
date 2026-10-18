@@ -20,6 +20,17 @@ void zgtk_focus(TerminalCore *core, bool focused);
 bool zgtk_select(TerminalCore *core, uint16_t x, uint16_t y, bool begin, bool rectangle);
 void zgtk_copy(TerminalCore *core);
 
+typedef struct {
+    uint32_t matches;
+    int32_t active; /* Zero-based, or -1 when no match is selected. */
+    bool scanning, failed;
+} SearchStatus;
+bool zgtk_search_set(TerminalCore *core, const char *query, size_t length);
+SearchStatus zgtk_search_tick(TerminalCore *core);
+SearchStatus zgtk_search_navigate(TerminalCore *core, bool forward);
+void zgtk_search_clear(TerminalCore *core);
+bool zgtk_navigate_prompt(TerminalCore *core, bool forward);
+
 /* Implemented by the GTK host. Colours are packed 0xRRGGBB. */
 void zgtk_write(void *host, const char *bytes, size_t length);
 void zgtk_title(void *host, const char *bytes, size_t length);
@@ -27,6 +38,6 @@ void zgtk_clipboard(void *host, const char *bytes, size_t length);
 void zgtk_begin_frame(void *host, uint32_t background);
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
-                    uint32_t background, uint32_t underline, uint8_t flags);
+                    uint32_t background, uint32_t underline, uint16_t flags);
 void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
                       uint8_t style, uint32_t colour);

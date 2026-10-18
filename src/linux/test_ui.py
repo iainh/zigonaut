@@ -105,6 +105,25 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             xdo("key", "ctrl+shift+Page_Up")
             xdo("key", "ctrl+Page_Down")
             wait_for(lambda: xdo("getwindowname", window) == "First session", "tab reordered without losing selection or sessions")
+            xdo("key", "ctrl+shift+f")
+            time.sleep(0.3)
+            command("echo leaked > search-leaked")
+            xdo("key", "ctrl+a")
+            xdo("type", "First")
+            time.sleep(0.3)
+            xdo("key", "Return", "shift+Return")
+            xdo("key", "ctrl+Page_Up")
+            wait_for(lambda: xdo("getwindowname", window) == "Second session", "switch away from search")
+            command("echo second > search-other-tab")
+            assert contents("search-other-tab") == "second"
+            xdo("key", "ctrl+Page_Down")
+            wait_for(lambda: xdo("getwindowname", window) == "First session", "return to searching tab")
+            xdo("key", "ctrl+a")
+            command("echo leaked > search-leaked")
+            xdo("key", "Escape")
+            command("echo restored > search-focus")
+            assert contents("search-focus") == "restored"
+            assert not (root / "search-leaked").exists(), "Search input reached a shell"
             xdo("windowsize", "--sync", window, 720, 480)
             time.sleep(0.3)
             command("stty size > after")
@@ -115,6 +134,11 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             xdo("key", "ctrl+c")
             command("echo interrupted > interrupt")
             assert contents("interrupt") == "interrupted"
+            command(r"stty -echo -icanon; printf '\033[>2u'; echo ready > prompt-input-ready; dd bs=1 count=1 of=prompt-key 2>/dev/null; printf '\033[<u'; stty sane; echo done > prompt-input-done")
+            assert contents("prompt-input-ready") == "ready"
+            xdo("key", "ctrl+shift+Up", "ctrl+shift+Down", "z")
+            assert contents("prompt-input-done") == "done"
+            assert contents("prompt-key") == "z", "Prompt shortcuts leaked key events into the PTY"
             clipboard = subprocess.Popen(
                 ["xclip", "-selection", "clipboard", "-in", "-quiet", "-loops", "1"],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -126,8 +150,11 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             xdo("key", "Return")
             assert contents("pasted") == "café 界"
             command("transfer_marker=preserved")
+            xdo("key", "ctrl+shift+f")
+            time.sleep(0.3)
             source_window = window
             window = move_to_window("First session")
+            xdo("key", "Escape")
             command('printf "%s %s" "$$" "$transfer_marker" > transferred')
             assert contents("transferred") == f"{first} preserved"
             xdo("key", "ctrl+shift+w")
@@ -151,7 +178,8 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             assert app.wait(timeout=8) == 0
             wait_for(lambda: not alive(second), "SIGHUP-resistant shell reaped after last window closes")
             print(f"GTK E2E passed: two isolated shells, titles, focus, tab reordering, resize {before} → {after}, "
-                  "Ctrl+C, UTF-8 clipboard paste, live tab transfers (including last tab), "
+                  "Ctrl+C, prompt shortcuts without PTY leakage, UTF-8 clipboard paste, per-tab search and focus restoration, "
+                  "live tab transfers (including an open search and last tab), "
                   "shell exit, tab close, and bounded child cleanup")
         finally:
             if clipboard and clipboard.poll() is None:

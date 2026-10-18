@@ -22,7 +22,9 @@ typedef struct {
 typedef struct {
     Window *window;
     GApplication *application;
-    GtkWidget *area;
+    GtkWidget *area, *content;
+    GtkSearchBar *search_bar;
+    GtkWidget *search_entry, *search_count, *search_previous, *search_next;
     AdwTabPage *page;
     GtkIMContext *im;
     GdkEvent *key_event;
@@ -34,13 +36,15 @@ typedef struct {
     GCancellable *clipboard_read;
     int master, columns, rows, cell_width, cell_height, font_size;
     pid_t child;
-    guint read_source, write_source, child_source;
+    guint read_source, write_source, child_source, search_source;
+    guint prompt_keys[2];
     double drag_x, drag_y;
     gboolean rectangle;
 } Tab;
 
 static void new_tab(Window *window);
 static Window *new_window(GtkApplication *app);
+static void schedule_search(Tab *tab);
 
 static void colour(cairo_t *cr, uint32_t rgb, double alpha) {
     cairo_set_source_rgba(cr, ((rgb >> 16) & 255) / 255.,
@@ -55,7 +59,7 @@ void zgtk_begin_frame(void *host, uint32_t background) {
 
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
-                    uint32_t background, uint32_t underline, uint8_t flags) {
+                    uint32_t background, uint32_t underline, uint16_t flags) {
     Tab *tab = host;
     double left = 8 + x * tab->cell_width, top = 8 + y * tab->cell_height;
     double width = columns * tab->cell_width;
@@ -63,14 +67,14 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
     cairo_save(cr);
     cairo_rectangle(cr, left, top, width, tab->cell_height);
     cairo_clip(cr);
-    colour(cr, flags & 32 ? 0x365880 : background, 1);
+    colour(cr, flags & 32 ? 0x365880 : flags & 256 ? 0xc8a15a : flags & 128 ? 0x625022 : background, 1);
     cairo_paint(cr);
     if (length) {
         pango_font_description_set_weight(tab->font, flags & 1 ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
         pango_font_description_set_style(tab->font, flags & 2 ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
         pango_layout_set_font_description(tab->layout, tab->font);
         pango_layout_set_text(tab->layout, text, (int)length);
-        colour(cr, foreground, flags & 16 ? 0.5 : 1);
+        colour(cr, (flags & 256) && !(flags & 32) ? 0x141414 : foreground, flags & 16 ? 0.5 : 1);
         cairo_move_to(cr, left, top);
         pango_cairo_show_layout(cr, tab->layout);
     }
@@ -164,6 +168,7 @@ static gboolean read_output(gint fd, GIOCondition condition, gpointer data) {
         } else { ended = TRUE; break; } /* Linux PTYs return EIO at EOF. */
     }
     gtk_widget_queue_draw(tab->area);
+    schedule_search(tab);
     if (!ended) return G_SOURCE_CONTINUE;
     tab->read_source = 0;
     if (tab->write_source) { g_source_remove(tab->write_source); tab->write_source = 0; }
@@ -203,8 +208,9 @@ static void stop_session(Tab *tab) {
     g_cancellable_cancel(tab->clipboard_read);
     if (tab->read_source) g_source_remove(tab->read_source);
     if (tab->write_source) g_source_remove(tab->write_source);
+    if (tab->search_source) g_source_remove(tab->search_source);
     if (tab->master >= 0) close(tab->master);
-    tab->read_source = tab->write_source = 0;
+    tab->read_source = tab->write_source = tab->search_source = 0;
     tab->master = -1;
     if (tab->child) {
         g_source_remove(tab->child_source);
@@ -233,6 +239,79 @@ static void destroy_tab(gpointer data) {
     g_free(tab);
 }
 
+static void show_search_status(Tab *tab, SearchStatus status) {
+    char text[64];
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(tab->search_entry));
+    if (status.failed) g_strlcpy(text, strlen(query) > 256 ? "Query too long" : "Search failed", sizeof text);
+    else if (!*query) text[0] = 0;
+    else if (!status.matches && !status.scanning) g_strlcpy(text, "No matches", sizeof text);
+    else g_snprintf(text, sizeof text, "%d / %u%s", status.active + 1, status.matches, status.scanning ? "+" : "");
+    gtk_label_set_text(GTK_LABEL(tab->search_count), text);
+    gtk_widget_set_sensitive(tab->search_previous, status.matches > 0 && !status.failed);
+    gtk_widget_set_sensitive(tab->search_next, status.matches > 0 && !status.failed);
+    if (status.failed) gtk_widget_add_css_class(tab->search_entry, "error");
+    else gtk_widget_remove_css_class(tab->search_entry, "error");
+    gtk_widget_queue_draw(tab->area);
+}
+
+static gboolean search_tick(gpointer data) {
+    Tab *tab = data;
+    SearchStatus status = zgtk_search_tick(tab->core);
+    show_search_status(tab, status);
+    if (status.scanning) return G_SOURCE_CONTINUE;
+    tab->search_source = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_search(Tab *tab) {
+    if (gtk_search_bar_get_search_mode(tab->search_bar) && !tab->search_source)
+        tab->search_source = g_idle_add(search_tick, tab);
+}
+
+static void search_changed(GtkSearchEntry *entry, gpointer data) {
+    Tab *tab = data;
+    if (!gtk_search_bar_get_search_mode(tab->search_bar)) return;
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
+    zgtk_search_set(tab->core, query, strlen(query));
+    schedule_search(tab);
+}
+
+static void search_mode_changed(GtkSearchBar *bar, GParamSpec *property, gpointer data) {
+    (void)property;
+    Tab *tab = data;
+    if (gtk_search_bar_get_search_mode(bar)) search_changed(GTK_SEARCH_ENTRY(tab->search_entry), tab);
+    else {
+        if (tab->search_source) { g_source_remove(tab->search_source); tab->search_source = 0; }
+        zgtk_search_clear(tab->core);
+        gtk_widget_queue_draw(tab->area);
+        gtk_widget_grab_focus(tab->area);
+    }
+}
+
+static void search_stop(GtkSearchEntry *entry, gpointer data) {
+    (void)entry;
+    gtk_search_bar_set_search_mode(((Tab *)data)->search_bar, FALSE);
+}
+static void search_next(GtkWidget *widget, gpointer data) {
+    (void)widget;
+    Tab *tab = data;
+    show_search_status(tab, zgtk_search_navigate(tab->core, TRUE));
+}
+static void search_previous(GtkWidget *widget, gpointer data) {
+    (void)widget;
+    Tab *tab = data;
+    show_search_status(tab, zgtk_search_navigate(tab->core, FALSE));
+}
+static gboolean search_key(GtkEventControllerKey *controller, guint keyval,
+                           guint keycode, GdkModifierType state, gpointer data) {
+    (void)controller; (void)keycode;
+    if ((state & GDK_SHIFT_MASK) && (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)) {
+        search_previous(NULL, data);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
     (void)area;
     Tab *tab = data;
@@ -243,6 +322,7 @@ static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
                        (uint32_t)tab->cell_width, (uint32_t)tab->cell_height)) return;
     tab->columns = columns;
     tab->rows = rows;
+    schedule_search(tab);
     struct winsize size = { .ws_row = (unsigned short)rows, .ws_col = (unsigned short)columns };
     if (tab->master >= 0) ioctl(tab->master, TIOCSWINSZ, &size);
 }
@@ -311,6 +391,12 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
     if ((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
         if (lower == GDK_KEY_c) { zgtk_copy(tab->core); return TRUE; }
         if (lower == GDK_KEY_v) { paste(tab); return TRUE; }
+        if (keyval == GDK_KEY_Up || keyval == GDK_KEY_Down) {
+            tab->prompt_keys[keyval == GDK_KEY_Down] = keycode;
+            zgtk_navigate_prompt(tab->core, keyval == GDK_KEY_Down);
+            gtk_widget_queue_draw(tab->area);
+            return TRUE;
+        }
     }
     if ((state & GDK_SHIFT_MASK) && keyval == GDK_KEY_Insert) { paste(tab); return TRUE; }
     if (state & GDK_CONTROL_MASK) {
@@ -340,6 +426,10 @@ static void key_released(GtkEventControllerKey *controller, guint keyval,
                          guint keycode, GdkModifierType state, gpointer data) {
     (void)controller; (void)keycode;
     Tab *tab = data;
+    for (int i = 0; i < 2; i++) if (tab->prompt_keys[i] == keycode && keycode) {
+        tab->prompt_keys[i] = 0;
+        return;
+    }
     const char *name = gdk_keyval_name(keyval);
     zgtk_key(tab->core, name ? name : "", modifiers(state), 0, "", 0, true);
 }
@@ -405,12 +495,23 @@ static void close_tab_action(GSimpleAction *action, GVariant *parameter, gpointe
     AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
     if (page) adw_tab_view_close_page(window->tabs, page);
 }
+static void find_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *window = data;
+    AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
+    if (!page) return;
+    Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
+    gtk_search_bar_set_search_mode(tab->search_bar, TRUE);
+    gtk_widget_grab_focus(tab->search_entry);
+    gtk_editable_select_region(GTK_EDITABLE(tab->search_entry), 0, -1);
+}
 static void switched(AdwTabView *view, GParamSpec *property, gpointer data) {
     (void)property;
     Window *window = data;
     AdwTabPage *page = adw_tab_view_get_selected_page(view);
     if (page) {
-        gtk_widget_grab_focus(adw_tab_page_get_child(page));
+        Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
+        gtk_widget_grab_focus(gtk_search_bar_get_search_mode(tab->search_bar) ? tab->search_entry : tab->area);
         gtk_window_set_title(window->window, adw_tab_page_get_title(page));
     }
 }
@@ -511,6 +612,44 @@ static void new_tab(Window *window) {
     tab->master = -1;
     tab->columns = 80; tab->rows = 24;
     tab->area = gtk_drawing_area_new();
+    tab->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_set_data(G_OBJECT(tab->content), "terminal", tab);
+    tab->search_bar = GTK_SEARCH_BAR(gtk_search_bar_new());
+    gtk_search_bar_set_show_close_button(tab->search_bar, TRUE);
+    GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    tab->search_entry = gtk_search_entry_new();
+    gtk_widget_set_hexpand(tab->search_entry, TRUE);
+    gtk_widget_set_tooltip_text(tab->search_entry, "Search scrollback (smart case; maximum 256 UTF-8 bytes)");
+    gtk_accessible_update_property(GTK_ACCESSIBLE(tab->search_entry), GTK_ACCESSIBLE_PROPERTY_LABEL, "Search scrollback", -1);
+    tab->search_count = gtk_label_new("");
+    gtk_widget_add_css_class(tab->search_count, "dim-label");
+    gtk_accessible_update_property(GTK_ACCESSIBLE(tab->search_count), GTK_ACCESSIBLE_PROPERTY_LABEL, "Search results", -1);
+    tab->search_previous = gtk_button_new_from_icon_name("go-up-symbolic");
+    tab->search_next = gtk_button_new_from_icon_name("go-down-symbolic");
+    gtk_widget_set_tooltip_text(tab->search_previous, "Previous match (Shift+Enter)");
+    gtk_widget_set_tooltip_text(tab->search_next, "Next match (Enter)");
+    gtk_widget_set_sensitive(tab->search_previous, FALSE);
+    gtk_widget_set_sensitive(tab->search_next, FALSE);
+    gtk_box_append(GTK_BOX(search_box), tab->search_entry);
+    gtk_box_append(GTK_BOX(search_box), tab->search_count);
+    gtk_box_append(GTK_BOX(search_box), tab->search_previous);
+    gtk_box_append(GTK_BOX(search_box), tab->search_next);
+    gtk_search_bar_set_child(tab->search_bar, search_box);
+    gtk_search_bar_connect_entry(tab->search_bar, GTK_EDITABLE(tab->search_entry));
+    g_signal_connect(tab->search_bar, "notify::search-mode-enabled", G_CALLBACK(search_mode_changed), tab);
+    g_signal_connect(tab->search_entry, "search-changed", G_CALLBACK(search_changed), tab);
+    g_signal_connect(tab->search_entry, "activate", G_CALLBACK(search_next), tab);
+    g_signal_connect(tab->search_entry, "next-match", G_CALLBACK(search_next), tab);
+    g_signal_connect(tab->search_entry, "previous-match", G_CALLBACK(search_previous), tab);
+    g_signal_connect(tab->search_entry, "stop-search", G_CALLBACK(search_stop), tab);
+    g_signal_connect(tab->search_previous, "clicked", G_CALLBACK(search_previous), tab);
+    g_signal_connect(tab->search_next, "clicked", G_CALLBACK(search_next), tab);
+    GtkEventController *search_keys = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(search_keys, GTK_PHASE_CAPTURE);
+    g_signal_connect(search_keys, "key-pressed", G_CALLBACK(search_key), tab);
+    gtk_widget_add_controller(tab->search_entry, search_keys);
+    gtk_box_append(GTK_BOX(tab->content), GTK_WIDGET(tab->search_bar));
+    gtk_box_append(GTK_BOX(tab->content), tab->area);
     tab->pending = g_byte_array_new();
     tab->clipboard_read = g_cancellable_new();
     tab->im = gtk_im_multicontext_new();
@@ -546,7 +685,7 @@ static void new_tab(Window *window) {
     GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect(wheel, "scroll", G_CALLBACK(scroll), tab);
     gtk_widget_add_controller(tab->area, wheel);
-    tab->page = adw_tab_view_append(window->tabs, tab->area);
+    tab->page = adw_tab_view_append(window->tabs, tab->content);
     zgtk_title(tab, "Terminal", strlen("Terminal"));
     adw_tab_view_set_selected_page(window->tabs, tab->page);
     gtk_widget_grab_focus(tab->area);
@@ -586,6 +725,7 @@ static Window *new_window(GtkApplication *app) {
         { .name = "new-tab", .activate = new_tab_action },
         { .name = "close-tab", .activate = close_tab_action },
         { .name = "move-tab", .activate = move_tab_action },
+        { .name = "find", .activate = find_action },
     };
     g_action_map_add_action_entries(G_ACTION_MAP(window->window), actions, G_N_ELEMENTS(actions), window);
     window->tabs = ADW_TAB_VIEW(adw_tab_view_new());
@@ -621,6 +761,7 @@ static Window *new_window(GtkApplication *app) {
     GMenu *menu = g_menu_new();
     g_menu_append(menu, "New Tab", "win.new-tab");
     g_menu_append(menu, "Move Tab to New Window", "win.move-tab");
+    g_menu_append(menu, "Find", "win.find");
     g_menu_append(menu, "About Zigonaut", "app.about");
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button), "open-menu-symbolic");
@@ -663,8 +804,10 @@ int main(int argc, char **argv) {
     g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), app);
     const char *new_tab_keys[] = { "<Control><Shift>t", NULL };
     const char *close_tab_keys[] = { "<Control><Shift>w", NULL };
+    const char *find_keys[] = { "<Control><Shift>f", NULL };
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-tab", new_tab_keys);
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.close-tab", close_tab_keys);
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.find", find_keys);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     int result = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);

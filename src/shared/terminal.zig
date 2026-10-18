@@ -1555,6 +1555,17 @@ pub const Terminal = struct {
             var reference = std.mem.zeroes(vt.GhosttyGridRef);
             reference.size = @sizeOf(vt.GhosttyGridRef);
             try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = x, .y = row_index } } }, &reference));
+            var cell: vt.GhosttyCell = 0;
+            try check(vt.ghostty_grid_ref_cell(&reference, &cell));
+            var wide: vt.GhosttyCellWide = vt.GHOSTTY_CELL_WIDE_NARROW;
+            try check(vt.ghostty_cell_get(cell, vt.GHOSTTY_CELL_DATA_WIDE, &wide));
+            if (wide == vt.GHOSTTY_CELL_WIDE_SPACER_TAIL) {
+                // A trailing column is not text. Put its boundary inside the
+                // preceding UTF-8 glyph so whole-glyph matches span both cells.
+                starts[x] = @intCast(scratch.text.items.len -| 1);
+                continue;
+            }
+            if (wide == vt.GHOSTTY_CELL_WIDE_SPACER_HEAD) continue;
             var codepoints: [16]u32 = undefined;
             var count: usize = 0;
             const result = vt.ghostty_grid_ref_graphemes(&reference, &codepoints, codepoints.len, &count);
@@ -3421,6 +3432,18 @@ test "cached search rows preserve text and byte-to-column mappings across querie
     try terminal.searchRowCached(std.testing.allocator, &cache, 0, "changed", &matches);
     try std.testing.expectEqual(@as(usize, 1), matches.items.len);
     try std.testing.expectEqual(@as(u16, 0), matches.items[0].start);
+
+    terminal.feed("\r\x1b[2K界 café");
+    cache.clear(std.testing.allocator);
+    matches.clearRetainingCapacity();
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "界 café", &matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.items.len);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start);
+    try std.testing.expectEqual(@as(u16, 7), matches.items[0].end);
+    matches.clearRetainingCapacity();
+    try terminal.searchRowCached(std.testing.allocator, &cache, 0, "界", &matches);
+    try std.testing.expectEqual(@as(u16, 0), matches.items[0].start);
+    try std.testing.expectEqual(@as(u16, 2), matches.items[0].end);
 }
 
 test "cached search uses smart case and crosses soft wraps" {
@@ -3443,6 +3466,14 @@ test "cached search uses smart case and crosses soft wraps" {
     matches.clearRetainingCapacity();
     for (0..total) |row| try terminal.searchRowCached(std.testing.allocator, &cache, @intCast(row), "HELLO", &matches);
     try std.testing.expectEqual(@as(usize, 0), matches.items.len);
+
+    terminal.feed("\x1b[2J\x1b[Habcde界X");
+    cache.clear(std.testing.allocator);
+    for (0..try terminal.totalRows()) |row| try terminal.searchRowCached(std.testing.allocator, &cache, @intCast(row), "e界X", &matches);
+    try std.testing.expectEqualSlices(SearchMatch, &.{
+        .{ .row = 0, .start = 4, .end = 5 },
+        .{ .row = 1, .start = 0, .end = 3 },
+    }, matches.items);
 }
 
 test "quote and logical line units derive stable selections" {

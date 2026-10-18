@@ -142,13 +142,21 @@ an About window in the main menu. The terminal keeps its Rasmus palette.
 It provides one POSIX PTY per tab, Pango/Cairo text rendering with font fallback,
 true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
 with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
-titles, and font zoom. It starts `$SHELL` interactively, falling back to
-`/bin/sh` when unset, and inherits the launcher's working directory. Shell exit
-leaves its final output visible until you close the tab.
+titles, scrollback search, shell-prompt navigation, and font zoom. It starts
+`$SHELL` interactively, falling back to `/bin/sh` when unset, and inherits the
+launcher's working directory. Shell exit leaves its final output visible until
+you close the tab.
 
 The main menu's **Move Tab to New Window** preserves the running shell and its
 state. Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
 the empty X11 desktop can leave the drag unfinished on that stack.
+
+Find keeps a separate query per tab and highlights matches across scrollback,
+including soft-wrapped lines. Lowercase ASCII queries ignore ASCII case; an
+uppercase ASCII letter makes the query case-sensitive. Queries support UTF-8,
+up to 256 bytes. Closing Find restores the previous scroll position and keyboard
+focus. Prompt navigation requires a shell that already emits OSC 133 markers;
+automatic shell integration is not installed yet.
 
 | Linux shortcut | Action |
 | --- | --- |
@@ -159,11 +167,15 @@ the empty X11 desktop can leave the drag unfinished on that stack.
 | `Ctrl+Shift+C` | Copy selected text |
 | `Ctrl+Shift+V` / `Shift+Insert` | Paste using the terminal's bracketed-paste mode |
 | `Shift+Page Up` / `Shift+Page Down` | Scroll history |
+| `Ctrl+Shift+F` | Find in scrollback |
+| `Enter` / `Shift+Enter` in Find | Next / previous match, wrapping at either end |
+| `Escape` in Find | Close Find and return to the terminal |
+| `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Move to the previous / next shell prompt |
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
 not yet include split panes, persistent settings/profiles, automatic shell
-integration, search, terminal mouse reporting, Kitty image presentation, or a
+integration, terminal mouse reporting, Kitty image presentation, or a
 screen-reader text interface. It uses the built-in Rasmus palette and does not
 read the Windows or macOS settings files. OSC clipboard writes are not enabled;
 clipboard changes require an explicit copy shortcut.
