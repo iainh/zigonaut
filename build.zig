@@ -411,6 +411,9 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     configureGhostty(module, ghostty);
     module.linkSystemLibrary("gtk4", .{ .use_pkg_config = .force });
     module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .force });
+    // Keep the GTK 4.8 API contract even when building with newer headers.
+    module.addCMacro("GDK_VERSION_MIN_REQUIRED", "GDK_VERSION_4_8");
+    module.addCMacro("GDK_VERSION_MAX_ALLOWED", "GDK_VERSION_4_8");
     module.addCMacro("ZIGONAUT_VERSION", b.fmt("\"{s}\"", .{app_version}));
     module.addCSourceFile(.{
         .file = b.path("src/linux/gtk.c"),
