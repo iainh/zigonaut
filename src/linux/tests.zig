@@ -183,3 +183,51 @@ test "Linux prompt navigation follows OSC 133 boundaries without typing into the
     try std.testing.expectEqualStrings("PS> two", state.first_row[0..7]);
     try std.testing.expectEqualStrings("", state.output.written());
 }
+
+test "Linux pane ABI preserves nested layout, focus, ratios and zoom across collapse" {
+    const layout = c.zgtk_layout_create() orelse return error.InitFailed;
+    defer c.zgtk_layout_destroy(layout);
+    var nodes: [127]c.PaneNode = undefined;
+    const right = c.zgtk_layout_split(layout, false);
+    const bottom = c.zgtk_layout_split(layout, true);
+    try std.testing.expect(right != 0 and bottom != 0 and right != bottom);
+    try std.testing.expectEqual(@as(usize, 5), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+    try std.testing.expect(nodes[0].split and !nodes[0].vertical and nodes[0].subtree_size == 5);
+    const outer = nodes[0].id;
+    const inner = nodes[2].id;
+    try std.testing.expect(nodes[2].split and nodes[2].vertical and nodes[2].subtree_size == 3);
+    try std.testing.expectEqual(bottom, c.zgtk_layout_focused(layout));
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_UP));
+    try std.testing.expectEqual(right, c.zgtk_layout_focused(layout));
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_LEFT));
+    try std.testing.expectEqual(@as(u64, 1), c.zgtk_layout_focused(layout));
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_PREVIOUS));
+    try std.testing.expectEqual(bottom, c.zgtk_layout_focused(layout));
+    try std.testing.expect(c.zgtk_layout_ratio(layout, outer, 22000));
+    try std.testing.expect(c.zgtk_layout_ratio(layout, inner, 41000));
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_RESIZE_UP));
+    _ = c.zgtk_layout_nodes(layout, &nodes, nodes.len);
+    try std.testing.expectEqual(@as(u16, 22000), nodes[0].ratio);
+    try std.testing.expectEqual(@as(u16, 37723), nodes[2].ratio);
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_ZOOM));
+    try std.testing.expectEqual(@as(usize, 1), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+    try std.testing.expectEqual(bottom, nodes[0].id);
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_NEXT));
+    _ = c.zgtk_layout_nodes(layout, &nodes, nodes.len);
+    try std.testing.expectEqual(@as(u64, 1), nodes[0].id);
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_ZOOM));
+    try std.testing.expectEqual(@as(usize, 5), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+    try std.testing.expectEqual(@as(u16, 37723), nodes[2].ratio);
+    try std.testing.expect(c.zgtk_layout_close(layout, right));
+    try std.testing.expectEqual(@as(usize, 3), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+    try std.testing.expectEqual(bottom, nodes[2].id);
+    try std.testing.expect(c.zgtk_layout_action(layout, c.PANE_EQUALIZE));
+    _ = c.zgtk_layout_nodes(layout, &nodes, nodes.len);
+    try std.testing.expectEqual(@as(u16, 32767), nodes[0].ratio);
+    try std.testing.expect(c.zgtk_layout_close(layout, 1));
+    try std.testing.expectEqual(bottom, c.zgtk_layout_focused(layout));
+    try std.testing.expect(!c.zgtk_layout_action(layout, c.PANE_ZOOM));
+    try std.testing.expect(c.zgtk_layout_close(layout, bottom));
+    try std.testing.expectEqual(@as(u64, 0), c.zgtk_layout_focused(layout));
+    try std.testing.expectEqual(@as(usize, 0), c.zgtk_layout_nodes(layout, &nodes, nodes.len));
+}

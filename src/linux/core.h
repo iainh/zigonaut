@@ -20,6 +20,32 @@ void zgtk_focus(TerminalCore *core, bool focused);
 bool zgtk_select(TerminalCore *core, uint16_t x, uint16_t y, bool begin, bool rectangle);
 void zgtk_copy(TerminalCore *core);
 
+/* The same layout model used by Windows. IDs are local to a tab. GTK owns
+ * session lifetimes and native widgets; the tree owns topology and focus. */
+typedef struct PaneLayout PaneLayout;
+typedef struct {
+    uint64_t id;
+    uint32_t subtree_size; /* Preorder, including this node; leaves are 1. */
+    uint16_t ratio;
+    bool split, vertical;
+} PaneNode;
+typedef enum {
+    PANE_LEFT, PANE_RIGHT, PANE_UP, PANE_DOWN,
+    PANE_PREVIOUS, PANE_NEXT,
+    PANE_RESIZE_LEFT, PANE_RESIZE_RIGHT, PANE_RESIZE_UP, PANE_RESIZE_DOWN,
+    PANE_EQUALIZE, PANE_ZOOM
+} PaneAction;
+PaneLayout *zgtk_layout_create(void);
+void zgtk_layout_destroy(PaneLayout *layout);
+uint64_t zgtk_layout_split(PaneLayout *layout, bool vertical);
+bool zgtk_layout_close(PaneLayout *layout, uint64_t pane);
+bool zgtk_layout_focus(PaneLayout *layout, uint64_t pane);
+uint64_t zgtk_layout_focused(PaneLayout *layout);
+bool zgtk_layout_zoomed(PaneLayout *layout);
+bool zgtk_layout_action(PaneLayout *layout, PaneAction action);
+bool zgtk_layout_ratio(PaneLayout *layout, uint64_t split, uint16_t ratio);
+size_t zgtk_layout_nodes(PaneLayout *layout, PaneNode *nodes, size_t capacity);
+
 typedef struct {
     uint32_t matches;
     int32_t active; /* Zero-based, or -1 when no match is selected. */

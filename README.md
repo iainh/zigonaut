@@ -141,19 +141,35 @@ The GTK/libadwaita frontend puts reorderable, detachable tabs directly in the
 header bar alongside native window controls. It follows the desktop's light/dark
 appearance for window chrome, uses Adwaita toasts for failed actions, and includes
 an About window in the main menu. The terminal keeps its Rasmus palette.
-It provides one POSIX PTY per tab, Pango/Cairo text rendering with font fallback,
+It provides an independent POSIX PTY per pane, Pango/Cairo text rendering with font fallback,
 true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
 with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
 titles, scrollback search, shell-prompt navigation, and font zoom. It starts
 `$SHELL` interactively, falling back to `/bin/sh` when unset or not an absolute
 path, and inherits the launcher's working directory. Shell exit leaves its final
-output visible until you close the tab.
+output visible until you close the pane.
 
-The main menu's **Move Tab to New Window** preserves the running shell and its
-state. Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
+Split the focused pane right with the header's split button, or right/down from
+the main menu. Tabs support up to 64 panes, including nested splits. Drag native
+GTK dividers to resize panes; dragging snaps to the
+focused terminal's cell size. Click a terminal or use directional/cyclic focus
+shortcuts to choose a pane. An accent border marks the focused pane, whose shell
+title also becomes the tab title. Resize shortcuts move the nearest divider on
+that axis by 5%; equalize distributes space among same-axis panes. Pane zoom
+shows only the focused pane without closing or stopping its siblings, follows
+focus changes and restores the layout when toggled off. Splitting or resizing
+exits zoom. Closing a pane collapses its split and focuses the preceding pane
+(or the following pane if there is no preceding one); closing the last pane
+closes the tab/window. The tab's close button and **Close Tab** menu action close
+all its panes. New panes use the launcher's shell and working directory, not a
+running sibling's current directory.
+
+The main menu's **Move Tab to New Window** preserves every running shell, split
+ratio, focused/zoomed pane and open search in the tab.
+Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
 the empty X11 desktop can leave the drag unfinished on that stack.
 
-Find keeps a separate query per tab and highlights matches across scrollback,
+Find keeps a separate query per pane and highlights matches across scrollback,
 including soft-wrapped lines. Lowercase ASCII queries ignore ASCII case; an
 uppercase ASCII letter makes the query case-sensitive. Queries support UTF-8,
 up to 256 bytes. Closing Find restores the previous scroll position and keyboard
@@ -174,7 +190,14 @@ Nested shells are not automatically injected.
 
 | Linux shortcut | Action |
 | --- | --- |
-| `Ctrl+Shift+T` / `Ctrl+Shift+W` | Open / close a tab |
+| `Ctrl+Shift+T` | Open a tab |
+| `Ctrl+Shift+O` / `Ctrl+Shift+E` | Split focused pane right / down |
+| `Ctrl+Shift+W` | Close focused pane (last pane closes the tab) |
+| `Ctrl+Alt+Arrow` | Focus a pane in that direction |
+| `Ctrl+Alt+Page Up` / `Ctrl+Alt+Page Down` | Focus previous / next pane, wrapping |
+| `Ctrl+Alt+Shift+Arrow` | Move nearest divider by 5% |
+| `Ctrl+Alt+=` | Equalize pane sizes |
+| `Ctrl+Shift+Enter` | Toggle focused-pane zoom |
 | `Ctrl+Page Up` / `Ctrl+Page Down` | Switch tabs |
 | `Ctrl+Shift+Page Up` / `Ctrl+Shift+Page Down` | Reorder the current tab |
 | `F10` | Open the main menu |
@@ -188,7 +211,7 @@ Nested shells are not automatically injected.
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
-not yet include split panes, persistent settings/profiles,
+not yet include persistent settings/profiles,
 terminal mouse reporting, Kitty image presentation, or a
 screen-reader text interface. It uses the built-in Rasmus palette and does not
 read the Windows or macOS settings files. OSC clipboard writes are not enabled;
@@ -205,7 +228,8 @@ xvfb-run -a zig build test-linux-ui
 ```
 
 Linux sources live in `src/linux`: a small Zig bridge owns the shared terminal
-engine, while the C GTK host owns windows, input, clipboard, rendering, and PTYs.
+engine and pane tree (also used by Windows), while the C GTK host owns native
+split widgets, windows, input, clipboard, rendering and per-pane PTYs.
 PTY I/O is nonblocking and event-driven on the GTK main loop. Shells start via
 `posix_spawn` and a fresh child process, so no GTK code runs after `fork`.
 

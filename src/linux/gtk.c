@@ -17,9 +17,21 @@ typedef struct {
     AdwTabView *tabs;
     AdwToastOverlay *toasts;
     gboolean closing;
+    guint pane_keys[16];
 } Window;
 
 typedef struct {
+    PaneLayout *tree;
+    GtkWidget *content;
+    GPtrArray *panes;
+    gboolean rebuilding;
+} Layout;
+
+/* One terminal/PTY session. A tab's Layout owns one or more sessions. */
+typedef struct {
+    Layout *owner;
+    uint64_t id;
+    char *title;
     Window *window;
     GApplication *application;
     GtkWidget *area, *content;
@@ -45,6 +57,27 @@ typedef struct {
 static void new_tab(Window *window);
 static Window *new_window(GtkApplication *app);
 static void schedule_search(Tab *tab);
+static void rebuild_layout(Layout *layout);
+static void focus_layout(Layout *layout);
+
+static Tab *pane_by_id(Layout *layout, uint64_t id) {
+    for (guint i = 0; i < layout->panes->len; i++) {
+        Tab *pane = g_ptr_array_index(layout->panes, i);
+        if (pane->id == id) return pane;
+    }
+    return NULL;
+}
+
+static Layout *page_layout(AdwTabPage *page) {
+    return g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "layout");
+}
+
+static Tab *selected_pane(Window *window) {
+    AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
+    if (!page) return NULL;
+    Layout *layout = page_layout(page);
+    return pane_by_id(layout, zgtk_layout_focused(layout->tree));
+}
 
 static void colour(cairo_t *cr, uint32_t rgb, double alpha) {
     cairo_set_source_rgba(cr, ((rgb >> 16) & 255) / 255.,
@@ -104,6 +137,9 @@ void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
 void zgtk_title(void *host, const char *bytes, size_t length) {
     Tab *tab = host;
     char *text = g_utf8_make_valid(bytes, (gssize)MIN(length, 1024));
+    g_free(tab->title);
+    tab->title = g_strdup(text);
+    if (!tab->page || tab->id != zgtk_layout_focused(tab->owner->tree)) { g_free(text); return; }
     /* Tab titles are plain text; the tooltip property, unlike the title,
      * accepts markup and must be escaped. */
     adw_tab_page_set_title(tab->page, text);
@@ -236,6 +272,7 @@ static void destroy_tab(gpointer data) {
     g_object_unref(tab->im);
     g_object_unref(tab->layout);
     pango_font_description_free(tab->font);
+    g_free(tab->title);
     g_free(tab);
 }
 
@@ -328,10 +365,19 @@ static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
 }
 
 static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
-    (void)area; (void)width; (void)height;
+    (void)area;
     Tab *tab = data;
     tab->cr = cr;
     if (!zgtk_render(tab->core)) g_warning("Unable to render terminal");
+    if (tab->owner->panes->len > 1 && tab->id == zgtk_layout_focused(tab->owner->tree)) {
+        GdkRGBA accent;
+        if (!gtk_style_context_lookup_color(gtk_widget_get_style_context(tab->area), "accent_color", &accent))
+            gdk_rgba_parse(&accent, "#3584e4");
+        gdk_cairo_set_source_rgba(cr, &accent);
+        cairo_set_line_width(cr, 2);
+        cairo_rectangle(cr, 1, 1, width - 2, height - 2);
+        cairo_stroke(cr);
+    }
     tab->cr = NULL;
 }
 
@@ -445,6 +491,16 @@ static void commit(GtkIMContext *im, const char *text, gpointer data) {
     gtk_widget_queue_draw(tab->area);
 }
 
+static void pane_enter(GtkEventControllerFocus *controller, gpointer data) {
+    (void)controller;
+    Tab *tab = data;
+    if (!tab->owner->rebuilding) {
+        zgtk_layout_focus(tab->owner->tree, tab->id);
+        zgtk_title(tab, tab->title ? tab->title : "Terminal", strlen(tab->title ? tab->title : "Terminal"));
+        for (guint i = 0; i < tab->owner->panes->len; i++)
+            gtk_widget_queue_draw(((Tab *)g_ptr_array_index(tab->owner->panes, i))->area);
+    }
+}
 static void focus_enter(GtkEventControllerFocus *controller, gpointer data) {
     (void)controller;
     Tab *tab = data;
@@ -495,12 +551,23 @@ static void close_tab_action(GSimpleAction *action, GVariant *parameter, gpointe
     AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
     if (page) adw_tab_view_close_page(window->tabs, page);
 }
+static void close_pane_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    Tab *pane = selected_pane(data);
+    if (!pane) return;
+    Layout *layout = pane->owner;
+    if (layout->panes->len == 1) { close_tab_action(action, parameter, data); return; }
+    zgtk_layout_close(layout->tree, pane->id);
+    stop_session(pane);
+    /* Remove from the tree before releasing the widget-owned session. */
+    g_ptr_array_remove(layout->panes, pane);
+    rebuild_layout(layout);
+    g_object_unref(pane->content);
+}
 static void find_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action; (void)parameter;
     Window *window = data;
-    AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
-    if (!page) return;
-    Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
+    Tab *tab = selected_pane(window);
+    if (!tab) return;
     gtk_search_bar_set_search_mode(tab->search_bar, TRUE);
     gtk_widget_grab_focus(tab->search_entry);
     gtk_editable_select_region(GTK_EDITABLE(tab->search_entry), 0, -1);
@@ -510,17 +577,19 @@ static void switched(AdwTabView *view, GParamSpec *property, gpointer data) {
     Window *window = data;
     AdwTabPage *page = adw_tab_view_get_selected_page(view);
     if (page) {
-        Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
-        gtk_widget_grab_focus(gtk_search_bar_get_search_mode(tab->search_bar) ? tab->search_entry : tab->area);
+        focus_layout(page_layout(page));
         gtk_window_set_title(window->window, adw_tab_page_get_title(page));
     }
 }
 
 static void page_attached(AdwTabView *view, AdwTabPage *page, int position, gpointer data) {
     (void)view; (void)position;
-    Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
-    tab->window = data;
-    tab->page = page;
+    Layout *layout = page_layout(page);
+    for (guint i = 0; i < layout->panes->len; i++) {
+        Tab *tab = g_ptr_array_index(layout->panes, i);
+        tab->window = data;
+        tab->page = page;
+    }
 }
 
 static void page_detached(AdwTabView *view, AdwTabPage *page, int position, gpointer data) {
@@ -535,7 +604,8 @@ static void page_detached(AdwTabView *view, AdwTabPage *page, int position, gpoi
 static gboolean close_page(AdwTabView *view, AdwTabPage *page, gpointer data) {
     (void)view; (void)data;
     /* Stop callbacks now: Adwaita can retain a closing page for animation. */
-    stop_session(g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal"));
+    Layout *layout = page_layout(page);
+    for (guint i = 0; i < layout->panes->len; i++) stop_session(g_ptr_array_index(layout->panes, i));
     return FALSE;
 }
 
@@ -545,7 +615,8 @@ static gboolean close_window(GtkWindow *widget, gpointer data) {
     window->closing = TRUE;
     for (int i = 0; i < adw_tab_view_get_n_pages(window->tabs); i++) {
         AdwTabPage *page = adw_tab_view_get_nth_page(window->tabs, i);
-        stop_session(g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal"));
+        Layout *layout = page_layout(page);
+        for (guint j = 0; j < layout->panes->len; j++) stop_session(g_ptr_array_index(layout->panes, j));
     }
     return FALSE;
 }
@@ -605,19 +676,25 @@ fail:
     return FALSE;
 }
 
-static void new_tab(Window *window) {
+static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *page) {
     Tab *tab = g_new0(Tab, 1);
+    tab->owner = owner;
+    tab->id = id;
+    tab->page = page;
     tab->window = window;
     tab->application = G_APPLICATION(gtk_window_get_application(window->window));
     tab->master = -1;
     tab->columns = 80; tab->rows = 24;
     tab->area = gtk_drawing_area_new();
     tab->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_ref_sink(tab->content); /* Retained even when hidden by pane zoom. */
+    g_ptr_array_add(owner->panes, tab);
     g_object_set_data(G_OBJECT(tab->content), "terminal", tab);
     tab->search_bar = GTK_SEARCH_BAR(gtk_search_bar_new());
     gtk_search_bar_set_show_close_button(tab->search_bar, TRUE);
     GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     tab->search_entry = gtk_search_entry_new();
+    gtk_editable_set_width_chars(GTK_EDITABLE(tab->search_entry), 8);
     gtk_widget_set_hexpand(tab->search_entry, TRUE);
     gtk_widget_set_tooltip_text(tab->search_entry, "Search scrollback (smart case; maximum 256 UTF-8 bytes)");
     gtk_accessible_update_property(GTK_ACCESSIBLE(tab->search_entry), GTK_ACCESSIBLE_PROPERTY_LABEL, "Search scrollback", -1);
@@ -663,6 +740,7 @@ static void new_tab(Window *window) {
     set_font(tab, 12);
     g_object_set_data_full(G_OBJECT(tab->area), "terminal", tab, destroy_tab);
     gtk_widget_set_focusable(tab->area, TRUE);
+    gtk_widget_set_size_request(tab->area, 80, 48);
     gtk_widget_set_hexpand(tab->area, TRUE);
     gtk_widget_set_vexpand(tab->area, TRUE);
     gtk_widget_set_cursor_from_name(tab->area, "text");
@@ -678,6 +756,9 @@ static void new_tab(Window *window) {
     g_signal_connect(focus, "enter", G_CALLBACK(focus_enter), tab);
     g_signal_connect(focus, "leave", G_CALLBACK(focus_leave), tab);
     gtk_widget_add_controller(tab->area, focus);
+    GtkEventController *pane_focus = gtk_event_controller_focus_new();
+    g_signal_connect(pane_focus, "enter", G_CALLBACK(pane_enter), tab);
+    gtk_widget_add_controller(tab->content, pane_focus);
     GtkGesture *drag = gtk_gesture_drag_new();
     g_signal_connect(drag, "drag-begin", G_CALLBACK(drag_begin), tab);
     g_signal_connect(drag, "drag-update", G_CALLBACK(drag_update), tab);
@@ -685,10 +766,7 @@ static void new_tab(Window *window) {
     GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect(wheel, "scroll", G_CALLBACK(scroll), tab);
     gtk_widget_add_controller(tab->area, wheel);
-    tab->page = adw_tab_view_append(window->tabs, tab->content);
     zgtk_title(tab, "Terminal", strlen("Terminal"));
-    adw_tab_view_set_selected_page(window->tabs, tab->page);
-    gtk_widget_grab_focus(tab->area);
     GError *error = NULL;
     if (!spawn_shell(tab, &error)) {
         zgtk_title(tab, "Shell failed", strlen("Shell failed"));
@@ -696,6 +774,201 @@ static void new_tab(Window *window) {
         adw_toast_overlay_add_toast(window->toasts, adw_toast_new(error->message));
         g_error_free(error);
     }
+    return tab;
+}
+
+static void focus_layout(Layout *layout) {
+    Tab *pane = pane_by_id(layout, zgtk_layout_focused(layout->tree));
+    if (!pane) return;
+    gtk_widget_grab_focus(gtk_search_bar_get_search_mode(pane->search_bar) ? pane->search_entry : pane->area);
+    zgtk_title(pane, pane->title, strlen(pane->title));
+    for (guint i = 0; i < layout->panes->len; i++)
+        gtk_widget_queue_draw(((Tab *)g_ptr_array_index(layout->panes, i))->area);
+}
+
+typedef struct {
+    Layout *layout;
+    uint64_t id;
+    uint16_t ratio;
+    int extent;
+    gboolean vertical, applying;
+} Divider;
+
+static int divider_extent(GtkPaned *paned, Divider *divider) {
+    return divider->vertical ? gtk_widget_get_height(GTK_WIDGET(paned)) : gtk_widget_get_width(GTK_WIDGET(paned));
+}
+
+static void divider_size(GObject *object, GParamSpec *property, gpointer data) {
+    (void)property;
+    GtkPaned *paned = GTK_PANED(object);
+    Divider *divider = data;
+    int extent = divider_extent(paned, divider);
+    if (extent <= 1 || extent == divider->extent) return;
+    divider->extent = extent;
+    divider->applying = TRUE;
+    gtk_paned_set_position(paned, (int)((int64_t)extent * divider->ratio / 65535));
+    divider->applying = FALSE;
+}
+
+static gboolean divider_initial(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
+    (void)clock;
+    divider_size(G_OBJECT(widget), NULL, data);
+    return ((Divider *)data)->extent > 1 ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+}
+
+static void divider_position(GObject *object, GParamSpec *property, gpointer data) {
+    (void)property;
+    GtkPaned *paned = GTK_PANED(object);
+    Divider *divider = data;
+    int extent = divider_extent(paned, divider);
+    if (divider->applying || extent <= 1 || extent != divider->extent) return;
+    int position = gtk_paned_get_position(paned);
+    /* Snap the terminal interior to its cell grid; GtkPaned keeps native
+     * pointer, keyboard and accessibility handling for the divider. */
+    Tab *focused = pane_by_id(divider->layout, zgtk_layout_focused(divider->layout->tree));
+    int cell = divider->vertical ? focused->cell_height : focused->cell_width;
+    position = 16 + ((MAX(0, position - 16) + cell / 2) / cell) * cell;
+    position = CLAMP(position, MAX(1, extent / 10), MAX(1, extent * 9 / 10));
+    divider->ratio = (uint16_t)CLAMP((int64_t)position * 65535 / extent, 1, 65534);
+    zgtk_layout_ratio(divider->layout->tree, divider->id, divider->ratio);
+    divider->applying = TRUE;
+    gtk_paned_set_position(paned, position);
+    divider->applying = FALSE;
+}
+
+static GtkWidget *layout_widget(Layout *layout, PaneNode *nodes, size_t *index) {
+    PaneNode node = nodes[(*index)++];
+    if (!node.split) return pane_by_id(layout, node.id)->content;
+    GtkWidget *paned = gtk_paned_new(node.vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_wide_handle(GTK_PANED(paned), TRUE);
+    gtk_paned_set_resize_start_child(GTK_PANED(paned), TRUE);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_start_child(GTK_PANED(paned), layout_widget(layout, nodes, index));
+    gtk_paned_set_end_child(GTK_PANED(paned), layout_widget(layout, nodes, index));
+    Divider *divider = g_new0(Divider, 1);
+    *divider = (Divider){ .layout = layout, .id = node.id, .ratio = node.ratio,
+        .vertical = node.vertical };
+    g_object_set_data_full(G_OBJECT(paned), "divider", divider, g_free);
+    g_signal_connect(paned, "notify::max-position", G_CALLBACK(divider_size), divider);
+    g_signal_connect(paned, "notify::position", G_CALLBACK(divider_position), divider);
+    gtk_widget_add_tick_callback(paned, divider_initial, divider, NULL);
+    return paned;
+}
+
+static void detach_pane(GtkWidget *content) {
+    GtkWidget *parent = gtk_widget_get_parent(content);
+    if (GTK_IS_PANED(parent)) {
+        if (gtk_paned_get_start_child(GTK_PANED(parent)) == content) gtk_paned_set_start_child(GTK_PANED(parent), NULL);
+        else gtk_paned_set_end_child(GTK_PANED(parent), NULL);
+    } else if (GTK_IS_BOX(parent)) gtk_box_remove(GTK_BOX(parent), content);
+}
+
+static void rebuild_layout(Layout *layout) {
+    layout->rebuilding = TRUE;
+    for (guint i = 0; i < layout->panes->len; i++)
+        detach_pane(((Tab *)g_ptr_array_index(layout->panes, i))->content);
+    GtkWidget *old = gtk_widget_get_first_child(layout->content);
+    if (old) gtk_box_remove(GTK_BOX(layout->content), old);
+    PaneNode nodes[127];
+    size_t count = zgtk_layout_nodes(layout->tree, nodes, G_N_ELEMENTS(nodes)), index = 0;
+    if (count) gtk_box_append(GTK_BOX(layout->content), layout_widget(layout, nodes, &index));
+    layout->rebuilding = FALSE;
+    focus_layout(layout);
+}
+
+static void destroy_layout(gpointer data) {
+    Layout *layout = data;
+    for (guint i = 0; i < layout->panes->len; i++)
+        g_object_unref(((Tab *)g_ptr_array_index(layout->panes, i))->content);
+    g_ptr_array_unref(layout->panes);
+    zgtk_layout_destroy(layout->tree);
+    g_free(layout);
+}
+
+static void new_tab(Window *window) {
+    Layout *layout = g_new0(Layout, 1);
+    layout->tree = zgtk_layout_create();
+    if (!layout->tree) g_error("Unable to initialize pane layout");
+    layout->panes = g_ptr_array_new();
+    layout->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_set_data_full(G_OBJECT(layout->content), "layout", layout, destroy_layout);
+    new_pane(window, layout, 1, NULL);
+    AdwTabPage *page = adw_tab_view_append(window->tabs, layout->content);
+    rebuild_layout(layout);
+    adw_tab_view_set_selected_page(window->tabs, page);
+}
+
+static void split_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)parameter;
+    Tab *pane = selected_pane(data);
+    if (!pane) return;
+    Layout *layout = pane->owner;
+    uint64_t id = zgtk_layout_split(layout->tree, strcmp(g_action_get_name(G_ACTION(action)), "split-down") == 0);
+    if (!id) {
+        adw_toast_overlay_add_toast(pane->window->toasts, adw_toast_new("Unable to split pane (maximum 64 panes per tab)"));
+        return;
+    }
+    Tab *created = new_pane(data, layout, id, pane->page);
+    set_font(created, pane->font_size);
+    rebuild_layout(layout);
+}
+
+static void pane_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action;
+    Tab *pane = selected_pane(data);
+    if (!pane) return;
+    Layout *layout = pane->owner;
+    int operation = g_variant_get_int32(parameter);
+    gboolean zoomed = zgtk_layout_zoomed(layout->tree);
+    if (!zgtk_layout_action(layout->tree, operation)) return;
+    if (operation >= PANE_RESIZE_LEFT || zoomed) rebuild_layout(layout);
+    else focus_layout(layout);
+}
+
+/* Capture both halves of pane shortcuts at the window. Focus can change (or
+ * a pane can disappear) between press and release, including in Kitty mode. */
+static gboolean pane_shortcut(GtkEventControllerLegacy *controller, GdkEvent *event, gpointer data) {
+    (void)controller;
+    Window *window = data;
+    GdkEventType type = gdk_event_get_event_type(event);
+    if (type != GDK_KEY_PRESS && type != GDK_KEY_RELEASE) return FALSE;
+    guint code = gdk_key_event_get_keycode(event);
+    for (guint i = 0; i < G_N_ELEMENTS(window->pane_keys); i++) if (window->pane_keys[i] == code && code) {
+        if (type == GDK_KEY_RELEASE) { window->pane_keys[i] = 0; return TRUE; }
+        break;
+    }
+    if (type == GDK_KEY_RELEASE) return FALSE;
+    guint key = gdk_keyval_to_lower(gdk_key_event_get_keyval(event));
+    GdkModifierType state = gdk_event_get_modifier_state(event) & (GDK_CONTROL_MASK | GDK_SHIFT_MASK | GDK_ALT_MASK | GDK_SUPER_MASK);
+    const char *action = NULL;
+    int operation = -1;
+    if (state == (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
+        if (key == GDK_KEY_o) action = "split-right";
+        if (key == GDK_KEY_e) action = "split-down";
+        if (key == GDK_KEY_w) action = "close-pane";
+        if (key == GDK_KEY_Return) operation = PANE_ZOOM;
+    }
+    if (state == (GDK_CONTROL_MASK | GDK_ALT_MASK) || state == (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SHIFT_MASK)) {
+        if (key == GDK_KEY_Left) operation = PANE_LEFT;
+        if (key == GDK_KEY_Right) operation = PANE_RIGHT;
+        if (key == GDK_KEY_Up) operation = PANE_UP;
+        if (key == GDK_KEY_Down) operation = PANE_DOWN;
+        if (operation >= 0 && (state & GDK_SHIFT_MASK)) operation += PANE_RESIZE_LEFT;
+        if (!(state & GDK_SHIFT_MASK)) {
+            if (key == GDK_KEY_Page_Up) operation = PANE_PREVIOUS;
+            if (key == GDK_KEY_Page_Down) operation = PANE_NEXT;
+            if (key == GDK_KEY_equal) operation = PANE_EQUALIZE;
+        }
+    }
+    if (!action && operation < 0) return FALSE;
+    for (guint i = 0; i < G_N_ELEMENTS(window->pane_keys); i++) {
+        if (window->pane_keys[i] == code) break;
+        if (!window->pane_keys[i]) { window->pane_keys[i] = code; break; }
+    }
+    g_action_group_activate_action(G_ACTION_GROUP(window->window), action ? action : "pane", action ? NULL : g_variant_new_int32(operation));
+    return TRUE;
 }
 
 static void about(GSimpleAction *action, GVariant *parameter, gpointer data) {
@@ -724,6 +997,10 @@ static Window *new_window(GtkApplication *app) {
     const GActionEntry actions[] = {
         { .name = "new-tab", .activate = new_tab_action },
         { .name = "close-tab", .activate = close_tab_action },
+        { .name = "close-pane", .activate = close_pane_action },
+        { .name = "split-right", .activate = split_action },
+        { .name = "split-down", .activate = split_action },
+        { .name = "pane", .activate = pane_action, .parameter_type = "i" },
         { .name = "move-tab", .activate = move_tab_action },
         { .name = "find", .activate = find_action },
     };
@@ -738,6 +1015,10 @@ static Window *new_window(GtkApplication *app) {
     g_signal_connect(window->tabs, "close-page", G_CALLBACK(close_page), window);
     g_signal_connect(window->tabs, "create-window", G_CALLBACK(create_window), window);
     g_signal_connect(window->window, "close-request", G_CALLBACK(close_window), window);
+    GtkEventController *pane_keys = gtk_event_controller_legacy_new();
+    gtk_event_controller_set_propagation_phase(pane_keys, GTK_PHASE_CAPTURE);
+    g_signal_connect(pane_keys, "event", G_CALLBACK(pane_shortcut), window);
+    gtk_widget_add_controller(GTK_WIDGET(window->window), pane_keys);
     /* Keep tab DND outside a GtkWindowHandle: on GTK 4.8, denying the tab
      * reorder gesture to begin DND otherwise also starts a window move. */
     GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -755,6 +1036,10 @@ static Window *new_window(GtkApplication *app) {
     gtk_actionable_set_action_name(GTK_ACTIONABLE(add), "win.new-tab");
     gtk_box_append(GTK_BOX(header), add);
     gtk_box_append(GTK_BOX(header), bar);
+    GtkWidget *split = gtk_button_new_from_icon_name("view-dual-symbolic");
+    gtk_widget_set_tooltip_text(split, "Split right (Ctrl+Shift+O)");
+    gtk_actionable_set_action_name(GTK_ACTIONABLE(split), "win.split-right");
+    gtk_box_append(GTK_BOX(header), split);
     GtkWidget *handle = gtk_window_handle_new();
     gtk_widget_set_size_request(handle, 48, -1);
     gtk_box_append(GTK_BOX(header), handle);
@@ -762,6 +1047,17 @@ static Window *new_window(GtkApplication *app) {
     g_menu_append(menu, "New Tab", "win.new-tab");
     g_menu_append(menu, "Move Tab to New Window", "win.move-tab");
     g_menu_append(menu, "Find", "win.find");
+    GMenu *panes = g_menu_new();
+    g_menu_append(panes, "Split Right", "win.split-right");
+    g_menu_append(panes, "Split Down", "win.split-down");
+    g_menu_append(panes, "Focus Previous Pane", "win.pane(4)");
+    g_menu_append(panes, "Focus Next Pane", "win.pane(5)");
+    g_menu_append(panes, "Equalize Panes", "win.pane(10)");
+    g_menu_append(panes, "Zoom / Restore Pane", "win.pane(11)");
+    g_menu_append(panes, "Close Pane", "win.close-pane");
+    g_menu_append(panes, "Close Tab", "win.close-tab");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(panes));
+    g_object_unref(panes);
     g_menu_append(menu, "About Zigonaut", "app.about");
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button), "open-menu-symbolic");
@@ -859,10 +1155,8 @@ int main(int argc, char **argv) {
     const GActionEntry actions[] = { { .name = "about", .activate = about } };
     g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), app);
     const char *new_tab_keys[] = { "<Control><Shift>t", NULL };
-    const char *close_tab_keys[] = { "<Control><Shift>w", NULL };
     const char *find_keys[] = { "<Control><Shift>f", NULL };
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-tab", new_tab_keys);
-    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.close-tab", close_tab_keys);
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.find", find_keys);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
     int result = g_application_run(G_APPLICATION(app), argc, argv);

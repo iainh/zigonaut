@@ -5,6 +5,91 @@ const allocator = std.heap.c_allocator;
 
 pub extern fn main(c_int, [*][*:0]u8) c_int;
 
+const PaneLayout = struct {
+    tree: shared.pane_tree.Tree,
+    next_id: u64 = 2,
+};
+const PaneNode = extern struct {
+    id: u64,
+    subtree_size: u32,
+    ratio: u16,
+    split: bool,
+    vertical: bool,
+};
+
+export fn zgtk_layout_create() ?*PaneLayout {
+    const layout = allocator.create(PaneLayout) catch return null;
+    layout.* = .{ .tree = shared.pane_tree.Tree.init(allocator, 1) catch {
+        allocator.destroy(layout);
+        return null;
+    } };
+    return layout;
+}
+
+export fn zgtk_layout_destroy(layout: *PaneLayout) void {
+    layout.tree.deinit();
+    allocator.destroy(layout);
+}
+
+export fn zgtk_layout_split(layout: *PaneLayout, vertical: bool) u64 {
+    const id = layout.next_id;
+    layout.tree.split(layout.tree.focused orelse return 0, id, id + 1, if (vertical) .top_bottom else .left_right) catch return 0;
+    layout.next_id += 2;
+    _ = layout.tree.focus(id);
+    return id;
+}
+
+export fn zgtk_layout_close(layout: *PaneLayout, id: u64) bool {
+    return layout.tree.close(id);
+}
+export fn zgtk_layout_focus(layout: *PaneLayout, id: u64) bool {
+    return layout.tree.focus(id);
+}
+export fn zgtk_layout_focused(layout: *PaneLayout) u64 {
+    return layout.tree.focused orelse 0;
+}
+export fn zgtk_layout_zoomed(layout: *PaneLayout) bool {
+    return layout.tree.zoomed != null;
+}
+export fn zgtk_layout_action(layout: *PaneLayout, action: c_int) bool {
+    return switch (action) {
+        0...3 => layout.tree.focusDirection(@enumFromInt(action)),
+        4, 5 => layout.tree.focusCycle(action == 5),
+        6...9 => layout.tree.resizeFocused(@enumFromInt(action - 6), 3277),
+        10 => layout.tree.equalize(),
+        11 => layout.tree.toggleZoom(),
+        else => false,
+    };
+}
+export fn zgtk_layout_ratio(layout: *PaneLayout, id: u64, ratio: u16) bool {
+    layout.tree.setRatio(id, ratio) catch return false;
+    return true;
+}
+export fn zgtk_layout_nodes(layout: *PaneLayout, nodes: [*]PaneNode, capacity: usize) usize {
+    const count = layout.tree.presentationNodeCount();
+    if (capacity < count) return count;
+    const Writer = struct {
+        output: []PaneNode,
+        index: usize = 0,
+        pub fn leaf(self: *@This(), id: u64) !void {
+            self.output[self.index] = .{ .id = id, .subtree_size = 1, .ratio = 0, .split = false, .vertical = false };
+            self.index += 1;
+        }
+        pub fn split(self: *@This(), id: u64, axis: shared.pane_tree.Axis, ratio: u16) usize {
+            const index = self.index;
+            self.output[index] = .{ .id = id, .subtree_size = 0, .ratio = ratio, .split = true, .vertical = axis == .top_bottom };
+            self.index += 1;
+            return index;
+        }
+        pub fn finishSplit(self: *@This(), index: usize, size: u32) void {
+            self.output[index].subtree_size = size;
+        }
+    };
+    var writer = Writer{ .output = nodes[0..capacity] };
+    layout.tree.writePresentation(&writer) catch unreachable;
+    return count;
+}
+
 extern fn zgtk_write(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_title(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_clipboard(?*anyopaque, [*]const u8, usize) void;

@@ -150,6 +150,87 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             xdo("key", "Return")
             assert contents("pasted") == "café 界"
             command("transfer_marker=preserved")
+            # Nested splits keep independent shells and route actions to the
+            # focused leaf, not to the original tab's terminal.
+            xdo("windowsize", "--sync", window, 980, 640)
+            xdo("key", "ctrl+shift+o")
+            time.sleep(0.3)
+            command(r"echo $$ > right.pid; pane=right; stty size > right-size; printf '\033]2;Right pane\007'")
+            right = int(contents("right.pid"))
+            children.append(right)
+            assert right not in (first, second)
+            right_size = tuple(map(int, contents("right-size").split()))
+            xdo("key", "ctrl+shift+f")
+            time.sleep(0.3)
+            xdo("type", "Right")
+            xdo("key", "ctrl+shift+e")
+            time.sleep(0.3)
+            command(r"echo $$ > bottom.pid; pane=bottom; stty size > bottom-size; printf '\033]2;Bottom pane\007'")
+            bottom = int(contents("bottom.pid"))
+            children.append(bottom)
+            assert bottom not in (first, second, right)
+            bottom_size = tuple(map(int, contents("bottom-size").split()))
+            assert bottom_size[0] < right_size[0] and abs(bottom_size[1] - right_size[1]) <= 1, (right_size, bottom_size)
+            xdo("key", "ctrl+alt+Up")
+            wait_for(lambda: xdo("getwindowname", window) == "Right pane", "directional focus up")
+            command("echo leaked > pane-search-leaked")
+            xdo("key", "Escape")
+            assert not (root / "pane-search-leaked").exists(), "Per-pane search focus was lost"
+            command('echo "$pane" > up-focus')
+            assert contents("up-focus") == "right"
+            xdo("key", "ctrl+alt+Left")
+            wait_for(lambda: xdo("getwindowname", window) == "First session", "directional focus left")
+            xdo("key", "ctrl+alt+Page_Up")
+            wait_for(lambda: xdo("getwindowname", window) == "Bottom pane", "pane cycle wraps backwards")
+            xdo("key", "ctrl+alt+shift+Up")
+            time.sleep(0.3)
+            command("stty size > pane-resized")
+            resized = tuple(map(int, contents("pane-resized").split()))
+            assert resized[0] > bottom_size[0] and resized[1] == bottom_size[1], (bottom_size, resized)
+            xdo("key", "ctrl+alt+equal")
+            time.sleep(0.3)
+            command("stty size > pane-equalized")
+            equalized = tuple(map(int, contents("pane-equalized").split()))
+            assert abs(equalized[0] - bottom_size[0]) <= 1, (bottom_size, equalized)
+            xdo("windowsize", "--sync", window, 1080, 720)
+            time.sleep(0.3)
+            command("stty size > pane-window-larger")
+            larger = tuple(map(int, contents("pane-window-larger").split()))
+            assert larger[0] > equalized[0] and larger[1] > equalized[1], (equalized, larger)
+            xdo("windowsize", "--sync", window, 980, 640)
+            time.sleep(0.3)
+            command("stty size > pane-window-restored")
+            restored = tuple(map(int, contents("pane-window-restored").split()))
+            assert all(abs(a - b) <= 1 for a, b in zip(equalized, restored)), (equalized, restored)
+            clipboard.wait(timeout=3)
+            clipboard = subprocess.Popen(
+                ["xclip", "-selection", "clipboard", "-in", "-quiet", "-loops", "1"],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            clipboard.stdin.write('printf "%s café" "$pane" > pane-pasted'.encode())
+            clipboard.stdin.close()
+            time.sleep(0.2)
+            xdo("key", "ctrl+shift+v")
+            time.sleep(0.2)
+            xdo("key", "Return")
+            assert contents("pane-pasted") == "bottom café"
+            command("(sleep 0.3; echo live > hidden-output) &")
+            xdo("key", "ctrl+shift+Return")
+            time.sleep(0.3)
+            command("stty size > pane-zoomed")
+            zoomed = tuple(map(int, contents("pane-zoomed").split()))
+            assert zoomed[0] > equalized[0] and zoomed[1] > equalized[1], (equalized, zoomed)
+            xdo("key", "ctrl+alt+Page_Down")
+            wait_for(lambda: xdo("getwindowname", window) == "First session", "zoom follows pane focus")
+            assert contents("hidden-output") == "live", "Zoom stopped a hidden PTY"
+            xdo("key", "ctrl+shift+Return")
+            # Raw Kitty input distinguishes swallowed releases from ordinary
+            # terminal input even when focus moves to another pane and back.
+            command(r"stty -echo -icanon; printf '\033[>2u'; echo ready > pane-input-ready; dd bs=1 count=1 of=pane-key 2>/dev/null; printf '\033[<u'; stty sane; echo done > pane-input-done")
+            assert contents("pane-input-ready") == "ready"
+            xdo("key", "ctrl+alt+Page_Down", "ctrl+alt+Page_Up",
+                "ctrl+shift+Return", "ctrl+shift+Return", "ctrl+alt+shift+Right", "ctrl+alt+equal", "z")
+            assert contents("pane-input-done") == "done"
+            assert contents("pane-key") == "z", "Pane shortcuts leaked key events into the PTY"
             xdo("key", "ctrl+shift+f")
             time.sleep(0.3)
             source_window = window
@@ -157,6 +238,24 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             xdo("key", "Escape")
             command('printf "%s %s" "$$" "$transfer_marker" > transferred')
             assert contents("transferred") == f"{first} preserved"
+            xdo("key", "ctrl+alt+Page_Down")
+            wait_for(lambda: xdo("getwindowname", window) == "Right pane", "split tab transfer preserves focused title")
+            command('printf "%s %s" "$$" "$pane" > right-transferred')
+            assert contents("right-transferred") == f"{right} right"
+            xdo("key", "ctrl+alt+Down")
+            wait_for(lambda: xdo("getwindowname", window) == "Bottom pane", "nested pane survives transfer")
+            command('printf "%s %s" "$$" "$pane" > bottom-transferred')
+            assert contents("bottom-transferred") == f"{bottom} bottom"
+            command("exit")
+            wait_for(lambda: not alive(bottom), "nested pane shell exit reaped")
+            wait_for(lambda: xdo("getwindowname", window) == "Shell exited", "exited pane retained")
+            xdo("key", "ctrl+shift+Return")
+            xdo("key", "ctrl+shift+w")
+            wait_for(lambda: xdo("getwindowname", window) == "Right pane", "closing nested pane collapses split and focuses neighbour")
+            assert alive(first) and alive(right) and alive(second)
+            xdo("key", "ctrl+shift+w")
+            wait_for(lambda: not alive(right), "closed pane shell reaped")
+            wait_for(lambda: xdo("getwindowname", window) == "First session", "closing second pane restores final pane")
             xdo("key", "ctrl+shift+w")
             wait_for(lambda: not alive(first), "closed tab's shell reaped")
             assert alive(second), "Closing one tab killed another session"
@@ -174,12 +273,22 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             window = move_to_window("Second session")
             command("trap '' HUP; echo ready > stubborn")
             assert contents("stubborn") == "ready"
-            xdo("key", "ctrl+shift+w")
+            xdo("key", "ctrl+shift+o")
+            time.sleep(0.3)
+            command("trap '' HUP; echo $$ > last-pane.pid")
+            last_pane = int(contents("last-pane.pid"))
+            children.append(last_pane)
+            xdo("key", "F10")
+            time.sleep(0.1)
+            xdo("key", "Home", *(["Down"] * 10), "Return")  # Close Tab, including all panes.
             assert app.wait(timeout=8) == 0
             wait_for(lambda: not alive(second), "SIGHUP-resistant shell reaped after last window closes")
+            wait_for(lambda: not alive(last_pane), "whole-tab close reaps every pane")
             print(f"GTK E2E passed: two isolated shells, titles, focus, tab reordering, resize {before} → {after}, "
                   "Ctrl+C, prompt shortcuts without PTY leakage, UTF-8 clipboard paste, per-tab search and focus restoration, "
-                  "live tab transfers (including an open search and last tab), "
+                  f"nested independent panes, directional/cyclic focus, pane resize {bottom_size} → {resized}, "
+                  f"equalize and zoom {equalized} → {zoomed}, hidden PTY output, pane shortcuts without leakage, "
+                  "live split-tab transfers (including an open search and last tab), pane exit and collapse, "
                   "shell exit, tab close, and bounded child cleanup")
         finally:
             if clipboard and clipboard.poll() is None:
