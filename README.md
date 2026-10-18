@@ -151,10 +151,10 @@ Shell exit leaves its final output visible until you close the pane.
 
 Open **Settings** (`Ctrl+,`) to edit font family/size, line height, padding,
 colour scheme, light/dark terminal themes (Rasmus or Fluent), intense text,
-scrollback, initial window grid, and bounded terminal clipboard writes. **Apply**
-saves and updates every open terminal without restarting shells. Initial grid
-dimensions affect new windows; zoom is temporary and `Ctrl+0` restores the saved
-font size. System colour scheme follows desktop appearance changes.
+scrollback, initial window grid, and bounded terminal clipboard writes. Valid edits
+save automatically and update every open terminal without restarting shells.
+Initial grid dimensions affect new windows; zoom is temporary and `Ctrl+0`
+restores the saved font size. System colour scheme follows desktop appearance changes.
 
 The **Profiles** page supports up to 32 named profiles, with add, rename, remove
 and default selection. Each profile has an absolute executable shell path, an
@@ -167,11 +167,13 @@ Names must be unique ignoring case; the last profile cannot be removed.
 
 Linux settings use a versioned GLib key file at
 `$XDG_CONFIG_HOME/zigonaut/settings.ini` (normally
-`~/.config/zigonaut/settings.ini`). The file is created on **Apply**, using an
-atomic, durable replacement with mode `0600`; new configuration directories use
-`0700`. Closing Settings discards unapplied edits. Invalid settings show an
-error and are not saved. Invalid files at startup produce a warning and defaults
-without overwriting the file. Edit files only while Zigonaut is closed: settings
+`~/.config/zigonaut/settings.ini`). The file is created on the first valid edit,
+using an atomic, durable replacement with mode `0600`; new configuration
+directories use `0700`. There is no Apply button. Invalid or incomplete edits show an inline
+error and leave the last valid settings active and saved until corrected.
+Closing Settings retains valid changes and discards invalid edits.
+Invalid files at startup produce a warning and defaults without overwriting the
+file. Edit files only while Zigonaut is closed: settings
 are loaded at startup, not watched, and concurrent instances use last-save-wins.
 Windows JSON and macOS preferences are separate and are not imported.
 

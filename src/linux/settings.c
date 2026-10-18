@@ -177,9 +177,17 @@ typedef struct {
     GtkStringList *profile_names;
     AdwComboRow *default_profile;
     AdwPreferencesPage *profiles_page;
+    AdwPreferencesGroup *errors[3];
     GtkWidget *add;
     int count;
+    gboolean updating;
 } Editor;
+
+static void changed(GtkWidget *widget, gpointer data);
+static void property_changed(GObject *object, GParamSpec *property, gpointer data) {
+    (void)object; (void)property;
+    changed(NULL, data);
+}
 
 static GtkWidget *entry(AdwPreferencesGroup *group, const char *title, const char *text) {
     GtkWidget *row = adw_entry_row_new();
@@ -190,16 +198,22 @@ static GtkWidget *entry(AdwPreferencesGroup *group, const char *title, const cha
 }
 
 static void refresh_names(Editor *e) {
+    gboolean updating = e->updating;
+    e->updating = TRUE;
     guint selected = adw_combo_row_get_selected(e->default_profile);
     while (g_list_model_get_n_items(G_LIST_MODEL(e->profile_names))) gtk_string_list_remove(e->profile_names, 0);
     for (int i = 0; i < e->count; i++) gtk_string_list_append(e->profile_names, gtk_editable_get_text(GTK_EDITABLE(e->names[i])));
     adw_combo_row_set_selected(e->default_profile, MIN(selected, (guint)e->count - 1));
     gtk_widget_set_sensitive(e->add, e->count < ZGTK_MAX_PROFILES);
+    e->updating = updating;
 }
 
 static void name_changed(GtkEditable *editable, gpointer data) {
     (void)editable;
-    refresh_names(data);
+    Editor *e = data;
+    if (e->updating) return;
+    refresh_names(e);
+    changed(NULL, e);
 }
 
 static void remove_profile(GtkButton *button, gpointer data) {
@@ -213,6 +227,7 @@ static void remove_profile(GtkButton *button, gpointer data) {
     for (index = 0; index < e->count; index++)
         if (e->groups[index] == g_object_get_data(G_OBJECT(button), "group")) break;
     guint selected = adw_combo_row_get_selected(e->default_profile);
+    e->updating = TRUE;
     adw_preferences_page_remove(e->profiles_page, e->groups[index]);
     for (int i = index; i + 1 < e->count; i++) {
         e->groups[i] = e->groups[i + 1]; e->names[i] = e->names[i + 1];
@@ -222,6 +237,8 @@ static void remove_profile(GtkButton *button, gpointer data) {
     e->count--;
     refresh_names(e);
     adw_combo_row_set_selected(e->default_profile, selected > (guint)index ? selected - 1 : MIN(selected, (guint)e->count - 1));
+    e->updating = FALSE;
+    changed(NULL, e);
 }
 
 static void append_profile(Editor *e, const Profile *p) {
@@ -242,6 +259,9 @@ static void append_profile(Editor *e, const Profile *p) {
     e->directories[i] = entry(group, "Working directory (empty to inherit)", p->directory);
     adw_preferences_page_add(e->profiles_page, group);
     g_signal_connect(e->names[i], "changed", G_CALLBACK(name_changed), e);
+    g_signal_connect(e->shells[i], "changed", G_CALLBACK(changed), e);
+    g_signal_connect(e->commands[i], "changed", G_CALLBACK(changed), e);
+    g_signal_connect(e->directories[i], "changed", G_CALLBACK(changed), e);
     refresh_names(e);
 }
 
@@ -250,9 +270,16 @@ static void add_profile(GtkButton *button, gpointer data) {
     Editor *e = data;
     if (e->count == ZGTK_MAX_PROFILES) return;
     Profile p = {0};
-    g_strlcpy(p.name, "New profile", sizeof p.name);
+    for (int suffix = 1; ; suffix++) {
+        g_snprintf(p.name, sizeof p.name, "New profile %d", suffix);
+        gboolean unique = TRUE;
+        for (int i = 0; i < e->count; i++)
+            if (!g_ascii_strcasecmp(p.name, gtk_editable_get_text(GTK_EDITABLE(e->names[i])))) unique = FALSE;
+        if (unique) break;
+    }
     g_strlcpy(p.shell, e->settings->profiles[0].shell, sizeof p.shell);
     append_profile(e, &p);
+    changed(NULL, e);
     gtk_widget_grab_focus(e->names[e->count - 1]);
 }
 
@@ -263,9 +290,10 @@ static gboolean collect(GtkWidget *widget, char *buffer, size_t capacity, GError
     return TRUE;
 }
 
-static void apply(GtkButton *button, gpointer data) {
-    (void)button;
+static void changed(GtkWidget *widget, gpointer data) {
+    (void)widget;
     Editor *e = data;
+    if (e->updating) return;
     Settings *s = g_new0(Settings, 1);
     GError *error = NULL;
     collect(e->font, s->font, sizeof s->font, &error);
@@ -287,9 +315,10 @@ static void apply(GtkButton *button, gpointer data) {
     if (!error && settings_save(s, &error)) {
         *e->settings = *s;
         e->applied(e->data);
-        adw_preferences_window_add_toast(ADW_PREFERENCES_WINDOW(e->window), adw_toast_new("Settings saved and applied"));
-    } else {
-        adw_preferences_window_add_toast(ADW_PREFERENCES_WINDOW(e->window), adw_toast_new(error->message));
+    }
+    for (guint i = 0; i < G_N_ELEMENTS(e->errors); i++) {
+        adw_preferences_group_set_description(e->errors[i], error ? error->message : NULL);
+        gtk_widget_set_visible(GTK_WIDGET(e->errors[i]), error != NULL);
     }
     g_clear_error(&error); g_free(s);
 }
@@ -304,6 +333,7 @@ static AdwPreferencesPage *page(AdwPreferencesWindow *window, const char *title,
 
 void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpointer), gpointer data) {
     Editor *e = g_new0(Editor, 1);
+    e->updating = TRUE;
     e->settings = settings; e->applied = applied; e->data = data;
     e->window = GTK_WINDOW(adw_preferences_window_new());
     g_object_set_data_full(G_OBJECT(e->window), "editor", e, g_free);
@@ -316,11 +346,19 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
     AdwPreferencesPage *appearance = page(ADW_PREFERENCES_WINDOW(e->window), "Appearance", "preferences-desktop-theme-symbolic");
     AdwPreferencesPage *terminal = page(ADW_PREFERENCES_WINDOW(e->window), "Terminal", "utilities-terminal-symbolic");
     e->profiles_page = page(ADW_PREFERENCES_WINDOW(e->window), "Profiles", "system-users-symbolic");
+    AdwPreferencesPage *pages[] = { appearance, terminal, e->profiles_page };
+    for (guint i = 0; i < G_N_ELEMENTS(pages); i++) {
+        e->errors[i] = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+        adw_preferences_group_set_title(e->errors[i], "Changes not saved; previous settings remain active");
+        gtk_widget_set_visible(GTK_WIDGET(e->errors[i]), FALSE);
+        adw_preferences_page_add(pages[i], e->errors[i]);
+    }
     AdwPreferencesGroup *look = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(look, "Text and colours");
-    adw_preferences_group_set_description(look, "Apply saves changes and updates all open terminals. Closing discards unapplied edits.");
+    adw_preferences_group_set_description(look, "Changes are saved automatically and update all open terminals. Invalid edits keep the previous settings until corrected.");
     adw_preferences_page_add(appearance, look);
     e->font = entry(look, "Font family", settings->font);
+    g_signal_connect(e->font, "changed", G_CALLBACK(changed), e);
     AdwPreferencesGroup *behaviour = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(behaviour, "Terminal behaviour");
     adw_preferences_group_set_description(behaviour, "Clipboard writes let terminal programs replace your clipboard. Disabled by default.");
@@ -336,6 +374,7 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
             g_object_unref(list);
             adw_combo_row_set_selected(ADW_COMBO_ROW(row), value);
             e->controls[i] = row;
+            g_signal_connect(row, "notify::selected", G_CALLBACK(property_changed), e);
         } else {
             row = adw_action_row_new();
             GtkWidget *control = f->maximum == 1 ? gtk_switch_new() : gtk_spin_button_new_with_range(f->minimum, f->maximum, 1);
@@ -346,6 +385,8 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
             adw_action_row_set_activatable_widget(ADW_ACTION_ROW(row), control);
             gtk_accessible_update_property(GTK_ACCESSIBLE(control), GTK_ACCESSIBLE_PROPERTY_LABEL, f->title, -1);
             e->controls[i] = control;
+            if (GTK_IS_SWITCH(control)) g_signal_connect(control, "notify::active", G_CALLBACK(property_changed), e);
+            else g_signal_connect(control, "value-changed", G_CALLBACK(changed), e);
         }
         adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), f->title);
         adw_preferences_group_add(i < 7 ? look : behaviour, row);
@@ -368,18 +409,7 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
     adw_preferences_page_add(e->profiles_page, profiles);
     for (int i = 0; i < settings->profile_count; i++) append_profile(e, &settings->profiles[i]);
     adw_combo_row_set_selected(e->default_profile, settings->default_profile);
-    AdwPreferencesPage *pages[] = { appearance, terminal, e->profiles_page };
-    for (guint i = 0; i < G_N_ELEMENTS(pages); i++) {
-        GtkWidget *button = gtk_button_new_with_label("Apply");
-        gtk_widget_set_valign(button, GTK_ALIGN_START);
-        gtk_widget_add_css_class(button, "suggested-action");
-        g_signal_connect(button, "clicked", G_CALLBACK(apply), e);
-        if (i == 2) gtk_box_append(GTK_BOX(profile_actions), button);
-        else {
-            AdwPreferencesGroup *group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-            adw_preferences_group_add(group, button);
-            adw_preferences_page_add(pages[i], group);
-        }
-    }
+    g_signal_connect(e->default_profile, "notify::selected", G_CALLBACK(property_changed), e);
+    e->updating = FALSE;
     gtk_window_present(e->window);
 }

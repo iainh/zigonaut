@@ -3,11 +3,14 @@
 Run in a D-Bus session on X11; requires the distribution's python3-pyatspi.
 """
 import configparser
+import fcntl
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 import pyatspi
@@ -109,8 +112,12 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             parser.read(config)
             return parser
 
-        def apply(index):
-            activate("push button", "Apply", index)
+        def grid(pid):
+            fd = os.open(f"/proc/{pid}/fd/0", os.O_RDONLY | os.O_NOCTTY)
+            try:
+                return struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))[:2]
+            finally:
+                os.close(fd)
 
         def stop(window):
             xdo("windowfocus", window)
@@ -140,11 +147,13 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             xdo("key", "ctrl+Page_Up")
             settings()
             assert not config.exists(), "Opening preferences should not write a file"
+            assert not any(n.getRoleName() == "push button" and n.name == "Apply" for n in nodes())
             spin("Font size", 16)
+            wait_for(lambda: config.exists() and saved()["Settings"]["fontSize"] == "16", "automatic font persistence")
+            wait_for(lambda: grid(original)[0] < 24 and grid(pane)[0] < 24, "live resize while preferences remain open")
             spin("Line height", 125)
             spin("Terminal padding", 20)
             combo("Colour scheme", 2)
-            apply(0)
             assert saved()["Settings"]["fontSize"] == "16"
             assert config.stat().st_mode & 0o777 == 0o600
             activate("page tab", "Terminal")
@@ -153,9 +162,13 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             spin("Initial rows", 19)
             spin("Clipboard write limit", 3)
             activate("check box", "Allow terminal clipboard writes")
-            apply(1)
+            assert saved()["Settings"]["terminalClipboardWrites"] == "1"
             activate("page tab", "Profiles")
             activate("push button", "Add Profile")
+            activate("push button", "Add Profile")
+            assert saved()["Settings"]["profileCount"] == "3"
+            assert saved()["Profile 1"]["name"] != saved()["Profile 2"]["name"]
+            activate("push button", "Remove profile", 2)
             edit("Name", "Build shell", 1)
             edit("Shell executable", "/bin/sh", 1)
             edit("Command", "printf '%s' \"$PWD\" > profile.cwd; echo $$ >> launches; exec /bin/sh -i", 1)
@@ -163,36 +176,30 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             combo("Default profile", 1)
             # Renaming must preserve the selected profile, not reset it to 0.
             edit("Name", "Builder", 1)
-            apply(2)
             assert saved()["Settings"]["defaultProfile"] == "1"
             assert saved()["Profile 1"]["name"] == "Builder"
             valid = config.read_bytes()
             edit("Name", "DEFAULT", 1)
-            apply(2)
             assert config.read_bytes() == valid, "Duplicate names were persisted"
+            assert any(n.name == "Changes not saved; previous settings remain active" for n in nodes())
             edit("Name", "Builder", 1)
             edit("Shell executable", "/missing-shell", 1)
-            apply(2)
             assert config.read_bytes() == valid, "Invalid shell was persisted"
             edit("Shell executable", "/bin/sh", 1)
             # Delete a profile before the default and retain its identity.
             activate("push button", "Remove profile", 0)
-            apply(2)
             assert saved()["Settings"]["defaultProfile"] == "0"
             assert saved()["Profile 0"]["name"] == "Builder"
             activate("push button", "Remove profile", 0)
-            apply(2)
             assert saved()["Settings"]["profileCount"] == "1"
             # Keep an alternate interactive profile for explicit menu launches.
             activate("push button", "Add Profile")
             edit("Name", "Interactive", 1)
-            apply(2)
             # A failed disk save must leave both the saved and live settings intact.
             backup = config.parent.with_name("backup")
             config.parent.rename(backup)
             config.parent.write_text("blocked settings directory")
             edit("Name", "Cannot save", 1)
-            apply(2)
             assert b"Cannot save" not in (backup / "settings.ini").read_bytes()
             config.parent.unlink()
             backup.rename(config.parent)
@@ -262,25 +269,26 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             settings()
             assert find("spin button", "Font size").queryValue().currentValue == 16
             activate("page tab", "Profiles")
-            apply(2)
             assert saved()["Profile 0"]["name"] == "Builder"
-            edit("Name", "Unsaved edit")
+            edit("Name", "Renamed automatically")
             close_settings()
             settings()
             activate("page tab", "Profiles")
-            apply(2)
-            assert saved()["Profile 0"]["name"] == "Builder"
+            assert saved()["Profile 0"]["name"] == "Renamed automatically"
+            assert find("label", "Renamed automatically"), "Reopened default-profile selector lost the saved name"
+            edit("Shell executable", "/incomplete")
             close_settings()
+            assert saved()["Profile 0"]["shell"] == "/bin/sh", "Closing persisted an invalid edit"
             stop(window)
             # Corruption falls back without destroying the file.
             config.write_text("[Settings]\nversion=99\n")
             window = start()
             assert config.read_text() == "[Settings]\nversion=99\n"
             stop(window)
-            print(f"Settings E2E passed: native editor, live PTY resize {before} → {after} without shell restart, "
+            print(f"Settings E2E passed: automatic save without Apply, live PTY resize {before} → {after} without shell restart, "
                   "settings across split panes and inactive tabs, inherited launch-profile snapshots, "
                   "private atomic persistence, validation, add/rename/remove/default profiles, named menu launch, "
-                  "command and directory with spaces, restart, discarded edits, and corrupt-file preservation")
+                  "command and directory with spaces, restart, valid edits retained on close, invalid edits rejected, and corrupt-file preservation")
         finally:
             if app and app.poll() is None:
                 app.terminate()
