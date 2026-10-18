@@ -13,6 +13,7 @@ const Capture = struct {
     red_cell: bool = false,
     highlighted: usize = 0,
     active_highlighted: usize = 0,
+    underlined: usize = 0,
     background: u32 = 0,
     images: usize = 0,
     last_image: c.TerminalImage = std.mem.zeroes(c.TerminalImage),
@@ -47,6 +48,7 @@ export fn zgtk_begin_frame(host: ?*anyopaque, background: u32) void {
     capture(host).highlighted = 0;
     capture(host).active_highlighted = 0;
     capture(host).images = 0;
+    capture(host).underlined = 0;
 }
 export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [*]const u8, length: usize, foreground: u32, _: u32, _: u32, flags: u16) void {
     const state = capture(host);
@@ -55,6 +57,7 @@ export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [
     if (length == 1 and text[0] == 'R' and foreground == 0xff0000) state.red_cell = true;
     if (flags & 128 != 0) state.highlighted += columns;
     if (flags & 256 != 0) state.active_highlighted += columns;
+    if (flags & 4 != 0) state.underlined += columns;
 }
 export fn zgtk_draw_image(host: ?*anyopaque, image: *const c.TerminalImage) void {
     const state = capture(host);
@@ -68,6 +71,60 @@ export fn zgtk_draw_cursor(_: ?*anyopaque, _: u16, _: u16, _: u8, _: u8, _: u32)
 
 fn feed(core: *c.TerminalCore, bytes: []const u8) !void {
     c.zgtk_feed(core, bytes.ptr, bytes.len);
+}
+
+test "Linux mouse ABI consumes tracking modes and uses padded current pixel geometry" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try std.testing.expect(c.zgtk_resize(core, 30, 8, 10, 20));
+    try std.testing.expect(!c.zgtk_mouse(core, 0, 1, 42, 69, 320, 180, 10, 20, 7, 0, true));
+    try feed(core, "\x1b[?1000h\x1b[?1006h");
+    try std.testing.expect(c.zgtk_mouse(core, 0, 1, 42, 69, 320, 180, 10, 20, 7, 6, true));
+    try std.testing.expect(c.zgtk_mouse(core, 2, 1, 52, 89, 320, 180, 10, 20, 7, 0, true));
+    try std.testing.expect(c.zgtk_mouse(core, 1, 1, 52, 89, 320, 180, 10, 20, 7, 0, false));
+    try feed(core, "\x1b[?1002h");
+    try std.testing.expect(c.zgtk_mouse(core, 2, 3, 62, 109, 320, 180, 10, 20, 7, 0, true));
+    try std.testing.expect(c.zgtk_mouse(core, 2, 0, 72, 129, 320, 180, 10, 20, 7, 0, false));
+    try feed(core, "\x1b[?1003h");
+    try std.testing.expect(c.zgtk_mouse(core, 2, 0, 82, 149, 320, 180, 10, 20, 7, 0, false));
+    for (4..8) |button| try std.testing.expect(c.zgtk_mouse(core, 0, @intCast(button), 42, 69, 320, 180, 10, 20, 7, 0, false));
+    try std.testing.expectEqualStrings("\x1b[<24;4;4M\x1b[<0;5;5m\x1b[<34;6;6M\x1b[<35;8;8M\x1b[<64;4;4M\x1b[<65;4;4M\x1b[<66;4;4M\x1b[<67;4;4M", state.output.written());
+    state.output.clearRetainingCapacity();
+    try feed(core, "\x1b[?1016h");
+    try std.testing.expect(c.zgtk_mouse(core, 0, 2, 42, 69, 320, 180, 10, 20, 7, 0, true));
+    try std.testing.expectEqualStrings("\x1b[<1;35;62M", state.output.written());
+}
+
+test "Linux links share OSC8 precedence and scheme policy and invalidate hover on mutation" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try feed(core, "\x1b]8;;https://target.invalid/\x07https://label.invalid\x1b]8;;\x07\r\n(https://plain.invalid/a),\r\n\x1b]8;;javascript:alert(1)\x07https://forbidden.invalid\x1b]8;;\x07");
+    var length: usize = 0;
+    var uri = c.zgtk_link_at(core, 2, 0, &length);
+    try std.testing.expectEqualStrings("https://target.invalid/", uri[0..length]);
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 21), state.underlined);
+    try feed(core, " ");
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.underlined);
+    uri = c.zgtk_link_at(core, 4, 1, &length);
+    try std.testing.expectEqualStrings("https://plain.invalid/a", uri[0..length]);
+    try std.testing.expect(c.zgtk_link_at(core, 4, 2, &length) == null);
+    try std.testing.expectEqual(@as(usize, 0), length);
+    try std.testing.expect(c.zgtk_link_at(core, 80, 0, &length) == null);
+    _ = c.zgtk_link_at(core, 2, 0, &length);
+    c.zgtk_scroll(core, -1);
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.underlined);
+    _ = c.zgtk_link_at(core, 2, 0, &length);
+    try std.testing.expect(c.zgtk_resize(core, 60, 12, 11, 22));
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.underlined);
+    try std.testing.expectEqualStrings("", state.output.written());
 }
 
 test "Linux input respects terminal modes, modifiers, UTF-8 and paste framing" {

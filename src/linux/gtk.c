@@ -58,8 +58,9 @@ typedef struct {
     pid_t child;
     guint read_source, write_source, child_source, search_source;
     guint prompt_keys[2];
-    double drag_x, drag_y;
-    gboolean rectangle;
+    double pointer_x, pointer_y;
+    guint reported_buttons;
+    gboolean pointer_inside, selecting, rectangle;
 } Tab;
 
 static void new_tab(Window *window);
@@ -68,6 +69,9 @@ static Window *new_window(GtkApplication *app);
 static void schedule_search(Tab *tab);
 static void rebuild_layout(Layout *layout);
 static void focus_layout(Layout *layout);
+static void clear_hover(Tab *tab);
+static void update_hover(Tab *tab, GdkModifierType state);
+static void cancel_pointer(GtkWidget *widget, gpointer data);
 
 static Tab *pane_by_id(Layout *layout, uint64_t id) {
     for (guint i = 0; i < layout->panes->len; i++) {
@@ -211,6 +215,7 @@ static gboolean read_output(gint fd, GIOCondition condition, gpointer data) {
     for (int iteration = 0; iteration < 16; iteration++) {
         ssize_t count = read(fd, buffer, sizeof buffer);
         if (count > 0) {
+            clear_hover(tab);
             zgtk_feed(tab->core, buffer, (size_t)count);
         } else if (count < 0 && errno == EINTR) continue;
         else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -293,6 +298,7 @@ static void destroy_tab(gpointer data) {
 }
 
 static void show_search_status(Tab *tab, SearchStatus status) {
+    clear_hover(tab);
     char text[64];
     const char *query = gtk_editable_get_text(GTK_EDITABLE(tab->search_entry));
     if (status.failed) g_strlcpy(text, strlen(query) > 256 ? "Query too long" : "Search failed", sizeof text);
@@ -332,6 +338,7 @@ static void search_changed(GtkSearchEntry *entry, gpointer data) {
 static void search_mode_changed(GtkSearchBar *bar, GParamSpec *property, gpointer data) {
     (void)property;
     Tab *tab = data;
+    clear_hover(tab);
     if (gtk_search_bar_get_search_mode(bar)) search_changed(GTK_SEARCH_ENTRY(tab->search_entry), tab);
     else {
         if (tab->search_source) { g_source_remove(tab->search_source); tab->search_source = 0; }
@@ -368,6 +375,7 @@ static gboolean search_key(GtkEventControllerKey *controller, guint keyval,
 static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
     (void)area;
     Tab *tab = data;
+    clear_hover(tab);
     int columns = CLAMP((width - 2 * settings.padding) / tab->cell_width, 1, 65535);
     int rows = CLAMP((height - 2 * settings.padding) / tab->cell_height, 1, 65535);
     if (columns == tab->columns && rows == tab->rows) return;
@@ -431,6 +439,7 @@ static void paste(Tab *tab) {
 }
 
 static void set_font(Tab *tab, int size) {
+    clear_hover(tab);
     tab->font_size = CLAMP(size, 6, 40);
     pango_font_description_set_size(tab->font, tab->font_size * PANGO_SCALE);
     pango_font_description_set_weight(tab->font, PANGO_WEIGHT_NORMAL);
@@ -454,6 +463,11 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
     (void)keycode;
     Tab *tab = data;
     guint lower = gdk_keyval_to_lower(keyval);
+    if (keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R) {
+        update_hover(tab, state | GDK_CONTROL_MASK);
+        return TRUE;
+    }
+    clear_hover(tab);
     if ((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
         if (lower == GDK_KEY_c) { zgtk_copy(tab->core); return TRUE; }
         if (lower == GDK_KEY_v) { paste(tab); return TRUE; }
@@ -498,6 +512,8 @@ static void key_released(GtkEventControllerKey *controller, guint keyval,
     }
     const char *name = gdk_keyval_name(keyval);
     zgtk_key(tab->core, name ? name : "", modifiers(state), 0, "", 0, true);
+    if (keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R) state &= ~GDK_CONTROL_MASK;
+    update_hover(tab, state);
 }
 
 static void commit(GtkIMContext *im, const char *text, gpointer data) {
@@ -531,6 +547,7 @@ static void focus_enter(GtkEventControllerFocus *controller, gpointer data) {
 static void focus_leave(GtkEventControllerFocus *controller, gpointer data) {
     (void)controller;
     Tab *tab = data;
+    cancel_pointer(tab->area, tab);
     gtk_im_context_focus_out(tab->im);
     zgtk_focus(tab->core, false);
     gtk_widget_queue_draw(tab->area);
@@ -541,22 +558,146 @@ static void select_at(Tab *tab, double x, double y, bool begin) {
                 (uint16_t)CLAMP((y - settings.padding) / tab->cell_height, 0, tab->rows - 1), begin, tab->rectangle);
     gtk_widget_queue_draw(tab->area);
 }
-static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
+static void clear_hover(Tab *tab) {
+    zgtk_clear_hover(tab->core);
+    gtk_widget_set_cursor_from_name(tab->area, "text");
+    gtk_widget_set_tooltip_text(tab->area, NULL);
+    gtk_widget_queue_draw(tab->area);
+}
+
+static char *link_at_pointer(Tab *tab, GdkModifierType state) {
+    if (!tab->pointer_inside || !(state & GDK_CONTROL_MASK) || (state & GDK_SHIFT_MASK)) return NULL;
+    double x = tab->pointer_x - settings.padding, y = tab->pointer_y - settings.padding;
+    if (x < 0 || y < 0 || x >= tab->columns * tab->cell_width || y >= tab->rows * tab->cell_height) return NULL;
+    size_t length = 0;
+    const char *bytes = zgtk_link_at(tab->core, (uint16_t)(x / tab->cell_width),
+                                    (uint16_t)(y / tab->cell_height), &length);
+    return bytes ? g_strndup(bytes, length) : NULL;
+}
+
+static void update_hover(Tab *tab, GdkModifierType state) {
+    clear_hover(tab);
+    char *uri = link_at_pointer(tab, state);
+    if (uri) {
+        gtk_widget_set_cursor_from_name(tab->area, "pointer");
+        gtk_widget_set_tooltip_text(tab->area, uri);
+        g_free(uri);
+    }
+}
+
+static gboolean report_mouse(Tab *tab, uint8_t action, uint8_t button, GdkModifierType state) {
+    return zgtk_mouse(tab->core, action, button, (int32_t)tab->pointer_x, (int32_t)tab->pointer_y,
+        (uint32_t)gtk_widget_get_width(tab->area), (uint32_t)gtk_widget_get_height(tab->area),
+        (uint32_t)tab->cell_width, (uint32_t)tab->cell_height, (uint32_t)settings.padding,
+        modifiers(state), tab->reported_buttons != 0);
+}
+
+static void cancel_pointer(GtkWidget *widget, gpointer data) {
+    (void)widget;
     Tab *tab = data;
+    /* Close presses on their original PTY now. Later physical releases must
+     * not reach a newly focused pane, a reparented tab, or a new gesture. */
+    for (guint button = 1; button <= 3; button++) if (tab->reported_buttons & (1u << button)) {
+        tab->reported_buttons &= ~(1u << button);
+        report_mouse(tab, 1, (uint8_t)button, 0);
+    }
+    tab->selecting = FALSE;
+    tab->pointer_inside = FALSE;
+    clear_hover(tab);
+}
+
+static void uri_opened(GObject *object, GAsyncResult *result, gpointer data) {
+    (void)object; (void)data;
+    GError *error = NULL;
+    if (!gtk_show_uri_full_finish(NULL, result, &error)) {
+        g_message("Unable to open terminal link: %s", error->message);
+        g_error_free(error);
+    }
+}
+
+static gboolean pointer_button(GtkEventControllerLegacy *controller, GdkEvent *event, gpointer data) {
+    (void)controller;
+    Tab *tab = data;
+    GdkEventType type = gdk_event_get_event_type(event);
+    if (type == GDK_GRAB_BROKEN) { cancel_pointer(tab->area, tab); return FALSE; }
+    if (type != GDK_BUTTON_PRESS && type != GDK_BUTTON_RELEASE) return FALSE;
+    guint button = gdk_button_event_get_button(event);
+    if (button < 1 || button > 3) return FALSE;
+    double x, y, tx, ty;
+    if (!gdk_event_get_position(event, &x, &y)) return FALSE;
+    GtkNative *native = gtk_widget_get_native(tab->area);
+    gtk_native_get_surface_transform(native, &tx, &ty);
+    graphene_point_t from = GRAPHENE_POINT_INIT((float)(x - tx), (float)(y - ty)), to;
+    if (!gtk_widget_compute_point(GTK_WIDGET(native), tab->area, &from, &to)) return FALSE;
+    tab->pointer_x = to.x; tab->pointer_y = to.y;
+    GdkModifierType state = gdk_event_get_modifier_state(event);
+    guint mask = 1u << button;
+    if (type == GDK_BUTTON_RELEASE) {
+        if (tab->reported_buttons & mask) {
+            tab->reported_buttons &= ~mask;
+            report_mouse(tab, 1, (uint8_t)button, state);
+        } else if (button == 1 && tab->selecting) {
+            select_at(tab, to.x, to.y, false);
+            tab->selecting = FALSE;
+        }
+        return TRUE;
+    }
     gtk_widget_grab_focus(tab->area);
-    tab->drag_x = x; tab->drag_y = y;
-    tab->rectangle = (gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)) & GDK_ALT_MASK) != 0;
-    select_at(tab, x, y, true);
+    tab->pointer_inside = TRUE;
+    clear_hover(tab);
+    char *uri = button == 1 ? link_at_pointer(tab, state) : NULL;
+    if (uri) {
+        /* Native URI dispatch, never a command line or shell interpolation. */
+        gtk_show_uri_full(NULL, uri, gdk_event_get_time(event), NULL, uri_opened, NULL);
+        g_free(uri);
+        return TRUE;
+    }
+    if (!(state & GDK_SHIFT_MASK)) {
+        tab->reported_buttons |= mask;
+        if (report_mouse(tab, 0, (uint8_t)button, state)) return TRUE;
+        tab->reported_buttons &= ~mask;
+    }
+    if (button == 1) {
+        tab->selecting = TRUE;
+        tab->rectangle = (state & GDK_ALT_MASK) != 0;
+        select_at(tab, to.x, to.y, true);
+    }
+    return TRUE;
 }
-static void drag_update(GtkGestureDrag *gesture, double x, double y, gpointer data) {
-    (void)gesture;
+
+static void pointer_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data) {
     Tab *tab = data;
-    select_at(tab, tab->drag_x + x, tab->drag_y + y, false);
+    tab->pointer_x = x; tab->pointer_y = y;
+    tab->pointer_inside = TRUE;
+    GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
+    if (tab->selecting) select_at(tab, x, y, false);
+    else if (!(state & GDK_SHIFT_MASK)) {
+        uint8_t button = 0;
+        for (uint8_t i = 1; i <= 3; i++) if (tab->reported_buttons & (1u << i)) { button = i; break; }
+        /* A local/overridden press must never become a protocol drag. */
+        if (button || !(state & (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK | GDK_BUTTON3_MASK)))
+            report_mouse(tab, 2, button, state);
+    }
+    update_hover(tab, state);
 }
+
+static void pointer_leave(GtkEventControllerMotion *controller, gpointer data) {
+    (void)controller;
+    Tab *tab = data;
+    tab->pointer_inside = FALSE;
+    clear_hover(tab);
+}
+
 static gboolean scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
-    (void)controller; (void)dx;
     Tab *tab = data;
-    zgtk_scroll(tab->core, dy > 0 ? 3 : -3);
+    GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
+    clear_hover(tab);
+    gboolean handled = FALSE;
+    if (!(state & GDK_SHIFT_MASK)) {
+        for (int i = 0; i < ABS(dy); i++) handled |= report_mouse(tab, 0, dy < 0 ? 4 : 5, state);
+        for (int i = 0; i < ABS(dx); i++) handled |= report_mouse(tab, 0, dx < 0 ? 6 : 7, state);
+    }
+    if (!handled && dy) zgtk_scroll(tab->core, (int)dy * 3);
     gtk_widget_queue_draw(tab->area);
     return TRUE;
 }
@@ -846,11 +987,16 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     GtkEventController *pane_focus = gtk_event_controller_focus_new();
     g_signal_connect(pane_focus, "enter", G_CALLBACK(pane_enter), tab);
     gtk_widget_add_controller(tab->content, pane_focus);
-    GtkGesture *drag = gtk_gesture_drag_new();
-    g_signal_connect(drag, "drag-begin", G_CALLBACK(drag_begin), tab);
-    g_signal_connect(drag, "drag-update", G_CALLBACK(drag_update), tab);
-    gtk_widget_add_controller(tab->area, GTK_EVENT_CONTROLLER(drag));
-    GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    GtkEventController *buttons = gtk_event_controller_legacy_new();
+    g_signal_connect(buttons, "event", G_CALLBACK(pointer_button), tab);
+    gtk_widget_add_controller(tab->area, buttons);
+    GtkEventController *motion = gtk_event_controller_motion_new();
+    g_signal_connect(motion, "enter", G_CALLBACK(pointer_motion), tab);
+    g_signal_connect(motion, "motion", G_CALLBACK(pointer_motion), tab);
+    g_signal_connect(motion, "leave", G_CALLBACK(pointer_leave), tab);
+    gtk_widget_add_controller(tab->area, motion);
+    g_signal_connect(tab->area, "unmap", G_CALLBACK(cancel_pointer), tab);
+    GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
     g_signal_connect(wheel, "scroll", G_CALLBACK(scroll), tab);
     gtk_widget_add_controller(tab->area, wheel);
     zgtk_title(tab, "Terminal", strlen("Terminal"));

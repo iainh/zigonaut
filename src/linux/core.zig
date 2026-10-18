@@ -108,6 +108,8 @@ const Core = struct {
     viewport_offset: u64 = 0,
     clipboard_enabled: bool = false,
     clipboard_limit: u32 = 1048576,
+    hover: ?Terminal.Link = null,
+    link_scratch: Terminal.LinkScratch = .{},
 
     fn clipboard(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperation) Terminal.ClipboardWriteResult {
         const self: *Core = @ptrCast(@alignCast(context.?));
@@ -172,9 +174,10 @@ const Core = struct {
             length += std.unicode.utf8Encode(scalar, buffer[length..][0..4]) catch continue;
         }
         const highlight = shared.search.highlight(self.search.matches.items, self.search.active, self.viewport_offset + cell.y, cell.x);
+        const hovered = if (self.hover) |link| cell.y == link.row and cell.x >= link.start_column and cell.x < link.end_column else false;
         const flags: u16 = @as(u16, @intFromBool(cell.bold)) |
             (@as(u16, @intFromBool(cell.italic)) << 1) |
-            (@as(u16, @intFromBool(cell.underline != 0)) << 2) |
+            (@as(u16, @intFromBool(cell.underline != 0 or hovered)) << 2) |
             (@as(u16, @intFromBool(cell.strikethrough)) << 3) |
             (@as(u16, @intFromBool(cell.faint)) << 4) |
             (@as(u16, @intFromBool(cell.selected)) << 5) |
@@ -237,6 +240,7 @@ export fn zgtk_create(host: ?*anyopaque) ?*Core {
 }
 
 export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, clipboard: bool, limit: u32) bool {
+    zgtk_clear_hover(core);
     const palette = switch (theme) {
         1 => shared.theme.parseJson(allocator, @embedFile("fluent-light")) catch return false,
         2 => shared.theme.parseJson(allocator, @embedFile("fluent-dark")) catch return false,
@@ -256,6 +260,8 @@ export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, c
 }
 
 export fn zgtk_destroy(core: *Core) void {
+    zgtk_clear_hover(core);
+    core.link_scratch.deinit(allocator);
     core.search.deinit(allocator);
     core.search_cache.deinit(allocator);
     core.snapshot.deinit(allocator);
@@ -264,11 +270,13 @@ export fn zgtk_destroy(core: *Core) void {
 }
 
 export fn zgtk_feed(core: *Core, bytes: [*]const u8, length: usize) void {
+    zgtk_clear_hover(core);
     core.terminal.feed(bytes[0..length]);
     if (core.search.enabled) core.invalidateSearch();
 }
 
 export fn zgtk_resize(core: *Core, columns: u16, rows: u16, cell_width: u32, cell_height: u32) bool {
+    zgtk_clear_hover(core);
     core.terminal.resize(columns, rows, cell_width, cell_height) catch return false;
     if (core.search.enabled) core.invalidateSearch();
     return true;
@@ -318,6 +326,7 @@ fn keyFromName(name: []const u8) ?Terminal.Key {
 }
 
 export fn zgtk_key(core: *Core, name: [*:0]const u8, modifiers: u16, consumed: u16, text: [*]const u8, length: usize, release: bool) bool {
+    zgtk_clear_hover(core);
     const key = keyFromName(std.mem.span(name)) orelse {
         if (!release and length != 0) {
             _ = core.terminal.scrollToBottom() catch return false;
@@ -339,6 +348,7 @@ export fn zgtk_key(core: *Core, name: [*:0]const u8, modifiers: u16, consumed: u
 }
 
 export fn zgtk_paste(core: *Core, text: [*]const u8, length: usize) bool {
+    zgtk_clear_hover(core);
     const mutable = allocator.dupe(u8, text[0..length]) catch return false;
     defer allocator.free(mutable);
     const bytes = core.terminal.encodePasteAlloc(allocator, mutable) catch return false;
@@ -349,7 +359,39 @@ export fn zgtk_paste(core: *Core, text: [*]const u8, length: usize) bool {
 }
 
 export fn zgtk_scroll(core: *Core, lines: c_int) void {
+    zgtk_clear_hover(core);
     core.terminal.scrollViewport(lines);
+}
+
+export fn zgtk_mouse(core: *Core, action: u8, button: u8, x: i32, y: i32, width: u32, height: u32, cell_width: u32, cell_height: u32, padding: u32, modifiers: u16, any_pressed: bool) bool {
+    if (action > 2 or button > 7 or !core.terminal.mouseTracking()) return false;
+    var buffer: [128]u8 = undefined;
+    const bytes = core.terminal.encodeMouse(@enumFromInt(action), @enumFromInt(button), .{ .x = x, .y = y }, modifiers, .{
+        .screen_width = width,
+        .screen_height = height,
+        .cell_width = cell_width,
+        .cell_height = cell_height,
+        .padding_top = padding,
+        .padding_bottom = padding,
+        .padding_left = padding,
+        .padding_right = padding,
+    }, any_pressed, &buffer) catch return true;
+    zgtk_write(core.host, bytes.ptr, bytes.len);
+    return true;
+}
+
+export fn zgtk_clear_hover(core: *Core) void {
+    if (core.hover) |link| allocator.free(link.uri);
+    core.hover = null;
+}
+
+export fn zgtk_link_at(core: *Core, x: u16, y: u16, length: *usize) ?[*]const u8 {
+    zgtk_clear_hover(core);
+    length.* = 0;
+    core.hover = core.terminal.linkAtAllocWithScratch(allocator, allocator, &core.link_scratch, .{ .x = x, .y = y }) catch return null;
+    const link = core.hover orelse return null;
+    length.* = link.uri.len;
+    return link.uri.ptr;
 }
 
 export fn zgtk_focus(core: *Core, focused: bool) void {
@@ -419,11 +461,13 @@ export fn zgtk_search_tick(core: *Core) SearchStatus {
 }
 
 export fn zgtk_search_navigate(core: *Core, forward: bool) SearchStatus {
+    zgtk_clear_hover(core);
     if (core.search.navigate(forward)) |match| core.scrollTo(match.row);
     return core.searchStatus();
 }
 
 export fn zgtk_search_clear(core: *Core) void {
+    zgtk_clear_hover(core);
     if (core.search.saved_offset) |offset| core.scrollTo(offset);
     core.search.deinit(allocator);
     core.search = .{};
@@ -432,6 +476,7 @@ export fn zgtk_search_clear(core: *Core) void {
 }
 
 export fn zgtk_navigate_prompt(core: *Core, forward: bool) bool {
+    zgtk_clear_hover(core);
     core.terminal.setSelection(null) catch return false;
     return core.terminal.navigatePrompt(forward) catch false;
 }

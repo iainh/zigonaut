@@ -20,6 +20,17 @@ bool zgtk_key(TerminalCore *core, const char *name, uint16_t modifiers,
 bool zgtk_paste(TerminalCore *core, const char *text, size_t length);
 void zgtk_scroll(TerminalCore *core, int lines);
 void zgtk_focus(TerminalCore *core, bool focused);
+/* action: press=0, release=1, motion=2. button: none=0, left/middle/right=1..3,
+ * wheels up/down/left/right=4..7. True consumes the event, even in modes
+ * that encode no bytes. GTK owns Shift override and matching press lifetimes. */
+bool zgtk_mouse(TerminalCore *core, uint8_t action, uint8_t button,
+                int32_t x, int32_t y, uint32_t width, uint32_t height,
+                uint32_t cell_width, uint32_t cell_height, uint32_t padding,
+                uint16_t modifiers, bool any_pressed);
+/* Borrowed URI bytes, valid until the next hover or terminal mutation. Never
+ * shell text. Shared link detection owns OSC8 precedence and scheme policy. */
+const char *zgtk_link_at(TerminalCore *core, uint16_t x, uint16_t y, size_t *length);
+void zgtk_clear_hover(TerminalCore *core);
 bool zgtk_select(TerminalCore *core, uint16_t x, uint16_t y, bool begin, bool rectangle);
 void zgtk_copy(TerminalCore *core);
 bool zgtk_copy_last_command(TerminalCore *core);

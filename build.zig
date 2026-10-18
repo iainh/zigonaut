@@ -498,6 +498,11 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     image_tests.addArg(installed_exe);
     image_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-images-ui", "Test Kitty pixels and pane lifetimes at 2x (requires python3-pil and X11)").dependOn(&image_tests.step);
+    const pointer_tests = b.addSystemCommand(&.{ "dbus-run-session", "--", "/usr/bin/python3" });
+    pointer_tests.addFileArg(b.path("src/linux/test_pointer_ui.py"));
+    pointer_tests.addArg(installed_exe);
+    pointer_tests.step.dependOn(b.getInstallStep());
+    b.step("test-linux-pointer-ui", "Test native mouse reporting and links (requires python3-pyatspi and X11)").dependOn(&pointer_tests.step);
 }
 
 fn addCiStep(b: *std.Build, check_step: *std.Build.Step, test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
