@@ -1,0 +1,672 @@
+#include "core.h"
+#include <adwaita.h>
+#include <glib-unix.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pty.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
+
+typedef struct {
+    GtkWindow *window;
+    AdwTabView *tabs;
+    AdwToastOverlay *toasts;
+    gboolean closing;
+} Window;
+
+typedef struct {
+    Window *window;
+    GApplication *application;
+    GtkWidget *area;
+    AdwTabPage *page;
+    GtkIMContext *im;
+    GdkEvent *key_event;
+    PangoLayout *layout;
+    PangoFontDescription *font;
+    TerminalCore *core;
+    cairo_t *cr; /* Borrowed only inside the drawing callback. */
+    GByteArray *pending;
+    GCancellable *clipboard_read;
+    int master, columns, rows, cell_width, cell_height, font_size;
+    pid_t child;
+    guint read_source, write_source, child_source;
+    double drag_x, drag_y;
+    gboolean rectangle;
+} Tab;
+
+static void new_tab(Window *window);
+static Window *new_window(GtkApplication *app);
+
+static void colour(cairo_t *cr, uint32_t rgb, double alpha) {
+    cairo_set_source_rgba(cr, ((rgb >> 16) & 255) / 255.,
+                          ((rgb >> 8) & 255) / 255., (rgb & 255) / 255., alpha);
+}
+
+void zgtk_begin_frame(void *host, uint32_t background) {
+    Tab *tab = host;
+    colour(tab->cr, background, 1);
+    cairo_paint(tab->cr);
+}
+
+void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
+                    const char *text, size_t length, uint32_t foreground,
+                    uint32_t background, uint32_t underline, uint8_t flags) {
+    Tab *tab = host;
+    double left = 8 + x * tab->cell_width, top = 8 + y * tab->cell_height;
+    double width = columns * tab->cell_width;
+    cairo_t *cr = tab->cr;
+    cairo_save(cr);
+    cairo_rectangle(cr, left, top, width, tab->cell_height);
+    cairo_clip(cr);
+    colour(cr, flags & 32 ? 0x365880 : background, 1);
+    cairo_paint(cr);
+    if (length) {
+        pango_font_description_set_weight(tab->font, flags & 1 ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+        pango_font_description_set_style(tab->font, flags & 2 ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
+        pango_layout_set_font_description(tab->layout, tab->font);
+        pango_layout_set_text(tab->layout, text, (int)length);
+        colour(cr, foreground, flags & 16 ? 0.5 : 1);
+        cairo_move_to(cr, left, top);
+        pango_cairo_show_layout(cr, tab->layout);
+    }
+    colour(cr, underline, 1);
+    if (flags & 4) cairo_rectangle(cr, left, top + tab->cell_height - 2, width, 1);
+    if (flags & 8) cairo_rectangle(cr, left, top + tab->cell_height / 2., width, 1);
+    if (flags & 64) cairo_rectangle(cr, left, top, width, 1);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
+void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
+                      uint8_t style, uint32_t rgb) {
+    Tab *tab = host;
+    double left = 8 + x * tab->cell_width, top = 8 + y * tab->cell_height;
+    double width = columns * tab->cell_width, height = tab->cell_height;
+    GdkRectangle location = { (int)left, (int)top, (int)width, (int)height };
+    gtk_im_context_set_cursor_location(tab->im, &location);
+    if (!gtk_widget_has_focus(tab->area)) style = 3;
+    colour(tab->cr, rgb, style == 1 ? 0.45 : 1);
+    if (style == 0) width = 2;
+    if (style == 2) { top += height - 2; height = 2; }
+    cairo_rectangle(tab->cr, left + 0.5, top + 0.5, width - 1, height - 1);
+    if (style == 3) cairo_stroke(tab->cr); else cairo_fill(tab->cr);
+}
+
+void zgtk_title(void *host, const char *bytes, size_t length) {
+    Tab *tab = host;
+    char *text = g_utf8_make_valid(bytes, (gssize)MIN(length, 1024));
+    /* Tab titles are plain text; the tooltip property, unlike the title,
+     * accepts markup and must be escaped. */
+    adw_tab_page_set_title(tab->page, text);
+    char *escaped = g_markup_escape_text(text, -1);
+    adw_tab_page_set_tooltip(tab->page, escaped);
+    g_free(escaped);
+    if (adw_tab_page_get_selected(tab->page)) gtk_window_set_title(tab->window->window, text);
+    g_free(text);
+}
+
+void zgtk_clipboard(void *host, const char *bytes, size_t length) {
+    Tab *tab = host;
+    char *text = g_strndup(bytes, length);
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(tab->area), text);
+    g_free(text);
+}
+
+static gboolean flush_output(gint fd, GIOCondition condition, gpointer data) {
+    Tab *tab = data;
+    if (condition & (G_IO_HUP | G_IO_ERR)) {
+        g_byte_array_set_size(tab->pending, 0);
+        tab->write_source = 0;
+        return G_SOURCE_REMOVE;
+    }
+    while (tab->pending->len) {
+        ssize_t count = write(fd, tab->pending->data, tab->pending->len);
+        if (count > 0) g_byte_array_remove_range(tab->pending, 0, (guint)count);
+        else if (count < 0 && errno == EINTR) continue;
+        else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return G_SOURCE_CONTINUE;
+        else { g_byte_array_set_size(tab->pending, 0); break; }
+    }
+    tab->write_source = 0;
+    return G_SOURCE_REMOVE;
+}
+
+void zgtk_write(void *host, const char *bytes, size_t length) {
+    Tab *tab = host;
+    if (tab->master < 0 || !length) return;
+    /* Bound queued paste while a foreground program is not reading. */
+    if (length > 16 * 1024 * 1024 - tab->pending->len) {
+        adw_toast_overlay_add_toast(tab->window->toasts, adw_toast_new("Paste exceeds the 16 MiB input queue limit"));
+        return;
+    }
+    g_byte_array_append(tab->pending, (const guint8 *)bytes, (guint)length);
+    if (!tab->write_source && flush_output(tab->master, G_IO_OUT, tab))
+        tab->write_source = g_unix_fd_add(tab->master, G_IO_OUT | G_IO_HUP | G_IO_ERR, flush_output, tab);
+}
+
+static gboolean read_output(gint fd, GIOCondition condition, gpointer data) {
+    Tab *tab = data;
+    char buffer[16384];
+    gboolean ended = FALSE;
+    /* Yield to GTK even when a process continuously floods the PTY. */
+    for (int iteration = 0; iteration < 16; iteration++) {
+        ssize_t count = read(fd, buffer, sizeof buffer);
+        if (count > 0) {
+            zgtk_feed(tab->core, buffer, (size_t)count);
+        } else if (count < 0 && errno == EINTR) continue;
+        else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            ended = (condition & (G_IO_HUP | G_IO_ERR)) != 0;
+            break;
+        } else { ended = TRUE; break; } /* Linux PTYs return EIO at EOF. */
+    }
+    gtk_widget_queue_draw(tab->area);
+    if (!ended) return G_SOURCE_CONTINUE;
+    tab->read_source = 0;
+    if (tab->write_source) { g_source_remove(tab->write_source); tab->write_source = 0; }
+    close(tab->master);
+    tab->master = -1;
+    zgtk_title(tab, "Shell exited", strlen("Shell exited"));
+    return G_SOURCE_REMOVE;
+}
+
+static void child_exited(GPid pid, gint status, gpointer data) {
+    (void)status;
+    Tab *tab = data;
+    tab->child = 0;
+    tab->child_source = 0;
+    g_spawn_close_pid(pid);
+}
+
+/* Once its tab is gone, a child still needs reaping. A bounded grace period
+ * prevents a shell ignoring SIGHUP from leaking after its window closes. */
+typedef struct { pid_t pid; guint timer; GApplication *application; } Reaper;
+static gboolean kill_child(gpointer data) {
+    Reaper *reaper = data;
+    kill(reaper->pid, SIGKILL);
+    reaper->timer = 0;
+    return G_SOURCE_REMOVE;
+}
+static void reap_child(GPid pid, gint status, gpointer data) {
+    (void)status;
+    Reaper *reaper = data;
+    if (reaper->timer) g_source_remove(reaper->timer);
+    g_spawn_close_pid(pid);
+    g_application_release(reaper->application);
+    g_free(reaper);
+}
+
+static void stop_session(Tab *tab) {
+    g_cancellable_cancel(tab->clipboard_read);
+    if (tab->read_source) g_source_remove(tab->read_source);
+    if (tab->write_source) g_source_remove(tab->write_source);
+    if (tab->master >= 0) close(tab->master);
+    tab->read_source = tab->write_source = 0;
+    tab->master = -1;
+    if (tab->child) {
+        g_source_remove(tab->child_source);
+        kill(-tab->child, SIGHUP);
+        kill(tab->child, SIGHUP);
+        Reaper *reaper = g_new0(Reaper, 1);
+        reaper->pid = tab->child;
+        reaper->application = tab->application;
+        g_application_hold(reaper->application);
+        reaper->timer = g_timeout_add(1000, kill_child, reaper);
+        g_child_watch_add(tab->child, reap_child, reaper);
+        tab->child = 0;
+        tab->child_source = 0;
+    }
+}
+
+static void destroy_tab(gpointer data) {
+    Tab *tab = data;
+    stop_session(tab);
+    g_object_unref(tab->clipboard_read);
+    zgtk_destroy(tab->core);
+    g_byte_array_unref(tab->pending);
+    g_object_unref(tab->im);
+    g_object_unref(tab->layout);
+    pango_font_description_free(tab->font);
+    g_free(tab);
+}
+
+static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
+    (void)area;
+    Tab *tab = data;
+    int columns = CLAMP((width - 16) / tab->cell_width, 1, 65535);
+    int rows = CLAMP((height - 16) / tab->cell_height, 1, 65535);
+    if (columns == tab->columns && rows == tab->rows) return;
+    if (!zgtk_resize(tab->core, (uint16_t)columns, (uint16_t)rows,
+                       (uint32_t)tab->cell_width, (uint32_t)tab->cell_height)) return;
+    tab->columns = columns;
+    tab->rows = rows;
+    struct winsize size = { .ws_row = (unsigned short)rows, .ws_col = (unsigned short)columns };
+    if (tab->master >= 0) ioctl(tab->master, TIOCSWINSZ, &size);
+}
+
+static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
+    (void)area; (void)width; (void)height;
+    Tab *tab = data;
+    tab->cr = cr;
+    if (!zgtk_render(tab->core)) g_warning("Unable to render terminal");
+    tab->cr = NULL;
+}
+
+static uint16_t modifiers(GdkModifierType state) {
+    return (state & GDK_SHIFT_MASK ? 1 : 0) | (state & GDK_CONTROL_MASK ? 2 : 0) |
+           (state & GDK_ALT_MASK ? 4 : 0) | (state & GDK_SUPER_MASK ? 8 : 0);
+}
+
+static void paste_ready(GObject *object, GAsyncResult *result, gpointer data) {
+    /* The weak reference avoids keeping a closed tab alive during a slow
+     * clipboard transfer. Cancellation alone does not prevent its callback. */
+    GWeakRef *weak = data;
+    GtkWidget *area = g_weak_ref_get(weak);
+    GError *error = NULL;
+    char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(object), result, &error);
+    if (area) {
+        Tab *tab = g_object_get_data(G_OBJECT(area), "terminal");
+        if (tab && !g_cancellable_is_cancelled(tab->clipboard_read)) {
+            if (text) zgtk_paste(tab->core, text, strlen(text));
+            if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+                adw_toast_overlay_add_toast(tab->window->toasts, adw_toast_new("Clipboard does not contain readable text"));
+        }
+        g_object_unref(area);
+    }
+    g_clear_error(&error);
+    g_free(text);
+    g_weak_ref_clear(weak);
+    g_free(weak);
+}
+
+static void paste(Tab *tab) {
+    GWeakRef *weak = g_new0(GWeakRef, 1);
+    g_weak_ref_init(weak, tab->area);
+    gdk_clipboard_read_text_async(gtk_widget_get_clipboard(tab->area), tab->clipboard_read, paste_ready, weak);
+}
+
+static void set_font(Tab *tab, int size) {
+    tab->font_size = CLAMP(size, 6, 40);
+    pango_font_description_set_size(tab->font, tab->font_size * PANGO_SCALE);
+    pango_font_description_set_weight(tab->font, PANGO_WEIGHT_NORMAL);
+    pango_font_description_set_style(tab->font, PANGO_STYLE_NORMAL);
+    pango_layout_set_font_description(tab->layout, tab->font);
+    pango_layout_set_text(tab->layout, "M", 1);
+    pango_layout_get_pixel_size(tab->layout, &tab->cell_width, &tab->cell_height);
+    if (gtk_widget_get_width(tab->area) > 0) {
+        tab->columns = 0; /* Refresh pixel metrics even if the grid size is unchanged. */
+        resize(GTK_DRAWING_AREA(tab->area), gtk_widget_get_width(tab->area), gtk_widget_get_height(tab->area), tab);
+    }
+    gtk_widget_queue_draw(tab->area);
+}
+
+static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval,
+                            guint keycode, GdkModifierType state, gpointer data) {
+    (void)keycode;
+    Tab *tab = data;
+    guint lower = gdk_keyval_to_lower(keyval);
+    if ((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) {
+        if (lower == GDK_KEY_c) { zgtk_copy(tab->core); return TRUE; }
+        if (lower == GDK_KEY_v) { paste(tab); return TRUE; }
+    }
+    if ((state & GDK_SHIFT_MASK) && keyval == GDK_KEY_Insert) { paste(tab); return TRUE; }
+    if (state & GDK_CONTROL_MASK) {
+        if (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal) { set_font(tab, tab->font_size + 1); return TRUE; }
+        if (keyval == GDK_KEY_minus) { set_font(tab, tab->font_size - 1); return TRUE; }
+        if (keyval == GDK_KEY_0) { set_font(tab, 12); return TRUE; }
+    }
+    GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(controller));
+    GdkModifierType consumed = gdk_key_event_get_consumed_modifiers(event);
+    if (!((state & ~consumed) & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))) {
+        tab->key_event = event;
+        gboolean handled = gtk_im_context_filter_keypress(tab->im, event);
+        tab->key_event = NULL;
+        if (handled) return TRUE;
+    }
+    char text[8] = {0};
+    gunichar unicode = gdk_keyval_to_unicode(keyval);
+    int length = unicode >= 32 && unicode != 127 ? g_unichar_to_utf8(unicode, text) : 0;
+    const char *name = gdk_keyval_name(keyval);
+    zgtk_key(tab->core, name ? name : "", modifiers(state),
+             modifiers(gdk_key_event_get_consumed_modifiers(event)), text, (size_t)length, false);
+    gtk_widget_queue_draw(tab->area);
+    return TRUE;
+}
+
+static void key_released(GtkEventControllerKey *controller, guint keyval,
+                         guint keycode, GdkModifierType state, gpointer data) {
+    (void)controller; (void)keycode;
+    Tab *tab = data;
+    const char *name = gdk_keyval_name(keyval);
+    zgtk_key(tab->core, name ? name : "", modifiers(state), 0, "", 0, true);
+}
+
+static void commit(GtkIMContext *im, const char *text, gpointer data) {
+    (void)im;
+    Tab *tab = data;
+    /* IME commits are typed text, not bracketed paste. */
+    GdkEvent *event = tab->key_event;
+    const char *name = event ? gdk_keyval_name(gdk_key_event_get_keyval(event)) : "";
+    zgtk_key(tab->core, name ? name : "", event ? modifiers(gdk_event_get_modifier_state(event)) : 0,
+             event ? modifiers(gdk_key_event_get_consumed_modifiers(event)) : 0, text, strlen(text), false);
+    gtk_widget_queue_draw(tab->area);
+}
+
+static void focus_enter(GtkEventControllerFocus *controller, gpointer data) {
+    (void)controller;
+    Tab *tab = data;
+    gtk_im_context_focus_in(tab->im);
+    zgtk_focus(tab->core, true);
+    gtk_widget_queue_draw(tab->area);
+}
+static void focus_leave(GtkEventControllerFocus *controller, gpointer data) {
+    (void)controller;
+    Tab *tab = data;
+    gtk_im_context_focus_out(tab->im);
+    zgtk_focus(tab->core, false);
+    gtk_widget_queue_draw(tab->area);
+}
+
+static void select_at(Tab *tab, double x, double y, bool begin) {
+    zgtk_select(tab->core, (uint16_t)CLAMP((x - 8) / tab->cell_width, 0, tab->columns - 1),
+                (uint16_t)CLAMP((y - 8) / tab->cell_height, 0, tab->rows - 1), begin, tab->rectangle);
+    gtk_widget_queue_draw(tab->area);
+}
+static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
+    Tab *tab = data;
+    gtk_widget_grab_focus(tab->area);
+    tab->drag_x = x; tab->drag_y = y;
+    tab->rectangle = (gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture)) & GDK_ALT_MASK) != 0;
+    select_at(tab, x, y, true);
+}
+static void drag_update(GtkGestureDrag *gesture, double x, double y, gpointer data) {
+    (void)gesture;
+    Tab *tab = data;
+    select_at(tab, tab->drag_x + x, tab->drag_y + y, false);
+}
+static gboolean scroll(GtkEventControllerScroll *controller, double dx, double dy, gpointer data) {
+    (void)controller; (void)dx;
+    Tab *tab = data;
+    zgtk_scroll(tab->core, dy > 0 ? 3 : -3);
+    gtk_widget_queue_draw(tab->area);
+    return TRUE;
+}
+
+static void new_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    new_tab(data);
+}
+static void close_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *window = data;
+    AdwTabPage *page = adw_tab_view_get_selected_page(window->tabs);
+    if (page) adw_tab_view_close_page(window->tabs, page);
+}
+static void switched(AdwTabView *view, GParamSpec *property, gpointer data) {
+    (void)property;
+    Window *window = data;
+    AdwTabPage *page = adw_tab_view_get_selected_page(view);
+    if (page) {
+        gtk_widget_grab_focus(adw_tab_page_get_child(page));
+        gtk_window_set_title(window->window, adw_tab_page_get_title(page));
+    }
+}
+
+static void page_attached(AdwTabView *view, AdwTabPage *page, int position, gpointer data) {
+    (void)view; (void)position;
+    Tab *tab = g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal");
+    tab->window = data;
+    tab->page = page;
+}
+
+static void page_detached(AdwTabView *view, AdwTabPage *page, int position, gpointer data) {
+    (void)page; (void)position;
+    Window *window = data;
+    /* Transfers retain the child and its live PTY. */
+    if (window->closing) return;
+    if (!adw_tab_view_get_n_pages(view)) gtk_window_close(window->window);
+    else switched(view, NULL, window);
+}
+
+static gboolean close_page(AdwTabView *view, AdwTabPage *page, gpointer data) {
+    (void)view; (void)data;
+    /* Stop callbacks now: Adwaita can retain a closing page for animation. */
+    stop_session(g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal"));
+    return FALSE;
+}
+
+static gboolean close_window(GtkWindow *widget, gpointer data) {
+    (void)widget;
+    Window *window = data;
+    window->closing = TRUE;
+    for (int i = 0; i < adw_tab_view_get_n_pages(window->tabs); i++) {
+        AdwTabPage *page = adw_tab_view_get_nth_page(window->tabs, i);
+        stop_session(g_object_get_data(G_OBJECT(adw_tab_page_get_child(page)), "terminal"));
+    }
+    return FALSE;
+}
+
+static AdwTabView *create_window(AdwTabView *view, gpointer data) {
+    (void)view;
+    Window *source = data;
+    Window *destination = new_window(gtk_window_get_application(source->window));
+    gtk_window_present(destination->window);
+    return destination->tabs;
+}
+
+static void move_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *source = data;
+    AdwTabPage *page = adw_tab_view_get_selected_page(source->tabs);
+    if (!page) return;
+    Window *destination = new_window(gtk_window_get_application(source->window));
+    adw_tab_view_transfer_page(source->tabs, page, destination->tabs, 0);
+    gtk_window_present(destination->window);
+}
+
+static gboolean spawn_shell(Tab *tab, GError **error) {
+    int slave;
+    struct winsize size = { .ws_row = (unsigned short)tab->rows, .ws_col = (unsigned short)tab->columns };
+    if (openpty(&tab->master, &slave, NULL, NULL, &size) < 0) goto fail;
+    fcntl(tab->master, F_SETFD, FD_CLOEXEC);
+    fcntl(slave, F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_adddup2(&actions, slave, fd);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    sigset_t signals;
+    sigfillset(&signals);
+    posix_spawnattr_setsigdefault(&attributes, &signals);
+    sigemptyset(&signals);
+    posix_spawnattr_setsigmask(&attributes, &signals);
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    /* Re-exec before setting up the child: no GTK or GLib code after fork. */
+    char *argv[] = { (char *)"zigonaut", (char *)"--pty-child", NULL };
+    char **env = g_get_environ();
+    env = g_environ_setenv(env, "TERM", "xterm-256color", TRUE);
+    env = g_environ_setenv(env, "COLORTERM", "truecolor", TRUE);
+    int result = posix_spawn(&tab->child, "/proc/self/exe", &actions, &attributes, argv, env);
+    g_strfreev(env);
+    posix_spawnattr_destroy(&attributes);
+    posix_spawn_file_actions_destroy(&actions);
+    close(slave);
+    if (result) { close(tab->master); tab->master = -1; errno = result; goto fail; }
+    fcntl(tab->master, F_SETFL, O_NONBLOCK);
+    tab->read_source = g_unix_fd_add(tab->master, G_IO_IN | G_IO_HUP | G_IO_ERR, read_output, tab);
+    tab->child_source = g_child_watch_add(tab->child, child_exited, tab);
+    return TRUE;
+fail:
+    g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Unable to start shell: %s", g_strerror(errno));
+    return FALSE;
+}
+
+static void new_tab(Window *window) {
+    Tab *tab = g_new0(Tab, 1);
+    tab->window = window;
+    tab->application = G_APPLICATION(gtk_window_get_application(window->window));
+    tab->master = -1;
+    tab->columns = 80; tab->rows = 24;
+    tab->area = gtk_drawing_area_new();
+    tab->pending = g_byte_array_new();
+    tab->clipboard_read = g_cancellable_new();
+    tab->im = gtk_im_multicontext_new();
+    gtk_im_context_set_client_widget(tab->im, tab->area);
+    g_signal_connect(tab->im, "commit", G_CALLBACK(commit), tab);
+    tab->layout = gtk_widget_create_pango_layout(tab->area, NULL);
+    pango_layout_set_single_paragraph_mode(tab->layout, TRUE);
+    tab->font = pango_font_description_from_string("Monospace 12");
+    tab->core = zgtk_create(tab);
+    if (!tab->core) g_error("Unable to initialize terminal engine");
+    set_font(tab, 12);
+    g_object_set_data_full(G_OBJECT(tab->area), "terminal", tab, destroy_tab);
+    gtk_widget_set_focusable(tab->area, TRUE);
+    gtk_widget_set_hexpand(tab->area, TRUE);
+    gtk_widget_set_vexpand(tab->area, TRUE);
+    gtk_widget_set_cursor_from_name(tab->area, "text");
+    gtk_widget_set_tooltip_text(tab->area, NULL);
+    gtk_accessible_update_property(GTK_ACCESSIBLE(tab->area), GTK_ACCESSIBLE_PROPERTY_LABEL, "Terminal", -1);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(tab->area), draw, tab, NULL);
+    g_signal_connect(tab->area, "resize", G_CALLBACK(resize), tab);
+    GtkEventController *keys = gtk_event_controller_key_new();
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(key_pressed), tab);
+    g_signal_connect(keys, "key-released", G_CALLBACK(key_released), tab);
+    gtk_widget_add_controller(tab->area, keys);
+    GtkEventController *focus = gtk_event_controller_focus_new();
+    g_signal_connect(focus, "enter", G_CALLBACK(focus_enter), tab);
+    g_signal_connect(focus, "leave", G_CALLBACK(focus_leave), tab);
+    gtk_widget_add_controller(tab->area, focus);
+    GtkGesture *drag = gtk_gesture_drag_new();
+    g_signal_connect(drag, "drag-begin", G_CALLBACK(drag_begin), tab);
+    g_signal_connect(drag, "drag-update", G_CALLBACK(drag_update), tab);
+    gtk_widget_add_controller(tab->area, GTK_EVENT_CONTROLLER(drag));
+    GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    g_signal_connect(wheel, "scroll", G_CALLBACK(scroll), tab);
+    gtk_widget_add_controller(tab->area, wheel);
+    tab->page = adw_tab_view_append(window->tabs, tab->area);
+    zgtk_title(tab, "Terminal", strlen("Terminal"));
+    adw_tab_view_set_selected_page(window->tabs, tab->page);
+    gtk_widget_grab_focus(tab->area);
+    GError *error = NULL;
+    if (!spawn_shell(tab, &error)) {
+        zgtk_title(tab, "Shell failed", strlen("Shell failed"));
+        zgtk_feed(tab->core, error->message, strlen(error->message));
+        adw_toast_overlay_add_toast(window->toasts, adw_toast_new(error->message));
+        g_error_free(error);
+    }
+}
+
+static void about(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    GtkWindow *parent = gtk_application_get_active_window(GTK_APPLICATION(data));
+    const char *developers[] = { "Iain H", NULL };
+    adw_show_about_window(parent,
+        "application-name", "Zigonaut",
+        "application-icon", "com.spiralpoint.zigonaut",
+        "developer-name", "Iain H",
+        "developers", developers,
+        "version", ZIGONAUT_VERSION,
+        "comments", "A native terminal built with Zig",
+        "website", "https://github.com/iainh/zigonaut",
+        "issue-url", "https://github.com/iainh/zigonaut/issues",
+        "license-type", GTK_LICENSE_MIT_X11,
+        NULL);
+}
+
+static Window *new_window(GtkApplication *app) {
+    Window *window = g_new0(Window, 1);
+    window->window = GTK_WINDOW(adw_application_window_new(app));
+    g_object_set_data_full(G_OBJECT(window->window), "window", window, g_free);
+    gtk_window_set_title(window->window, "Zigonaut");
+    gtk_window_set_default_size(window->window, 980, 640);
+    const GActionEntry actions[] = {
+        { .name = "new-tab", .activate = new_tab_action },
+        { .name = "close-tab", .activate = close_tab_action },
+        { .name = "move-tab", .activate = move_tab_action },
+    };
+    g_action_map_add_action_entries(G_ACTION_MAP(window->window), actions, G_N_ELEMENTS(actions), window);
+    window->tabs = ADW_TAB_VIEW(adw_tab_view_new());
+    adw_tab_view_set_shortcuts(window->tabs,
+        ADW_TAB_VIEW_SHORTCUT_CONTROL_PAGE_UP | ADW_TAB_VIEW_SHORTCUT_CONTROL_PAGE_DOWN |
+        ADW_TAB_VIEW_SHORTCUT_CONTROL_SHIFT_PAGE_UP | ADW_TAB_VIEW_SHORTCUT_CONTROL_SHIFT_PAGE_DOWN);
+    g_signal_connect(window->tabs, "notify::selected-page", G_CALLBACK(switched), window);
+    g_signal_connect(window->tabs, "page-attached", G_CALLBACK(page_attached), window);
+    g_signal_connect(window->tabs, "page-detached", G_CALLBACK(page_detached), window);
+    g_signal_connect(window->tabs, "close-page", G_CALLBACK(close_page), window);
+    g_signal_connect(window->tabs, "create-window", G_CALLBACK(create_window), window);
+    g_signal_connect(window->window, "close-request", G_CALLBACK(close_window), window);
+    /* Keep tab DND outside a GtkWindowHandle: on GTK 4.8, denying the tab
+     * reorder gesture to begin DND otherwise also starts a window move. */
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_add_css_class(header, "titlebar");
+    gtk_widget_add_css_class(header, "toolbar");
+    gtk_box_append(GTK_BOX(header), gtk_window_controls_new(GTK_PACK_START));
+    GtkWidget *bar = GTK_WIDGET(adw_tab_bar_new());
+    adw_tab_bar_set_view(ADW_TAB_BAR(bar), window->tabs);
+    adw_tab_bar_set_autohide(ADW_TAB_BAR(bar), FALSE);
+    adw_tab_bar_set_expand_tabs(ADW_TAB_BAR(bar), FALSE);
+    gtk_widget_add_css_class(bar, "inline");
+    gtk_widget_set_hexpand(bar, TRUE);
+    GtkWidget *add = gtk_button_new_from_icon_name("tab-new-symbolic");
+    gtk_widget_set_tooltip_text(add, "New tab (Ctrl+Shift+T)");
+    gtk_actionable_set_action_name(GTK_ACTIONABLE(add), "win.new-tab");
+    gtk_box_append(GTK_BOX(header), add);
+    gtk_box_append(GTK_BOX(header), bar);
+    GtkWidget *handle = gtk_window_handle_new();
+    gtk_widget_set_size_request(handle, 48, -1);
+    gtk_box_append(GTK_BOX(header), handle);
+    GMenu *menu = g_menu_new();
+    g_menu_append(menu, "New Tab", "win.new-tab");
+    g_menu_append(menu, "Move Tab to New Window", "win.move-tab");
+    g_menu_append(menu, "About Zigonaut", "app.about");
+    GtkWidget *menu_button = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button), "open-menu-symbolic");
+    gtk_menu_button_set_primary(GTK_MENU_BUTTON(menu_button), TRUE);
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_button), G_MENU_MODEL(menu));
+    gtk_widget_set_tooltip_text(menu_button, "Main menu");
+    g_object_unref(menu);
+    gtk_box_append(GTK_BOX(header), menu_button);
+    gtk_box_append(GTK_BOX(header), gtk_window_controls_new(GTK_PACK_END));
+    window->toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
+    adw_toast_overlay_set_child(window->toasts, GTK_WIDGET(window->tabs));
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(content), header);
+    gtk_box_append(GTK_BOX(content), GTK_WIDGET(window->toasts));
+    gtk_widget_set_vexpand(GTK_WIDGET(window->toasts), TRUE);
+    adw_application_window_set_content(ADW_APPLICATION_WINDOW(window->window), content);
+    return window;
+}
+
+static void activate(GtkApplication *app, gpointer data) {
+    (void)data;
+    Window *window = new_window(app);
+    new_tab(window);
+    gtk_window_present(window->window);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--pty-child") == 0) {
+        if (setsid() < 0 || ioctl(STDIN_FILENO, TIOCSCTTY, 0) < 0) return 126;
+        const char *shell = getenv("SHELL");
+        if (!shell || shell[0] != '/') shell = "/bin/sh";
+        execl(shell, shell, "-i", (char *)NULL);
+        perror("Unable to execute shell");
+        return 127;
+    }
+    AdwApplication *app = adw_application_new("com.spiralpoint.zigonaut", G_APPLICATION_NON_UNIQUE);
+    g_set_application_name("Zigonaut");
+    gtk_window_set_default_icon_name("com.spiralpoint.zigonaut");
+    const GActionEntry actions[] = { { .name = "about", .activate = about } };
+    g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), app);
+    const char *new_tab_keys[] = { "<Control><Shift>t", NULL };
+    const char *close_tab_keys[] = { "<Control><Shift>w", NULL };
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-tab", new_tab_keys);
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.close-tab", close_tab_keys);
+    g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
+    int result = g_application_run(G_APPLICATION(app), argc, argv);
+    g_object_unref(app);
+    return result;
+}

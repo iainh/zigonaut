@@ -1,6 +1,6 @@
 <div align="center">
   <h1><img src="assets/icons/windows/zigonaut-256.png" width="144" alt="Zigonaut icon" align="center"> Zigonaut</h1>
-  <p><strong>A fast, native terminal for Windows, built with Zig and WinUI 3.</strong></p>
+  <p><strong>A native terminal for Windows, macOS, and Linux, built with Zig.</strong></p>
   <p>
     <a href="https://github.com/iainh/zigonaut/releases">Releases</a>
     ·
@@ -10,7 +10,7 @@
 
 Zigonaut combines a native Windows interface with a hardware-accelerated terminal renderer. It runs PowerShell, Command Prompt, WSL, and custom commands through Windows ConPTY, while [Ghostty's](https://github.com/ghostty-org/ghostty) VT library provides terminal parsing and state.
 
-The application is written primarily in Zig, with a code-first C++/WinRT bridge for WinUI 3. It supports Windows on x64 and ARM64.
+The application is written primarily in Zig, with native WinUI 3, macOS, and GTK 4 frontends sharing the same terminal engine. Windows supports x64 and ARM64. The initial Linux frontend is described under [Linux (GTK 4)](#linux-gtk-4); the feature lists below describe the Windows frontend unless noted otherwise.
 
 ## Major features
 
@@ -115,6 +115,70 @@ See [Windows keyboard shortcuts](docs/keyboard-shortcuts-windows.md) for the com
 Drag to select and copy text automatically. Hold `Alt` for rectangular selection, `Shift` to override terminal mouse reporting, or `Ctrl` while hovering and clicking to identify and open links.
 
 ## Compiling
+
+### Linux (GTK 4)
+
+Requires Zig 0.16.0, GTK 4.8+ and libadwaita 1.2+ development libraries,
+`pkg-config`, and a Linux desktop session. GTK chooses Wayland or X11 through
+its normal backend selection. Automated UI checks currently cover X11.
+
+On Debian or Ubuntu:
+
+```sh
+sudo apt-get install libgtk-4-dev libadwaita-1-dev pkg-config
+zig build
+zig build run
+```
+
+The default Linux build installs `zig-out/bin/zigonaut`, a desktop entry under
+`zig-out/share/applications`, and an application icon. For a user-local desktop
+installation, run `zig build --prefix "$HOME/.local"` and ensure `~/.local/bin`
+is on your desktop session's `PATH`. No Windows or Apple SDK is needed.
+
+The GTK/libadwaita frontend puts reorderable, detachable tabs directly in the
+header bar alongside native window controls. It follows the desktop's light/dark
+appearance for window chrome, uses Adwaita toasts for failed actions, and includes
+an About window in the main menu. The terminal keeps its Rasmus palette.
+It provides one POSIX PTY per tab, Pango/Cairo text rendering with font fallback,
+true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
+with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
+titles, and font zoom. It starts `$SHELL` interactively, falling back to
+`/bin/sh` when unset, and inherits the launcher's working directory. Shell exit
+leaves its final output visible until you close the tab.
+
+The main menu's **Move Tab to New Window** preserves the running shell and its
+state. Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
+the empty X11 desktop can leave the drag unfinished on that stack.
+
+| Linux shortcut | Action |
+| --- | --- |
+| `Ctrl+Shift+T` / `Ctrl+Shift+W` | Open / close a tab |
+| `Ctrl+Page Up` / `Ctrl+Page Down` | Switch tabs |
+| `Ctrl+Shift+Page Up` / `Ctrl+Shift+Page Down` | Reorder the current tab |
+| `F10` | Open the main menu |
+| `Ctrl+Shift+C` | Copy selected text |
+| `Ctrl+Shift+V` / `Shift+Insert` | Paste using the terminal's bracketed-paste mode |
+| `Shift+Page Up` / `Shift+Page Down` | Scroll history |
+| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
+
+This is an initial frontend, not feature parity with Windows or macOS. It does
+not yet include split panes, persistent settings/profiles, automatic shell
+integration, search, terminal mouse reporting, Kitty image presentation, or a
+screen-reader text interface. It uses the built-in Rasmus palette and does not
+read the Windows or macOS settings files. OSC clipboard writes are not enabled;
+clipboard changes require an explicit copy shortcut.
+
+```sh
+zig build ci
+# Real GTK/PTY integration checks, without needing a desktop:
+sudo apt-get install xvfb xdotool xclip
+xvfb-run -a zig build test-linux-ui
+```
+
+Linux sources live in `src/linux`: a small Zig bridge owns the shared terminal
+engine, while the C GTK host owns windows, input, clipboard, rendering, and PTYs.
+PTY I/O is nonblocking and event-driven on the GTK main loop. Shells start via
+`posix_spawn` and a fresh child process, so no GTK code runs after `fork`.
 
 ### Requirements
 

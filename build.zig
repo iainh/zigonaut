@@ -52,8 +52,12 @@ pub fn build(b: *std.Build) void {
         buildMacos(b, target, optimize, ghostty, shared_module, shared_test_step, fmt_step, apple_sdk);
         return;
     }
+    if (target.result.os.tag == .linux) {
+        buildLinux(b, target, optimize, ghostty, shared_module, shared_test_step, fmt_step);
+        return;
+    }
     if (target.result.os.tag != .windows) {
-        const unsupported = b.addFail("Zigonaut supports only Windows and macOS targets");
+        const unsupported = b.addFail("Zigonaut supports only Windows, macOS, and Linux targets");
         b.getInstallStep().dependOn(&unsupported.step);
         return;
     }
@@ -393,6 +397,55 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     run.step.dependOn(&bundle.step);
     const run_step = b.step("macos-run", "Run the native macOS frontend");
     run_step.dependOn(&run.step);
+}
+
+fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/linux/core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("shared", shared_module);
+    module.addIncludePath(b.path("src/linux"));
+    configureGhostty(module, ghostty);
+    module.linkSystemLibrary("gtk4", .{ .use_pkg_config = .force });
+    module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .force });
+    module.addCMacro("ZIGONAUT_VERSION", b.fmt("\"{s}\"", .{app_version}));
+    module.addCSourceFile(.{
+        .file = b.path("src/linux/gtk.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror" },
+    });
+    const exe = b.addExecutable(.{ .name = "zigonaut", .root_module = module });
+    b.installArtifact(exe);
+    b.installFile("src/linux/com.spiralpoint.zigonaut.desktop", "share/applications/com.spiralpoint.zigonaut.desktop");
+    b.installFile("assets/icons/windows/zigonaut-256.png", "share/icons/hicolor/256x256/apps/com.spiralpoint.zigonaut.png");
+    const check_step = b.step("check", "Compile Zigonaut without installing it");
+    check_step.dependOn(&exe.step);
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| run.addArgs(args);
+    b.step("run", "Run the native GTK frontend").dependOn(&run.step);
+
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/linux/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    tests.root_module.addImport("shared", shared_module);
+    tests.root_module.addIncludePath(b.path("src/linux"));
+    configureGhostty(tests.root_module, ghostty);
+    const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
+    linux_tests.dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run all supported tests");
+    test_step.dependOn(shared_test_step);
+    test_step.dependOn(linux_tests);
+    addCiStep(b, check_step, test_step, fmt_step);
+
+    const ui_tests = b.addSystemCommand(&.{"python3"});
+    ui_tests.addFileArg(b.path("src/linux/test_ui.py"));
+    ui_tests.addArtifactArg(exe);
+    b.step("test-linux-ui", "Test the GTK frontend on an X11 display (requires xdotool)").dependOn(&ui_tests.step);
 }
 
 fn addCiStep(b: *std.Build, check_step: *std.Build.Step, test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {

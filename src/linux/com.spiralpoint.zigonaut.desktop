@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zigonaut
+Comment=Native terminal emulator
+Exec=zigonaut
+Icon=com.spiralpoint.zigonaut
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;
+StartupNotify=true

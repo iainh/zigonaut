@@ -15,6 +15,7 @@
         "CHANGELOG.md",
         "LICENSE",
         "licenses",
+        "assets/icons/windows/zigonaut-256.png",
         "src",
         "macos",
         "winui",
