@@ -184,19 +184,17 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
             capture("pointer-default")
             baseline = underline()
             xdo("keydown", "ctrl")
-            time.sleep(0.2)
+            wait_for(lambda: underline() > baseline + scale * cell_width * 15, "Ctrl hover underline")
             capture("pointer-ctrl-hover")
-            assert underline() > baseline + scale * cell_width * 15, "Ctrl hover did not underline the link"
             send(first, "\x1b[10;1Hupdated")
-            assert underline() == baseline, "Output retained stale hover"
+            wait_for(lambda: underline() == baseline, "Output clears stale hover")
             move(4, 1)
-            assert underline() > baseline + scale * cell_width * 15
+            wait_for(lambda: underline() > baseline + scale * cell_width * 15, "Motion restores hover underline")
             xdo("mousemove", "--window", window, left + 20, top + 20)
-            time.sleep(0.1)
-            assert underline() == baseline, "Leaving retained stale hover"
+            wait_for(lambda: underline() == baseline, "Leaving clears stale hover")
             move(3, 1)
             xdo("click", 6)
-            assert underline() == baseline, "Scrolling retained stale hover"
+            wait_for(lambda: underline() == baseline, "Scrolling clears stale hover")
             xdo("click", 1)
             wait_for(lambda: (root / "uris").exists(), "native URI handler")
             assert json.loads((root / "uris").read_text().splitlines()[0]) == ["https://target.invalid/path?q=a;b"]
