@@ -169,7 +169,7 @@ typedef struct {
     Settings *settings;
     void (*applied)(gpointer);
     gpointer data;
-    GtkWindow *window;
+    AdwDialog *dialog;
     GtkWidget *font, *controls[G_N_ELEMENTS(fields)];
     GtkWidget *names[ZGTK_MAX_PROFILES], *shells[ZGTK_MAX_PROFILES];
     GtkWidget *commands[ZGTK_MAX_PROFILES], *directories[ZGTK_MAX_PROFILES];
@@ -219,7 +219,7 @@ static void name_changed(GtkEditable *editable, gpointer data) {
 static void remove_profile(GtkButton *button, gpointer data) {
     Editor *e = data;
     if (e->count == 1) {
-        adw_preferences_window_add_toast(ADW_PREFERENCES_WINDOW(e->window), adw_toast_new("Keep at least one profile"));
+        adw_preferences_dialog_add_toast(ADW_PREFERENCES_DIALOG(e->dialog), adw_toast_new("Keep at least one profile"));
         return;
     }
     /* Buttons carry their group instead of an index that could become stale. */
@@ -323,11 +323,11 @@ static void changed(GtkWidget *widget, gpointer data) {
     g_clear_error(&error); g_free(s);
 }
 
-static AdwPreferencesPage *page(AdwPreferencesWindow *window, const char *title, const char *icon) {
+static AdwPreferencesPage *page(AdwPreferencesDialog *dialog, const char *title, const char *icon) {
     AdwPreferencesPage *p = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
     adw_preferences_page_set_title(p, title);
     adw_preferences_page_set_icon_name(p, icon);
-    adw_preferences_window_add(window, p);
+    adw_preferences_dialog_add(dialog, p);
     return p;
 }
 
@@ -335,17 +335,15 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
     Editor *e = g_new0(Editor, 1);
     e->updating = TRUE;
     e->settings = settings; e->applied = applied; e->data = data;
-    e->window = GTK_WINDOW(adw_preferences_window_new());
-    g_object_set_data_full(G_OBJECT(e->window), "editor", e, g_free);
-    gtk_window_set_title(e->window, "Settings");
-    gtk_window_set_transient_for(e->window, parent);
-    gtk_window_set_modal(e->window, TRUE);
-    gtk_window_set_destroy_with_parent(e->window, TRUE);
-    gtk_window_set_default_size(e->window, 660, 720);
-    adw_preferences_window_set_search_enabled(ADW_PREFERENCES_WINDOW(e->window), FALSE);
-    AdwPreferencesPage *appearance = page(ADW_PREFERENCES_WINDOW(e->window), "Appearance", "preferences-desktop-theme-symbolic");
-    AdwPreferencesPage *terminal = page(ADW_PREFERENCES_WINDOW(e->window), "Terminal", "utilities-terminal-symbolic");
-    e->profiles_page = page(ADW_PREFERENCES_WINDOW(e->window), "Profiles", "system-users-symbolic");
+    e->dialog = adw_preferences_dialog_new();
+    g_object_set_data_full(G_OBJECT(e->dialog), "editor", e, g_free);
+    adw_dialog_set_title(e->dialog, "Settings");
+    adw_dialog_set_content_width(e->dialog, 660);
+    adw_dialog_set_content_height(e->dialog, 720);
+    adw_preferences_dialog_set_search_enabled(ADW_PREFERENCES_DIALOG(e->dialog), FALSE);
+    AdwPreferencesPage *appearance = page(ADW_PREFERENCES_DIALOG(e->dialog), "Appearance", "preferences-desktop-appearance-symbolic");
+    AdwPreferencesPage *terminal = page(ADW_PREFERENCES_DIALOG(e->dialog), "Terminal", "utilities-terminal-symbolic");
+    e->profiles_page = page(ADW_PREFERENCES_DIALOG(e->dialog), "Profiles", "system-users-symbolic");
     AdwPreferencesPage *pages[] = { appearance, terminal, e->profiles_page };
     for (guint i = 0; i < G_N_ELEMENTS(pages); i++) {
         e->errors[i] = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
@@ -411,5 +409,5 @@ void settings_present(GtkWindow *parent, Settings *settings, void (*applied)(gpo
     adw_combo_row_set_selected(e->default_profile, settings->default_profile);
     g_signal_connect(e->default_profile, "notify::selected", G_CALLBACK(property_changed), e);
     e->updating = FALSE;
-    gtk_window_present(e->window);
+    adw_dialog_present(e->dialog, GTK_WIDGET(parent));
 }

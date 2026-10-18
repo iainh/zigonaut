@@ -38,7 +38,8 @@ def nodes(root=None):
 
 
 def find(role, name, index=0):
-    return [n for n in nodes() if n.getRoleName() == role and n.name.startswith(name)][index]
+    dialog = next((n for n in nodes() if n.getRoleName() == "dialog" and n.name == "Settings"), None)
+    return [n for n in nodes(dialog) if n.getRoleName() == role and n.name.startswith(name)][index]
 
 
 def activate(role, name, index=0):
@@ -57,12 +58,20 @@ def spin(name, value):
 
 
 def combo(name, index):
-    # GTK 4.8 exposes combo rows but not an AT-SPI activation action.
     row = find("combo box", name)
-    window = xdo("search", "--onlyvisible", "--name", "^Settings$").splitlines()[0]
-    xdo("mousemove", "--window", window, 600, 300, "click", "--repeat", 12, "--delay", 10, 4)
-    time.sleep(0.3)
-    rect = row.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+    scroller = row.parent
+    while scroller.getRoleName() != "scroll pane":
+        scroller = scroller.parent
+    viewport = scroller.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+    for _ in range(40):
+        rect = row.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+        if viewport.y < rect.y + rect.height // 2 < viewport.y + viewport.height:
+            break
+        xdo("mousemove", "--window", window, viewport.x + viewport.width // 2, viewport.y + viewport.height // 2,
+            "click", 4 if rect.y < viewport.y else 5)
+        time.sleep(0.1)
+    else:
+        raise AssertionError(f"Combo row did not scroll into view: {name}")
     xdo("mousemove", "--window", window, rect.x + rect.width // 2, rect.y + rect.height // 2, "click", 1)
     time.sleep(0.2)
     xdo("key", "Home", *(["Down"] * index), "Return")
@@ -97,15 +106,15 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
 
         def settings():
             xdo("key", "ctrl+comma")
-            wait_for(lambda: any(n.getRoleName() == "frame" and n.name == "Settings" for n in nodes()), "settings window")
+            wait_for(lambda: any(n.getRoleName() == "dialog" and n.name == "Settings" for n in nodes()), "settings dialog")
             time.sleep(0.5)
 
         def close_settings():
-            # Close through the native window control rather than killing it.
-            frame = find("frame", "Settings")
-            close = [n for n in nodes(frame) if n.getRoleName() == "push button" and n.name == "Close"]
+            # Close through the native dialog control rather than killing it.
+            dialog = find("dialog", "Settings")
+            close = [n for n in nodes(dialog) if n.getRoleName() == "button" and n.name == "Close"]
             assert close[0].queryAction().doAction(0)
-            wait_for(lambda: not any(n.getRoleName() == "frame" and n.name == "Settings" for n in nodes()), "settings closed")
+            wait_for(lambda: not any(n.getRoleName() == "dialog" and n.name == "Settings" for n in nodes()), "settings closed")
 
         def saved():
             parser = configparser.ConfigParser(interpolation=None)
@@ -147,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             xdo("key", "ctrl+Page_Up")
             settings()
             assert not config.exists(), "Opening preferences should not write a file"
-            assert not any(n.getRoleName() == "push button" and n.name == "Apply" for n in nodes())
+            assert not any(n.getRoleName() == "button" and n.name == "Apply" for n in nodes())
             spin("Font size", 16)
             wait_for(lambda: config.exists() and saved()["Settings"]["fontSize"] == "16", "automatic font persistence")
             wait_for(lambda: grid(original)[0] < 24 and grid(pane)[0] < 24, "live resize while preferences remain open")
@@ -164,11 +173,11 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             activate("check box", "Allow terminal clipboard writes")
             assert saved()["Settings"]["terminalClipboardWrites"] == "1"
             activate("page tab", "Profiles")
-            activate("push button", "Add Profile")
-            activate("push button", "Add Profile")
+            activate("button", "Add Profile")
+            activate("button", "Add Profile")
             assert saved()["Settings"]["profileCount"] == "3"
             assert saved()["Profile 1"]["name"] != saved()["Profile 2"]["name"]
-            activate("push button", "Remove profile", 2)
+            activate("button", "Remove profile", 2)
             edit("Name", "Build shell", 1)
             edit("Shell executable", "/bin/sh", 1)
             edit("Command", "printf '%s' \"$PWD\" > profile.cwd; echo $$ >> launches; exec /bin/sh -i", 1)
@@ -187,13 +196,13 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             assert config.read_bytes() == valid, "Invalid shell was persisted"
             edit("Shell executable", "/bin/sh", 1)
             # Delete a profile before the default and retain its identity.
-            activate("push button", "Remove profile", 0)
+            activate("button", "Remove profile", 0)
             assert saved()["Settings"]["defaultProfile"] == "0"
             assert saved()["Profile 0"]["name"] == "Builder"
-            activate("push button", "Remove profile", 0)
+            activate("button", "Remove profile", 0)
             assert saved()["Settings"]["profileCount"] == "1"
             # Keep an alternate interactive profile for explicit menu launches.
-            activate("push button", "Add Profile")
+            activate("button", "Add Profile")
             edit("Name", "Interactive", 1)
             # A failed disk save must leave both the saved and live settings intact.
             backup = config.parent.with_name("backup")
@@ -247,9 +256,12 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-settings-") as directory:
             first_launch = (work / "launches").read_text().strip()
             assert first_launch != original
             # Navigate the actual profile submenu to select Interactive.
-            xdo("key", "F10", "Home", "Down", "Down", "Down", "Return")
+            xdo("key", "F10")
+            time.sleep(0.3)
+            xdo("key", "Down", "Down", "Down", "Right")
+            time.sleep(0.3)
+            xdo("key", "Down", "Down", "Return")
             time.sleep(0.5)
-            activate("menu item", "Interactive")
             command("pwd > alternate.cwd")
             wait_for(lambda: line_ready("alternate.cwd"), "named profile menu launch")
             assert (root / "alternate.cwd").read_text().strip() == str(root)

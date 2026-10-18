@@ -13,14 +13,15 @@ concurrency:
 
 jobs:
   linux:
-    name: Linux GTK (x86_64)
+    name: Linux GTK (Debian 13, x86_64)
     runs-on: ubuntu-24.04
+    container: debian:13
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-
       - name: Install GTK and UI test dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick
+        run: apt-get update && apt-get install -y ca-certificates curl git libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xauth xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick fonts-dejavu-core
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Install Zig 0.16.0
         env:

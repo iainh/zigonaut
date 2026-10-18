@@ -118,11 +118,14 @@ Drag to select and copy text automatically. Hold `Alt` for rectangular selection
 
 ### Linux (GTK 4)
 
-Requires Zig 0.16.0, GTK 4.8+, libadwaita 1.2+ and libpng development libraries,
-`pkg-config`, and a Linux desktop session. GTK chooses Wayland or X11 through
-its normal backend selection. Automated UI checks currently cover X11.
+The Linux dependency baseline is Debian 13 (trixie): Zig 0.16.0, GTK 4.18+,
+libadwaita 1.7+, GLib 2.84+ and libpng 1.6.48+ development libraries,
+`pkg-config`, and a Linux desktop session. Other distributions need equivalent
+or newer libraries; Debian 12 and Ubuntu 24.04's stock libraries are too old.
+GTK chooses Wayland or X11 through its normal backend selection. Automated UI
+checks run on Debian 13 with X11.
 
-On Debian or Ubuntu:
+On Debian 13:
 
 ```sh
 sudo apt-get install libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config
@@ -140,7 +143,7 @@ is on your desktop session's `PATH`. No Windows or Apple SDK is needed.
 The GTK/libadwaita frontend puts reorderable, detachable tabs directly in the
 header bar alongside native window controls. It follows the desktop's light/dark
 appearance for window chrome, uses Adwaita toasts for failed actions, and includes
-an About window and native Settings window in the main menu.
+native About and Settings dialogs in the main menu.
 It provides an independent POSIX PTY per pane, Pango/Cairo text rendering with font fallback,
 true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
 with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
@@ -197,8 +200,6 @@ pane key combinations; use the pane menu actions or adjust desktop bindings.
 
 The main menu's **Move Tab to New Window** preserves every running shell, split
 ratio, focused/zoomed pane and open search in the tab.
-Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
-the empty X11 desktop can leave the drag unfinished on that stack.
 
 Find keeps a separate query per pane and highlights matches across scrollback,
 including soft-wrapped lines. Lowercase ASCII queries ignore ASCII case; an
@@ -268,11 +269,8 @@ below the cursor, clipped to each pane's terminal grid; raw RGB-format images
 and negative-z placements remain unsupported. Converted Cairo surfaces use a
 per-pane cache bounded to eight images and 32 MiB. Shared image transport and
 resource limits still apply.
-On the tested GTK 4.8.3/Xvfb stack, the GL renderer intermittently corrupts a
-pane after tab transfer. The cause remains unresolved; the app keeps GTK's
-default renderer selection. `GSK_RENDERER=cairo zig build run` is a tested
-workaround. The image pixel suite defaults to Cairo for deterministic headless
-checks; set `GSK_RENDERER=gl` to exercise the affected GL path explicitly.
+The app keeps GTK's default renderer selection. The image pixel suite defaults
+to Cairo for deterministic headless checks.
 OSC clipboard writes are disabled by default; enabling them allows terminal
 programs to replace your clipboard up to the configured byte limit. Clipboard
 reads are not exposed to terminal programs. Explicit copy shortcuts work

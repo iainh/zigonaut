@@ -400,6 +400,9 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 }
 
 fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ghostty: *std.Build.Dependency, shared_module: *std.Build.Module, shared_test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {
+    const dependencies = b.addSystemCommand(&.{
+        "pkg-config", "--print-errors", "--exists", "gtk4 >= 4.18", "libadwaita-1 >= 1.7", "glib-2.0 >= 2.84", "libpng >= 1.6.48",
+    });
     const module = b.createModule(.{
         .root_source_file = b.path("src/linux/core.zig"),
         .target = target,
@@ -411,9 +414,13 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     configureGhostty(module, ghostty);
     module.linkSystemLibrary("gtk4", .{ .use_pkg_config = .force });
     module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .force });
-    // Keep the GTK 4.8 API contract even when building with newer headers.
-    module.addCMacro("GDK_VERSION_MIN_REQUIRED", "GDK_VERSION_4_8");
-    module.addCMacro("GDK_VERSION_MAX_ALLOWED", "GDK_VERSION_4_8");
+    // Debian 13's API baseline, including when building with newer headers.
+    module.addCMacro("GDK_VERSION_MIN_REQUIRED", "GDK_VERSION_4_18");
+    module.addCMacro("GDK_VERSION_MAX_ALLOWED", "GDK_VERSION_4_18");
+    module.addCMacro("ADW_VERSION_MIN_REQUIRED", "ADW_VERSION_1_7");
+    module.addCMacro("ADW_VERSION_MAX_ALLOWED", "ADW_VERSION_1_7");
+    module.addCMacro("GLIB_VERSION_MIN_REQUIRED", "GLIB_VERSION_2_84");
+    module.addCMacro("GLIB_VERSION_MAX_ALLOWED", "GLIB_VERSION_2_84");
     module.addCMacro("ZIGONAUT_VERSION", b.fmt("\"{s}\"", .{app_version}));
     module.addCSourceFile(.{
         .file = b.path("src/linux/gtk.c"),
@@ -431,6 +438,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
     });
     const exe = b.addExecutable(.{ .name = "zigonaut", .root_module = module });
+    exe.step.dependOn(&dependencies.step);
     b.installArtifact(exe);
     b.installFile("src/linux/com.spiralpoint.zigonaut.desktop", "share/applications/com.spiralpoint.zigonaut.desktop");
     b.installFile("assets/icons/windows/zigonaut-256.png", "share/icons/hicolor/256x256/apps/com.spiralpoint.zigonaut.png");
@@ -457,6 +465,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
         .link_libc = true,
     }) });
+    tests.step.dependOn(&dependencies.step);
     tests.root_module.addImport("shared", shared_module);
     tests.root_module.addIncludePath(b.path("src/linux"));
     tests.root_module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });

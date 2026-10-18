@@ -18,13 +18,19 @@ curl --fail --silent --show-error --location \
   --output "$temporary_directory/orb-setup"
 bash "$temporary_directory/orb-setup"
 
-if ! pkg-config --atleast-version=1.2 libadwaita-1 || ! pkg-config --atleast-version=4.8 gtk4 || ! pkg-config --exists libpng ||
+if ! pkg-config --exists 'gtk4 >= 4.18' 'libadwaita-1 >= 1.7' 'glib-2.0 >= 2.84' 'libpng >= 1.6.48' ||
    ! command -v Xvfb >/dev/null 2>&1 || ! command -v xdotool >/dev/null 2>&1 || ! command -v xclip >/dev/null 2>&1 ||
    ! command -v import >/dev/null 2>&1 || ! command -v dbus-launch >/dev/null 2>&1 ||
    ! /usr/bin/python3 -c 'import pyatspi; from PIL import Image, ImageGrab' >/dev/null 2>&1; then
   echo "Installing GTK frontend and headless UI test dependencies..."
   sudo apt-get update -qq
-  sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick
+  sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xauth xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick fonts-dejavu-core
+fi
+
+# Do not report success when the host's repositories predate the baseline.
+if ! pkg-config --print-errors --exists 'gtk4 >= 4.18' 'libadwaita-1 >= 1.7' 'glib-2.0 >= 2.84' 'libpng >= 1.6.48'; then
+  echo "Linux builds require Debian 13 (trixie) or equivalent development libraries." >&2
+  exit 1
 fi
 
 if ! command -v zig >/dev/null 2>&1 || [[ "$(zig version)" != "$zig_version" ]]; then

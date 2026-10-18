@@ -394,10 +394,10 @@ static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpoin
     tab->cr = cr;
     if (!zgtk_render(tab->core)) g_warning("Unable to render terminal");
     if (tab->owner->panes->len > 1 && tab->id == zgtk_layout_focused(tab->owner->tree)) {
-        GdkRGBA accent;
-        if (!gtk_style_context_lookup_color(gtk_widget_get_style_context(tab->area), "accent_color", &accent))
-            gdk_rgba_parse(&accent, "#3584e4");
-        gdk_cairo_set_source_rgba(cr, &accent);
+        GdkRGBA *accent = adw_style_manager_get_accent_color_rgba(
+            adw_style_manager_get_for_display(gtk_widget_get_display(tab->area)));
+        gdk_cairo_set_source_rgba(cr, accent);
+        gdk_rgba_free(accent);
         cairo_set_line_width(cr, 2);
         cairo_rectangle(cr, 1, 1, width - 2, height - 2);
         cairo_stroke(cr);
@@ -607,9 +607,9 @@ static void cancel_pointer(GtkWidget *widget, gpointer data) {
 }
 
 static void uri_opened(GObject *object, GAsyncResult *result, gpointer data) {
-    (void)object; (void)data;
+    (void)data;
     GError *error = NULL;
-    if (!gtk_show_uri_full_finish(NULL, result, &error)) {
+    if (!gtk_uri_launcher_launch_finish(GTK_URI_LAUNCHER(object), result, &error)) {
         g_message("Unable to open terminal link: %s", error->message);
         g_error_free(error);
     }
@@ -648,7 +648,9 @@ static gboolean pointer_button(GtkEventControllerLegacy *controller, GdkEvent *e
     char *uri = button == 1 ? link_at_pointer(tab, state) : NULL;
     if (uri) {
         /* Native URI dispatch, never a command line or shell interpolation. */
-        gtk_show_uri_full(NULL, uri, gdk_event_get_time(event), NULL, uri_opened, NULL);
+        GtkUriLauncher *launcher = gtk_uri_launcher_new(uri);
+        gtk_uri_launcher_launch(launcher, tab->window->window, NULL, uri_opened, NULL);
+        g_object_unref(launcher);
         g_free(uri);
         return TRUE;
     }
@@ -914,6 +916,7 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     tab->master = -1;
     tab->columns = settings.columns; tab->rows = settings.rows;
     tab->area = gtk_drawing_area_new();
+    g_object_set(tab->area, "accessible-role", GTK_ACCESSIBLE_ROLE_TERMINAL, NULL);
     tab->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     g_object_ref_sink(tab->content); /* Retained even when hidden by pane zoom. */
     g_ptr_array_add(owner->panes, tab);
@@ -1216,7 +1219,7 @@ static void about(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action; (void)parameter;
     GtkWindow *parent = gtk_application_get_active_window(GTK_APPLICATION(data));
     const char *developers[] = { "Iain H", NULL };
-    adw_show_about_window(parent,
+    adw_show_about_dialog(GTK_WIDGET(parent),
         "application-name", "Zigonaut",
         "application-icon", "com.spiralpoint.zigonaut",
         "developer-name", "Iain H",
@@ -1334,18 +1337,19 @@ static Window *new_window(GtkApplication *app) {
     gtk_box_append(GTK_BOX(content), GTK_WIDGET(window->toasts));
     gtk_widget_set_vexpand(GTK_WIDGET(window->toasts), TRUE);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window->window), content);
-    /* Account for the actual header and client border rather than stealing a
-     * row/column from the requested initial grid with guessed chrome metrics. */
-    GtkBorder border, padding;
-    GtkStyleContext *style = gtk_widget_get_style_context(GTK_WIDGET(window->window));
-    gtk_style_context_get_border(style, &border);
-    gtk_style_context_get_padding(style, &padding);
+    /* Measure the requested grid plus chrome, without reading CSS internals.
+     * Remove the temporary request so the window can still shrink afterward. */
     int header_height;
     gtk_widget_measure(header, GTK_ORIENTATION_VERTICAL, -1, NULL, &header_height, NULL, NULL);
-    gtk_window_set_default_size(window->window,
-        settings.columns * width + 2 * settings.padding + border.left + border.right + padding.left + padding.right,
+    gtk_widget_set_size_request(content,
+        settings.columns * width + 2 * settings.padding,
         settings.rows * ((height * settings.line_height + 99) / 100) + 2 * settings.padding +
-            header_height + border.top + border.bottom + padding.top + padding.bottom);
+            header_height);
+    int window_width, window_height;
+    gtk_widget_measure(GTK_WIDGET(window->window), GTK_ORIENTATION_HORIZONTAL, -1, &window_width, NULL, NULL, NULL);
+    gtk_widget_measure(GTK_WIDGET(window->window), GTK_ORIENTATION_VERTICAL, -1, &window_height, NULL, NULL, NULL);
+    gtk_widget_set_size_request(content, -1, -1);
+    gtk_window_set_default_size(window->window, window_width, window_height);
     return window;
 }
 
@@ -1433,6 +1437,7 @@ int main(int argc, char **argv) {
         exec_shell(shell);
         return 127;
     }
+    adw_init();
     AdwApplication *app = adw_application_new("com.spiralpoint.zigonaut", G_APPLICATION_NON_UNIQUE);
     GError *error = NULL;
     if (!settings_load(&settings, &error)) {

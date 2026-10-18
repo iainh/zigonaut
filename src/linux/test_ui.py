@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             children.append(first)
             before = tuple(map(int, contents("before").split()))
             wait_for(lambda: xdo("getwindowname", window) == "First session", "OSC title")
-            assert before[0] > 10 and before[1] > 40, before
+            assert before == (24, 80), before
             xdo("key", "ctrl+shift+n")
             new_windows = []
 

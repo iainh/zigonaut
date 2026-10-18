@@ -126,7 +126,9 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
             send(first, reset + screen)
 
             def terminals():
-                return [n for n in nodes() if n.name == "Terminal" and n.getRoleName() != "frame"
+                # The tab container also inherits the name "Terminal". Only
+                # the focusable drawing surfaces are actual pointer targets.
+                return [n for n in nodes() if n.name == "Terminal" and n.getState().contains(pyatspi.STATE_FOCUSABLE)
                         and n.queryComponent().getExtents(pyatspi.WINDOW_COORDS).height > 100]
 
             wait_for(lambda: terminals(), "accessible terminal surface")
