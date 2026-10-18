@@ -43,6 +43,10 @@ if len(sys.argv) == 3 and sys.argv[1] == "--fixture":
     fixture(Path(sys.argv[2]))
     sys.exit(0)
 
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Pango", "1.0")
+from gi.repository import Gtk, Pango
 import pyatspi
 from PIL import Image
 
@@ -143,13 +147,22 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
 
             def move(column, row, index=0):
                 r = rect(index)
-                # Fixed test profile: Monospace 12 pt has 10 × 19 logical pixels.
-                xdo("mousemove", "--sync", "--window", window, left + scale * (r.x + 13 + 10 * column + 4),
-                    top + scale * (r.y + 13 + 19 * row + 8))
+                xdo("mousemove", "--sync", "--window", window, left + scale * (r.x + 13 + cell_width * column + cell_width // 2),
+                    top + scale * (r.y + 13 + cell_height * row + cell_height // 2))
                 time.sleep(0.08)
 
             def data(pid=first):
                 return (root / f"{pid}.input").read_bytes()
+
+            Gtk.init()
+            font_probe = Gtk.DrawingArea().create_pango_layout("M")
+
+            def cell_size(points=12):
+                font_probe.set_font_description(Pango.FontDescription.from_string(f"Monospace {points}"))
+                return tuple(font_probe.get_pixel_size())
+
+            # Fontconfig's Monospace choice varies between Linux installations.
+            cell_width, cell_height = cell_size()
 
             def reports(start, pid=first):
                 return re.findall(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])", data(pid)[start:])
@@ -163,8 +176,9 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
                 image = Image.open(geometry).convert("RGB")
                 r = rect()
                 x = left + scale * (r.x + 13)
-                y = top + scale * (r.y + 13 + 19 + 17)
-                return sum(image.getpixel((p, y)) != (26, 26, 25) for p in range(x, x + scale * 230))
+                y = top + scale * (r.y + 13 + 2 * cell_height - 2)
+                return sum(image.getpixel((p, y)) != (26, 26, 25)
+                           for p in range(x, x + scale * cell_width * len("https://display.invalid")))
 
             move(3, 1)
             capture("pointer-default")
@@ -172,11 +186,11 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
             xdo("keydown", "ctrl")
             time.sleep(0.2)
             capture("pointer-ctrl-hover")
-            assert underline() > baseline + scale * 150, "Ctrl hover did not underline the link"
+            assert underline() > baseline + scale * cell_width * 15, "Ctrl hover did not underline the link"
             send(first, "\x1b[10;1Hupdated")
             assert underline() == baseline, "Output retained stale hover"
             move(4, 1)
-            assert underline() > baseline + scale * 150
+            assert underline() > baseline + scale * cell_width * 15
             xdo("mousemove", "--window", window, left + 20, top + 20)
             time.sleep(0.1)
             assert underline() == baseline, "Leaving retained stale hover"
@@ -218,13 +232,17 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
             start = len(data())
             xdo("click", 3)
             time.sleep(0.1)
-            assert reports(start) == [(b"2", b"74", b"122", b"M"), (b"2", b"74", b"122", b"m")], reports(start)
+            pixel_x = str(7 * cell_width + cell_width // 2).encode()
+            pixel_y = str(6 * cell_height + cell_height // 2).encode()
+            assert reports(start) == [(b"2", pixel_x, pixel_y, b"M"), (b"2", pixel_x, pixel_y, b"m")], reports(start)
             send(first, reset + "\x1b[?1000h\x1b[?1006h")
             xdo("key", "ctrl+plus")
             time.sleep(0.2)
             r = rect()
-            # Pango Monospace 13 pt is 10 × 22 pixels, not the old 10 × 19.
-            xdo("mousemove", "--window", window, left + scale * (r.x + 13 + 74), top + scale * (r.y + 13 + 140))
+            zoom_width, zoom_height = cell_size(13)
+            assert (zoom_width, zoom_height) != (cell_width, cell_height), "Font zoom did not change cell geometry"
+            xdo("mousemove", "--window", window, left + scale * (r.x + 13 + 7 * zoom_width + zoom_width // 2),
+                top + scale * (r.y + 13 + 6 * zoom_height + zoom_height // 2))
             start = len(data())
             xdo("click", 1)
             time.sleep(0.1)
@@ -328,7 +346,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
             # centre of the right half via the new native window instead.
             native_size = dict(line.split("=") for line in xdo("getwindowgeometry", "--shell", window).splitlines())
             xdo("mousemove", "--window", window, int(native_size["WIDTH"]) * 3 // 4,
-                top + scale * (rect().y + 13 + 19 * 6 + 8))
+                top + scale * (rect().y + 13 + cell_height * 6 + cell_height // 2))
             capture("pointer-transfer")
             before_first = len(data())
             start = len(data(second))
@@ -360,8 +378,8 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-pointer-") as directory:
 
                         def tour(column, row):
                             current = dict(line.split("=") for line in xdo("getmouselocation", "--shell").splitlines())
-                            target_x = int(geometry_values["X"]) + demo_origin[0] + scale * (13 + column * 10 + 4)
-                            target_y = int(geometry_values["Y"]) + demo_origin[1] + scale * (13 + row * 19 + 8)
+                            target_x = int(geometry_values["X"]) + demo_origin[0] + scale * (13 + column * cell_width + cell_width // 2)
+                            target_y = int(geometry_values["Y"]) + demo_origin[1] + scale * (13 + row * cell_height + cell_height // 2)
                             for step in range(1, 25):
                                 xdo("mousemove", round(int(current["X"]) + (target_x - int(current["X"])) * step / 24),
                                     round(int(current["Y"]) + (target_y - int(current["Y"])) * step / 24))

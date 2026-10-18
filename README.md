@@ -206,6 +206,14 @@ uppercase ASCII letter makes the query case-sensitive. Queries support UTF-8,
 up to 256 bytes. Closing Find restores the previous scroll position and keyboard
 focus.
 
+Terminal applications can request mouse buttons, motion and both wheel axes,
+including SGR pixel coordinates. Hold `Shift` to select text or scroll history
+instead of sending mouse events. `Alt` selects a rectangle. Presses stay with
+their original pane and are released when focus or layout visibility changes.
+Hold `Ctrl` over an allowed OSC 8 or detected URI to underline it and show its
+target; `Ctrl`-click opens it through the desktop's native URI handler. `Shift`
+also overrides link activation. Links use the shared supported-scheme policy.
+
 Zigonaut automatically loads its bundled integration for Bash 4.4+, Zsh and
 fish 2.7+. It emits prompt/command boundaries (OSC 133) and working-directory
 updates (OSC 7), enabling prompt navigation without manual shell configuration.
@@ -251,7 +259,7 @@ explicit copy works regardless of the terminal clipboard-write permission.
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
-not yet include terminal mouse reporting or a screen-reader text interface.
+not yet include a screen-reader text interface.
 Settings cover the supported Linux subset, not Windows backdrop materials,
 palette overrides, notifications or output piping.
 Kitty images use the shared supported subset: in-memory RGBA and PNG transport,
@@ -260,6 +268,11 @@ below the cursor, clipped to each pane's terminal grid; raw RGB-format images
 and negative-z placements remain unsupported. Converted Cairo surfaces use a
 per-pane cache bounded to eight images and 32 MiB. Shared image transport and
 resource limits still apply.
+On the tested GTK 4.8.3/Xvfb stack, the GL renderer intermittently corrupts a
+pane after tab transfer. The cause remains unresolved; the app keeps GTK's
+default renderer selection. `GSK_RENDERER=cairo zig build run` is a tested
+workaround. The image pixel suite defaults to Cairo for deterministic headless
+checks; set `GSK_RENDERER=gl` to exercise the affected GL path explicitly.
 OSC clipboard writes are disabled by default; enabling them allows terminal
 programs to replace your clipboard up to the configured byte limit. Clipboard
 reads are not exposed to terminal programs. Explicit copy shortcuts work
@@ -279,6 +292,9 @@ xvfb-run -a -s '-screen 0 2200x1500x24' zig build test-linux-images-ui
 # Native preferences, persistence, and real profile-launch checks:
 sudo apt-get install python3-pyatspi dbus-x11
 xvfb-run -a zig build test-linux-settings-ui
+# Native mouse protocols, link dispatch, selection and pane routing:
+sudo apt-get install imagemagick
+xvfb-run -a -s '-screen 0 2400x1800x24' env GDK_SCALE=2 zig build test-linux-pointer-ui
 ```
 
 Linux sources live in `src/linux`: a small Zig bridge owns the shared terminal

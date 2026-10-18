@@ -1,6 +1,7 @@
 """Pixel-level Kitty presentation checks through real GTK/PTYS on X11.
 
 Requires python3-pil and xdotool. GDK_SCALE=2 checks native HiDPI rendering.
+Pixel checks default to Cairo; set GSK_RENDERER=gl to exercise GTK's GL path.
 Set ZIGONAUT_IMAGE_ARTIFACTS to save review screenshots and a layout recording.
 """
 import base64
@@ -55,6 +56,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-images-") as directory:
         "profileCount=1\ndefaultProfile=0\n[Profile 0]\nname=Default\nshell=/bin/sh\ncommand=\ndirectory=\n")
     env = dict(os.environ, SHELL="/bin/sh", PS1="", GDK_BACKEND="x11", GDK_SCALE="2",
                XDG_CONFIG_HOME=str(root / "config"), GTK_A11Y="none", G_DEBUG="fatal-warnings")
+    env.setdefault("GSK_RENDERER", "cairo")
     with (root / "stderr").open("w+") as log:
         app = subprocess.Popen([str(Path(sys.argv[1]).resolve())], cwd=root, env=env, stdout=log, stderr=log)
         recording = None
@@ -208,7 +210,12 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-images-") as directory:
             window = destination[0]
             if recording:
                 xdo("windowmove", "--sync", window, 80, 120)
-            time.sleep(0.6)
+
+            def images_visible():
+                image = screenshot()
+                return bounds(image, (35, 170, 230)) and bounds(image, (220, 180, 15))
+
+            wait(images_visible, "Transferred images painted in the destination window")
             transferred = screenshot("kitty-transferred-2x")
             assert bounds(transferred, (35, 170, 230)) and bounds(transferred, (220, 180, 15)), "Transfer lost images"
             if recording:
