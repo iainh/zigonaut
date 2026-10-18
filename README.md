@@ -118,14 +118,14 @@ Drag to select and copy text automatically. Hold `Alt` for rectangular selection
 
 ### Linux (GTK 4)
 
-Requires Zig 0.16.0, GTK 4.8+ and libadwaita 1.2+ development libraries,
+Requires Zig 0.16.0, GTK 4.8+, libadwaita 1.2+ and libpng development libraries,
 `pkg-config`, and a Linux desktop session. GTK chooses Wayland or X11 through
 its normal backend selection. Automated UI checks currently cover X11.
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install libgtk-4-dev libadwaita-1-dev pkg-config
+sudo apt-get install libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config
 zig build
 zig build run
 ```
@@ -251,9 +251,15 @@ explicit copy works regardless of the terminal clipboard-write permission.
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
-not yet include terminal mouse reporting, Kitty image presentation, or a
-screen-reader text interface. Settings cover the supported Linux subset, not
-Windows backdrop materials, palette overrides, notifications or output piping.
+not yet include terminal mouse reporting or a screen-reader text interface.
+Settings cover the supported Linux subset, not Windows backdrop materials,
+palette overrides, notifications or output piping.
+Kitty images use the shared supported subset: in-memory RGBA and PNG transport,
+source crops, scaling and Unicode placeholders. Images composite above text and
+below the cursor, clipped to each pane's terminal grid; raw RGB-format images
+and negative-z placements remain unsupported. Converted Cairo surfaces use a
+per-pane cache bounded to eight images and 32 MiB. Shared image transport and
+resource limits still apply.
 OSC clipboard writes are disabled by default; enabling them allows terminal
 programs to replace your clipboard up to the configured byte limit. Clipboard
 reads are not exposed to terminal programs. Explicit copy shortcuts work
@@ -267,6 +273,9 @@ zig build test-linux-shell-integration
 # Real GTK/PTY integration checks, without needing a desktop:
 sudo apt-get install xvfb xdotool xclip
 xvfb-run -a zig build test-linux-ui
+# Native 2x Kitty pixels, alpha, crop, replacement and split/zoom/transfer:
+sudo apt-get install python3-pil
+xvfb-run -a -s '-screen 0 2200x1500x24' zig build test-linux-images-ui
 # Native preferences, persistence, and real profile-launch checks:
 sudo apt-get install python3-pyatspi dbus-x11
 xvfb-run -a zig build test-linux-settings-ui

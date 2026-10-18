@@ -1,4 +1,5 @@
 #include "core.h"
+#include "images.h"
 #include "settings.h"
 #include <adwaita.h>
 #include <glib-unix.h>
@@ -50,6 +51,7 @@ typedef struct {
     PangoFontDescription *font;
     TerminalCore *core;
     cairo_t *cr; /* Borrowed only inside the drawing callback. */
+    ImageCache images;
     GByteArray *pending;
     GCancellable *clipboard_read;
     int master, columns, rows, cell_width, cell_height, font_size;
@@ -124,6 +126,12 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
     if (flags & 64) cairo_rectangle(cr, left, top, width, 1);
     cairo_fill(cr);
     cairo_restore(cr);
+}
+
+void zgtk_draw_image(void *host, const TerminalImage *image) {
+    Tab *tab = host;
+    zgtk_images_draw(&tab->images, tab->cr, image, settings.padding,
+                     tab->columns, tab->rows, tab->cell_width, tab->cell_height);
 }
 
 void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
@@ -275,6 +283,7 @@ static void destroy_tab(gpointer data) {
     stop_session(tab);
     g_object_unref(tab->clipboard_read);
     zgtk_destroy(tab->core);
+    zgtk_images_clear(&tab->images);
     g_byte_array_unref(tab->pending);
     g_object_unref(tab->im);
     g_object_unref(tab->layout);
@@ -433,6 +442,9 @@ static void set_font(Tab *tab, int size) {
     if (gtk_widget_get_width(tab->area) > 0) {
         tab->columns = 0; /* Refresh pixel metrics even if the grid size is unchanged. */
         resize(GTK_DRAWING_AREA(tab->area), gtk_widget_get_width(tab->area), gtk_widget_get_height(tab->area), tab);
+    } else if (!zgtk_resize(tab->core, (uint16_t)tab->columns, (uint16_t)tab->rows,
+                            (uint32_t)tab->cell_width, (uint32_t)tab->cell_height)) {
+        g_warning("Unable to initialize terminal pixel metrics");
     }
     gtk_widget_queue_draw(tab->area);
 }

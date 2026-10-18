@@ -69,5 +69,17 @@ void zgtk_begin_frame(void *host, uint32_t background);
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
                     uint32_t background, uint32_t underline, uint16_t flags);
+/* RGBA pixels are snapshot-owned and borrowed only during draw_image. */
+typedef struct {
+    uint64_t generation;
+    const uint8_t *pixels;
+    size_t length;
+    uint32_t image_id, width, height;
+    uint32_t source_x, source_y, source_width, source_height;
+    uint32_t pixel_width, pixel_height;
+    int32_t viewport_col, viewport_row;
+    uint32_t x_offset, y_offset;
+} TerminalImage;
+void zgtk_draw_image(void *host, const TerminalImage *image);
 void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
                       uint8_t style, uint32_t colour);

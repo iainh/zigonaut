@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Install GTK and UI test dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev pkg-config xvfb xdotool xclip
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xdotool xclip python3-pil
 
       - name: Install Zig 0.16.0
         env:
@@ -49,6 +49,9 @@ jobs:
 
       - name: Test GTK sessions and input
         run: xvfb-run -a zig build test-linux-ui
+
+      - name: Test Kitty presentation at native 2x
+        run: xvfb-run -a -s '-screen 0 2200x1500x24' zig build test-linux-images-ui
 
   macos:
     name: macOS (arm64)

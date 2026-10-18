@@ -422,6 +422,11 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
     module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
+    module.linkSystemLibrary("libpng", .{ .use_pkg_config = .force });
+    module.addCSourceFile(.{
+        .file = b.path("src/linux/images.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
     const exe = b.addExecutable(.{ .name = "zigonaut", .root_module = module });
     b.installArtifact(exe);
     b.installFile("src/linux/com.spiralpoint.zigonaut.desktop", "share/applications/com.spiralpoint.zigonaut.desktop");
@@ -454,6 +459,12 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     tests.root_module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
     tests.root_module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
     configureGhostty(tests.root_module, ghostty);
+    tests.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
+    tests.root_module.linkSystemLibrary("libpng", .{ .use_pkg_config = .force });
+    tests.root_module.addCSourceFile(.{
+        .file = b.path("src/linux/images.c"),
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+    });
     const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
     linux_tests.dependOn(&b.addRunArtifact(tests).step);
     const shell_tests = b.step("test-linux-shell-integration", "Test real Bash, Zsh and fish PTYs (requires all three shells)");
@@ -482,6 +493,11 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     settings_tests.addArg(installed_exe);
     settings_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-settings-ui", "Test native settings and profiles (requires python3-pyatspi and X11)").dependOn(&settings_tests.step);
+    const image_tests = b.addSystemCommand(&.{"/usr/bin/python3"});
+    image_tests.addFileArg(b.path("src/linux/test_images_ui.py"));
+    image_tests.addArg(installed_exe);
+    image_tests.step.dependOn(b.getInstallStep());
+    b.step("test-linux-images-ui", "Test Kitty pixels and pane lifetimes at 2x (requires python3-pil and X11)").dependOn(&image_tests.step);
 }
 
 fn addCiStep(b: *std.Build, check_step: *std.Build.Step, test_step: *std.Build.Step, fmt_step: *std.Build.Step) void {

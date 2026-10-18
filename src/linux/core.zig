@@ -2,6 +2,7 @@ const std = @import("std");
 const shared = @import("shared");
 const Terminal = shared.terminal.Terminal;
 const allocator = std.heap.c_allocator;
+const native = @cImport(@cInclude("images.h"));
 
 pub extern fn main(c_int, [*][*:0]u8) c_int;
 
@@ -99,6 +100,7 @@ extern fn zgtk_draw_cursor(?*anyopaque, u16, u16, u8, u8, u32) void;
 
 const Core = struct {
     terminal: Terminal,
+    snapshot: Terminal.RenderSnapshot = .{},
     host: ?*anyopaque,
     search: shared.search.State = .{},
     search_cache: Terminal.SearchCache = .{},
@@ -181,6 +183,28 @@ const Core = struct {
         zgtk_draw_cell(self.host, cell.x, cell.y, if (cell.occupancy == .wide) 2 else 1, &buffer, length, colour(cell.foreground), colour(cell.background), colour(cell.underline_color), flags);
     }
 
+    pub fn drawImage(self: *Core, image: Terminal.Image) void {
+        const borrowed: native.TerminalImage = .{
+            .generation = image.generation,
+            .pixels = image.pixels.ptr,
+            .length = image.pixels.len,
+            .image_id = image.image_id,
+            .width = image.width,
+            .height = image.height,
+            .source_x = image.source_x,
+            .source_y = image.source_y,
+            .source_width = image.source_width,
+            .source_height = image.source_height,
+            .pixel_width = image.pixel_width,
+            .pixel_height = image.pixel_height,
+            .viewport_col = image.viewport_col,
+            .viewport_row = image.viewport_row,
+            .x_offset = image.x_offset,
+            .y_offset = image.y_offset,
+        };
+        native.zgtk_draw_image(self.host, &borrowed);
+    }
+
     pub fn endFrame(self: *Core, frame: Terminal.Frame) void {
         if (frame.cursor_visible) zgtk_draw_cursor(self.host, frame.cursor_x, frame.cursor_y, frame.cursor_columns, @intFromEnum(frame.cursor_style), colour(frame.cursor));
     }
@@ -191,6 +215,7 @@ fn colour(value: shared.theme.Color) u32 {
 }
 
 export fn zgtk_create(host: ?*anyopaque) ?*Core {
+    if (!native.zgtk_install_png_decoder()) return null;
     const core = allocator.create(Core) catch return null;
     core.* = .{ .terminal = Terminal.init(80, 24, shared.theme.rasmus) catch {
         allocator.destroy(core);
@@ -233,6 +258,7 @@ export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, c
 export fn zgtk_destroy(core: *Core) void {
     core.search.deinit(allocator);
     core.search_cache.deinit(allocator);
+    core.snapshot.deinit(allocator);
     core.terminal.deinit();
     allocator.destroy(core);
 }
@@ -249,7 +275,8 @@ export fn zgtk_resize(core: *Core, columns: u16, rows: u16, cell_width: u32, cel
 }
 
 export fn zgtk_render(core: *Core) bool {
-    core.terminal.renderViewport(core) catch return false;
+    core.snapshot.capture(allocator, &core.terminal) catch return false;
+    core.snapshot.replay(core);
     return true;
 }
 

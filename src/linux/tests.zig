@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("core.h"));
+const c = @cImport(@cInclude("images.h"));
 comptime {
     _ = @import("core.zig");
 }
@@ -14,8 +14,14 @@ const Capture = struct {
     highlighted: usize = 0,
     active_highlighted: usize = 0,
     background: u32 = 0,
+    images: usize = 0,
+    last_image: c.TerminalImage = std.mem.zeroes(c.TerminalImage),
+    image_pixels: [24]u8 = @splat(0),
+    cache: c.ImageCache = std.mem.zeroes(c.ImageCache),
+    cr: ?*c.cairo_t = null,
 
     fn deinit(self: *Capture) void {
+        c.zgtk_images_clear(&self.cache);
         self.output.deinit();
         self.clipboard.deinit();
         self.title.deinit();
@@ -40,6 +46,7 @@ export fn zgtk_begin_frame(host: ?*anyopaque, background: u32) void {
     capture(host).first_row = @splat(' ');
     capture(host).highlighted = 0;
     capture(host).active_highlighted = 0;
+    capture(host).images = 0;
 }
 export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [*]const u8, length: usize, foreground: u32, _: u32, _: u32, flags: u16) void {
     const state = capture(host);
@@ -48,6 +55,14 @@ export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [
     if (length == 1 and text[0] == 'R' and foreground == 0xff0000) state.red_cell = true;
     if (flags & 128 != 0) state.highlighted += columns;
     if (flags & 256 != 0) state.active_highlighted += columns;
+}
+export fn zgtk_draw_image(host: ?*anyopaque, image: *const c.TerminalImage) void {
+    const state = capture(host);
+    state.images += 1;
+    state.last_image = image.*;
+    const length = @min(image.length, state.image_pixels.len);
+    @memcpy(state.image_pixels[0..length], image.pixels[0..length]);
+    if (state.cr) |cr| c.zgtk_images_draw(&state.cache, cr, image, 2, 8, 4, 10, 20);
 }
 export fn zgtk_draw_cursor(_: ?*anyopaque, _: u16, _: u16, _: u8, _: u8, _: u32) void {}
 
@@ -92,6 +107,93 @@ test "Linux rendering, selection and titles preserve terminal data across resize
     try std.testing.expect(c.zgtk_resize(core, 47, 12, 10, 19));
     try std.testing.expect(c.zgtk_render(core));
     try std.testing.expectEqualStrings("Alpha R ", state.first_row[0..8]);
+}
+
+fn pixel(surface: *c.cairo_surface_t, x: usize, y: usize) u32 {
+    c.cairo_surface_flush(surface);
+    const data = c.cairo_image_surface_get_data(surface);
+    const stride: usize = @intCast(c.cairo_image_surface_get_stride(surface));
+    return @as(*align(1) const u32, @ptrCast(data + y * stride + x * 4)).*;
+}
+
+test "Linux Kitty PNG and RGBA render cropped alpha pixels and replace cached generations" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try std.testing.expect(c.zgtk_resize(core, 8, 4, 10, 20));
+    const surface = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, 90, 90).?;
+    defer c.cairo_surface_destroy(surface);
+    state.cr = c.cairo_create(surface).?;
+    defer c.cairo_destroy(state.cr);
+    // Distinct RGB channels, opaque/half/quarter/zero alpha, and asymmetric rows.
+    // Crop the bottom middle texel (200,100,30,64); neighbours must not bleed.
+    try feed(core, "\x1b_Ga=T,f=100,i=7,c=2,r=1,x=1,y=1,w=1,h=1,C=1;" ++
+        "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAI0lEQVR4nGP4oBHQwHUi6r+b3B0GBhGbS/9PpMg5MDIx/wcAiqAKBBHBF4IAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 1), state.images);
+    try std.testing.expectEqualSlices(u8, &.{ 240, 40, 80, 128, 10, 200, 90, 255, 70, 30, 220, 0, 20, 60, 210, 255, 200, 100, 30, 64, 1, 2, 3, 255 }, &state.image_pixels);
+    try std.testing.expectEqual(@as(u32, 1), state.last_image.source_x);
+    try std.testing.expectEqual(@as(u32, 1), state.last_image.source_y);
+    try std.testing.expectEqual(@as(u32, 0x40321908), pixel(surface, 2, 2));
+    try std.testing.expectEqual(@as(u32, 0x40321908), pixel(surface, 21, 21));
+    try std.testing.expectEqual(@as(u32, 0), pixel(surface, 22, 22));
+    const generation = state.last_image.generation;
+    // Same ID and dimensions, different pixels: stale cache keys fail here.
+    try feed(core, "\x1b_Ga=T,f=32,s=3,v=2,i=7,c=2,r=1,x=1,y=1,w=1,h=1,C=1;" ++
+        "8ChQgArIWv9GHtwAFDzS/8hkHv8BAgP/\x1b\\");
+    c.cairo_set_operator(state.cr, c.CAIRO_OPERATOR_CLEAR);
+    c.cairo_paint(state.cr);
+    c.cairo_set_operator(state.cr, c.CAIRO_OPERATOR_OVER);
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expect(state.last_image.generation != generation);
+    try std.testing.expectEqual(@as(u32, 0xffc8641e), pixel(surface, 2, 2));
+    // Repeat frame, then delete: retained surfaces must never retain placements.
+    try std.testing.expect(c.zgtk_render(core));
+    try feed(core, "\x1b_Ga=d,d=I,i=7\x1b\\");
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.images);
+    try feed(core, "\x1b_Ga=T,f=100,i=8;bm90IGEgcG5n\x1b\\");
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.images);
+    // Valid PNG header, truncated pixel stream: also exercise decode cleanup
+    // after the Ghostty-owned output allocation, not just header rejection.
+    try feed(core, "\x1b_Ga=T,f=100,i=8;iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAI0lEQVR4nGP4oBHQ\x1b\\");
+    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expectEqual(@as(usize, 0), state.images);
+}
+
+test "Linux image compositor clips negative viewport rows and padding at nondefault metrics" {
+    var cache = std.mem.zeroes(c.ImageCache);
+    defer c.zgtk_images_clear(&cache);
+    const surface = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, 60, 70).?;
+    defer c.cairo_surface_destroy(surface);
+    const cr = c.cairo_create(surface).?;
+    defer c.cairo_destroy(cr);
+    const rgba = [_]u8{ 12, 90, 210, 255 };
+    const image: c.TerminalImage = .{
+        .image_id = 9,
+        .generation = 1,
+        .pixels = &rgba,
+        .length = 4,
+        .width = 1,
+        .height = 1,
+        .source_x = 0,
+        .source_y = 0,
+        .source_width = 1,
+        .source_height = 1,
+        .pixel_width = 90,
+        .pixel_height = 100,
+        .viewport_col = -1,
+        .viewport_row = -1,
+        .x_offset = 3,
+        .y_offset = 5,
+    };
+    c.zgtk_images_draw(&cache, cr, &image, 4, 3, 2, 13, 27);
+    try std.testing.expectEqual(@as(u32, 0xff0c5ad2), pixel(surface, 4, 4));
+    try std.testing.expectEqual(@as(u32, 0xff0c5ad2), pixel(surface, 42, 57));
+    for ([_][2]usize{ .{ 3, 4 }, .{ 4, 3 }, .{ 43, 30 }, .{ 20, 58 } }) |point|
+        try std.testing.expectEqual(@as(u32, 0), pixel(surface, point[0], point[1]));
 }
 
 fn search(core: *c.TerminalCore, query: []const u8) !c.SearchStatus {
