@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Install GTK and UI test dependencies
-        run: apt-get update && apt-get install -y ca-certificates curl git libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xauth xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick fonts-dejavu-core
+        run: apt-get update && apt-get install -y ca-certificates curl git xz-utils libgtk-4-dev libadwaita-1-dev libpng-dev pkg-config xvfb xauth xdotool xclip python3-pil python3-pyatspi dbus-x11 imagemagick fonts-dejavu-core
 
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
