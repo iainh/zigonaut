@@ -1249,6 +1249,20 @@ pub const Terminal = struct {
     }
 
     pub fn resize(self: *Terminal, columns: u16, rows: u16, cell_width: u32, cell_height: u32) !void {
+        var restore_offset: ?u64 = null;
+        if (rows > self.rows) {
+            const viewport = try self.scrollbar();
+            if (viewport.offset < viewport.total -| viewport.len and rows > viewport.total - viewport.offset) {
+                // Ghostty's row-growth loop checks a pinned viewport before
+                // normalizing it for the larger height. Unpin for that loop,
+                // then restore the offset within the new viewport bounds.
+                restore_offset = viewport.offset;
+                vt.ghostty_terminal_scroll_viewport(self.terminal, .{
+                    .tag = vt.GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
+                    .value = .{ .delta = 0 },
+                });
+            }
+        }
         try check(vt.ghostty_terminal_resize(
             self.terminal,
             columns,
@@ -1258,6 +1272,11 @@ pub const Terminal = struct {
         ));
         self.columns = columns;
         self.rows = rows;
+        if (restore_offset) |offset| {
+            const viewport = try self.scrollbar();
+            const target = @min(offset, viewport.total -| viewport.len);
+            self.scrollViewport(-@as(isize, @intCast(viewport.offset - target)));
+        }
     }
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
@@ -3278,6 +3297,26 @@ test "scrollbar tracks and scrolls the viewport" {
     const restored = try terminal.scrollbar();
     try std.testing.expectEqual(bottom.offset, restored.offset);
     try std.testing.expect(!try terminal.scrollToBottom());
+}
+
+test "growing a scrolled viewport beyond available history preserves a valid view" {
+    for ([_]bool{ false, true }) |pull_scrollback| {
+        var terminal = try Terminal.init(20, 3, theme.rasmus);
+        defer terminal.deinit();
+        try terminal.setResizePullScrollback(pull_scrollback);
+        terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight");
+        terminal.scrollViewport(-3);
+        try std.testing.expectEqual(@as(u64, 2), (try terminal.scrollbar()).offset);
+        try terminal.resize(20, 4, 10, 19);
+        try std.testing.expectEqual(@as(u64, 2), (try terminal.scrollbar()).offset);
+        try terminal.resize(20, 12, 10, 19);
+        const state = try terminal.scrollbar();
+        try std.testing.expectEqual(@as(u64, 12), state.len);
+        try std.testing.expect(state.offset + state.len <= state.total);
+        try std.testing.expectEqual(@as(u64, if (pull_scrollback) 0 else 2), state.offset);
+        var text: [512]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, try terminal.writeViewportText(&text), "eight") != null);
+    }
 }
 
 test "incremental compression preserves cold history selection search and viewport" {
