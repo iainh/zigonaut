@@ -420,9 +420,20 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     b.installArtifact(exe);
     b.installFile("src/linux/com.spiralpoint.zigonaut.desktop", "share/applications/com.spiralpoint.zigonaut.desktop");
     b.installFile("assets/icons/windows/zigonaut-256.png", "share/icons/hicolor/256x256/apps/com.spiralpoint.zigonaut.png");
+    for ([_][]const u8{ "bash", "zsh", "fish" }) |shell| {
+        const resources = b.addInstallDirectory(.{
+            .source_dir = b.path(b.fmt("assets/shell-integration/{s}", .{shell})),
+            .install_dir = .prefix,
+            .install_subdir = b.fmt("share/zigonaut/shell-integration/{s}", .{shell}),
+        });
+        b.getInstallStep().dependOn(&resources.step);
+    }
     const check_step = b.step("check", "Compile Zigonaut without installing it");
     check_step.dependOn(&exe.step);
-    const run = b.addRunArtifact(exe);
+    // Run the installed layout, including shell startup resources.
+    const installed_exe = b.getInstallPath(.bin, "zigonaut");
+    const run = b.addSystemCommand(&.{installed_exe});
+    run.step.dependOn(b.getInstallStep());
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run the native GTK frontend").dependOn(&run.step);
 
@@ -437,6 +448,17 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     configureGhostty(tests.root_module, ghostty);
     const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
     linux_tests.dependOn(&b.addRunArtifact(tests).step);
+    const shell_tests = b.step("test-linux-shell-integration", "Test real Bash, Zsh and fish PTYs (requires all three shells)");
+    const zsh_tests = b.addSystemCommand(&.{"python3"});
+    zsh_tests.addFileArg(b.path("assets/shell-integration/test_shell_integration.py"));
+    zsh_tests.addArgs(&.{ installed_exe, "--linux" });
+    zsh_tests.step.dependOn(b.getInstallStep());
+    shell_tests.dependOn(&zsh_tests.step);
+    const additional_shell_tests = b.addSystemCommand(&.{"python3"});
+    additional_shell_tests.addFileArg(b.path("assets/shell-integration/test_additional_shells.py"));
+    additional_shell_tests.addArgs(&.{ installed_exe, "/bin/bash", "/usr/bin/fish", "--linux" });
+    additional_shell_tests.step.dependOn(b.getInstallStep());
+    shell_tests.dependOn(&additional_shell_tests.step);
     const test_step = b.step("test", "Run all supported tests");
     test_step.dependOn(shared_test_step);
     test_step.dependOn(linux_tests);
@@ -444,7 +466,8 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
     const ui_tests = b.addSystemCommand(&.{"python3"});
     ui_tests.addFileArg(b.path("src/linux/test_ui.py"));
-    ui_tests.addArtifactArg(exe);
+    ui_tests.addArg(installed_exe);
+    ui_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-ui", "Test the GTK frontend on an X11 display (requires xdotool)").dependOn(&ui_tests.step);
 }
 

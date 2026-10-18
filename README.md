@@ -131,7 +131,9 @@ zig build run
 ```
 
 The default Linux build installs `zig-out/bin/zigonaut`, a desktop entry under
-`zig-out/share/applications`, and an application icon. For a user-local desktop
+`zig-out/share/applications`, an application icon, and shell resources under
+`zig-out/share/zigonaut/shell-integration`. Keep the `bin` and `share` layout
+together when relocating an installation. For a user-local desktop
 installation, run `zig build --prefix "$HOME/.local"` and ensure `~/.local/bin`
 is on your desktop session's `PATH`. No Windows or Apple SDK is needed.
 
@@ -143,9 +145,9 @@ It provides one POSIX PTY per tab, Pango/Cairo text rendering with font fallback
 true colour, text styles, wide characters, scrollback, drag selection, rectangular selection
 with `Alt`, clipboard copy/paste, input-method commits, terminal-provided tab
 titles, scrollback search, shell-prompt navigation, and font zoom. It starts
-`$SHELL` interactively, falling back to `/bin/sh` when unset, and inherits the
-launcher's working directory. Shell exit leaves its final output visible until
-you close the tab.
+`$SHELL` interactively, falling back to `/bin/sh` when unset or not an absolute
+path, and inherits the launcher's working directory. Shell exit leaves its final
+output visible until you close the tab.
 
 The main menu's **Move Tab to New Window** preserves the running shell and its
 state. Prefer this action on GTK 4.8/libadwaita 1.2: dropping a dragged tab onto
@@ -155,8 +157,20 @@ Find keeps a separate query per tab and highlights matches across scrollback,
 including soft-wrapped lines. Lowercase ASCII queries ignore ASCII case; an
 uppercase ASCII letter makes the query case-sensitive. Queries support UTF-8,
 up to 256 bytes. Closing Find restores the previous scroll position and keyboard
-focus. Prompt navigation requires a shell that already emits OSC 133 markers;
-automatic shell integration is not installed yet.
+focus.
+
+Zigonaut automatically loads its bundled integration for Bash 4.4+, Zsh and
+fish 2.7+. It emits prompt/command boundaries (OSC 133) and working-directory
+updates (OSC 7), enabling prompt navigation without manual shell configuration.
+Shells remain interactive and non-login, inherit the launcher's environment and
+working directory, and read their normal startup configuration. Bash loads
+`~/.bashrc` before installing hooks, Zsh preserves `ZDOTDIR`, and fish loads its
+configuration before integration. Startup files are never edited. Other shell
+names, or installations missing the required scripts, launch without injection;
+prompt navigation then depends on markers supplied by the shell itself.
+Set `ZIGONAUT_SHELL_INTEGRATION=0` in Zigonaut's launch environment to skip
+injection (any existing value suppresses setup, matching the bundled integrations).
+Nested shells are not automatically injected.
 
 | Linux shortcut | Action |
 | --- | --- |
@@ -174,14 +188,17 @@ automatic shell integration is not installed yet.
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
-not yet include split panes, persistent settings/profiles, automatic shell
-integration, terminal mouse reporting, Kitty image presentation, or a
+not yet include split panes, persistent settings/profiles,
+terminal mouse reporting, Kitty image presentation, or a
 screen-reader text interface. It uses the built-in Rasmus palette and does not
 read the Windows or macOS settings files. OSC clipboard writes are not enabled;
 clipboard changes require an explicit copy shortcut.
 
 ```sh
 zig build ci
+# Real PTY checks for all supported shells (no display needed):
+sudo apt-get install bash zsh fish
+zig build test-linux-shell-integration
 # Real GTK/PTY integration checks, without needing a desktop:
 sudo apt-get install xvfb xdotool xclip
 xvfb-run -a zig build test-linux-ui

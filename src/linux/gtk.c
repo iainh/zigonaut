@@ -788,13 +788,69 @@ static void activate(GtkApplication *app, gpointer data) {
     gtk_window_present(window->window);
 }
 
+static gboolean integration_file(const char *path) {
+    return g_file_test(path, G_FILE_TEST_IS_REGULAR) && access(path, R_OK) == 0;
+}
+
+/* Runs only in the fresh --pty-child process, never in a post-fork GTK child.
+ * Resolve relative to the executable so installations remain relocatable. */
+static void exec_shell(const char *shell) {
+    char *executable = g_file_read_link("/proc/self/exe", NULL);
+    char *bin = executable ? g_path_get_dirname(executable) : NULL;
+    char *root = bin ? g_build_filename(bin, "..", "share", "zigonaut", "shell-integration", NULL) : NULL;
+    const char *name = strrchr(shell, '/');
+    name = name ? name + 1 : shell;
+    if (root && !getenv("ZIGONAUT_SHELL_INTEGRATION")) {
+        if (strcmp(name, "bash") == 0) {
+            char *script = g_build_filename(root, "bash", "zigonaut.bash", NULL);
+            char *startup = g_build_filename(root, "bash", "linux.bash", NULL);
+            if (integration_file(script) && integration_file(startup)) {
+                g_setenv("ZIGONAUT_BASH_INTEGRATION", script, TRUE);
+                g_setenv("ZIGONAUT_SHELL_INTEGRATION", "1", TRUE);
+                execl(shell, shell, "--rcfile", startup, "-i", (char *)NULL);
+                goto failed;
+            }
+            g_free(script);
+            g_free(startup);
+        } else if (strcmp(name, "zsh") == 0) {
+            char *directory = g_build_filename(root, "zsh", NULL);
+            char *startup = g_build_filename(directory, ".zshenv", NULL);
+            char *script = g_build_filename(directory, "zigonaut.zsh", NULL);
+            if (integration_file(startup) && integration_file(script)) {
+                const char *original = getenv("ZDOTDIR");
+                if (original) g_setenv("ZIGONAUT_ZSH_ORIGINAL_ZDOTDIR", original, TRUE);
+                else g_unsetenv("ZIGONAUT_ZSH_ORIGINAL_ZDOTDIR");
+                g_setenv("ZDOTDIR", directory, TRUE);
+                g_setenv("ZIGONAUT_SHELL_INTEGRATION", "1", TRUE);
+            }
+            g_free(directory);
+            g_free(startup);
+            g_free(script);
+        } else if (strcmp(name, "fish") == 0) {
+            char *script = g_build_filename(root, "fish", "zigonaut.fish", NULL);
+            if (integration_file(script)) {
+                g_setenv("ZIGONAUT_FISH_INTEGRATION", script, TRUE);
+                g_setenv("ZIGONAUT_SHELL_INTEGRATION", "1", TRUE);
+                execl(shell, shell, "-i", "--init-command=test -r \"$ZIGONAUT_FISH_INTEGRATION\"; and source \"$ZIGONAUT_FISH_INTEGRATION\" 2>/dev/null", (char *)NULL);
+                goto failed;
+            }
+            g_free(script);
+        }
+    }
+    g_free(root);
+    g_free(bin);
+    g_free(executable);
+    execl(shell, shell, "-i", (char *)NULL);
+failed:
+    perror("Unable to execute shell");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--pty-child") == 0) {
         if (setsid() < 0 || ioctl(STDIN_FILENO, TIOCSCTTY, 0) < 0) return 126;
         const char *shell = getenv("SHELL");
         if (!shell || shell[0] != '/') shell = "/bin/sh";
-        execl(shell, shell, "-i", (char *)NULL);
-        perror("Unable to execute shell");
+        exec_shell(shell);
         return 127;
     }
     AdwApplication *app = adw_application_new("com.spiralpoint.zigonaut", G_APPLICATION_NON_UNIQUE);
