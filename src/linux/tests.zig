@@ -253,3 +253,26 @@ test "Linux settings update live themes and enforce opt-in bounded clipboard wri
     try feed(core, "\x1b]52;c;dHdv\x07");
     try std.testing.expectEqualStrings("one", state.clipboard.written());
 }
+
+test "Linux command output copy is explicit, pane-local and never reuses an empty command" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try feed(core, "startup banner\r\n");
+    try std.testing.expect(!c.zgtk_copy_last_command(core));
+    try feed(core, "\x1b]133;A\x07$ \x1b]133;B\x07example\x1b]133;C\x07\r\n\x1b[31mcafé 界\x1b[0m\r\nsecond\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    // Explicit user copies work with OSC clipboard writes disabled by default.
+    try std.testing.expect(c.zgtk_copy_last_command(core));
+    try std.testing.expectEqualStrings("café 界\nsecond", state.clipboard.written());
+    var other = Capture{};
+    defer other.deinit();
+    const other_core = c.zgtk_create(&other) orelse return error.InitFailed;
+    defer c.zgtk_destroy(other_core);
+    try feed(other_core, "ordinary output");
+    try std.testing.expect(!c.zgtk_copy_last_command(other_core));
+    try std.testing.expectEqualStrings("", other.clipboard.written());
+    try feed(core, "\x1b]133;B\x07true\x1b]133;C\x07\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    try std.testing.expect(!c.zgtk_copy_last_command(core));
+    try std.testing.expectEqualStrings("café 界\nsecond", state.clipboard.written());
+}

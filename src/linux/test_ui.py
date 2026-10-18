@@ -89,6 +89,24 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             before = tuple(map(int, contents("before").split()))
             wait_for(lambda: xdo("getwindowname", window) == "First session", "OSC title")
             assert before[0] > 10 and before[1] > 40, before
+            xdo("key", "ctrl+shift+n")
+            new_windows = []
+
+            def find_new_window():
+                result = xdo("search", "--onlyvisible", "--pid", app.pid)
+                new_windows[:] = [candidate for candidate in result.splitlines()
+                                  if candidate != window and xdo("getwindowname", candidate) == "Terminal"]
+                return bool(new_windows)
+
+            wait_for(find_new_window, "new independent window")
+            xdo("windowfocus", "--sync", new_windows[0])
+            command("echo $$ > new-window.pid")
+            new_window_pid = int(contents("new-window.pid"))
+            children.append(new_window_pid)
+            assert new_window_pid != first and alive(first)
+            xdo("key", "ctrl+shift+w")
+            wait_for(lambda: not alive(new_window_pid), "new window shell reaped independently")
+            xdo("windowfocus", "--sync", window)
             xdo("key", "ctrl+shift+t")
             time.sleep(0.2)
             command(r"echo $$ > second.pid; printf '\033]2;Second session\007'")
@@ -213,6 +231,15 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             time.sleep(0.2)
             xdo("key", "Return")
             assert contents("pane-pasted") == "bottom café"
+            command(r"printf '\033]133;A\007$ \033]133;B\007example\033]133;C\007\r\n\033[31mcaf\303\251\033[0m\r\nsecond\r\n\033]133;D;0\007\033]133;A\007$ \033]2;Copy ready\007'")
+            wait_for(lambda: xdo("getwindowname", window) == "Copy ready", "command output consumed by GTK")
+            xdo("key", "ctrl+shift+g")
+            wait_for(lambda: subprocess.run(["xclip", "-selection", "clipboard", "-o"],
+                                           capture_output=True, text=True).stdout == "café\nsecond", "focused-pane command output copy")
+            command(r"printf '\033]133;B\007true\033]133;C\007\r\n\033]133;D;0\007\033]133;A\007$ \033]2;Bottom pane\007'")
+            wait_for(lambda: xdo("getwindowname", window) == "Bottom pane", "empty command consumed")
+            xdo("key", "ctrl+shift+g")
+            assert subprocess.check_output(["xclip", "-selection", "clipboard", "-o"], text=True) == "café\nsecond"
             command("(sleep 0.3; echo live > hidden-output) &")
             xdo("key", "ctrl+shift+Return")
             time.sleep(0.3)
@@ -228,7 +255,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             command(r"stty -echo -icanon; printf '\033[>2u'; echo ready > pane-input-ready; dd bs=1 count=1 of=pane-key 2>/dev/null; printf '\033[<u'; stty sane; echo done > pane-input-done")
             assert contents("pane-input-ready") == "ready"
             xdo("key", "ctrl+alt+Page_Down", "ctrl+alt+Page_Up",
-                "ctrl+shift+Return", "ctrl+shift+Return", "ctrl+alt+shift+Right", "ctrl+alt+equal", "z")
+                "ctrl+shift+Return", "ctrl+shift+Return", "ctrl+alt+shift+Right", "ctrl+alt+equal", "ctrl+shift+g", "z")
             assert contents("pane-input-done") == "done"
             assert contents("pane-key") == "z", "Pane shortcuts leaked key events into the PTY"
             xdo("key", "ctrl+shift+f")
@@ -286,7 +313,7 @@ with tempfile.TemporaryDirectory(prefix="zigonaut-gtk-") as directory:
             assert app.wait(timeout=8) == 0
             wait_for(lambda: not alive(second), "SIGHUP-resistant shell reaped after last window closes")
             wait_for(lambda: not alive(last_pane), "whole-tab close reaps every pane")
-            print(f"GTK E2E passed: two isolated shells, titles, focus, tab reordering, resize {before} → {after}, "
+            print(f"GTK E2E passed: independent new window, explicit focused-pane command output copy, two isolated shells, titles, focus, tab reordering, resize {before} → {after}, "
                   "Ctrl+C, prompt shortcuts without PTY leakage, UTF-8 clipboard paste, per-tab search and focus restoration, "
                   f"nested independent panes, directional/cyclic focus, pane resize {bottom_size} → {resized}, "
                   f"equalize and zoom {equalized} → {zoomed}, hidden PTY output, pane shortcuts without leakage, "

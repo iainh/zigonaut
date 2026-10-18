@@ -22,6 +22,7 @@ void zgtk_scroll(TerminalCore *core, int lines);
 void zgtk_focus(TerminalCore *core, bool focused);
 bool zgtk_select(TerminalCore *core, uint16_t x, uint16_t y, bool begin, bool rectangle);
 void zgtk_copy(TerminalCore *core);
+bool zgtk_copy_last_command(TerminalCore *core);
 
 /* The same layout model used by Windows. IDs are local to a tab. GTK owns
  * session lifetimes and native widgets; the tree owns topology and focus. */

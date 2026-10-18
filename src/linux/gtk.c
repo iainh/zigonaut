@@ -553,6 +553,18 @@ static void new_tab_action(GSimpleAction *action, GVariant *parameter, gpointer 
     (void)action; (void)parameter;
     new_tab(data);
 }
+static void new_window_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *window = data;
+    g_application_activate(G_APPLICATION(gtk_window_get_application(window->window)));
+}
+static void copy_command_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
+    (void)action; (void)parameter;
+    Window *window = data;
+    Tab *tab = selected_pane(window);
+    if (tab && !zgtk_copy_last_command(tab->core))
+        adw_toast_overlay_add_toast(window->toasts, adw_toast_new("No command output available"));
+}
 static void profile_tab_action(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action;
     int index = g_variant_get_int32(parameter);
@@ -1017,6 +1029,8 @@ static gboolean pane_shortcut(GtkEventControllerLegacy *controller, GdkEvent *ev
         if (key == GDK_KEY_o) action = "split-right";
         if (key == GDK_KEY_e) action = "split-down";
         if (key == GDK_KEY_w) action = "close-pane";
+        if (key == GDK_KEY_n) action = "new-window";
+        if (key == GDK_KEY_g) action = "copy-command";
         if (key == GDK_KEY_Return) operation = PANE_ZOOM;
     }
     if (state == (GDK_CONTROL_MASK | GDK_ALT_MASK) || state == (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SHIFT_MASK)) {
@@ -1073,6 +1087,8 @@ static Window *new_window(GtkApplication *app) {
     g_object_unref(measure);
     const GActionEntry actions[] = {
         { .name = "new-tab", .activate = new_tab_action },
+        { .name = "new-window", .activate = new_window_action },
+        { .name = "copy-command", .activate = copy_command_action },
         { .name = "profile-tab", .activate = profile_tab_action, .parameter_type = "i" },
         { .name = "settings", .activate = settings_action },
         { .name = "close-tab", .activate = close_tab_action },
@@ -1142,6 +1158,8 @@ static Window *new_window(GtkApplication *app) {
     g_menu_append(panes, "Close Tab", "win.close-tab");
     g_menu_append_submenu(menu, "Panes", G_MENU_MODEL(panes));
     g_object_unref(panes);
+    g_menu_append(menu, "New Window", "win.new-window");
+    g_menu_append(menu, "Copy Last Command Output", "win.copy-command");
     g_menu_append(menu, "About Zigonaut", "app.about");
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_button), "open-menu-symbolic");
@@ -1270,9 +1288,13 @@ int main(int argc, char **argv) {
     const GActionEntry actions[] = { { .name = "about", .activate = about } };
     g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), app);
     const char *new_tab_keys[] = { "<Control><Shift>t", NULL };
+    const char *new_window_keys[] = { "<Control><Shift>n", NULL };
+    const char *copy_command_keys[] = { "<Control><Shift>g", NULL };
     const char *find_keys[] = { "<Control><Shift>f", NULL };
     const char *settings_keys[] = { "<Control>comma", NULL };
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-tab", new_tab_keys);
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.new-window", new_window_keys);
+    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.copy-command", copy_command_keys);
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.find", find_keys);
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "win.settings", settings_keys);
     g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);

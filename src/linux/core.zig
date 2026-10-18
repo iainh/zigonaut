@@ -343,6 +343,13 @@ export fn zgtk_copy(core: *Core) void {
     zgtk_clipboard(core.host, text.ptr, text.len);
 }
 
+export fn zgtk_copy_last_command(core: *Core) bool {
+    const text = (core.terminal.lastCommandOutputAlloc(allocator) catch return false) orelse return false;
+    defer allocator.free(text);
+    zgtk_clipboard(core.host, text.ptr, text.len);
+    return true;
+}
+
 const SearchStatus = extern struct {
     matches: u32,
     active: i32,

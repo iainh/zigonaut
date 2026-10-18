@@ -219,9 +219,16 @@ Set `ZIGONAUT_SHELL_INTEGRATION=0` in Zigonaut's launch environment to skip
 injection (any existing value suppresses setup, matching the bundled integrations).
 Nested shells are not automatically injected.
 
+**Copy Last Command Output** (`Ctrl+Shift+G`) copies plain UTF-8 output from the
+focused pane's latest OSC 133 command, without the prompt, command line or text
+styles. It leaves the clipboard unchanged when no output is available. This
+explicit copy works regardless of the terminal clipboard-write permission.
+**New Window** (`Ctrl+Shift+N`) starts an independent default-profile session.
+
 | Linux shortcut | Action |
 | --- | --- |
 | `Ctrl+Shift+T` | Open a tab |
+| `Ctrl+Shift+N` | Open a new window with the default profile |
 | `Ctrl+Shift+O` / `Ctrl+Shift+E` | Split focused pane right / down |
 | `Ctrl+Shift+W` | Close focused pane (last pane closes the tab) |
 | `Ctrl+Alt+Arrow` | Focus a pane in that direction |
@@ -240,6 +247,7 @@ Nested shells are not automatically injected.
 | `Enter` / `Shift+Enter` in Find | Next / previous match, wrapping at either end |
 | `Escape` in Find | Close Find and return to the terminal |
 | `Ctrl+Shift+Up` / `Ctrl+Shift+Down` | Move to the previous / next shell prompt |
+| `Ctrl+Shift+G` | Copy the latest command output from the focused pane |
 | `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Increase / decrease / reset font size |
 
 This is an initial frontend, not feature parity with Windows or macOS. It does
