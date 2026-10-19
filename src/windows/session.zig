@@ -242,6 +242,7 @@ pub const SessionRuntime = struct {
             .rows = rows,
         };
         errdefer self.terminal.deinit();
+        try self.terminal.setFractionalScrolling(true);
         // ConPTY owns a screen buffer without scrollback. Use libghostty's
         // recommended policy; this does not guarantee identical resize reflow.
         try self.terminal.setResizePullScrollback(false);
@@ -567,10 +568,24 @@ pub const SessionRuntime = struct {
         return self.render_snapshot.images.items.len != 0 or self.render_snapshot.placements.items.len != 0;
     }
 
+    pub fn preparedViewportHasDamage(self: *SessionRuntime) bool {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        if (self.render_snapshot.images_changed) return true;
+        for (self.render_snapshot.rows.items) |row| if (row.dirty) return true;
+        return false;
+    }
+
     pub fn preparedScrollOffset(self: *SessionRuntime) usize {
         self.snapshot_mutex.lock();
         defer self.snapshot_mutex.unlock();
         return self.render_scroll_offset;
+    }
+
+    pub fn preparedScrollFraction(self: *SessionRuntime) f32 {
+        self.snapshot_mutex.lock();
+        defer self.snapshot_mutex.unlock();
+        return if (self.render_snapshot.frame) |frame| frame.scroll_offset else 0;
     }
 
     pub fn mouseShape(self: *SessionRuntime) Terminal.MouseShape {
@@ -620,6 +635,12 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         self.terminal.scrollViewport(delta);
+    }
+
+    pub fn scrollViewportFractional(self: *SessionRuntime, delta: f64) !bool {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return self.terminal.scrollViewportFractional(delta);
     }
 
     pub fn navigatePrompt(self: *SessionRuntime, forward: bool) !bool {
@@ -1293,6 +1314,38 @@ pub const SessionRuntime = struct {
         return .success;
     }
 };
+
+test "fractional session snapshots retain overscan and unchanged row hashes" {
+    var runtime = SessionRuntime{
+        .allocator = std.testing.allocator,
+        .terminal = try Terminal.init(4, 2, theme.rasmus),
+        .refresh = .{},
+        .columns = 4,
+        .rows = 2,
+    };
+    defer deinitTestRuntime(&runtime);
+    try runtime.terminal.setFractionalScrolling(true);
+    runtime.terminal.feed("1\r\n2\r\n3\r\n4\r\n5");
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(usize, 3), runtime.render_snapshot.rows.items.len);
+    try std.testing.expectEqual(@as(f32, 0), runtime.preparedScrollFraction());
+    try std.testing.expect(try runtime.scrollViewportFractional(-0.25));
+    try std.testing.expect(try runtime.prepareRender());
+    const hashes = try std.testing.allocator.dupe(u64, runtime.render_snapshot.row_hashes.items);
+    defer std.testing.allocator.free(hashes);
+    const offset = runtime.preparedScrollOffset();
+    const fraction = runtime.preparedScrollFraction();
+    try std.testing.expect(fraction > 0 and fraction < 1);
+    try std.testing.expect(try runtime.scrollViewportFractional(-0.125));
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(offset, runtime.preparedScrollOffset());
+    try std.testing.expect(runtime.preparedScrollFraction() != fraction);
+    try std.testing.expectEqualSlices(u64, hashes, runtime.render_snapshot.row_hashes.items);
+    for (runtime.render_snapshot.rows.items) |row| try std.testing.expect(!row.dirty);
+    runtime.scrollViewport(0);
+    try std.testing.expect(try runtime.prepareRender());
+    try std.testing.expectEqual(@as(f32, 0), runtime.preparedScrollFraction());
+}
 
 test "PTY work queue preserves input ordering and coalesces adjacent resizes" {
     var runtime = SessionRuntime{

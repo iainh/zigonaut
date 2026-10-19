@@ -7,14 +7,18 @@ typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
 /* mouse_shape uses public GhosttyMouseShape values (0 default, 8 text initially).
    It occupies a formerly reserved byte; record size and existing offsets are unchanged. */
-typedef struct { uint32_t version, size; uint32_t foreground_rgb, background_rgb, cursor_rgb; uint16_t cursor_x, cursor_y; uint8_t cursor_columns, cursor_style, cursor_visible, cursor_has_position, images_skipped, mouse_shape; uint8_t reserved[6]; } zigonaut_render_frame_v1;
+/* viewport_rows and scroll_offset consume the remaining reserved bytes in v1.
+   Size (36), alignment, and all earlier offsets are unchanged. Zero rows means
+   legacy logical-row count; otherwise snapshots include one bottom overscan
+   row. Positive scroll_offset translates content UP by that fraction of a row. */
+typedef struct { uint32_t version, size; uint32_t foreground_rgb, background_rgb, cursor_rgb; uint16_t cursor_x, cursor_y; uint8_t cursor_columns, cursor_style, cursor_visible, cursor_has_position, images_skipped, mouse_shape; uint16_t viewport_rows; float scroll_offset; } zigonaut_render_frame_v1;
 /* text_offset/text_length reference the caller-owned UTF-8 arena passed with this cell array. */
 typedef struct { uint32_t version, size, text_offset, text_length; uint32_t foreground_rgb, background_rgb, underline_rgb; uint16_t x, y; uint8_t occupancy, underline_style, bold, italic, faint, strikethrough, overline, selected, background_is_default, search_highlight; uint8_t reserved[6]; } zigonaut_render_cell_v1;
 /* data_offset/data_length reference the caller-owned RGBA arena. */
 typedef struct { uint32_t version, size, image_id; uint64_t generation; uint32_t data_offset, data_length, width, height, source_x, source_y, source_width, source_height, pixel_width, pixel_height; int32_t viewport_column, viewport_row, z; uint32_t x_offset, y_offset; uint8_t reserved[8]; } zigonaut_render_image_v1;
 typedef struct { uint32_t image_id, reserved; uint64_t generation; } zigonaut_image_generation_v1;
 /* status: 0 complete, 1 truncated, 2 error. Holds replay the completed frame. */
-typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes, required_rows, written_rows; uint64_t viewport_offset; uint8_t status; uint8_t reserved[7]; } zigonaut_render_snapshot_result_v1;
+typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes, required_rows, written_rows; uint64_t viewport_offset; uint8_t status, images_changed; uint8_t reserved[6]; } zigonaut_render_snapshot_result_v1;
 typedef struct { uint32_t version, size, required_images, written_images, required_data_bytes, written_data_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_images_result_v1;
 typedef struct { uint32_t version, size, foreground_rgb, background_rgb, cursor_rgb; uint32_t ansi_rgb[16]; uint8_t reserved[8]; } zigonaut_terminal_theme_v1;
 typedef struct { uint32_t version, size; uint64_t generation; uint8_t active, state, value; uint8_t reserved[5]; } zigonaut_progress_v1;
@@ -37,6 +41,9 @@ void zigonaut_core_set_focused(zigonaut_core *, bool focused);
 bool zigonaut_core_key(zigonaut_core *, const zigonaut_key_event_v1 *);
 void zigonaut_core_paste(zigonaut_core *, const uint8_t *bytes, size_t length);
 void zigonaut_core_scroll(zigonaut_core *, ptrdiff_t rows);
+/* Signed row units, same direction as integer scroll; false for no visual
+   change, invalid handle, nonfinite input, or failure. Host supplies momentum. */
+bool zigonaut_core_scroll_fractional(zigonaut_core *, double rows);
 /* Call on a background queue after terminal activity. Returns the next idle
    delay in milliseconds, or zero when complete. Never waits for a busy core. */
 uint32_t zigonaut_core_compress(zigonaut_core *);

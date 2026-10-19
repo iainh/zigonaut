@@ -87,6 +87,8 @@ struct TerminalRenderFrame {
   var cursorStyle: UInt8 = 1
   var cursorVisible = false
   var mouseShape: UInt8 = 8
+  var viewportRows: Int = 0
+  var scrollOffset: CGFloat = 0
 }
 
 struct TerminalRenderCell: Identifiable {
@@ -432,6 +434,7 @@ struct TerminalPalette: Equatable {
   private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
   private var imageCache: [TerminalImageKey: CGImage] = [:]
+  private var imagesNeedRefresh = true
   private var latencySignpostID: OSSignpostID?
   private var currentColumns = 80
   private var currentRows = 24
@@ -505,7 +508,7 @@ struct TerminalPalette: Equatable {
     guard let core else {
       return
     }
-    let desiredCells = min(maximumCells, max(currentColumns * currentRows, 1))
+    let desiredCells = min(maximumCells, max(currentColumns * (currentRows + 1), 1))
     if cellBuffer.count < desiredCells {
       cellBuffer = [zigonaut_render_cell_v1](
         repeating: zigonaut_render_cell_v1(), count: desiredCells)
@@ -692,6 +695,7 @@ struct TerminalPalette: Equatable {
         }
       }
     }
+    imagesNeedRefresh = imagesNeedRefresh || result.images_changed != 0
     if retry && result.status == 1 {
       let requiredCells = min(Int(result.required_cells), maximumCells)
       let requiredText = min(Int(result.required_text_bytes), maximumTextBytes)
@@ -707,7 +711,7 @@ struct TerminalPalette: Equatable {
         hashBuffer = [UInt64](repeating: 0, count: requiredRows)
       }
       if requiredCells <= maximumCells && requiredText <= maximumTextBytes
-        && requiredRows <= currentRows
+        && requiredRows <= currentRows + 1
       {
         retrieveSnapshot(core: core, retry: false)
         return
@@ -745,16 +749,19 @@ struct TerminalPalette: Equatable {
     if retainedCellsByRow.count != rowCount {
       retainedCellsByRow = [[TerminalRenderCell]](repeating: [], count: rowCount)
     }
-    var dirtyCells = [[TerminalRenderCell]](repeating: [], count: rowCount)
-    for cell in cells where dirtyCells.indices.contains(cell.y) {
-      dirtyCells[cell.y].append(cell)
+    if !cells.isEmpty {
+      var dirtyCells = [[TerminalRenderCell]](repeating: [], count: rowCount)
+      for cell in cells where dirtyCells.indices.contains(cell.y) {
+        dirtyCells[cell.y].append(cell)
+      }
+      for row in rowHashes.indices
+        where renderSnapshot.rowHashes.count != rowCount || renderSnapshot.rowHashes[row] != rowHashes[row]
+      {
+        retainedCellsByRow[row] = dirtyCells[row]
+      }
     }
-    for row in rowHashes.indices
-      where renderSnapshot.rowHashes.count != rowCount || renderSnapshot.rowHashes[row] != rowHashes[row]
-    {
-      retainedCellsByRow[row] = dirtyCells[row]
-    }
-    let images = retrieveImages(core: core)
+    let images = imagesNeedRefresh ? retrieveImages(core: core) : renderSnapshot.images
+    imagesNeedRefresh = false
     renderSnapshot = TerminalRenderSnapshot(
       frame: TerminalRenderFrame(
         foreground: frame.foreground_rgb,
@@ -765,9 +772,12 @@ struct TerminalPalette: Equatable {
         cursorColumns: Int(frame.cursor_columns),
         cursorStyle: frame.cursor_style,
         cursorVisible: frame.cursor_visible != 0 && frame.cursor_has_position != 0,
-        mouseShape: frame.mouse_shape
+        mouseShape: frame.mouse_shape,
+        viewportRows: Int(frame.viewport_rows),
+        scrollOffset: CGFloat(frame.scroll_offset)
       ),
-      cells: retainedCellsByRow.flatMap { $0 },
+      cells: rowHashes == renderSnapshot.rowHashes
+        ? renderSnapshot.cells : retainedCellsByRow.flatMap { $0 },
       cellsByRow: retainedCellsByRow,
       images: images,
       rowHashes: rowHashes,
@@ -958,6 +968,10 @@ struct TerminalPalette: Equatable {
   }
   func scroll(_ rows: Int) {
     if let core { zigonaut_core_scroll(core.pointer, rows) }
+    refresh()
+  }
+  func scrollFractional(_ rows: Double) {
+    guard let core, zigonaut_core_scroll_fractional(core.pointer, rows) else { return }
     refresh()
   }
   func setSearch(_ query: String) {

@@ -94,7 +94,7 @@ export fn zgtk_layout_nodes(layout: *PaneLayout, nodes: [*]PaneNode, capacity: u
 extern fn zgtk_write(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_title(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_clipboard(?*anyopaque, [*]const u8, usize) void;
-extern fn zgtk_begin_frame(?*anyopaque, u32) void;
+extern fn zgtk_begin_frame(?*anyopaque, u32, f32, bool) void;
 extern fn zgtk_draw_cell(?*anyopaque, u16, u16, u8, [*]const u8, usize, u32, u32, u32, u16) void;
 extern fn zgtk_draw_cursor(?*anyopaque, u16, u16, u8, u8, u32) void;
 
@@ -110,6 +110,8 @@ const Core = struct {
     clipboard_limit: u32 = 1048576,
     hover: ?Terminal.Link = null,
     link_scratch: Terminal.LinkScratch = .{},
+    visual_dirty: bool = true,
+    clear_scene: bool = true,
 
     fn clipboard(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperation) Terminal.ClipboardWriteResult {
         const self: *Core = @ptrCast(@alignCast(context.?));
@@ -157,7 +159,7 @@ const Core = struct {
 
     pub fn beginFrame(self: *Core, frame: Terminal.Frame) void {
         self.viewport_offset = if (self.terminal.scrollbar()) |state| state.offset else |_| 0;
-        zgtk_begin_frame(self.host, colour(frame.background));
+        zgtk_begin_frame(self.host, colour(frame.background), frame.scroll_offset, self.clear_scene);
     }
 
     pub fn beginRow(_: *Core, _: u16) void {}
@@ -224,6 +226,10 @@ export fn zgtk_create(host: ?*anyopaque) ?*Core {
         allocator.destroy(core);
         return null;
     }, .host = host };
+    core.terminal.setFractionalScrolling(true) catch {
+        zgtk_destroy(core);
+        return null;
+    };
     core.terminal.setWritePty(Core.write, core) catch {
         zgtk_destroy(core);
         return null;
@@ -241,6 +247,7 @@ export fn zgtk_create(host: ?*anyopaque) ?*Core {
 
 export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, clipboard: bool, limit: u32) bool {
     zgtk_clear_hover(core);
+    core.visual_dirty = true;
     const palette = switch (theme) {
         1 => shared.theme.parseJson(allocator, @embedFile("fluent-light")) catch return false,
         2 => shared.theme.parseJson(allocator, @embedFile("fluent-dark")) catch return false,
@@ -284,7 +291,26 @@ export fn zgtk_resize(core: *Core, columns: u16, rows: u16, cell_width: u32, cel
 
 export fn zgtk_render(core: *Core) bool {
     core.snapshot.capture(allocator, &core.terminal) catch return false;
+    core.clear_scene = true;
     core.snapshot.replay(core);
+    return true;
+}
+
+export fn zgtk_render_retained(core: *Core, force: bool) bool {
+    const previous_images = core.snapshot.image_generation;
+    const had_images = core.snapshot.images.items.len != 0;
+    core.snapshot.capture(allocator, &core.terminal) catch return false;
+    core.clear_scene = force or core.visual_dirty;
+    core.visual_dirty = false;
+    var changed = core.clear_scene or previous_images != core.snapshot.image_generation;
+    for (core.snapshot.rows.items) |row| changed = changed or row.dirty;
+    if (!changed) {
+        // Update presentation without touching retained pixels, including images.
+        if (core.snapshot.frame) |frame| core.beginFrame(frame);
+        return true;
+    }
+    core.clear_scene = core.clear_scene or had_images or core.snapshot.images.items.len != 0;
+    if (core.clear_scene) core.snapshot.replay(core) else core.snapshot.replayDirty(core);
     return true;
 }
 
@@ -363,6 +389,16 @@ export fn zgtk_scroll(core: *Core, lines: c_int) void {
     core.terminal.scrollViewport(lines);
 }
 
+export fn zgtk_scroll_fractional(core: *Core, rows: f64) bool {
+    if (!std.math.isFinite(rows)) return false;
+    zgtk_clear_hover(core);
+    return core.terminal.scrollViewportFractional(rows) catch false;
+}
+
+export fn zgtk_mouse_tracking(core: *Core) bool {
+    return core.terminal.mouseTracking();
+}
+
 export fn zgtk_mouse(core: *Core, action: u8, button: u8, x: i32, y: i32, width: u32, height: u32, cell_width: u32, cell_height: u32, padding: u32, modifiers: u16, any_pressed: bool) bool {
     if (action > 2 or button > 7 or !core.terminal.mouseTracking()) return false;
     var buffer: [128]u8 = undefined;
@@ -381,12 +417,14 @@ export fn zgtk_mouse(core: *Core, action: u8, button: u8, x: i32, y: i32, width:
 }
 
 export fn zgtk_clear_hover(core: *Core) void {
+    core.visual_dirty = core.visual_dirty or core.hover != null;
     if (core.hover) |link| allocator.free(link.uri);
     core.hover = null;
 }
 
 export fn zgtk_link_at(core: *Core, x: u16, y: u16, length: *usize) ?[*]const u8 {
     zgtk_clear_hover(core);
+    core.visual_dirty = true;
     length.* = 0;
     core.hover = core.terminal.linkAtAllocWithScratch(allocator, allocator, &core.link_scratch, .{ .x = x, .y = y }) catch return null;
     const link = core.hover orelse return null;
@@ -395,11 +433,13 @@ export fn zgtk_link_at(core: *Core, x: u16, y: u16, length: *usize) ?[*]const u8
 }
 
 export fn zgtk_focus(core: *Core, focused: bool) void {
+    core.visual_dirty = true;
     core.terminal.setFocused(focused);
 }
 
 export fn zgtk_select(core: *Core, x: u16, y: u16, begin: bool, rectangle: bool) bool {
-    const point: Terminal.Point = .{ .x = @min(x, core.terminal.columns - 1), .y = @min(y, core.terminal.rows - 1) };
+    const last_row = core.terminal.rows - @as(u16, @intFromBool(core.terminal.scroll_fraction == 0));
+    const point: Terminal.Point = .{ .x = @min(x, core.terminal.columns - 1), .y = @min(y, last_row) };
     if (begin) core.terminal.beginSelectionAnchor(point) catch return false;
     core.terminal.setDerivedSelection(point, .cell, rectangle) catch return false;
     return true;
@@ -427,6 +467,7 @@ const SearchStatus = extern struct {
 };
 
 export fn zgtk_search_set(core: *Core, query: [*]const u8, length: usize) bool {
+    core.visual_dirty = true;
     if (!core.search.enabled) {
         core.search.saved_offset = if (core.terminal.scrollbar()) |state| state.offset else |_| null;
         core.search.enabled = true;
@@ -443,6 +484,7 @@ export fn zgtk_search_set(core: *Core, query: [*]const u8, length: usize) bool {
 // Scan a bounded batch per GTK idle callback, leaving PTY I/O and input live.
 export fn zgtk_search_tick(core: *Core) SearchStatus {
     if (!core.search.scanning or core.search_failed) return core.searchStatus();
+    core.visual_dirty = true;
     const total = core.terminal.totalRows() catch {
         core.search.scanning = false;
         core.search_failed = true;
@@ -462,12 +504,14 @@ export fn zgtk_search_tick(core: *Core) SearchStatus {
 
 export fn zgtk_search_navigate(core: *Core, forward: bool) SearchStatus {
     zgtk_clear_hover(core);
+    core.visual_dirty = true;
     if (core.search.navigate(forward)) |match| core.scrollTo(match.row);
     return core.searchStatus();
 }
 
 export fn zgtk_search_clear(core: *Core) void {
     zgtk_clear_hover(core);
+    core.visual_dirty = true;
     if (core.search.saved_offset) |offset| core.scrollTo(offset);
     core.search.deinit(allocator);
     core.search = .{};

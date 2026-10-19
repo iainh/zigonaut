@@ -15,10 +15,13 @@ void zgtk_feed(TerminalCore *core, const char *bytes, size_t length);
 bool zgtk_resize(TerminalCore *core, uint16_t columns, uint16_t rows,
                   uint32_t cell_width, uint32_t cell_height);
 bool zgtk_render(TerminalCore *core);
+bool zgtk_render_retained(TerminalCore *core, bool force);
 bool zgtk_key(TerminalCore *core, const char *name, uint16_t modifiers,
               uint16_t consumed, const char *text, size_t length, bool release);
 bool zgtk_paste(TerminalCore *core, const char *text, size_t length);
 void zgtk_scroll(TerminalCore *core, int lines);
+bool zgtk_scroll_fractional(TerminalCore *core, double rows);
+bool zgtk_mouse_tracking(TerminalCore *core);
 void zgtk_focus(TerminalCore *core, bool focused);
 /* action: press=0, release=1, motion=2. button: none=0, left/middle/right=1..3,
  * wheels up/down/left/right=4..7. True consumes the event, even in modes
@@ -76,7 +79,7 @@ bool zgtk_navigate_prompt(TerminalCore *core, bool forward);
 void zgtk_write(void *host, const char *bytes, size_t length);
 void zgtk_title(void *host, const char *bytes, size_t length);
 void zgtk_clipboard(void *host, const char *bytes, size_t length);
-void zgtk_begin_frame(void *host, uint32_t background);
+void zgtk_begin_frame(void *host, uint32_t background, float scroll_offset, bool clear);
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
                     uint32_t background, uint32_t underline, uint16_t flags);

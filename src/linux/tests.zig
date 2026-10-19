@@ -20,6 +20,8 @@ const Capture = struct {
     image_pixels: [24]u8 = @splat(0),
     cache: c.ImageCache = std.mem.zeroes(c.ImageCache),
     cr: ?*c.cairo_t = null,
+    drawn_cells: usize = 0,
+    scroll_offset: f32 = 0,
 
     fn deinit(self: *Capture) void {
         c.zgtk_images_clear(&self.cache);
@@ -42,8 +44,10 @@ export fn zgtk_title(host: ?*anyopaque, bytes: [*]const u8, length: usize) void 
 export fn zgtk_clipboard(host: ?*anyopaque, bytes: [*]const u8, length: usize) void {
     capture(host).clipboard.writer.writeAll(bytes[0..length]) catch unreachable;
 }
-export fn zgtk_begin_frame(host: ?*anyopaque, background: u32) void {
+export fn zgtk_begin_frame(host: ?*anyopaque, background: u32, scroll_offset: f32, _: bool) void {
     capture(host).background = background;
+    capture(host).drawn_cells = 0;
+    capture(host).scroll_offset = scroll_offset;
     capture(host).first_row = @splat(' ');
     capture(host).highlighted = 0;
     capture(host).active_highlighted = 0;
@@ -52,6 +56,7 @@ export fn zgtk_begin_frame(host: ?*anyopaque, background: u32) void {
 }
 export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [*]const u8, length: usize, foreground: u32, _: u32, _: u32, flags: u16) void {
     const state = capture(host);
+    state.drawn_cells += 1;
     if (y == 0 and x < 80 and length == 1) state.first_row[x] = text[0];
     if (length == 3 and std.mem.eql(u8, text[0..length], "界")) state.wide_columns = columns;
     if (length == 1 and text[0] == 'R' and foreground == 0xff0000) state.red_cell = true;
@@ -434,4 +439,30 @@ test "Linux command output copy is explicit, pane-local and never reuses an empt
     try feed(core, "\x1b]133;B\x07true\x1b]133;C\x07\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
     try std.testing.expect(!c.zgtk_copy_last_command(core));
     try std.testing.expectEqualStrings("café 界\nsecond", state.clipboard.written());
+}
+
+test "retained GTK fractional scroll presents without redrawing unchanged cells" {
+    var state = Capture{};
+    defer state.deinit();
+    const core = c.zgtk_create(&state) orelse return error.InitFailed;
+    defer c.zgtk_destroy(core);
+    try std.testing.expect(c.zgtk_resize(core, 12, 3, 8, 16));
+    try feed(core, "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
+    try std.testing.expect(c.zgtk_scroll_fractional(core, -1.5));
+    try std.testing.expect(c.zgtk_render_retained(core, true));
+    try std.testing.expectEqual(@as(usize, 48), state.drawn_cells);
+    try std.testing.expectEqual(@as(f32, 0.5), state.scroll_offset);
+    try std.testing.expect(c.zgtk_scroll_fractional(core, 0.125));
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expectEqual(@as(usize, 0), state.drawn_cells);
+    try std.testing.expectEqual(@as(f32, 0.625), state.scroll_offset);
+    try std.testing.expect(c.zgtk_scroll_fractional(core, 0.5));
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expectEqual(@as(f32, 0.125), state.scroll_offset);
+    try std.testing.expect(state.drawn_cells > 0);
+    c.zgtk_scroll(core, 100);
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expectEqual(@as(f32, 0), state.scroll_offset);
+    // Fractional local scrolling must not manufacture application wheel input.
+    try std.testing.expectEqual(@as(usize, 0), state.output.written().len);
 }

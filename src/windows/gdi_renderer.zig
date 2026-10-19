@@ -141,6 +141,7 @@ const CellRenderer = struct {
     pub fn drawImage(_: *CellRenderer, _: Terminal.Image) void {}
 
     pub fn drawCell(self: *CellRenderer, cell: Terminal.Cell) void {
+        if (cell.y >= self.context.rows) return; // GDI stays row-aligned; do not expose overscan in padding.
         if (cell.occupancy == .wide_tail) return;
         const left = self.context.origin_x + @as(i32, cell.x) * @as(i32, @intCast(self.context.cell_width));
         const top = self.context.origin_y + @as(i32, cell.y) * @as(i32, @intCast(self.context.cell_height));

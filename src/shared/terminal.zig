@@ -109,6 +109,9 @@ pub const Terminal = struct {
     held_snapshot: RenderSnapshot = .{},
     held_scrollbar: Scrollbar = .{ .total = 0, .offset = 0, .len = 0 },
     mouse_shape: MouseShape = .text,
+    fractional_scrolling: bool = false,
+    scroll_fraction: f64 = 0,
+    image_generation: u64 = 0,
 
     // Public libghostty values, also used by the native snapshot ABI.
     pub const MouseShape = enum(u8) {
@@ -255,6 +258,9 @@ pub const Terminal = struct {
         cursor_columns: u8,
         intense_text_style: IntenseTextStyle,
         mouse_shape: MouseShape = .text,
+        // Presentation only: cached rows remain in whole-row coordinates.
+        scroll_offset: f32 = 0,
+        viewport_rows: u16 = 0,
     };
 
     pub const Image = struct {
@@ -299,6 +305,9 @@ pub const Terminal = struct {
         row_hashes: std.ArrayList(u64) = .empty,
         previous_row_hashes: std.ArrayList(u64) = .empty,
         previous_selection_ranges: std.ArrayList(?SelectionRange) = .empty,
+        image_generation: ?u64 = null,
+        images_held: bool = false,
+        images_changed: bool = false,
 
         const OwnedImage = struct {
             image_id: u32,
@@ -486,16 +495,18 @@ pub const Terminal = struct {
         }
 
         pub fn capture(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
-            const cell_count = @as(usize, terminal.columns) * @as(usize, terminal.rows);
-            const resized = self.cells.items.len != cell_count or self.rows.items.len != terminal.rows;
+            self.images_changed = false;
+            const row_count = terminal.renderRowCount();
+            const cell_count = @as(usize, terminal.columns) * row_count;
+            const resized = self.cells.items.len != cell_count or self.rows.items.len != row_count;
             if (resized) {
                 var replacement = RenderSnapshot{};
                 errdefer replacement.deinit(allocator);
                 try replacement.cells.resize(allocator, cell_count);
-                try replacement.rows.resize(allocator, terminal.rows);
-                try replacement.row_hashes.resize(allocator, terminal.rows);
-                try replacement.previous_row_hashes.resize(allocator, terminal.rows);
-                try replacement.previous_selection_ranges.resize(allocator, terminal.rows);
+                try replacement.rows.resize(allocator, row_count);
+                try replacement.row_hashes.resize(allocator, row_count);
+                try replacement.previous_row_hashes.resize(allocator, row_count);
+                try replacement.previous_selection_ranges.resize(allocator, row_count);
                 for (replacement.rows.items) |*row| row.* = .{};
                 for (replacement.rows.items) |*row|
                     try row.graphemes.ensureTotalCapacity(allocator, terminal.columns);
@@ -635,6 +646,16 @@ pub const Terminal = struct {
         }
 
         fn captureImages(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
+            // Fraction-only input must not walk placements or copy image pixels.
+            if (self.image_generation == terminal.image_generation and self.images_held == terminal.render_held) return;
+            self.image_generation = null;
+            try self.captureImagesUncached(allocator, terminal);
+            self.images_changed = true;
+            self.image_generation = terminal.image_generation;
+            self.images_held = terminal.render_held;
+        }
+
+        fn captureImagesUncached(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
             self.clearImages(allocator);
             errdefer self.clearImages(allocator);
             if (terminal.render_held) {
@@ -690,7 +711,8 @@ pub const Terminal = struct {
                 var info: vt.GhosttyKittyGraphicsPlacementRenderInfo = std.mem.zeroes(vt.GhosttyKittyGraphicsPlacementRenderInfo);
                 info.size = @sizeOf(vt.GhosttyKittyGraphicsPlacementRenderInfo);
                 if (vt.ghostty_kitty_graphics_placement_render_info(iterator, handle, terminal.terminal, &info) != vt.GHOSTTY_SUCCESS) continue;
-                if (!virtual and !info.viewport_visible) continue;
+                if (!virtual and !info.viewport_visible and
+                    !(terminal.fractional_scrolling and info.viewport_row == terminal.rows)) continue;
                 if (info.source_x > width or info.source_y > height or info.source_width > width - info.source_x or info.source_height > height - info.source_y) continue;
                 var image_index: ?usize = null;
                 for (self.images.items, 0..) |image, index| {
@@ -899,6 +921,11 @@ pub const Terminal = struct {
                 }
                 renderer.endRow(@intCast(y));
             }
+            self.replayImages(renderer);
+            renderer.endFrame(frame);
+        }
+
+        pub fn replayImages(self: *const RenderSnapshot, renderer: anytype) void {
             for (self.placements.items) |placement| {
                 const image = self.images.items[placement.image_index];
                 renderer.drawImage(.{
@@ -920,7 +947,6 @@ pub const Terminal = struct {
                     .z = placement.z,
                 });
             }
-            renderer.endFrame(frame);
         }
     };
 
@@ -1231,6 +1257,7 @@ pub const Terminal = struct {
 
     pub fn setTheme(self: *Terminal, value: theme.Theme) !void {
         try applyTheme(self.terminal, value);
+        self.image_generation +%= 1;
     }
 
     pub fn setIntenseTextStyle(self: *Terminal, value: IntenseTextStyle) void {
@@ -1240,6 +1267,8 @@ pub const Terminal = struct {
     pub fn setScrollbackSize(self: *Terminal, max_scrollback: u32) !void {
         const scrollback_lines: usize = max_scrollback;
         try check(vt.ghostty_terminal_set(self.terminal, vt.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &scrollback_lines));
+        self.scroll_fraction = 0;
+        self.image_generation +%= 1;
     }
 
     /// Controls history entering the active area on resize, not column reflow.
@@ -1272,6 +1301,8 @@ pub const Terminal = struct {
         ));
         self.columns = columns;
         self.rows = rows;
+        self.scroll_fraction = 0;
+        self.image_generation +%= 1;
         if (restore_offset) |offset| {
             const viewport = try self.scrollbar();
             const target = @min(offset, viewport.total -| viewport.len);
@@ -1280,6 +1311,7 @@ pub const Terminal = struct {
     }
 
     pub fn feed(self: *Terminal, bytes: []const u8) void {
+        self.image_generation +%= 1;
         // init returns by value; install userdata only once the Terminal has
         // its stable address. The callback runs under the caller's terminal
         // lock and never acquires a host snapshot lock.
@@ -1290,6 +1322,13 @@ pub const Terminal = struct {
         }
         const focus_reporting = self.focusReporting();
         vt.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+        // Screen switches, history clearing and output at the live bottom
+        // must not leave a fractional translation on a non-scrollable grid.
+        if (self.scroll_fraction != 0) {
+            if (self.scrollbar() catch null) |state| {
+                if (state.offset >= state.total -| state.len) self.scroll_fraction = 0;
+            }
+        }
         var shape: vt.GhosttyMouseShape = undefined;
         if (vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE, &shape) == vt.GHOSTTY_SUCCESS)
             self.mouse_shape = @enumFromInt(shape);
@@ -1380,10 +1419,40 @@ pub const Terminal = struct {
     }
 
     pub fn scrollViewport(self: *Terminal, delta: isize) void {
+        self.scroll_fraction = 0;
+        self.image_generation +%= 1;
         vt.ghostty_terminal_scroll_viewport(self.terminal, .{
             .tag = vt.GHOSTTY_SCROLL_VIEWPORT_DELTA,
             .value = .{ .delta = delta },
         });
+    }
+
+    /// One persistent bottom row avoids resizing snapshot storage on every
+    /// transition between fractional and aligned positions.
+    pub fn setFractionalScrolling(self: *Terminal, enabled: bool) !void {
+        const overscan = vt.GhosttyRenderStateOverscan{ .above = 0, .below = @intFromBool(enabled) };
+        try check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &overscan));
+        self.fractional_scrolling = enabled;
+        self.scroll_fraction = 0;
+    }
+
+    fn renderRowCount(self: *const Terminal) usize {
+        return @as(usize, self.rows) + @intFromBool(self.fractional_scrolling);
+    }
+
+    pub fn scrollViewportFractional(self: *Terminal, delta: f64) !bool {
+        if (!self.fractional_scrolling or delta == 0) return false;
+        const state = try self.scrollbar();
+        const bottom = state.total -| state.len;
+        const position = std.math.clamp(self.scroll_fraction + delta, -@as(f64, @floatFromInt(state.offset)), @as(f64, @floatFromInt(bottom -| state.offset)));
+        const rows: isize = @intFromFloat(@floor(position));
+        const fraction = position - @floor(position);
+        const changed = rows != 0 or fraction != self.scroll_fraction;
+        if (rows != 0) {
+            self.scrollViewport(rows);
+        }
+        self.scroll_fraction = fraction;
+        return changed;
     }
 
     /// Shift-navigation belongs to history only on the primary screen. Keep
@@ -1421,7 +1490,11 @@ pub const Terminal = struct {
     pub fn scrollToBottom(self: *Terminal) !bool {
         const state = try self.scrollbar();
         const bottom = state.total -| state.len;
-        if (state.offset >= bottom) return false;
+        if (state.offset >= bottom) {
+            const changed = self.scroll_fraction != 0;
+            self.scroll_fraction = 0;
+            return changed;
+        }
         self.scrollViewport(@intCast(@min(bottom - state.offset, std.math.maxInt(isize))));
         return true;
     }
@@ -1739,8 +1812,9 @@ pub const Terminal = struct {
         }
         var scratch = LinkScratch{};
         defer scratch.deinit(allocator);
-        var row: u16 = 0;
-        while (row < self.rows) : (row += 1) {
+        const visible_rows = @as(usize, self.rows) + @intFromBool(self.scroll_fraction > 0);
+        for (0..visible_rows) |row_index| {
+            const row: u16 = @intCast(row_index);
             var column: u16 = 0;
             while (column < self.columns) {
                 const found = try self.linkAtAllocWithScratch(allocator, allocator, &scratch, .{ .x = column, .y = row });
@@ -1766,7 +1840,8 @@ pub const Terminal = struct {
         scratch: *LinkScratch,
         point: Point,
     ) !?Link {
-        if (point.x >= self.columns or point.y >= self.rows) return null;
+        if (point.x >= self.columns or point.y > self.rows or
+            (point.y == self.rows and self.scroll_fraction == 0)) return null;
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
         reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
@@ -1994,6 +2069,11 @@ pub const Terminal = struct {
             .cursor_columns = if (cursor_wide_tail) 2 else 1,
             .intense_text_style = self.intense_text_style,
             .mouse_shape = self.mouse_shape,
+            .scroll_offset = if (self.render_held)
+                if (self.held_snapshot.frame) |held| held.scroll_offset else 0
+            else
+                @floatCast(self.scroll_fraction),
+            .viewport_rows = self.rows,
         };
         renderer.beginFrame(frame);
         const global_appearance_changed = if (previous_frame) |previous|
@@ -2013,8 +2093,9 @@ pub const Terminal = struct {
             vt.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
             @ptrCast(&self.row_iterator),
         ));
-        var y: u16 = 0;
-        while (vt.ghostty_render_state_row_iterator_next(self.row_iterator)) : (y += 1) {
+        var row_index: usize = 0;
+        while (vt.ghostty_render_state_row_iterator_next(self.row_iterator)) : (row_index += 1) {
+            const y: u16 = @intCast(row_index);
             var row_dirty = false;
             try check(vt.ghostty_render_state_row_get(
                 self.row_iterator,
@@ -2137,24 +2218,49 @@ pub const Terminal = struct {
                 });
                 if (comptime @TypeOf(draw_result) != void) try draw_result;
             }
-            if (dirty_only) {
-                row_dirty = false;
-                try check(vt.ghostty_render_state_row_set(
-                    self.row_iterator,
-                    vt.GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
-                    &row_dirty,
-                ));
-            }
-        }
-        renderer.endFrame(frame);
-        if (dirty_only) {
-            dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
-            try check(vt.ghostty_render_state_set(
-                self.render_state,
-                vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY,
-                &dirty,
+            row_dirty = false;
+            try check(vt.ghostty_render_state_row_set(
+                self.row_iterator,
+                vt.GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+                &row_dirty,
             ));
         }
+        // No overscan exists past the live bottom. Keep snapshot dimensions
+        // stable and erase the retained extra row after returning there.
+        if (row_index < self.renderRowCount() and dirty == vt.GHOSTTY_RENDER_STATE_DIRTY_FULL) {
+            const y: u16 = @intCast(row_index);
+            if (comptime @hasDecl(@TypeOf(renderer.*), "rowMetadata")) renderer.rowMetadata(y, .{});
+            renderer.beginRow(y);
+            for (0..self.columns) |x| {
+                const draw_result = renderer.drawCell(Cell{
+                    .x = @intCast(x),
+                    .y = y,
+                    .occupancy = .narrow,
+                    .codepoints = &.{},
+                    .foreground = frame.foreground,
+                    .background = frame.background,
+                    .underline_color = frame.foreground,
+                    .bold = false,
+                    .italic = false,
+                    .faint = false,
+                    .strikethrough = false,
+                    .overline = false,
+                    .underline = 0,
+                    .selected = false,
+                    .background_is_default = true,
+                    .background_matches_default = true,
+                });
+                if (comptime @TypeOf(draw_result) != void) try draw_result;
+            }
+            renderer.endRow(y);
+        }
+        renderer.endFrame(frame);
+        dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+        try check(vt.ghostty_render_state_set(
+            self.render_state,
+            vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY,
+            &dirty,
+        ));
     }
 
     pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, consumed_modifiers: u16, utf8: []const u8, unshifted_codepoint: u32, output: []u8) ![]const u8 {
@@ -2352,6 +2458,7 @@ pub const Terminal = struct {
         var writer: std.Io.Writer = .fixed(output);
         var row_index: usize = 0;
         while (vt.ghostty_render_state_row_iterator_next(self.row_iterator)) : (row_index += 1) {
+            if (row_index >= self.rows and self.scroll_fraction == 0) break;
             if (row_index != 0) try writer.writeByte('\n');
             try check(vt.ghostty_render_state_row_get(
                 self.row_iterator,
@@ -2659,6 +2766,8 @@ fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
 
 fn renderHold(_: vt.GhosttyTerminal, userdata: ?*anyopaque, held: bool) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
+    // More than one boundary may occur inside a single feed call.
+    self.image_generation +%= 1;
     self.render_held = false;
     self.render_hold_error = null;
     if (!held) return;
@@ -3152,6 +3261,11 @@ test "held snapshots own image pixels and placements before live deletion" {
     terminal.feed("\x1b[?2026l");
     try snapshot.capture(std.testing.allocator, &terminal);
     try std.testing.expectEqual(@as(usize, 0), snapshot.placements.items.len);
+    terminal.feed("\x1b_Gf=32,s=1,v=1,a=T,i=1,c=1,r=1;/wAA/w==\x1b\\\x1b[?2026h" ++
+        "\x1b_Gf=32,s=1,v=1,a=T,i=1,c=1,r=1;AAD//w==\x1b\\\x1b[?2026l\x1b[?2026h\x1b_Ga=d,d=A\x1b\\");
+    try snapshot.capture(std.testing.allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.images.items.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, snapshot.images.items[0].pixels);
 }
 
 test "focus reports are emitted only when requested" {
@@ -3297,6 +3411,61 @@ test "scrollbar tracks and scrolls the viewport" {
     const restored = try terminal.scrollbar();
     try std.testing.expectEqual(bottom.offset, restored.offset);
     try std.testing.expect(!try terminal.scrollToBottom());
+}
+
+test "fractional scrolling retains overscan and reuses rows between boundaries" {
+    const allocator = std.testing.allocator;
+    var terminal = try Terminal.init(12, 3, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.setFractionalScrolling(true);
+    terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\r\nseven");
+    try std.testing.expect(try terminal.scrollViewportFractional(-1.5));
+    try std.testing.expectEqual(@as(u64, 2), (try terminal.scrollbar()).offset);
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(allocator);
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.rows.items.len);
+    try std.testing.expectEqual(@as(f32, 0.5), snapshot.frame.?.scroll_offset);
+    try std.testing.expectEqual(@as(u16, 3), snapshot.frame.?.viewport_rows);
+    const hashes: [4]u64 = snapshot.row_hashes.items[0..4].*;
+    try std.testing.expect(try terminal.scrollViewportFractional(0.125));
+    // A subrow update must succeed without allocating and emit no dirty text.
+    try snapshot.capture(std.testing.failing_allocator, &terminal);
+    try std.testing.expectEqual(@as(f32, 0.625), snapshot.frame.?.scroll_offset);
+    try std.testing.expectEqualSlices(u64, &hashes, snapshot.row_hashes.items);
+    for (snapshot.rows.items) |row| try std.testing.expect(!row.dirty);
+    const found = (try terminal.linkAtAlloc(allocator, .{ .x = 1, .y = 3 })).?;
+    defer allocator.free(found.uri);
+    try std.testing.expectEqualStrings("https://example.com", found.uri);
+    try terminal.setSelection(.{ .anchor = .{ .x = 0, .y = 3 }, .focus = .{ .x = 3, .y = 3 } });
+    const text = try terminal.selectedTextAlloc(allocator);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("link", text);
+    const hints = try terminal.linkHintsAlloc(allocator);
+    defer {
+        for (hints) |candidate| allocator.free(candidate.target);
+        allocator.free(hints);
+    }
+    try std.testing.expectEqual(@as(usize, 1), hints.len);
+    try std.testing.expectEqual(@as(u16, 3), hints[0].row);
+    try std.testing.expect(try terminal.scrollViewportFractional(-100));
+    try std.testing.expect(!try terminal.scrollViewportFractional(-0.125));
+    try std.testing.expectEqual(@as(u64, 0), (try terminal.scrollbar()).offset);
+    try std.testing.expect(try terminal.scrollViewportFractional(100));
+    try std.testing.expect(!try terminal.scrollViewportFractional(0.125));
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expectEqual(@as(f32, 0), snapshot.frame.?.scroll_offset);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.rows.items.len);
+    try std.testing.expect(try terminal.scrollViewportFractional(-0.25));
+    terminal.scrollViewport(0);
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expectEqual(@as(f32, 0), snapshot.frame.?.scroll_offset);
+    try std.testing.expect(try terminal.scrollViewportFractional(0.25));
+    try terminal.resize(12, 4, 8, 16);
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expectEqual(@as(f32, 0), snapshot.frame.?.scroll_offset);
+    terminal.feed("\x1b[?1049h");
+    try std.testing.expect(!try terminal.scrollViewportFractional(-0.5));
 }
 
 test "growing a scrolled viewport beyond available history preserves a valid view" {

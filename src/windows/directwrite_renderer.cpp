@@ -693,6 +693,11 @@ struct ZigonautTextEngine {
     uint64_t d3d_scene_region_copy_bytes = 0;
     uint32_t scene_width = 0;
     uint32_t scene_height = 0;
+    uint32_t presentation_left = 0, presentation_top = 0;
+    uint32_t presentation_width = 0, presentation_height = 0;
+    uint32_t presentation_offset = 0;
+    uint32_t overscan_height = 0;
+    uint32_t presentation_restore_frames = 0;
     SceneDamage frame_damage;
     SceneDamage previous_present_damage;
     bool damage_history_valid = false;
@@ -1378,6 +1383,55 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         // immediate-context copy is ordered after them; this does not wait for GPU
         // completion. Drop D2D's retained target association before switching APIs.
         target->SetTarget(nullptr);
+        if (scene_height != target_bitmap->GetPixelSize().height) {
+            const auto size = target_bitmap->GetPixelSize();
+            // Overscan is retained in scene coordinates, never in the swap chain.
+            // Copy only damage when aligned; fractional presentation copies the
+            // grid without rerasterizing any retained text or glyphs.
+            SceneDamage damage;
+            try {
+                damage = transferDamage();
+            } catch (...) {
+                markFullDamage(damage);
+            }
+            if (force_full || shouldCopyFull(damage)) {
+                const D3D11_BOX whole{0, 0, 0, size.width, size.height, 1};
+                d3d_context->CopySubresourceRegion(destination, 0, 0, 0, 0, scene_texture, 0, &whole);
+                ++d3d_scene_full_copy_count;
+                ++d3d_scene_copy_count;
+            } else for (auto box : damage.boxes) {
+                box.bottom = std::min(box.bottom, size.height);
+                if (box.top >= box.bottom) continue;
+                d3d_context->CopySubresourceRegion(destination, 0, box.left, box.top, 0, scene_texture, 0, &box);
+                ++d3d_scene_region_copy_count;
+                ++d3d_scene_copy_count;
+                d3d_scene_region_copy_bytes += static_cast<uint64_t>(box.right - box.left) *
+                    (box.bottom - box.top) * 4;
+            }
+            const uint32_t bottom = presentation_top + presentation_height;
+            if (presentation_width != 0 && bottom < size.height) {
+                const D3D11_BOX padding{0, bottom + overscan_height, 0,
+                    size.width, size.height + overscan_height, 1};
+                d3d_context->CopySubresourceRegion(destination, 0, 0,
+                    bottom, 0, scene_texture, 0, &padding);
+                ++d3d_scene_region_copy_count;
+                ++d3d_scene_copy_count;
+                d3d_scene_region_copy_bytes += static_cast<uint64_t>(size.width) * (size.height - bottom) * 4;
+            }
+            if ((presentation_offset != 0 || presentation_restore_frames != 0) && presentation_width != 0) {
+                const D3D11_BOX grid{presentation_left, presentation_top + presentation_offset, 0,
+                    presentation_left + presentation_width,
+                    presentation_top + presentation_height + presentation_offset, 1};
+                d3d_context->CopySubresourceRegion(destination, 0, presentation_left,
+                    presentation_top, 0, scene_texture, 0, &grid);
+                ++d3d_scene_region_copy_count;
+                ++d3d_scene_copy_count;
+                d3d_scene_region_copy_bytes += static_cast<uint64_t>(presentation_width) * presentation_height * 4;
+            }
+            if (presentation_offset != 0) presentation_restore_frames = 2;
+            else if (presentation_restore_frames != 0) --presentation_restore_frames;
+            return d3d_device->GetDeviceRemovedReason();
+        }
         SceneDamage damage;
         try {
             damage = transferDamage();
@@ -1505,7 +1559,8 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         if (target == nullptr || swap_chain == nullptr) return E_HANDLE;
         if (target_bitmap != nullptr && scene_bitmap != nullptr &&
             target_bitmap->GetPixelSize().width == width &&
-            target_bitmap->GetPixelSize().height == height) return S_OK;
+            target_bitmap->GetPixelSize().height == height &&
+            scene_height == height + overscan_height) return S_OK;
 
         discardTargetBitmap();
         HRESULT hr = swap_chain->ResizeBuffers(
@@ -1536,7 +1591,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         if (SUCCEEDED(hr)) {
             D3D11_TEXTURE2D_DESC scene_description{};
             scene_description.Width = width;
-            scene_description.Height = height;
+            scene_description.Height = height + overscan_height;
             scene_description.MipLevels = 1;
             scene_description.ArraySize = 1;
             scene_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1561,7 +1616,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         if (FAILED(hr)) discardTargetBitmap();
         else {
             scene_width = width;
-            scene_height = height;
+            scene_height = height + overscan_height;
         }
         return hr;
     }
@@ -4151,7 +4206,7 @@ extern "C" HRESULT zigonaut_text_engine_begin_frame(
     const uint64_t atlas_generation = engine->atlas_generation;
     const bool recreate = engine->scene_bitmap == nullptr ||
         engine->scene_bitmap->GetPixelSize().width != width ||
-        engine->scene_bitmap->GetPixelSize().height != height;
+        engine->scene_bitmap->GetPixelSize().height != height + engine->overscan_height;
     const HRESULT hr = engine->ensureTarget(width, height);
     if (FAILED(hr)) {
         engine->atlas_reset_pending = pressure_reset;
@@ -4192,6 +4247,17 @@ extern "C" void zigonaut_text_engine_clear_rect(ZigonautTextEngine* engine,
     engine->addDamage(engine->frame_damage, left, top, right, bottom);
     engine->brush->SetColor(color(background));
     engine->target->FillRectangle(D2D1::RectF(left, top, right, bottom), engine->brush);
+}
+
+extern "C" void zigonaut_text_engine_set_scroll_presentation(ZigonautTextEngine* engine,
+    uint32_t left, uint32_t top, uint32_t width, uint32_t height, uint32_t offset) {
+    if (!engine) return;
+    engine->presentation_left = left;
+    engine->presentation_top = top;
+    engine->presentation_width = width;
+    engine->presentation_height = height;
+    engine->presentation_offset = std::min(offset, engine->metrics.height);
+    engine->overscan_height = engine->metrics.height;
 }
 
 extern "C" HRESULT zigonaut_text_engine_shift_scene(ZigonautTextEngine* engine,

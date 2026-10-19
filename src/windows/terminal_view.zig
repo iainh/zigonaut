@@ -301,6 +301,7 @@ fn accessibilitySnapshot(view: *View, query: *win.zigonaut_accessibility_snapsho
     _ = win.ClientToScreen(view.hwnd, &origin);
     query.grid_left = origin.x;
     query.grid_top = origin.y;
+    if (view.text_engine != null) query.grid_top -= @intFromFloat(@round(runtime.preparedScrollFraction() * @as(f32, @floatFromInt(view.cell_height))));
     query.cell_width = view.cell_width;
     query.cell_height = view.cell_height;
     query.rows = view.rows;
@@ -831,7 +832,9 @@ pub const View = struct {
             @max(client.top, geometry.gridBottom() - 2 * @as(i32, @intCast(self.cell_height)))
         else
             geometry.top + @as(i32, self.ime_anchor_y) * @as(i32, @intCast(self.cell_height));
-        var caret_origin = win.POINT{ .x = std.math.clamp(caret_x, client.left, client.right - 1), .y = std.math.clamp(caret_y, client.top, client.bottom - 1) };
+        const fraction = if (self.text_engine != null) if (self.boundRuntime()) |runtime| runtime.preparedScrollFraction() else 0 else 0;
+        const translation: i32 = @intFromFloat(@round(fraction * @as(f32, @floatFromInt(self.cell_height))));
+        var caret_origin = win.POINT{ .x = std.math.clamp(caret_x, client.left, client.right - 1), .y = std.math.clamp(caret_y - translation, client.top, client.bottom - 1) };
         var pane_origin = win.POINT{ .x = client.left, .y = client.top };
         var pane_end = win.POINT{ .x = client.right, .y = client.bottom };
         if (win.ClientToScreen(self.hwnd, &caret_origin) == 0 or
@@ -1246,8 +1249,8 @@ pub const View = struct {
     }
 
     fn scrollViewport(self: *View, delta: isize) void {
-        if (delta == 0) return;
         const session = self.boundSession() orelse return;
+        if (delta == 0 and session.runtime.?.preparedScrollFraction() == 0) return;
         const tracing = scroll_trace.enabled();
         session.runtime.?.scrollViewport(delta);
         if (tracing) {
@@ -1277,13 +1280,27 @@ pub const View = struct {
     fn scrollToBottom(self: *View) void {
         const state = self.scrollbar();
         const bottom = state.total -| state.len;
-        if (state.offset >= bottom) return;
+        if (state.offset >= bottom) {
+            if (self.boundRuntime()) |runtime| runtime.scrollViewport(0);
+            return;
+        }
         self.scrollViewport(@intCast(@min(bottom - state.offset, std.math.maxInt(isize))));
     }
 
     pub fn handleMouseWheelDelta(self: *View, delta: i32) void {
         var lines: win.UINT = default_wheel_rows;
         _ = win.SystemParametersInfoW(win.SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+        if (self.text_engine != null and lines != std.math.maxInt(win.UINT)) {
+            self.wheel_remainder = 0;
+            if (lines == 0) return;
+            const runtime = self.boundRuntime() orelse return;
+            const changed = runtime.scrollViewportFractional(-@as(f64, @floatFromInt(delta)) * @as(f64, @floatFromInt(lines)) / win.WHEEL_DELTA) catch return;
+            if (changed) {
+                self.notifyScrollbar(true);
+                self.invalidateContent();
+            }
+            return;
+        }
         const result = wheelScroll(self.wheel_remainder, delta, lines, self.scrollbar().len);
         self.wheel_remainder = result.remainder;
         self.scrollViewport(-result.rows);
@@ -1433,9 +1450,13 @@ pub const View = struct {
         else
             colorRef(self.model.terminal_theme.foreground);
         const engine = &self.text_engine.?;
+        const geometry = self.gridGeometry(client);
+        const fraction = if (self.boundRuntime()) |runtime| runtime.preparedScrollFraction() else 0;
+        engine.setScrollPresentation(@intCast(@max(geometry.left, 0)), @intCast(@max(geometry.top, 0)), @intCast(@max(@min(geometry.gridRight(), client.right) - @max(geometry.left, 0), 0)), @intCast(@max(@min(geometry.gridBottom(), client.bottom) - @max(geometry.top, 0), 0)), @intFromFloat(@round(fraction * @as(f32, @floatFromInt(self.cell_height)))));
         var full_rebuild = self.full_rebuild_required.swap(false, .acq_rel);
         const current_has_images = if (self.boundRuntime()) |runtime| runtime.preparedViewportHasImages() else false;
-        full_rebuild = full_rebuild or self.scene_has_images or current_has_images;
+        const scene_changed = if (self.boundRuntime()) |runtime| runtime.preparedViewportHasDamage() else false;
+        full_rebuild = full_rebuild or ((self.scene_has_images or current_has_images) and scene_changed);
         const native_rebuilt = engine.beginFrame(@intCast(width), @intCast(height), background, full_rebuild) catch |err| {
             self.full_rebuild_required.store(true, .release);
             return err;
@@ -1447,7 +1468,6 @@ pub const View = struct {
         }
         full_rebuild = full_rebuild or native_rebuilt;
 
-        const geometry = self.gridGeometry(client);
         if (self.boundSession()) |session| {
             const offset = session.runtime.?.preparedScrollOffset();
             const scroll_delta: ?i32 = if (!full_rebuild and self.retained_scroll_offset != null and
@@ -1477,11 +1497,11 @@ pub const View = struct {
                 .background = background,
             };
             if (scroll_delta) |delta| {
-                try engine.shiftScene(delta, @intCast(geometry.left), @intCast(geometry.top), self.columns * self.cell_width, self.cell_height, self.rows);
+                try engine.shiftScene(delta, @intCast(geometry.left), @intCast(geometry.top), self.columns * self.cell_width, self.cell_height, @as(u32, self.rows) + 1);
                 session.runtime.?.replayPreparedViewportShifted(&renderer, delta);
             } else if (full_rebuild or (self.retained_scroll_offset != null and offset != self.retained_scroll_offset.?))
                 session.runtime.?.replayPreparedViewport(&renderer)
-            else
+            else if (scene_changed)
                 session.runtime.?.replayPreparedViewportDirty(&renderer);
             if (renderer.draw_error) |err| return err;
             self.retained_scroll_offset = offset;
@@ -2176,6 +2196,10 @@ pub const View = struct {
         if (!clamp_to_grid and (x < 0 or y < 0 or x >= width or y >= height)) return null;
         x = std.math.clamp(x, 0, width - 1);
         y = std.math.clamp(y, 0, height - 1);
+        if (self.text_engine != null) {
+            const fraction = if (self.boundRuntime()) |runtime| runtime.preparedScrollFraction() else 0;
+            y += @intFromFloat(@round(fraction * @as(f32, @floatFromInt(self.cell_height))));
+        }
         return .{
             .x = @intCast(@divTrunc(x, @as(i32, @intCast(self.cell_width)))),
             .y = @intCast(@divTrunc(y, @as(i32, @intCast(self.cell_height)))),
@@ -2422,7 +2446,7 @@ const DirectWriteCellRenderer = struct {
         self.vertical_extension = null;
         self.search_row_matches = self.search_cursor.next(self.search_offset + y);
         const top = self.origin_y + @as(i32, y) * @as(i32, @intCast(self.view.cell_height));
-        const extend = self.view.padding_color != .background and !self.view.high_contrast;
+        const extend = y < self.view.rows and self.view.padding_color != .background and !self.view.high_contrast;
         self.engine.clearRect(
             @floatFromInt(if (extend) self.client.left else self.origin_x),
             @floatFromInt(top),
@@ -2440,9 +2464,9 @@ const DirectWriteCellRenderer = struct {
         const grid_bottom = self.origin_y + @as(i32, self.view.rows) * @as(i32, @intCast(self.view.cell_height));
         if (extend and y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
             @floatFromInt(self.client.left),
-            @floatFromInt(grid_bottom),
+            @floatFromInt(grid_bottom + @as(i32, @intCast(self.view.cell_height))),
             @floatFromInt(self.client.right),
-            @floatFromInt(self.client.bottom),
+            @floatFromInt(self.client.bottom + @as(i32, @intCast(self.view.cell_height))),
             self.background,
         );
         self.engine.beginRow(
@@ -2565,6 +2589,7 @@ const DirectWriteCellRenderer = struct {
     }
 
     fn extendBackground(self: *DirectWriteCellRenderer, cell: Terminal.Cell, span: u32, color: u32) void {
+        if (cell.y >= self.view.rows) return;
         if (self.view.padding_color == .background or self.view.high_contrast) return;
         const cell_width: i32 = @intCast(self.view.cell_width);
         const cell_height: i32 = @intCast(self.view.cell_height);
@@ -2618,9 +2643,9 @@ const DirectWriteCellRenderer = struct {
         const grid_bottom = self.origin_y + @as(i32, self.view.rows) * @as(i32, @intCast(self.view.cell_height));
         if (y + 1 == self.view.rows and grid_bottom < self.client.bottom) self.engine.clearRect(
             @floatFromInt(run.left),
-            @floatFromInt(grid_bottom),
+            @floatFromInt(grid_bottom + @as(i32, @intCast(self.view.cell_height))),
             @floatFromInt(run.right),
-            @floatFromInt(self.client.bottom),
+            @floatFromInt(self.client.bottom + @as(i32, @intCast(self.view.cell_height))),
             run.color,
         );
     }
@@ -2642,7 +2667,7 @@ const DirectWriteCellRenderer = struct {
         const top = origin_y + @as(f32, @floatFromInt(image.viewport_row)) * cell_height + @as(f32, @floatFromInt(image.y_offset));
         self.engine.drawImage(image, left, top, @floatFromInt(image.pixel_width), @floatFromInt(image.pixel_height), .{
             origin_x,                                                           origin_y,
-            origin_x + @as(f32, @floatFromInt(self.view.columns)) * cell_width, origin_y + @as(f32, @floatFromInt(self.view.rows)) * cell_height,
+            origin_x + @as(f32, @floatFromInt(self.view.columns)) * cell_width, origin_y + @as(f32, @floatFromInt(@as(u32, self.view.rows) + 1)) * cell_height,
         }) catch |err| {
             self.draw_error = err;
         };

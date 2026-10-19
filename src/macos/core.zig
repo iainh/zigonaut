@@ -99,6 +99,9 @@ const Core = struct {
     synchronized_output: SynchronizedOutput = .{},
     compression: Compression = .{},
     render_snapshot: Terminal.RenderSnapshot = .{},
+    render_visual: std.ArrayList(u64) = .empty,
+    render_dirty: std.ArrayList(bool) = .empty,
+    render_selection: std.ArrayList(RenderSelectionRange) = .empty,
 };
 
 pub const NotificationResult = extern struct {
@@ -173,7 +176,8 @@ pub const RenderFrame = extern struct {
     cursor_has_position: u8,
     images_skipped: u8,
     mouse_shape: u8,
-    reserved: [6]u8,
+    viewport_rows: u16,
+    scroll_offset: f32,
 };
 
 pub const RenderCell = extern struct {
@@ -220,7 +224,8 @@ pub const RenderSnapshotResult = extern struct {
     written_rows: u32,
     viewport_offset: u64,
     status: u8,
-    reserved: [7]u8,
+    images_changed: u8 = 0,
+    reserved: [6]u8,
 };
 
 pub const RenderImage = extern struct {
@@ -379,6 +384,7 @@ export fn zigonaut_core_create(helper_path: ?[*:0]const u8, shell_path: ?[*:0]co
         allocator.destroy(self);
         return null;
     }, .master = -1, .cancel_read = -1, .cancel_write = -1, .child = -1, .wake = wake, .context = context };
+    self.terminal.setFractionalScrolling(true) catch return failCreate(self, -1);
     const shell_name = std.fs.path.basename(std.mem.span(shell));
     const initial_title = if (shell_name.len == 0) "Terminal" else shell_name;
     self.default_title_len = @intCast(@min(initial_title.len, self.default_title.len));
@@ -783,7 +789,8 @@ const SnapshotCollector = struct {
             .cursor_has_position = @intFromBool(frame.cursor_has_position),
             .images_skipped = 0,
             .mouse_shape = @intFromEnum(frame.mouse_shape),
-            .reserved = @splat(0),
+            .viewport_rows = frame.viewport_rows,
+            .scroll_offset = frame.scroll_offset,
         };
     }
     pub fn endFrame(_: *SnapshotCollector, _: Terminal.Frame) void {}
@@ -937,14 +944,15 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     collector.viewport_offset = if (core.terminal.render_held) core.terminal.held_scrollbar.offset else if (core.terminal.scrollbar()) |state| state.offset else |_| 0;
     output.viewport_offset = collector.viewport_offset;
     core.render_snapshot.capture(std.heap.c_allocator, &core.terminal) catch return;
+    output.images_changed = @intFromBool(core.render_snapshot.images_changed);
     const row_count = core.render_snapshot.row_hashes.items.len;
     output.required_rows = @intCast(row_count);
-    const visual = std.heap.c_allocator.alloc(u64, row_count) catch return;
-    defer std.heap.c_allocator.free(visual);
-    const dirty = std.heap.c_allocator.alloc(bool, row_count) catch return;
-    defer std.heap.c_allocator.free(dirty);
-    const selection_ranges = std.heap.c_allocator.alloc(RenderSelectionRange, row_count) catch return;
-    defer std.heap.c_allocator.free(selection_ranges);
+    core.render_visual.resize(std.heap.c_allocator, row_count) catch return;
+    core.render_dirty.resize(std.heap.c_allocator, row_count) catch return;
+    core.render_selection.resize(std.heap.c_allocator, row_count) catch return;
+    const visual = core.render_visual.items;
+    const dirty = core.render_dirty.items;
+    const selection_ranges = core.render_selection.items;
     @memset(selection_ranges, .{});
     if (core.terminal.hasSelection()) {
         var selection_collector = SelectionCollector{ .ranges = selection_ranges };
@@ -954,7 +962,9 @@ export fn zigonaut_core_render_snapshot(self: ?*Core, previous_hashes: ?[*]const
     const previous = if (previous_hashes) |pointer| pointer[0..previous_count] else &.{};
     dirtyRows(previous, visual, dirty);
     collector.dirty_rows = dirty;
-    core.render_snapshot.replay(&collector);
+    if (std.mem.indexOfScalar(bool, dirty, true) != null) {
+        core.render_snapshot.replay(&collector);
+    } else if (core.render_snapshot.frame) |current| collector.beginFrame(current);
     if (collector.truncated or hash_capacity < row_count or (row_count != 0 and current_hashes == null)) {
         output.status = 1;
         output.written_cells = 0;
@@ -978,6 +988,9 @@ test "native snapshots present the completed frame during a hold and remain idle
     };
     defer core.terminal.deinit();
     defer core.render_snapshot.deinit(std.heap.c_allocator);
+    defer core.render_visual.deinit(std.heap.c_allocator);
+    defer core.render_dirty.deinit(std.heap.c_allocator);
+    defer core.render_selection.deinit(std.heap.c_allocator);
     core.terminal.feed("AAAA\x1b[?2026h\rBBBB\x1b[?2026l\x1b[?2026h\rCCCC");
     var frame: RenderFrame = undefined;
     var cells: [16]RenderCell = undefined;
@@ -1102,7 +1115,7 @@ export fn zigonaut_core_render_images(self: ?*Core, known_generations: ?[*]const
     core.mutex.lock();
     defer core.mutex.unlock();
     var collector = ImageCollector{ .images = image_slice, .rgba = rgba_slice, .known = known_slice, .result = output };
-    core.render_snapshot.replay(&collector);
+    core.render_snapshot.replayImages(&collector);
     output.status = if (collector.truncated) 1 else 0;
 }
 
@@ -1371,6 +1384,16 @@ export fn zigonaut_core_scroll(self: ?*Core, rows: isize) void {
     core.mutex.lock();
     defer core.mutex.unlock();
     core.terminal.scrollViewport(rows);
+}
+
+/// Signed row units, with native momentum supplied by the host. No UI wake
+/// here: the synchronous caller refreshes only when the visual position changed.
+export fn zigonaut_core_scroll_fractional(self: ?*Core, rows: f64) bool {
+    const core = self orelse return false;
+    if (!std.math.isFinite(rows)) return false;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    return core.terminal.scrollViewportFractional(rows) catch false;
 }
 
 /// Background maintenance only: yield to terminal users and never wake the UI.
@@ -1649,6 +1672,9 @@ export fn zigonaut_core_destroy(self: ?*Core) void {
     for (core.clipboard_writes.items) |item| std.heap.c_allocator.free(item.payload);
     core.clipboard_writes.deinit(std.heap.c_allocator);
     core.render_snapshot.deinit(std.heap.c_allocator);
+    core.render_visual.deinit(std.heap.c_allocator);
+    core.render_dirty.deinit(std.heap.c_allocator);
+    core.render_selection.deinit(std.heap.c_allocator);
     core.terminal.deinit();
     std.heap.c_allocator.destroy(core);
 }
@@ -1916,6 +1942,51 @@ test "snapshot with null handle is bounded" {
     var bytes = [_]u8{0xaa};
     try std.testing.expectEqual(@as(usize, 0), zigonaut_core_snapshot(null, &bytes, 1));
     try std.testing.expectEqual(@as(u8, 0xaa), bytes[0]);
+}
+
+test "fractional native ABI reuses unchanged rows and preserves frame layout" {
+    try std.testing.expectEqual(@as(usize, 36), @sizeOf(RenderFrame));
+    try std.testing.expectEqual(@as(usize, 30), @offsetOf(RenderFrame, "viewport_rows"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(RenderFrame, "scroll_offset"));
+    try std.testing.expect(!zigonaut_core_scroll_fractional(null, 0.5));
+    var core = Core{
+        .terminal = try Terminal.init(8, 2, theme.rasmus),
+        .master = -1,
+        .cancel_read = -1,
+        .cancel_write = -1,
+        .child = -1,
+        .wake = null,
+        .context = null,
+    };
+    defer core.terminal.deinit();
+    defer core.render_snapshot.deinit(std.heap.c_allocator);
+    defer core.render_visual.deinit(std.heap.c_allocator);
+    defer core.render_dirty.deinit(std.heap.c_allocator);
+    defer core.render_selection.deinit(std.heap.c_allocator);
+    try core.terminal.setFractionalScrolling(true);
+    core.terminal.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+    try std.testing.expect(!zigonaut_core_scroll_fractional(&core, std.math.nan(f64)));
+    try std.testing.expect(zigonaut_core_scroll_fractional(&core, -1.5));
+    var frame: RenderFrame = undefined;
+    var cells: [24]RenderCell = undefined;
+    var text: [128]u8 = undefined;
+    var hashes: [3]u64 = undefined;
+    var result: RenderSnapshotResult = undefined;
+    zigonaut_core_render_snapshot(&core, null, 0, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expectEqual(@as(u32, 3), result.written_rows);
+    try std.testing.expectEqual(@as(u16, 2), frame.viewport_rows);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), frame.scroll_offset, 0.0001);
+    const previous = hashes;
+    try std.testing.expect(zigonaut_core_scroll_fractional(&core, 0.125));
+    zigonaut_core_render_snapshot(&core, &previous, previous.len, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(u8, 0), result.status);
+    try std.testing.expectEqual(@as(u32, 0), result.written_cells);
+    try std.testing.expectEqualSlices(u64, &previous, &hashes);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.625), frame.scroll_offset, 0.0001);
+    zigonaut_core_scroll(&core, 0);
+    zigonaut_core_render_snapshot(&core, null, 0, &frame, &cells, cells.len, &text, text.len, &hashes, hashes.len, &result);
+    try std.testing.expectEqual(@as(f32, 0), frame.scroll_offset);
 }
 
 test "OSC 22 reaches the native frame ABI independently of the text cursor" {

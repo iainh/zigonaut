@@ -128,6 +128,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var retainedViewportOffset: UInt64?
   private var retainedAppearance = ""
   private var retainedPixelSize = CGSize.zero
+  private var drawingRetainedScene = false
+  private var cachedTextPlacements: [MetalTextPlacement] = []
+  private var decorationSignature = ""
+  private var overlaySignature = ""
   private var encodedKeys = Set<UInt16>()
   private var pressedModifiers = Set<UInt16>()
   private var pendingKeyEvent: NSEvent?
@@ -261,10 +265,22 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       : preferences.paddingHorizontal
   }
 
-  private var originY: CGFloat {
+  private var unscrolledOriginY: CGFloat {
     preferences.paddingBalance == "Centered"
       ? max(0, (bounds.height - CGFloat(gridRows) * lineHeight) / 2)
       : preferences.paddingVertical
+  }
+
+  private var scrollTranslation: CGFloat {
+    let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+    return (model.renderSnapshot.frame.scrollOffset * lineHeight * scale).rounded() / scale
+  }
+  private var originY: CGFloat {
+    unscrolledOriginY - (drawingRetainedScene ? 0 : scrollTranslation)
+  }
+  private var viewportRect: NSRect {
+    NSRect(x: originX, y: unscrolledOriginY,
+      width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)
   }
 
   private var isDarkAppearance: Bool {
@@ -316,10 +332,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       #include <metal_stdlib>
       using namespace metal;
       struct VertexOut { float4 position [[position]]; float2 uv; };
-      vertex VertexOut terminal_vertex(uint id [[vertex_id]]) {
+      vertex VertexOut terminal_vertex(uint id [[vertex_id]], constant float2 &sampling [[buffer(1)]]) {
         const float2 positions[] = { {-1,-1}, {1,-1}, {-1,1}, {1,1} };
         const float2 coordinates[] = { {0,1}, {1,1}, {0,0}, {1,0} };
-        return { float4(positions[id], 0, 1), coordinates[id] };
+        float2 uv = coordinates[id];
+        uv.y = uv.y * sampling.x + sampling.y;
+        return { float4(positions[id], 0, 1), uv };
       }
       vertex VertexOut placement_vertex(const device float4 *vertices [[buffer(0)]], uint id [[vertex_id]]) {
         return { float4(vertices[id].xy, 0, 1), vertices[id].zw };
@@ -532,8 +550,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       requested.set()
       return
     }
-    let grid = NSRect(x: originX, y: originY,
-      width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)
+    let grid = viewportRect
     guard grid.contains(point) else {
       setHoveredLink(nil)
       requested.set()
@@ -820,7 +837,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func cell(_ event: NSEvent) -> (Int, Int) {
     let point = convert(event.locationInWindow, from: nil)
     let column = min(gridColumns - 1, max(0, Int((point.x - originX) / cellWidth)))
-    let row = min(gridRows - 1, max(0, Int((point.y - originY) / lineHeight)))
+    let lastRow = gridRows - (model.renderSnapshot.frame.scrollOffset > 0 ? 0 : 1)
+    let row = min(lastRow, max(0, Int(floor((point.y - originY) / lineHeight))))
     return (column, row)
   }
 
@@ -876,9 +894,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     guard selecting else { return }
     selectionShouldCopy = true
     let location = convert(event.locationInWindow, from: nil)
-    if location.y < originY {
+    if location.y < unscrolledOriginY {
       model.scroll(1)
-    } else if location.y > originY + CGFloat(gridRows) * lineHeight {
+    } else if location.y > unscrolledOriginY + CGFloat(gridRows) * lineHeight {
       model.scroll(-1)
     }
     _ = autoscroll(with: event)
@@ -952,13 +970,21 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   override func scrollWheel(with event: NSEvent) {
+    guard event.scrollingDeltaY != 0 else { return }
     if shouldReport(event) {
+      scrollRemainder = 0
       let count = max(1, Int(abs(event.scrollingDeltaY) / max(1, lineHeight)))
       let button: UInt8 = event.scrollingDeltaY > 0 ? 4 : 5
       for _ in 0..<count { sendMouse(event, action: 0, button: button, pressed: false) }
       return
     }
-    scrollRemainder += event.scrollingDeltaY / max(1, lineHeight)
+    if event.hasPreciseScrollingDeltas {
+      scrollRemainder = 0
+      model.scrollFractional(-Double(event.scrollingDeltaY / max(1, lineHeight)))
+      return
+    }
+    // Discrete wheels report ticks rather than point distances.
+    scrollRemainder += event.scrollingDeltaY * 3
     let rows = Int(scrollRemainder)
     if rows != 0 {
       scrollRemainder -= CGFloat(rows)
@@ -987,8 +1013,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     model.sendMouse(
       action: action, button: button, x: Int(point.x), y: Int(point.y), width: Int(bounds.width),
       height: Int(bounds.height), cellWidth: Int(cellWidth), cellHeight: Int(lineHeight),
-      paddingTop: Int(originY),
-      paddingBottom: Int(max(0, bounds.height - originY - CGFloat(gridRows) * lineHeight)),
+      paddingTop: Int(unscrolledOriginY),
+      paddingBottom: Int(max(0, bounds.height - unscrolledOriginY - CGFloat(gridRows) * lineHeight)),
       paddingLeft: Int(originX),
       paddingRight: Int(max(0, bounds.width - originX - CGFloat(gridColumns) * cellWidth)),
       modifiers: modifiers, pressed: pressed)
@@ -1014,7 +1040,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     bounds.fill()
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: bounds).addClip()
+    drawingRetainedScene = true
     drawEdgeColors(snapshot.cells)
+    drawingRetainedScene = false
+    NSBezierPath(rect: viewportRect).addClip()
     drawBackgrounds(snapshot.cells, selectionPath: roundedSelectionPath(snapshot.cellsByRow))
     drawText(snapshot.cells)
     for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
@@ -1035,7 +1064,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       let geometry = updateMetalGeometry() else { return false }
     let scale = geometry.scale
     let pixelWidth = geometry.width
-    let pixelHeight = geometry.height
+    // Keep a full, stationary overscan row in the retained backing stores.
+    let pixelHeight = geometry.height + Int(ceil(lineHeight * scale))
     let pixelSize = CGSize(width: pixelWidth, height: pixelHeight)
     if retainedBitmap == nil || retainedPixelSize != pixelSize {
       let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -1068,6 +1098,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       retainedPixelSize = pixelSize
       retainedRowHashes = []
       retainedViewportOffset = nil
+      decorationSignature = ""
+      overlaySignature = ""
     }
     guard let bitmap = retainedBitmap, let texture = retainedTexture,
       let overlayBitmap, let overlayTexture, let decorationBitmap, let decorationTexture,
@@ -1083,6 +1115,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     var forceAll = retainedAppearance != appearance
       || retainedRowHashes.count != snapshot.rowHashes.count || snapshot.rowHashes.isEmpty
     let rowCount = snapshot.rowHashes.isEmpty ? gridRows : snapshot.rowHashes.count
+    drawingRetainedScene = true
     var scrollDelta: Int?
     if !forceAll, let previousOffset = retainedViewportOffset,
       previousOffset != snapshot.viewportOffset
@@ -1108,8 +1141,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         for: row, delta: delta, rowCount: rowCount) else { return true }
       return retainedRowHashes[source] != snapshot.rowHashes[row]
     }
-    if forceAll || !dirtyRows.isEmpty {
-      rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : dirtyRows, in: bitmap)
+    let sceneChanged = forceAll || !dirtyRows.isEmpty
+    if sceneChanged {
+      let refreshPadding = forceAll || scrollDelta != nil || dirtyRows.contains(gridRows - 1)
+      rasterize(snapshot: snapshot, rowCount: rowCount, rows: forceAll ? nil : dirtyRows,
+        refreshPadding: refreshPadding, in: bitmap)
       if forceAll {
         texture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
           withBytes: data, bytesPerRow: bitmap.bytesPerRow)
@@ -1126,28 +1162,51 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
             withBytes: data.advanced(by: physicalY * bitmap.bytesPerRow),
             bytesPerRow: bitmap.bytesPerRow)
         }
+        let paddingY = min(pixelHeight, max(0,
+          Int(floor((unscrolledOriginY + CGFloat(gridRows + 1) * lineHeight) * scale))))
+        if refreshPadding && paddingY < pixelHeight {
+          texture.replace(region: MTLRegionMake2D(0, paddingY, pixelWidth, pixelHeight - paddingY),
+            mipmapLevel: 0, withBytes: data.advanced(by: paddingY * bitmap.bytesPerRow),
+            bytesPerRow: bitmap.bytesPerRow)
+        }
       }
       retainedRowHashes = snapshot.rowHashes
-      retainedViewportOffset = snapshot.viewportOffset
       retainedAppearance = appearance
     }
+    retainedViewportOffset = snapshot.viewportOffset
+    drawingRetainedScene = false
+    // Glyph placements/resources are independent of the subrow translation.
+    if sceneChanged {
+      cachedTextPlacements = metalTextPlacements(snapshot.cells)
+    }
     let hasOverlay = markedText.length > 0 || !linkHints.isEmpty
-    if hasOverlay {
+    if !hasOverlay { overlaySignature = "" }
+    let hintSignature = linkHints.map { "\($0.label):\($0.row):\($0.startColumn):\($0.endColumn)" }.joined(separator: ",")
+    let nextOverlaySignature = "\(markedText.string)|\(markedSelection)|\(hintPrefix)|\(hintSignature)|\(snapshot.frame.cursorX):\(snapshot.frame.cursorY)"
+    if hasOverlay && (sceneChanged || overlaySignature != nextOverlaySignature) {
+      drawingRetainedScene = true
       rasterizeOverlay(frame: snapshot.frame, in: overlayBitmap)
+      drawingRetainedScene = false
+      overlaySignature = nextOverlaySignature
       guard let overlayData = overlayBitmap.data else { return disableMetal() }
       overlayTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
         withBytes: overlayData, bytesPerRow: overlayBitmap.bytesPerRow)
     }
-    let textPlacements = metalTextPlacements(snapshot.cells)
-    guard prepareMetalGlyphs(textPlacements, device: device, scale: scale) else {
+    let textPlacements = cachedTextPlacements
+    if sceneChanged && !prepareMetalGlyphs(textPlacements, device: device, scale: scale) {
       return disableMetal()
     }
     let hasDecorations = snapshot.cells.contains {
       !$0.text.isEmpty && $0.occupancy != 2
         && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
     } || hoveredLink != nil || !linkHints.isEmpty
-    if hasDecorations {
+    if !hasDecorations { decorationSignature = "" }
+    let nextDecorationSignature = "\(String(describing: hoveredLink))|\(hintPrefix)|\(hintSignature)"
+    if hasDecorations && (sceneChanged || nextDecorationSignature != decorationSignature) {
+      drawingRetainedScene = true
       rasterizeDecorations(snapshot.cells, in: decorationBitmap)
+      drawingRetainedScene = false
+      decorationSignature = nextDecorationSignature
       guard let decorationData = decorationBitmap.data else { return disableMetal() }
       decorationTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
         withBytes: decorationData, bytesPerRow: decorationBitmap.bytesPerRow)
@@ -1160,8 +1219,30 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     pass.colorAttachments[0].storeAction = .store
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
     guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return disableMetal() }
+    // Paint stationary padding first, then translate only the clipped grid.
+    var sampling: [Float] = [Float(geometry.height) / Float(pixelHeight), 0]
+    encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentTexture(texture, index: 0)
+    encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    // Bottom padding is stored after overscan, not underneath its cells.
+    let paddingTop = min(geometry.height, max(0, Int(viewportRect.maxY * scale)))
+    if paddingTop < geometry.height {
+      encoder.setScissorRect(MTLScissorRect(x: 0, y: paddingTop,
+        width: geometry.width, height: geometry.height - paddingTop))
+      sampling[1] = Float(lineHeight * scale) / Float(pixelHeight)
+      encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
+      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+    let intersection = viewportRect.intersection(bounds)
+    let clip = intersection.isEmpty ? bounds : intersection
+    let clipX = min(geometry.width - 1, max(0, Int(clip.minX * scale)))
+    let clipY = min(geometry.height - 1, max(0, Int(clip.minY * scale)))
+    encoder.setScissorRect(MTLScissorRect(x: clipX, y: clipY,
+      width: min(geometry.width - clipX, max(1, Int(clip.width * scale))),
+      height: min(geometry.height - clipY, max(1, Int(clip.height * scale)))))
+    sampling[1] = Float(scrollTranslation * scale) / Float(pixelHeight)
+    encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     drawMetalText(textPlacements, encoder: encoder, pipeline: glyphPipeline, scale: scale)
     if hasDecorations {
@@ -1190,7 +1271,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func rasterizeOverlay(frame: TerminalRenderFrame, in bitmap: CGContext) {
-    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
+    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + lineHeight))
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
@@ -1351,7 +1432,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func rasterizeDecorations(_ cells: [TerminalRenderCell], in bitmap: CGContext) {
-    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height))
+    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + lineHeight))
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
@@ -1378,7 +1459,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     guard !images.isEmpty, bounds.width > 0, bounds.height > 0,
       let device = retainedTexture?.device else { return }
     let loader = MTKTextureLoader(device: device)
-    let clip = ImageRect(x: Double(originX), y: Double(originY),
+    let clip = ImageRect(x: Double(originX), y: Double(unscrolledOriginY),
       width: Double(CGFloat(gridColumns) * cellWidth),
       height: Double(CGFloat(gridRows) * lineHeight))
     encoder.setRenderPipelineState(pipeline)
@@ -1506,7 +1587,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func rasterize(snapshot: TerminalRenderSnapshot, rowCount: Int, rows: [Int]?,
-    in bitmap: CGContext)
+    refreshPadding: Bool, in bitmap: CGContext)
   {
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     let selectionPath = roundedSelectionPath(snapshot.cellsByRow)
@@ -1517,7 +1598,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       var rowRect = NSRect(x: 0, y: originY + CGFloat(row) * lineHeight,
         width: bounds.width, height: lineHeight)
       if row == 0 { rowRect.origin.y = 0; rowRect.size.height += originY }
-      if row == rowCount - 1 { rowRect.size.height = bounds.maxY - rowRect.minY }
       NSBezierPath(rect: rowRect).addClip()
       color(snapshot.frame.background, alpha: preferences.opacity).setFill()
       rowRect.fill()
@@ -1532,6 +1612,20 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     } else {
       for row in 0..<rowCount { drawRow(row) }
     }
+    if rowCount > gridRows && refreshPadding {
+      bitmap.saveGState()
+      let bottom = originY + CGFloat(gridRows + 1) * lineHeight
+      let padding = NSRect(x: 0, y: bottom, width: bounds.width,
+        height: max(0, bounds.height + lineHeight - bottom))
+      NSBezierPath(rect: padding).addClip()
+      color(snapshot.frame.background, alpha: preferences.opacity).setFill()
+      padding.fill()
+      bitmap.translateBy(x: 0, y: lineHeight)
+      if snapshot.cellsByRow.indices.contains(gridRows - 1) {
+        drawEdgeColors(snapshot.cellsByRow[gridRows - 1])
+      }
+      bitmap.restoreGState()
+    }
     NSGraphicsContext.restoreGraphicsState()
   }
 
@@ -1540,7 +1634,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let always = preferences.paddingColor == "Always Extend"
     let gridRight = originX + CGFloat(gridColumns) * cellWidth
     let gridBottom = originY + CGFloat(gridRows) * lineHeight
-    for cell in cells where always || !cell.backgroundIsDefault {
+    for cell in cells where cell.y < gridRows && (always || !cell.backgroundIsDefault) {
       color(cell.background, alpha: preferences.opacity).setFill()
       if cell.y == 0 {
         NSRect(x: originX + CGFloat(cell.x) * cellWidth, y: 0,
@@ -1565,7 +1659,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func drawImages(_ images: [TerminalRenderImage]) {
     guard !images.isEmpty else { return }
     NSGraphicsContext.current?.saveGraphicsState()
-    NSBezierPath(rect: NSRect(x: originX, y: originY,
+    NSBezierPath(rect: NSRect(x: originX, y: unscrolledOriginY,
       width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)).addClip()
     for placement in images {
       let destination = NSRect(

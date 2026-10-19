@@ -5,6 +5,7 @@
 #include <glib-unix.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pty.h>
 #include <signal.h>
 #include <spawn.h>
@@ -51,6 +52,10 @@ typedef struct {
     PangoFontDescription *font;
     TerminalCore *core;
     cairo_t *cr; /* Borrowed only inside the drawing callback. */
+    cairo_surface_t *scene;
+    int scene_width, scene_height, scene_scale;
+    uint32_t background;
+    double scroll_offset, wheel_x, wheel_y;
     ImageCache images;
     GByteArray *pending;
     GCancellable *clipboard_read;
@@ -97,10 +102,16 @@ static void colour(cairo_t *cr, uint32_t rgb, double alpha) {
                           ((rgb >> 8) & 255) / 255., (rgb & 255) / 255., alpha);
 }
 
-void zgtk_begin_frame(void *host, uint32_t background) {
+void zgtk_begin_frame(void *host, uint32_t background, float scroll_offset, bool clear) {
     Tab *tab = host;
-    colour(tab->cr, background, 1);
-    cairo_paint(tab->cr);
+    tab->background = background;
+    /* Pointer/IME coordinates use the same physical-pixel translation as draw. */
+    double pixels_per_row = tab->cell_height * tab->scene_scale;
+    tab->scroll_offset = round(scroll_offset * pixels_per_row) / pixels_per_row;
+    if (clear) {
+        colour(tab->cr, background, 1);
+        cairo_paint(tab->cr);
+    }
 }
 
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
@@ -135,7 +146,7 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
 void zgtk_draw_image(void *host, const TerminalImage *image) {
     Tab *tab = host;
     zgtk_images_draw(&tab->images, tab->cr, image, settings.padding,
-                     tab->columns, tab->rows, tab->cell_width, tab->cell_height);
+                     tab->columns, tab->rows + 1, tab->cell_width, tab->cell_height);
 }
 
 void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
@@ -143,7 +154,7 @@ void zgtk_draw_cursor(void *host, uint16_t x, uint16_t y, uint8_t columns,
     Tab *tab = host;
     double left = settings.padding + x * tab->cell_width, top = settings.padding + y * tab->cell_height;
     double width = columns * tab->cell_width, height = tab->cell_height;
-    GdkRectangle location = { (int)left, (int)top, (int)width, (int)height };
+    GdkRectangle location = { (int)left, (int)(top - tab->scroll_offset * tab->cell_height), (int)width, (int)height };
     gtk_im_context_set_cursor_location(tab->im, &location);
     if (!gtk_widget_has_focus(tab->area)) style = 3;
     colour(tab->cr, rgb, style == 1 ? 0.45 : 1);
@@ -289,6 +300,7 @@ static void destroy_tab(gpointer data) {
     g_object_unref(tab->clipboard_read);
     zgtk_destroy(tab->core);
     zgtk_images_clear(&tab->images);
+    if (tab->scene) cairo_surface_destroy(tab->scene);
     g_byte_array_unref(tab->pending);
     g_object_unref(tab->im);
     g_object_unref(tab->layout);
@@ -391,8 +403,35 @@ static void resize(GtkDrawingArea *area, int width, int height, gpointer data) {
 static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
     (void)area;
     Tab *tab = data;
-    tab->cr = cr;
-    if (!zgtk_render(tab->core)) g_warning("Unable to render terminal");
+    int scale = gtk_widget_get_scale_factor(tab->area);
+    int scene_height = height + tab->cell_height;
+    gboolean force = !tab->scene || tab->scene_width != width ||
+        tab->scene_height != scene_height || tab->scene_scale != scale;
+    if (force) {
+        if (tab->scene) cairo_surface_destroy(tab->scene);
+        tab->scene = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width * scale, scene_height * scale);
+        cairo_surface_set_device_scale(tab->scene, scale, scale);
+        tab->scene_width = width;
+        tab->scene_height = scene_height;
+        tab->scene_scale = scale;
+    }
+    tab->cr = cairo_create(tab->scene);
+    if (!zgtk_render_retained(tab->core, force)) g_warning("Unable to render terminal");
+    cairo_destroy(tab->cr);
+    tab->cr = NULL;
+    colour(cr, tab->background, 1);
+    cairo_paint(cr);
+    cairo_save(cr);
+    cairo_rectangle(cr, settings.padding, settings.padding,
+                    tab->columns * tab->cell_width, tab->rows * tab->cell_height);
+    cairo_clip(cr);
+    /* Snap to physical pixels. Fraction-only events reuse the stationary scene:
+     * no Pango shaping, cell drawing, image decoding or surface allocation. */
+    double offset = round(tab->scroll_offset * tab->cell_height * scale) / scale;
+    cairo_set_source_surface(cr, tab->scene, 0, -offset);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+    cairo_restore(cr);
     if (tab->owner->panes->len > 1 && tab->id == zgtk_layout_focused(tab->owner->tree)) {
         GdkRGBA *accent = adw_style_manager_get_accent_color_rgba(
             adw_style_manager_get_for_display(gtk_widget_get_display(tab->area)));
@@ -555,7 +594,8 @@ static void focus_leave(GtkEventControllerFocus *controller, gpointer data) {
 
 static void select_at(Tab *tab, double x, double y, bool begin) {
     zgtk_select(tab->core, (uint16_t)CLAMP((x - settings.padding) / tab->cell_width, 0, tab->columns - 1),
-                (uint16_t)CLAMP((y - settings.padding) / tab->cell_height, 0, tab->rows - 1), begin, tab->rectangle);
+                (uint16_t)CLAMP((y - settings.padding) / tab->cell_height + tab->scroll_offset,
+                               0, tab->rows - (tab->scroll_offset > 0 ? 0 : 1)), begin, tab->rectangle);
     gtk_widget_queue_draw(tab->area);
 }
 static void clear_hover(Tab *tab) {
@@ -571,7 +611,7 @@ static char *link_at_pointer(Tab *tab, GdkModifierType state) {
     if (x < 0 || y < 0 || x >= tab->columns * tab->cell_width || y >= tab->rows * tab->cell_height) return NULL;
     size_t length = 0;
     const char *bytes = zgtk_link_at(tab->core, (uint16_t)(x / tab->cell_width),
-                                    (uint16_t)(y / tab->cell_height), &length);
+                                    (uint16_t)(y / tab->cell_height + tab->scroll_offset), &length);
     return bytes ? g_strndup(bytes, length) : NULL;
 }
 
@@ -694,12 +734,19 @@ static gboolean scroll(GtkEventControllerScroll *controller, double dx, double d
     Tab *tab = data;
     GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
     clear_hover(tab);
-    gboolean handled = FALSE;
-    if (!(state & GDK_SHIFT_MASK)) {
-        for (int i = 0; i < ABS(dy); i++) handled |= report_mouse(tab, 0, dy < 0 ? 4 : 5, state);
-        for (int i = 0; i < ABS(dx); i++) handled |= report_mouse(tab, 0, dx < 0 ? 6 : 7, state);
+    gboolean pixels = gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_SURFACE;
+    if (!(state & GDK_SHIFT_MASK) && zgtk_mouse_tracking(tab->core)) {
+        tab->wheel_y += pixels ? dy / tab->cell_height : dy;
+        tab->wheel_x += pixels ? dx / tab->cell_width : dx;
+        int vertical = (int)tab->wheel_y, horizontal = (int)tab->wheel_x;
+        tab->wheel_y -= vertical;
+        tab->wheel_x -= horizontal;
+        for (int i = 0; i < ABS(vertical); i++) report_mouse(tab, 0, vertical < 0 ? 4 : 5, state);
+        for (int i = 0; i < ABS(horizontal); i++) report_mouse(tab, 0, horizontal < 0 ? 6 : 7, state);
+    } else {
+        tab->wheel_x = tab->wheel_y = 0;
+        if (dy) zgtk_scroll_fractional(tab->core, pixels ? dy / tab->cell_height : dy * 3);
     }
-    if (!handled && dy) zgtk_scroll(tab->core, (int)dy * 3);
     gtk_widget_queue_draw(tab->area);
     return TRUE;
 }
@@ -999,7 +1046,7 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     g_signal_connect(motion, "leave", G_CALLBACK(pointer_leave), tab);
     gtk_widget_add_controller(tab->area, motion);
     g_signal_connect(tab->area, "unmap", G_CALLBACK(cancel_pointer), tab);
-    GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE);
+    GtkEventController *wheel = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
     g_signal_connect(wheel, "scroll", G_CALLBACK(scroll), tab);
     gtk_widget_add_controller(tab->area, wheel);
     zgtk_title(tab, "Terminal", strlen("Terminal"));

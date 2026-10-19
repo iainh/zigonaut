@@ -196,6 +196,10 @@ pub const Engine = struct {
         return native.zigonaut_text_engine_get_frame_latency_waitable_object(self.handle);
     }
 
+    pub fn setScrollPresentation(self: *Engine, left: u32, top: u32, width: u32, height: u32, offset: u32) void {
+        native.zigonaut_text_engine_set_scroll_presentation(self.handle, left, top, width, height, offset);
+    }
+
     pub fn beginFrame(self: *Engine, width: u32, height: u32, background: u32, full_rebuild: bool) !bool {
         var required: native.BOOL = 0;
         if (native.zigonaut_text_engine_begin_frame(
