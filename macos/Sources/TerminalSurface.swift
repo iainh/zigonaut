@@ -17,14 +17,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let faint: Bool
   }
 
-  private struct TextRun {
-    let x: Int
-    let y: Int
-    var nextX: Int
-    let style: TextStyle
-    var bytes: [UInt8]
-  }
-
   private struct ColorKey: Hashable {
     let rgb: UInt32
     let alpha: UInt64
@@ -130,6 +122,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var retainedPixelSize = CGSize.zero
   private var drawingRetainedScene = false
   private var cachedTextPlacements: [MetalTextPlacement] = []
+  private var textRunBytes: [UInt8] = []
   private var decorationSignature = ""
   private var overlaySignature = ""
   private var encodedKeys = Set<UInt16>()
@@ -1299,40 +1292,55 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     where C.Element == TerminalRenderCell
   {
     var placements: [MetalTextPlacement] = []
-    var run: TextRun?
+    prepareText(cells, drawBuiltins: false) { placements.append($0) }
+    return placements
+  }
+
+  private func prepareText<C: Collection>(_ cells: C, drawBuiltins: Bool,
+    emit: (MetalTextPlacement) -> Void) where C.Element == TerminalRenderCell
+  {
+    var state = zigonaut_text_run_state()
+    var bytes = textRunBytes
+    textRunBytes = []
+    defer { bytes.removeAll(keepingCapacity: true); textRunBytes = bytes }
+    var x = 0
+    var y = 0
+    var columns = 0
+    var runStyle: TextStyle?
     func flush() {
-      guard let current = run else { return }
-      placements.append(MetalTextPlacement(
-        text: String(decoding: current.bytes, as: UTF8.self), x: current.x, y: current.y,
-        columns: current.nextX - current.x, style: current.style, batched: true))
-      run = nil
+      guard let style = runStyle else { return }
+      emit(MetalTextPlacement(text: String(decoding: bytes, as: UTF8.self),
+        x: x, y: y, columns: columns, style: style, batched: true))
+      bytes.removeAll(keepingCapacity: true)
+      runStyle = nil
     }
     for cell in cells {
-      if proceduralScalar(cell.text) != nil {
-        flush()
-        continue
-      }
-      guard cell.occupancy == 0 else {
-        flush()
-        if !cell.text.isEmpty && cell.occupancy != 2 {
-          placements.append(MetalTextPlacement(text: cell.text, x: cell.x, y: cell.y,
-            columns: cell.occupancy == 1 ? 2 : 1, style: textStyle(cell), batched: false))
-        }
-        continue
-      }
-      let bytes = Array((cell.text.isEmpty ? " " : cell.text).utf8)
       let style = textStyle(cell)
-      if var current = run, current.y == cell.y, current.nextX == cell.x, current.style == style {
-        current.bytes.append(contentsOf: bytes)
-        current.nextX += 1
-        run = current
-      } else {
-        flush()
-        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: bytes)
+      let span = cell.occupancy == 1 ? 2 : 1
+      let scalar = proceduralScalar(cell.textBytes)
+      let mask = drawBuiltins ? scalar.flatMap { pseudographicsMask(codepoint: $0, columns: span) } : nil
+      var input = zigonaut_text_run_input(column: UInt32(cell.x), row: UInt32(cell.y),
+        columns: UInt32(span), foreground: style.rgb,
+        style: (style.bold ? 1 : 0) | (style.italic ? 2 : 0) | (style.faint ? 4 : 0),
+        occupancy: UInt32(cell.occupancy),
+        builtin: scalar != nil && (!drawBuiltins || mask != nil) ? 1 : 0,
+        empty: cell.textBytes.isEmpty ? 1 : 0)
+      let action = zigonaut_text_run_push(&state, &input, false)
+      if action != UInt32(ZIGONAUT_RUN_APPEND) && action != UInt32(ZIGONAUT_RUN_SKIP) { flush() }
+      switch action {
+      case UInt32(ZIGONAUT_RUN_BUILTIN):
+        if let mask { drawPseudographics(mask, cell: cell) }
+      case UInt32(ZIGONAUT_RUN_SINGLE):
+        emit(MetalTextPlacement(text: cell.text, x: cell.x, y: cell.y,
+          columns: span, style: style, batched: false))
+      case UInt32(ZIGONAUT_RUN_START), UInt32(ZIGONAUT_RUN_APPEND):
+        if runStyle == nil { x = cell.x; y = cell.y; columns = 0; runStyle = style }
+        if cell.textBytes.isEmpty { bytes.append(32) } else { bytes.append(contentsOf: cell.textBytes) }
+        columns += span
+      default: break
       }
     }
     flush()
-    return placements
   }
 
   private func glyphKey(_ placement: MetalTextPlacement, scale: CGFloat) -> GlyphKey? {
@@ -1782,42 +1790,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func drawText<C: Collection>(_ cells: C) where C.Element == TerminalRenderCell {
-    var run: TextRun?
-    func flush() {
-      guard let current = run else { return }
-      drawText(String(decoding: current.bytes, as: UTF8.self), x: current.x, y: current.y,
-        columns: current.nextX - current.x, style: current.style, batched: true)
-      run = nil
+    prepareText(cells, drawBuiltins: true) { placement in
+      drawText(placement.text, x: placement.x, y: placement.y, columns: placement.columns,
+        style: placement.style, batched: placement.batched)
     }
-    for cell in cells {
-      let columns = cell.occupancy == 1 ? 2 : 1
-      if let scalar = proceduralScalar(cell.text),
-        let mask = pseudographicsMask(codepoint: scalar, columns: columns)
-      {
-        flush()
-        drawPseudographics(mask, cell: cell)
-        continue
-      }
-      guard cell.occupancy == 0 else {
-        flush()
-        if !cell.text.isEmpty && cell.occupancy != 2 {
-          drawText(cell.text, x: cell.x, y: cell.y, columns: columns,
-            style: textStyle(cell), batched: false)
-        }
-        continue
-      }
-      let bytes = Array((cell.text.isEmpty ? " " : cell.text).utf8)
-      let style = textStyle(cell)
-      if var current = run, current.y == cell.y, current.nextX == cell.x, current.style == style {
-        current.bytes.append(contentsOf: bytes)
-        current.nextX += 1
-        run = current
-      } else {
-        flush()
-        run = TextRun(x: cell.x, y: cell.y, nextX: cell.x + 1, style: style, bytes: bytes)
-      }
-    }
-    flush()
   }
 
   private func drawRetainedPseudographics<C: Collection>(_ cells: C)
@@ -1825,15 +1801,16 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   {
     for cell in cells {
       let columns = cell.occupancy == 1 ? 2 : 1
-      guard let scalar = proceduralScalar(cell.text),
+      guard let scalar = proceduralScalar(cell.textBytes),
         let mask = pseudographicsMask(codepoint: scalar, columns: columns) else { continue }
       drawPseudographics(mask, cell: cell)
     }
   }
 
-  private func proceduralScalar(_ text: String) -> UInt32? {
-    guard text.unicodeScalars.count == 1, let scalar = text.unicodeScalars.first else { return nil }
-    return scalar.value >= 0x2500 && scalar.value <= 0x259F ? scalar.value : nil
+  private func proceduralScalar(_ bytes: ArraySlice<UInt8>) -> UInt32? {
+    guard bytes.count == 3 else { return nil }
+    let scalar = bytes.withUnsafeBufferPointer { zigonaut_render_procedural_scalar($0.baseAddress, $0.count) }
+    return scalar == 0 ? nil : scalar
   }
 
   private func pseudographicsMask(codepoint: UInt32, columns: Int) -> CGImage? {

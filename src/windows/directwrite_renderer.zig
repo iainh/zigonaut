@@ -2,6 +2,7 @@ const std = @import("std");
 const shared = @import("shared");
 comptime {
     _ = shared.selection_path;
+    _ = shared.text_runs;
 }
 const win32 = @import("win32.zig");
 const native = win32.c;

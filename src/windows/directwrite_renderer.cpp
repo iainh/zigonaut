@@ -1,6 +1,7 @@
 #include "directwrite_renderer.h"
 #include "glyph_atlas_allocator.h"
 #include "../shared/selection_path.h"
+#include "../shared/text_runs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2384,6 +2385,7 @@ HRESULT ZigonautTextEngine::endRow() {
     order.clear();
     auto& segment = row_segment; segment.clear();
     bool has_segment = false;
+    zigonaut_text_run_state run_state{};
     const auto flush = [&]() -> HRESULT {
         HRESULT hr = S_OK;
         if (has_segment) try {
@@ -2398,8 +2400,16 @@ HRESULT ZigonautTextEngine::endRow() {
 
     for (size_t cell_index = 0; cell_index < row_cells.size(); ++cell_index) {
         const auto& cell = row_cells[cell_index];
-        if (cell.occupancy == ZIGONAUT_CELL_WIDE_TAIL) continue;
-        if (cell.kind == RowCell::Kind::builtin) {
+        const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
+        const zigonaut_text_run_input input{
+            cell.column, 0, span, cell.foreground,
+            (cell.bold ? 1u : 0u) | (cell.italic ? 2u : 0u),
+            static_cast<uint32_t>(cell.occupancy),
+            cell.kind == RowCell::Kind::builtin ? 1u : 0u,
+            cell.text_length == 0 ? 1u : 0u};
+        const auto action = zigonaut_text_run_push(&run_state, &input, true);
+        if (action == ZIGONAUT_RUN_SKIP) continue;
+        if (action == ZIGONAUT_RUN_BUILTIN) {
             const HRESULT boundary = flush();
             if (FAILED(boundary)) return boundary;
             try { order.push_back(-1 - static_cast<int64_t>(cell_index)); }
@@ -2409,10 +2419,7 @@ HRESULT ZigonautTextEngine::endRow() {
         const std::u16string_view cell_text = cell.text_length == 0
             ? std::u16string_view{}
             : std::u16string_view(row_text.data() + cell.text_offset, cell.text_length);
-        if (has_segment &&
-            (segment.foreground != cell.foreground ||
-             segment.bold != cell.bold ||
-             segment.italic != cell.italic)) {
+        if (action == ZIGONAUT_RUN_START) {
             const HRESULT hr = flush();
             if (FAILED(hr)) return hr;
         }
@@ -2423,7 +2430,6 @@ HRESULT ZigonautTextEngine::endRow() {
             has_segment = true;
         }
 
-        const uint32_t span = cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
         if (cell_text.empty() || cell.occupancy == ZIGONAUT_CELL_WRAP_SPACER) {
             segment.text.push_back(u' ');
             segment.columns.push_back(packedColumns(cell.column, span));

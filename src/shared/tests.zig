@@ -10,6 +10,7 @@ const modules = .{
     shared.selection_path,
     shared.synchronized_output,
     shared.terminal,
+    shared.text_runs,
     shared.theme,
 };
 

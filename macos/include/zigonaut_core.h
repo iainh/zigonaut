@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "../../src/shared/selection_path.h"
 #include "../../src/shared/render_cells.h"
+#include "../../src/shared/text_runs.h"
 typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
 /* Main-thread pane tree. IDs are nonzero and unique across leaves and splits.

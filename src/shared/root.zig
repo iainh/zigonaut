@@ -6,5 +6,6 @@ pub const search = @import("search.zig");
 pub const selection_path = @import("selection_path.zig");
 pub const synchronized_output = @import("synchronized_output.zig");
 pub const terminal = @import("terminal.zig");
+pub const text_runs = @import("text_runs.zig");
 pub const theme = @import("theme.zig");
 pub const pseudographics = @import("pseudographics.zig");
