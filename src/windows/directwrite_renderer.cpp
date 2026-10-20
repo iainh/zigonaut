@@ -3,6 +3,7 @@
 #include "../shared/selection_path.h"
 #include "../shared/text_runs.h"
 #include "../shared/background_span.h"
+#include "../shared/decoration_path.h"
 
 #include <algorithm>
 #include <atomic>
@@ -609,6 +610,9 @@ struct ZigonautTextEngine {
     bool pending_row_background_active = false;
     bool pending_row_background_selection = false;
     ID2D1PathGeometry* selection_geometry = nullptr;
+    // Engine-owned, device-independent paths. Width is the only variable in
+    // the fixed curly style; position and colour are applied at draw time.
+    std::map<float, ID2D1PathGeometry*> curly_geometries;
     float selection_radius = 0.0f;
     bool row_active = false;
     bool frame_active = false;
@@ -1597,33 +1601,41 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     void drawCurlyUnderline(float left, float width, float underline_y) {
         if (d2d_factory == nullptr || target == nullptr || brush == nullptr || width <= 0.0f)
             return;
-        ID2D1PathGeometry* geometry = nullptr;
-        HRESULT hr = d2d_factory->CreatePathGeometry(&geometry);
-        ID2D1GeometrySink* sink = nullptr;
-        if (SUCCEEDED(hr)) hr = geometry->Open(&sink);
-        if (SUCCEEDED(hr)) {
+        auto cached = curly_geometries.find(width);
+        if (cached == curly_geometries.end()) {
+            const size_t count = zigonaut_curly_underline_f32(width, nullptr, 0);
+            if (count == 0) return;
+            std::vector<zigonaut_decoration_command_f32> commands(count);
+            zigonaut_curly_underline_f32(width, commands.data(), commands.size());
+            ID2D1PathGeometry* geometry = nullptr;
+            HRESULT hr = d2d_factory->CreatePathGeometry(&geometry);
+            ID2D1GeometrySink* sink = nullptr;
+            if (SUCCEEDED(hr)) hr = geometry->Open(&sink);
             const auto point = [](float x, float y) { return D2D1::Point2F(x, y); };
-            const int cycles = std::max(1, static_cast<int>(std::lround(width / 8.0f)));
-            const float half_wave = width / static_cast<float>(cycles * 2);
-            const float center_y = underline_y - 1.0f;
-            float x = left;
-            float direction = 1.0f;
-            sink->BeginFigure(point(x, center_y), D2D1_FIGURE_BEGIN_HOLLOW);
-            for (int segment = 0; segment < cycles * 2; ++segment) {
-                const float end = x + half_wave;
-                sink->AddBezier(D2D1::BezierSegment(
-                    point(x + half_wave / 3.0f, center_y + 2.0f * direction),
-                    point(x + 2.0f * half_wave / 3.0f, center_y + 2.0f * direction),
-                    point(end, center_y)));
-                x = end;
-                direction *= -1.0f;
+            if (SUCCEEDED(hr)) {
+                sink->BeginFigure(point(commands[0].x, commands[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+                for (size_t i = 1; i < commands.size(); ++i) {
+                    const auto& command = commands[i];
+                    sink->AddBezier(D2D1::BezierSegment(
+                        point(command.c1x, command.c1y), point(command.c2x, command.c2y),
+                        point(command.x, command.y)));
+                }
+                sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                hr = sink->Close();
             }
-            sink->EndFigure(D2D1_FIGURE_END_OPEN);
-            hr = sink->Close();
+            release(sink);
+            if (FAILED(hr)) { release(geometry); return; }
+            if (curly_geometries.size() >= 16) {
+                for (auto& entry : curly_geometries) release(entry.second);
+                curly_geometries.clear();
+            }
+            cached = curly_geometries.emplace(width, geometry).first;
         }
-        if (SUCCEEDED(hr)) target->DrawGeometry(geometry, brush, 1.0f);
-        release(sink);
-        release(geometry);
+        D2D1_MATRIX_3X2_F transform;
+        target->GetTransform(&transform);
+        target->SetTransform(D2D1::Matrix3x2F::Translation(left, underline_y - 1.0f) * transform);
+        target->DrawGeometry(cached->second, brush, 1.0f);
+        target->SetTransform(transform);
     }
 
     HRESULT drawCell(
@@ -2162,6 +2174,7 @@ private:
 ZigonautTextEngine::~ZigonautTextEngine() {
     delete grid_renderer;
     release(selection_geometry);
+    for (auto& entry : curly_geometries) release(entry.second);
     invalidateAtlas();
     discardTargetBitmap();
     clearBuiltinBitmaps();

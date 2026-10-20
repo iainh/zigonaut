@@ -68,6 +68,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   var onFocus: () -> Void
   private var scrollRemainder: CGFloat = 0
   private let selectionPathBuffer = SelectionPathBuffer()
+  private var wavyPaths: [CGFloat: NSBezierPath] = [:]
   private var markedText = NSMutableAttributedString()
   private var markedSelection = NSRange(location: NSNotFound, length: 0)
   private var reportingButton: UInt8 = 0
@@ -2033,23 +2034,38 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func strokeWavyLine(y: CGFloat, rect: NSRect) {
-    let path = NSBezierPath()
-    path.move(to: NSPoint(x: rect.minX, y: y))
-    let cycles = max(1, Int((rect.width / 8).rounded()))
-    let halfWave = rect.width / CGFloat(cycles * 2)
-    var x = rect.minX
-    var direction: CGFloat = 1
-    for _ in 0..<(cycles * 2) {
-      let end = x + halfWave
-      path.curve(
-        to: NSPoint(x: end, y: y),
-        controlPoint1: NSPoint(x: x + halfWave / 3, y: y + 2 * direction),
-        controlPoint2: NSPoint(x: x + 2 * halfWave / 3, y: y + 2 * direction))
-      x = end
-      direction *= -1
+    guard let context = NSGraphicsContext.current?.cgContext else { return }
+    let path: NSBezierPath
+    if let cached = wavyPaths[rect.width] {
+      path = cached
+    } else {
+      let count = zigonaut_curly_underline_f64(Double(rect.width), nil, 0)
+      guard count > 0 else { return }
+      var commands = [zigonaut_decoration_command_f64](
+        repeating: zigonaut_decoration_command_f64(), count: count)
+      _ = commands.withUnsafeMutableBufferPointer {
+        zigonaut_curly_underline_f64(Double(rect.width), $0.baseAddress, $0.count)
+      }
+      path = NSBezierPath()
+      for command in commands {
+        if command.tag == 0 {
+          path.move(to: NSPoint(x: command.x, y: command.y))
+        } else {
+          path.curve(to: NSPoint(x: command.x, y: command.y),
+            controlPoint1: NSPoint(x: command.c1x, y: command.c1y),
+            controlPoint2: NSPoint(x: command.c2x, y: command.c2y))
+        }
+      }
+      path.lineWidth = 1
+      // The fixed style depends only on width, not font, position or colour.
+      // Bound retained geometry when zooming through many cell sizes.
+      if wavyPaths.count >= 16 { wavyPaths.removeAll(keepingCapacity: true) }
+      wavyPaths[rect.width] = path
     }
-    path.lineWidth = 1
+    context.saveGState()
+    context.translateBy(x: rect.minX, y: y)
     path.stroke()
+    context.restoreGState()
   }
 
   private func drawCursor(_ frame: TerminalRenderFrame) {

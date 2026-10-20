@@ -3,6 +3,7 @@ const shared = @import("root.zig");
 
 const modules = .{
     shared.background_span,
+    shared.decoration_path,
     shared.hint,
     shared.link,
     shared.pane_tree,
