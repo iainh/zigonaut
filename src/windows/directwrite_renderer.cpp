@@ -4,6 +4,7 @@
 #include "../shared/text_runs.h"
 #include "../shared/background_span.h"
 #include "../shared/decoration_path.h"
+#include "../shared/search.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2308,35 +2309,20 @@ HRESULT ZigonautTextEngine::endRow() {
         }
         target->PopLayer();
     }
-    D2D1_RECT_F search_rect{};
-    uint32_t search_color = 0;
-    bool search_active = false;
-    const auto flush_search = [&]() {
-        if (!search_active) return;
-        brush->SetColor(color(search_color));
+    zigonaut_search_span pending{}, span{};
+    const auto draw_search = [&](const zigonaut_search_span& value) {
+        const auto rect = D2D1::RectF(row_origin_x + value.start * row_cell_width, row_top,
+            row_origin_x + value.end * row_cell_width, row_top + row_cell_height);
+        brush->SetColor(color(value.highlight - 1));
         target->FillRoundedRectangle(
-            D2D1::RoundedRect(search_rect, selection_radius, selection_radius), brush);
-        search_active = false;
+            D2D1::RoundedRect(rect, selection_radius, selection_radius), brush);
     };
     for (const auto& cell : row_cells) {
-        if (!cell.search_background) {
-            flush_search();
-            continue;
-        }
-        const float left = row_origin_x + cell.column * row_cell_width;
-        const float width = row_cell_width *
-            (cell.occupancy == ZIGONAUT_CELL_WIDE ? 2.0f : 1.0f);
-        if (search_active && search_color == cell.background && search_rect.right == left) {
-            search_rect.right = left + width;
-        } else {
-            flush_search();
-            search_rect = D2D1::RectF(left, row_top,
-                left + width, row_top + row_cell_height);
-            search_color = cell.background;
-            search_active = true;
-        }
+        if (zigonaut_search_span_push(&pending, 0, cell.column,
+            cell.occupancy == ZIGONAUT_CELL_WIDE ? 2 : 1,
+            cell.search_background ? cell.background + 1 : 0, &span)) draw_search(span);
     }
-    flush_search();
+    if (zigonaut_search_span_push(&pending, 0, 0, 0, 0, &span)) draw_search(span);
     // Backgrounds are complete now. Draw decorations afterward so concave
     // colour bleed and the exact selection/search passes cannot cover them;
     // text and strikethrough are already emitted later in this method.

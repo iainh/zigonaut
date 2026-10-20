@@ -5,6 +5,7 @@ comptime {
     _ = shared.text_runs;
     _ = shared.background_span;
     _ = shared.decoration_path;
+    _ = shared.search;
 }
 const win32 = @import("win32.zig");
 const native = win32.c;

@@ -800,11 +800,14 @@ const SnapshotCollector = struct {
     search_matches: []const search.Match = &.{},
     search_active: ?usize = null,
     viewport_offset: u64 = 0,
+    search_cursor: search.RowCursor = .{ .matches = &.{} },
+    search_row: search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
     truncated: bool = false,
     dirty_rows: []const bool = &.{},
     emit_row: bool = true,
 
     pub fn beginFrame(self: *SnapshotCollector, frame: Terminal.Frame) void {
+        self.search_cursor = search.RowCursor.init(self.search_matches, self.viewport_offset);
         self.frame.* = .{
             .version = 1,
             .size = @sizeOf(RenderFrame),
@@ -826,6 +829,7 @@ const SnapshotCollector = struct {
     pub fn endFrame(_: *SnapshotCollector, _: Terminal.Frame) void {}
     pub fn beginRow(self: *SnapshotCollector, row: u16) void {
         self.emit_row = row >= self.dirty_rows.len or self.dirty_rows[row];
+        self.search_row = self.search_cursor.next(self.viewport_offset + row);
     }
     pub fn endRow(_: *SnapshotCollector, _: u16) void {}
     pub fn drawImage(_: *SnapshotCollector, _: Terminal.Image) void {}
@@ -874,7 +878,7 @@ const SnapshotCollector = struct {
             .overline = @intFromBool(cell.overline),
             .selected = @intFromBool(cell.selected),
             .background_is_default = @intFromBool(cell.background_is_default),
-            .search_highlight = search.highlight(self.search_matches, self.search_active, self.viewport_offset + cell.y, cell.x),
+            .search_highlight = search.highlightRow(self.search_row, self.search_active, cell.x),
             .reserved = @splat(0),
         };
         self.result.written_cells += 1;

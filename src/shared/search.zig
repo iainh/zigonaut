@@ -49,6 +49,30 @@ pub fn highlight(matches: []const Match, active: ?usize, row: u64, column: u16) 
     return highlightRow(matchesForRow(matches, row), active, column);
 }
 
+/// Integer-cell spans retain native traversal order, including overlapping wide
+/// heads/tails. Highlight is opaque: native consumers may use a kind or colour.
+pub const Span = extern struct {
+    row: u32 = 0,
+    start: u32 = 0,
+    end: u32 = 0,
+    highlight: u32 = 0,
+};
+
+/// Push a cell, returning a completed span when continuity breaks. Push a zero
+/// highlight to flush (also at end of input). No allocation or pixel arithmetic.
+pub export fn zigonaut_search_span_push(pending: *Span, row: u32, column: u32, width: u32, kind: u32, output: *Span) bool {
+    const present = pending.highlight != 0;
+    if (present and kind != 0 and pending.row == row and
+        pending.end == column and pending.highlight == kind)
+    {
+        pending.end = column + width;
+        return false;
+    }
+    if (present) output.* = pending.*;
+    pending.* = .{ .row = row, .start = column, .end = column + width, .highlight = kind };
+    return present;
+}
+
 pub const State = struct {
     enabled: bool = false,
     query: std.ArrayList(u8) = .empty,
@@ -116,4 +140,23 @@ test "row cursor advances through visible matches" {
     try std.testing.expectEqual(@as(usize, 2), first.matches.len);
     try std.testing.expectEqual(@as(usize, 0), cursor.next(8001).matches.len);
     try std.testing.expectEqual(@as(u16, 2), cursor.next(8002).matches[0].end);
+}
+
+test "search spans preserve gaps, kinds, rows and overlapping wide cells" {
+    var pending = Span{};
+    var output: Span = undefined;
+    try std.testing.expect(!zigonaut_search_span_push(&pending, 3, 1, 2, 1, &output));
+    try std.testing.expect(!zigonaut_search_span_push(&pending, 3, 3, 1, 1, &output));
+    try std.testing.expect(zigonaut_search_span_push(&pending, 3, 4, 1, 2, &output));
+    try std.testing.expectEqual(Span{ .row = 3, .start = 1, .end = 4, .highlight = 1 }, output);
+    try std.testing.expect(zigonaut_search_span_push(&pending, 3, 6, 2, 2, &output));
+    try std.testing.expectEqual(Span{ .row = 3, .start = 4, .end = 5, .highlight = 2 }, output);
+    // A wide tail overlaps its head rather than extending it, as in native drawing.
+    try std.testing.expect(zigonaut_search_span_push(&pending, 3, 7, 1, 2, &output));
+    try std.testing.expectEqual(Span{ .row = 3, .start = 6, .end = 8, .highlight = 2 }, output);
+    try std.testing.expect(zigonaut_search_span_push(&pending, 4, 8, 1, 2, &output));
+    try std.testing.expectEqual(@as(u32, 3), output.row);
+    try std.testing.expect(zigonaut_search_span_push(&pending, 0, 0, 0, 0, &output));
+    try std.testing.expectEqual(Span{ .row = 4, .start = 8, .end = 9, .highlight = 2 }, output);
+    try std.testing.expect(!zigonaut_search_span_push(&pending, 0, 0, 0, 0, &output));
 }

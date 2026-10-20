@@ -107,6 +107,8 @@ const Core = struct {
     search_cache: Terminal.SearchCache = .{},
     search_failed: bool = false,
     viewport_offset: u64 = 0,
+    search_cursor: shared.search.RowCursor = .{ .matches = &.{} },
+    search_row: shared.search.RowMatches = .{ .matches = &.{}, .start_index = 0 },
     clipboard_enabled: bool = false,
     clipboard_limit: u32 = 1048576,
     hover: ?Terminal.Link = null,
@@ -162,10 +164,12 @@ const Core = struct {
 
     pub fn beginFrame(self: *Core, frame: Terminal.Frame) void {
         self.viewport_offset = if (self.terminal.scrollbar()) |state| state.offset else |_| 0;
+        self.search_cursor = shared.search.RowCursor.init(self.search.matches.items, self.viewport_offset);
         zgtk_begin_frame(self.host, colour(frame.background), frame.scroll_offset, self.clear_scene);
     }
 
     pub fn beginRow(self: *Core, y: u16) void {
+        self.search_row = self.search_cursor.next(self.viewport_offset + y);
         // Paint the ordinary layer before any glyphs or highlights. This is
         // called only for replayed rows, including default-colour dirty rows.
         const count = self.snapshot.cells.items.len / self.snapshot.rows.items.len;
@@ -200,7 +204,7 @@ const Core = struct {
             const scalar = std.math.cast(u21, codepoint) orelse continue;
             length += std.unicode.utf8Encode(scalar, buffer[length..][0..4]) catch continue;
         }
-        const highlight = shared.search.highlight(self.search.matches.items, self.search.active, self.viewport_offset + cell.y, cell.x);
+        const highlight = shared.search.highlightRow(self.search_row, self.search.active, cell.x);
         const hovered = if (self.hover) |link| cell.y == link.row and cell.x >= link.start_column and cell.x < link.end_column else false;
         const flags: u16 = @as(u16, @intFromBool(cell.bold)) |
             (@as(u16, @intFromBool(cell.italic)) << 1) |

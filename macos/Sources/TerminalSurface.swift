@@ -1809,31 +1809,22 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
     let radius = CGFloat(SelectionShape.cornerRadius(
       cellWidth: Double(cellWidth), lineHeight: Double(lineHeight)))
-    var searchRect: NSRect?
-    var searchHighlight: UInt8 = 0
-    func flushSearch() {
-      guard let rect = searchRect else { return }
-      (searchHighlight == 2 ? NSColor.systemOrange : .systemYellow).setFill()
+    var pendingSearch = zigonaut_search_span()
+    var span = zigonaut_search_span()
+    func drawSearch(_ span: zigonaut_search_span) {
+      let rect = NSRect(x: originX + CGFloat(span.start) * cellWidth,
+        y: originY + CGFloat(span.row) * lineHeight,
+        width: CGFloat(span.end - span.start) * cellWidth, height: lineHeight)
+      (span.highlight == 2 ? NSColor.systemOrange : .systemYellow).setFill()
       NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-      searchRect = nil
     }
     for cell in cells {
-      guard cell.searchHighlight != 0 else {
-        flushSearch()
-        continue
-      }
-      let rect = cellRect(cell)
-      if let current = searchRect, searchHighlight == cell.searchHighlight,
-        current.maxX == rect.minX, current.minY == rect.minY
-      {
-        searchRect = current.union(rect)
-      } else {
-        flushSearch()
-        searchRect = rect
-        searchHighlight = cell.searchHighlight
+      if zigonaut_search_span_push(&pendingSearch, UInt32(cell.y), UInt32(cell.x),
+        cell.occupancy == 1 ? 2 : 1, UInt32(cell.searchHighlight), &span) {
+        drawSearch(span)
       }
     }
-    flushSearch()
+    if zigonaut_search_span_push(&pendingSearch, 0, 0, 0, 0, &span) { drawSearch(span) }
   }
 
   private func drawText<C: Collection>(_ cells: C) where C.Element == TerminalRenderCell {
