@@ -115,7 +115,7 @@ struct TerminalLink {
 
 struct TerminalHint {
   let url: URL
-  let label: String
+  let label: zigonaut_hint_label_v1
   let row: Int
   let startColumn: Int
   let endColumn: Int
@@ -582,9 +582,9 @@ struct TerminalPalette: Equatable {
       let end = start + Int(record.target_length)
       guard start >= 0, end <= bytes.count,
         let url = URL(string: String(decoding: bytes[start..<end], as: UTF8.self)) else { return nil }
-      let label = withUnsafeBytes(of: record.label) {
-        String(decoding: $0.prefix(Int(record.label_length)), as: UTF8.self)
-      }
+      var label = zigonaut_hint_label_v1()
+      label.bytes = record.label
+      label.length = record.label_length
       return TerminalHint(url: url, label: label, row: Int(record.row),
         startColumn: Int(record.start_column), endColumn: Int(record.end_column))
     }

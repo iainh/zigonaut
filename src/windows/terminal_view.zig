@@ -402,8 +402,7 @@ pub const View = struct {
     selection: ?MouseSelection = null,
     hovered_link: ?HoveredLink = null,
     link_hints: ?[]hint.Candidate = null,
-    hint_prefix: [8]u8 = @splat(0),
-    hint_prefix_len: u8 = 0,
+    hint_interaction: hint.Interaction = .{},
     hint_copies: bool = false,
     titles_changed_message: win.UINT,
     shell_exited_message: win.UINT,
@@ -1711,16 +1710,9 @@ pub const View = struct {
     fn handleLinkHintKey(self: *View, wparam: win.WPARAM, released: bool) bool {
         if (self.link_hints) |candidates| {
             if (released) return true;
-            if (wparam == win.VK_ESCAPE) {
-                self.clearLinkHints();
-                return true;
-            }
-            if (wparam == win.VK_BACK) {
-                self.hint_prefix_len -|= 1;
-                self.invalidate();
-                return true;
-            }
             const character: ?u8 = switch (wparam) {
+                win.VK_ESCAPE => 27,
+                win.VK_BACK => 8,
                 'A' => 'a',
                 'S' => 's',
                 'D' => 'd',
@@ -1733,25 +1725,22 @@ pub const View = struct {
                 else => null,
             };
             const value = character orelse return true;
-            if (self.hint_prefix_len >= self.hint_prefix.len) return true;
-            self.hint_prefix[self.hint_prefix_len] = value;
-            self.hint_prefix_len += 1;
-            const prefix = self.hint_prefix[0..self.hint_prefix_len];
-            var any = false;
-            for (candidates) |candidate| {
-                if (!hint.matchesPrefix(candidate, prefix)) continue;
-                any = true;
-                if (!std.mem.eql(u8, candidate.labelSlice(), prefix)) continue;
-                if (self.hint_copies) {
-                    setClipboardText(self.hwnd, candidate.target) catch |err| log.debug("unable to copy terminal hint: {}", .{err});
-                } else openUri(candidate.target) catch |err| log.debug("unable to open terminal hint: {}", .{err});
-                self.clearLinkHints();
-                return true;
+            switch (self.hint_interaction.key(candidates, value)) {
+                .ignored => {},
+                .changed => self.invalidate(),
+                .cancelled => self.clearLinkHints(),
+                .no_match => {
+                    _ = win.MessageBeep(win.MB_ICONWARNING);
+                    self.clearLinkHints();
+                },
+                .selected => |index| {
+                    const candidate = candidates[index];
+                    if (self.hint_copies) {
+                        setClipboardText(self.hwnd, candidate.target) catch |err| log.debug("unable to copy terminal hint: {}", .{err});
+                    } else openUri(candidate.target) catch |err| log.debug("unable to open terminal hint: {}", .{err});
+                    self.clearLinkHints();
+                },
             }
-            if (!any) {
-                _ = win.MessageBeep(win.MB_ICONWARNING);
-                self.clearLinkHints();
-            } else self.invalidate();
             return true;
         }
         if (released or wparam != 'U' or win.GetKeyState(win.VK_CONTROL) >= 0 or win.GetKeyState(win.VK_SHIFT) >= 0) return false;
@@ -1765,7 +1754,7 @@ pub const View = struct {
             return true;
         }
         self.link_hints = candidates;
-        self.hint_prefix_len = 0;
+        self.hint_interaction = .{};
         self.hint_copies = win.GetKeyState(win.VK_MENU) < 0;
         self.consumed_application_key = wparam;
         self.suppress_application_character = true;
@@ -1777,17 +1766,16 @@ pub const View = struct {
         if (self.link_hints) |candidates| hint.deinitCandidates(std.heap.page_allocator, candidates);
         const changed = self.link_hints != null;
         self.link_hints = null;
-        self.hint_prefix_len = 0;
+        self.hint_interaction = .{};
         if (changed) self.invalidate();
     }
 
     fn drawLinkHintsDirectWrite(self: *View, engine: *TextEngine, geometry: GridGeometry, foreground: u32, background: u32) void {
         const candidates = self.link_hints orelse return;
-        const prefix = self.hint_prefix[0..self.hint_prefix_len];
         for (candidates) |candidate| {
-            if (!hint.matchesPrefix(candidate, prefix)) continue;
-            const remaining = candidate.labelSlice()[prefix.len..];
-            if (remaining.len == 0) continue;
+            const suffix = self.hint_interaction.visibleLabel(candidate) orelse continue;
+            if (suffix.length == 0) continue;
+            const remaining = candidate.labelSlice()[suffix.offset..][0..suffix.length];
             var wide: [8]u16 = undefined;
             const length = std.unicode.utf8ToUtf16Le(&wide, remaining) catch continue;
             const left: f32 = @floatFromInt(geometry.left + @as(i32, candidate.start_column) * @as(i32, @intCast(self.cell_width)));
@@ -1798,15 +1786,14 @@ pub const View = struct {
 
     fn drawLinkHintsGdi(self: *View, dc: win.HDC, geometry: GridGeometry) void {
         const candidates = self.link_hints orelse return;
-        const prefix = self.hint_prefix[0..self.hint_prefix_len];
         _ = win.SelectObject(dc, self.font);
         _ = win.SetTextColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOWTEXT) else win.RGB(0, 0, 0));
         _ = win.SetBkColor(dc, if (self.high_contrast) win.GetSysColor(win.COLOR_WINDOW) else win.RGB(255, 196, 0));
         _ = win.SetBkMode(dc, win.OPAQUE);
         for (candidates) |candidate| {
-            if (!hint.matchesPrefix(candidate, prefix)) continue;
-            const remaining = candidate.labelSlice()[prefix.len..];
-            if (remaining.len == 0) continue;
+            const suffix = self.hint_interaction.visibleLabel(candidate) orelse continue;
+            if (suffix.length == 0) continue;
+            const remaining = candidate.labelSlice()[suffix.offset..][0..suffix.length];
             var wide: [8]u16 = undefined;
             const length = std.unicode.utf8ToUtf16Le(&wide, remaining) catch continue;
             const left = geometry.left + @as(i32, candidate.start_column) * @as(i32, @intCast(self.cell_width));

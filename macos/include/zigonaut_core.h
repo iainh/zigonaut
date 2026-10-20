@@ -82,6 +82,14 @@ typedef struct { uint32_t version, size; uint64_t token; uint32_t required_bytes
 typedef struct { uint32_t target_offset, target_length; uint16_t row, start_column, end_column; uint8_t label_length, label[8], reserved[5]; } zigonaut_hint_v1;
 /* status: 0 complete, 1 insufficient capacity, 2 invalid/error. */
 typedef struct { uint32_t version, size, required_hints, required_bytes, written_hints, written_bytes; uint8_t status, reserved[7]; } zigonaut_hint_result_v1;
+typedef struct { uint8_t bytes[8], length; } zigonaut_hint_label_v1;
+typedef struct { uint8_t prefix[8], length; } zigonaut_hint_interaction_v1;
+typedef struct { uint8_t offset, length; } zigonaut_hint_suffix_v1;
+/* ASCII keys, Escape=27, Backspace=8. Result: index, -1 ignored, -2 changed,
+   -3 cancelled, -4 no match. Initialize/reset interaction with zeroes. */
+int32_t zigonaut_hint_key(zigonaut_hint_interaction_v1 *, const zigonaut_hint_label_v1 *, uint32_t count, uint8_t key);
+/* False hides this occurrence; a matching empty suffix highlights without a badge. */
+bool zigonaut_hint_suffix(const zigonaut_hint_interaction_v1 *, const zigonaut_hint_label_v1 *, zigonaut_hint_suffix_v1 *);
 /* action: 0 press, 1 repeat, 2 release. UTF-8 is optional and limited to 64 bytes. */
 typedef struct { uint32_t version, size; uint16_t key_code, modifiers, consumed_modifiers, utf8_length; uint8_t action, reserved0[3]; uint32_t unshifted_codepoint; const uint8_t *utf8; uint8_t reserved[8]; } zigonaut_key_event_v1;
 zigonaut_core *zigonaut_core_create(const char *helper_path, const char *shell_path, const char *working_directory, bool shell_integration, const char *shell_integration_path, zigonaut_wake_fn wake, void *context);

@@ -58,6 +58,8 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_has_foreground_job",
     "zigonaut_core_title",
     "zigonaut_core_link_at",
+    "zigonaut_hint_key",
+    "zigonaut_hint_suffix",
     "zigonaut_core_take_notification",
     "zigonaut_core_set_command_notifications",
     "zigonaut_core_set_clipboard_write",
@@ -81,4 +83,27 @@ test "public header compiles and dylib exports its contract" {
     inline for (symbols) |symbol| {
         try std.testing.expect(library.lookup(*const anyopaque, symbol) != null);
     }
+}
+
+test "hint C ABI preserves interaction state and suffix offsets" {
+    try std.testing.expectEqual(@as(usize, 9), @sizeOf(abi.zigonaut_hint_label_v1));
+    try std.testing.expectEqual(@as(usize, 9), @sizeOf(abi.zigonaut_hint_interaction_v1));
+    try std.testing.expectEqual(@as(usize, 2), @sizeOf(abi.zigonaut_hint_suffix_v1));
+    var library = try std.DynLib.open("zig-out/lib/libzigonaut-core.dylib");
+    defer library.close();
+    const key = library.lookup(*const fn ([*c]abi.zigonaut_hint_interaction_v1, [*c]const abi.zigonaut_hint_label_v1, u32, u8) callconv(.c) i32, "zigonaut_hint_key").?;
+    const suffix = library.lookup(*const fn ([*c]const abi.zigonaut_hint_interaction_v1, [*c]const abi.zigonaut_hint_label_v1, [*c]abi.zigonaut_hint_suffix_v1) callconv(.c) bool, "zigonaut_hint_suffix").?;
+    const labels = [_]abi.zigonaut_hint_label_v1{
+        .{ .bytes = .{ 's', 'd', 0, 0, 0, 0, 0, 0 }, .length = 2 },
+        .{ .bytes = .{ 'a', 0, 0, 0, 0, 0, 0, 0 }, .length = 1 },
+    };
+    var state = std.mem.zeroes(abi.zigonaut_hint_interaction_v1);
+    var visible: abi.zigonaut_hint_suffix_v1 = undefined;
+    try std.testing.expectEqual(@as(i32, -2), key(&state, &labels, labels.len, 's'));
+    try std.testing.expect(suffix(&state, &labels[0], &visible));
+    try std.testing.expectEqual(@as(u8, 1), visible.offset);
+    try std.testing.expectEqual(@as(u8, 1), visible.length);
+    try std.testing.expect(!suffix(&state, &labels[1], &visible));
+    try std.testing.expectEqual(@as(i32, 0), key(&state, &labels, labels.len, 'd'));
+    try std.testing.expectEqual(@as(i32, -3), key(&state, &labels, labels.len, 27));
 }

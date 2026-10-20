@@ -123,14 +123,27 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var drawingRetainedScene = false
   private var cachedTextPlacements: [MetalTextPlacement] = []
   private var textRunBytes: [UInt8] = []
-  private var decorationSignature = ""
-  private var overlaySignature = ""
+  private struct OverlayState: Equatable {
+    let markedText: String
+    let selection: NSRange
+    let hints: UInt64
+    let cursorX: Int
+    let cursorY: Int
+  }
+  private struct DecorationState: Equatable {
+    let hoveredLink: HoveredLink?
+    let hints: UInt64
+  }
+  private var decorationSignature: DecorationState?
+  private var overlaySignature: OverlayState?
   private var encodedKeys = Set<UInt16>()
   private var pressedModifiers = Set<UInt16>()
   private var pendingKeyEvent: NSEvent?
   private var pendingKeyUsedMarkedText = false
   private var linkHints: [TerminalHint] = []
-  private var hintPrefix = ""
+  private var hintLabels: [zigonaut_hint_label_v1] = []
+  private var hintInteraction = zigonaut_hint_interaction_v1()
+  private var hintGeneration: UInt64 = 0
   private var hintCopies = false
 
   private var font: NSFont {
@@ -594,7 +607,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
     if event.keyCode == 32, event.modifierFlags.contains([.command, .shift]) {
       linkHints = model.linkHints()
-      hintPrefix = ""
+      hintLabels = linkHints.map(\.label)
+      hintInteraction = zigonaut_hint_interaction_v1()
+      hintGeneration &+= 1
       hintCopies = event.modifierFlags.contains(.option)
       needsDisplay = true
       return
@@ -637,25 +652,28 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func handleHintKey(_ event: NSEvent) {
-    if event.keyCode == 53 {
-      cancelHints()
-      return
+    let key: UInt8
+    switch event.keyCode {
+    case 53: key = 27
+    case 51: key = 8
+    default:
+      guard let value = event.charactersIgnoringModifiers?.lowercased(), value.count == 1,
+        let ascii = value.utf8.first, value.utf8.count == 1 else { return }
+      key = ascii
     }
-    if event.keyCode == 51 {
-      if !hintPrefix.isEmpty { hintPrefix.removeLast() }
+    let result = hintLabels.withUnsafeBufferPointer {
+      zigonaut_hint_key(&hintInteraction, $0.baseAddress, UInt32($0.count), key)
+    }
+    switch result {
+    case -1: return
+    case -2:
+      hintGeneration &+= 1
       needsDisplay = true
-      return
-    }
-    guard let value = event.charactersIgnoringModifiers?.lowercased(), value.count == 1,
-      "asdfghjkl".contains(value) else { return }
-    hintPrefix += value
-    let matches = linkHints.filter { $0.label.hasPrefix(hintPrefix) }
-    guard !matches.isEmpty else {
-      NSSound.beep()
+    case -3, -4:
+      if result == -4 { NSSound.beep() }
       cancelHints()
-      return
-    }
-    if let match = matches.first(where: { $0.label == hintPrefix }) {
+    default:
+      let match = linkHints[Int(result)]
       if hintCopies {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(match.url.absoluteString, forType: .string)
@@ -663,15 +681,21 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         NSWorkspace.shared.open(match.url)
       }
       cancelHints()
-    } else {
-      needsDisplay = true
     }
   }
 
   private func cancelHints() {
     linkHints = []
-    hintPrefix = ""
+    hintLabels = []
+    hintInteraction = zigonaut_hint_interaction_v1()
+    hintGeneration &+= 1
     needsDisplay = true
+  }
+
+  private func hintSuffix(_ hint: TerminalHint) -> zigonaut_hint_suffix_v1? {
+    var label = hint.label
+    var suffix = zigonaut_hint_suffix_v1()
+    return zigonaut_hint_suffix(&hintInteraction, &label, &suffix) ? suffix : nil
   }
 
   override func keyUp(with event: NSEvent) {
@@ -1091,8 +1115,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       retainedPixelSize = pixelSize
       retainedRowHashes = []
       retainedViewportOffset = nil
-      decorationSignature = ""
-      overlaySignature = ""
+      decorationSignature = nil
+      overlaySignature = nil
     }
     guard let bitmap = retainedBitmap, let texture = retainedTexture,
       let overlayBitmap, let overlayTexture, let decorationBitmap, let decorationTexture,
@@ -1173,9 +1197,10 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       cachedTextPlacements = metalTextPlacements(snapshot.cells)
     }
     let hasOverlay = markedText.length > 0 || !linkHints.isEmpty
-    if !hasOverlay { overlaySignature = "" }
-    let hintSignature = linkHints.map { "\($0.label):\($0.row):\($0.startColumn):\($0.endColumn)" }.joined(separator: ",")
-    let nextOverlaySignature = "\(markedText.string)|\(markedSelection)|\(hintPrefix)|\(hintSignature)|\(snapshot.frame.cursorX):\(snapshot.frame.cursorY)"
+    if !hasOverlay { overlaySignature = nil }
+    let nextOverlaySignature = OverlayState(markedText: markedText.string,
+      selection: markedSelection, hints: hintGeneration,
+      cursorX: snapshot.frame.cursorX, cursorY: snapshot.frame.cursorY)
     if hasOverlay && (sceneChanged || overlaySignature != nextOverlaySignature) {
       drawingRetainedScene = true
       rasterizeOverlay(frame: snapshot.frame, in: overlayBitmap)
@@ -1193,8 +1218,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       !$0.textBytes.isEmpty && $0.occupancy != 2
         && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
     } || hoveredLink != nil || !linkHints.isEmpty
-    if !hasDecorations { decorationSignature = "" }
-    let nextDecorationSignature = "\(String(describing: hoveredLink))|\(hintPrefix)|\(hintSignature)"
+    if !hasDecorations { decorationSignature = nil }
+    let nextDecorationSignature = DecorationState(hoveredLink: hoveredLink, hints: hintGeneration)
     if hasDecorations && (sceneChanged || nextDecorationSignature != decorationSignature) {
       drawingRetainedScene = true
       rasterizeDecorations(snapshot.cells, in: decorationBitmap)
@@ -1279,10 +1304,12 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       .foregroundColor: NSColor.black,
       .backgroundColor: NSColor.systemYellow,
     ]
-    for hint in linkHints where hint.label.hasPrefix(hintPrefix) {
-      let text = hint.label.dropFirst(hintPrefix.count)
-      guard !text.isEmpty else { continue }
-      NSAttributedString(string: String(text), attributes: attributes).draw(at: NSPoint(
+    for hint in linkHints {
+      guard let suffix = hintSuffix(hint), suffix.length > 0 else { continue }
+      let text = withUnsafeBytes(of: hint.label.bytes) {
+        String(decoding: $0[Int(suffix.offset)..<Int(suffix.offset + suffix.length)], as: UTF8.self)
+      }
+      NSAttributedString(string: text, attributes: attributes).draw(at: NSPoint(
         x: originX + CGFloat(hint.startColumn) * cellWidth,
         y: originY + CGFloat(hint.row) * lineHeight))
     }
@@ -1458,7 +1485,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     if let hoveredLink, cell.y == hoveredLink.row && cell.x >= hoveredLink.startColumn
       && cell.x < hoveredLink.endColumn { return true }
     return linkHints.contains { hint in
-      hint.label.hasPrefix(hintPrefix) && cell.y == hint.row
+      hintSuffix(hint) != nil && cell.y == hint.row
         && cell.x >= hint.startColumn && cell.x < hint.endColumn
     }
   }
