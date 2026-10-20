@@ -1007,11 +1007,47 @@ pub const Terminal = struct {
     pub const LinkScratch = struct {
         row: std.ArrayList(u8) = .empty,
         starts: std.ArrayList(usize) = .empty,
+        uri: std.ArrayList(u8) = .empty,
 
         pub fn deinit(self: *LinkScratch, allocator: std.mem.Allocator) void {
             self.row.deinit(allocator);
             self.starts.deinit(allocator);
+            self.uri.deinit(allocator);
             self.* = .{};
+        }
+    };
+
+    /// Borrowed results (including misses) are stable until the next lookup or
+    /// deinit. Keep one cache per consumer and use under the terminal's lock.
+    pub const LinkCache = struct {
+        scratch: LinkScratch = .{},
+        key: ?CacheKey = null,
+        result: ?Link = null,
+        revision: u64 = 0,
+
+        const CacheKey = struct { terminal: vt.GhosttyTerminal, generation: u64, fraction: f64, point: Point };
+
+        pub fn invalidate(self: *LinkCache) void {
+            self.key = null;
+            self.result = null;
+        }
+
+        pub fn deinit(self: *LinkCache, allocator: std.mem.Allocator) void {
+            self.scratch.deinit(allocator);
+            self.* = .{};
+        }
+
+        pub fn lookup(self: *LinkCache, allocator: std.mem.Allocator, terminal: *Terminal, point: Point) !?Link {
+            // image_generation also covers feed, geometry, history configuration
+            // and integral viewport movement. Fraction-only scrolling is separate.
+            const key: CacheKey = .{ .terminal = terminal.terminal, .generation = terminal.image_generation, .fraction = terminal.scroll_fraction, .point = point };
+            if (self.key) |previous| if (std.meta.eql(previous, key)) return self.result;
+            self.invalidate();
+            self.revision +%= 1;
+            const result = try terminal.linkAtWithScratch(allocator, &self.scratch, point);
+            self.result = result;
+            self.key = key;
+            return result;
         }
     };
 
@@ -1848,14 +1884,28 @@ pub const Terminal = struct {
         scratch: *LinkScratch,
         point: Point,
     ) !?Link {
+        var found = try self.linkAtWithScratch(scratch_allocator, scratch, point) orelse return null;
+        found.uri = try output_allocator.dupe(u8, found.uri);
+        return found;
+    }
+
+    /// URI storage is scratch-owned and NUL terminated outside the returned
+    /// slice, so native tooltip/opening APIs need no temporary string copy.
+    pub fn linkAtWithScratch(self: *Terminal, scratch_allocator: std.mem.Allocator, scratch: *LinkScratch, point: Point) !?Link {
         if (point.x >= self.columns or point.y > self.rows or
             (point.y == self.rows and self.scroll_fraction == 0)) return null;
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
         reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
-        if (try hyperlinkAlloc(output_allocator, &reference)) |uri| {
+        var required: usize = 0;
+        const status = vt.ghostty_grid_ref_hyperlink_uri(&reference, null, 0, &required);
+        if (status != vt.GHOSTTY_OUT_OF_SPACE) try check(status);
+        if (required > 0) {
+            try scratch.uri.resize(scratch_allocator, required + 1);
+            try check(vt.ghostty_grid_ref_hyperlink_uri(&reference, scratch.uri.items.ptr, required, &required));
+            scratch.uri.items[required] = 0;
+            const uri = scratch.uri.items[0..required];
             if (!link.hasAllowedScheme(uri)) {
-                output_allocator.free(uri);
                 return null;
             }
             var start = point.x;
@@ -1880,8 +1930,11 @@ pub const Terminal = struct {
         while (start_column < self.columns and starts[start_column + 1] <= match.start) start_column += 1;
         var end_column = start_column;
         while (end_column < self.columns and starts[end_column] < match.end) end_column += 1;
+        try scratch.uri.resize(scratch_allocator, match.end - match.start + 1);
+        @memcpy(scratch.uri.items[0 .. match.end - match.start], scratch.row.items[match.start..match.end]);
+        scratch.uri.items[scratch.uri.items.len - 1] = 0;
         return .{
-            .uri = try output_allocator.dupe(u8, scratch.row.items[match.start..match.end]),
+            .uri = scratch.uri.items[0 .. scratch.uri.items.len - 1],
             .row = point.y,
             .start_column = start_column,
             .end_column = end_column,
@@ -2752,18 +2805,6 @@ pub const Terminal = struct {
         return allocator.realloc(output, written);
     }
 };
-
-fn hyperlinkAlloc(allocator: std.mem.Allocator, reference: *const vt.GhosttyGridRef) !?[]u8 {
-    var required: usize = 0;
-    const result = vt.ghostty_grid_ref_hyperlink_uri(reference, null, 0, &required);
-    if (result == vt.GHOSTTY_SUCCESS and required == 0) return null;
-    if (result != vt.GHOSTTY_OUT_OF_SPACE) try check(result);
-    if (required == 0) return null;
-    const uri = try allocator.alloc(u8, required);
-    errdefer allocator.free(uri);
-    try check(vt.ghostty_grid_ref_hyperlink_uri(reference, uri.ptr, uri.len, &required));
-    return uri;
-}
 
 fn viewportPoint(point: Terminal.Point) vt.GhosttyPoint {
     return .{
@@ -3821,6 +3862,54 @@ test "link lookup rejects points outside the viewport" {
 
     try std.testing.expect(try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 80, .y = 0 }) == null);
     try std.testing.expect(try terminal.linkAtAlloc(std.testing.allocator, .{ .x = 0, .y = 4 }) == null);
+}
+
+test "hover cache retains hits and misses and follows content geometry viewport and session" {
+    const allocator = std.testing.allocator;
+    var terminal = try Terminal.init(40, 2, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.setFractionalScrolling(true);
+    var cache = Terminal.LinkCache{};
+    defer cache.deinit(allocator);
+    terminal.feed("https://first.invalid\r\nno link");
+    const point: Terminal.Point = .{ .x = 3, .y = 0 };
+    const first = (try cache.lookup(allocator, &terminal, point)).?;
+    try std.testing.expectEqualStrings("https://first.invalid", first.uri);
+    try std.testing.expectEqual(@as(u8, 0), first.uri.ptr[first.uri.len]);
+    const revision = cache.revision;
+    try std.testing.expectEqualStrings("https://first.invalid", (try cache.lookup(std.testing.failing_allocator, &terminal, point)).?.uri);
+    try std.testing.expectEqual(revision, cache.revision);
+    // A different point must be evaluated, but can reuse all URI/row capacity.
+    try std.testing.expectEqualStrings("https://first.invalid", (try cache.lookup(std.testing.failing_allocator, &terminal, .{ .x = 4, .y = 0 })).?.uri);
+    try std.testing.expect(cache.revision != revision);
+    const missing: Terminal.Point = .{ .x = 3, .y = 1 };
+    try std.testing.expect(try cache.lookup(allocator, &terminal, missing) == null);
+    const miss_revision = cache.revision;
+    try std.testing.expect(try cache.lookup(std.testing.failing_allocator, &terminal, missing) == null);
+    try std.testing.expectEqual(miss_revision, cache.revision);
+
+    terminal.feed("\r\x1b]8;;https://target.invalid\x07label\x1b]8;;\x07");
+    const explicit = (try cache.lookup(allocator, &terminal, missing)).?;
+    try std.testing.expectEqualStrings("https://target.invalid", explicit.uri);
+    try std.testing.expectEqual(@as(u16, 5), explicit.end_column);
+    cache.invalidate(); // Modifier/consumer lifecycle change.
+    const before_invalidation = cache.revision;
+    _ = try cache.lookup(allocator, &terminal, missing);
+    try std.testing.expect(cache.revision != before_invalidation);
+    try terminal.resize(40, 1, 9, 19);
+    try std.testing.expect(try cache.lookup(allocator, &terminal, missing) == null);
+    terminal.scrollViewport(-1);
+    try std.testing.expectEqualStrings("https://first.invalid", (try cache.lookup(allocator, &terminal, point)).?.uri);
+
+    // The overscan row becomes addressable with fractional scrolling, without
+    // any whole-row movement or content-generation change.
+    try std.testing.expect(try cache.lookup(allocator, &terminal, missing) == null);
+    try std.testing.expect(try terminal.scrollViewportFractional(0.25));
+    try std.testing.expectEqualStrings("https://target.invalid", (try cache.lookup(allocator, &terminal, missing)).?.uri);
+    var other = try Terminal.init(40, 2, theme.rasmus);
+    defer other.deinit();
+    other.feed("https://other.invalid");
+    try std.testing.expectEqualStrings("https://other.invalid", (try cache.lookup(allocator, &other, point)).?.uri);
 }
 
 test "link hints label visible OSC and detected links from bottom to top" {

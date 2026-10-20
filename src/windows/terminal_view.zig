@@ -401,6 +401,7 @@ pub const View = struct {
     last_titles_generation: u64 = 0,
     selection: ?MouseSelection = null,
     hovered_link: ?HoveredLink = null,
+    link_cache: Terminal.LinkCache = .{},
     link_hints: ?[]hint.Candidate = null,
     hint_interaction: hint.Interaction = .{},
     hint_copies: bool = false,
@@ -558,6 +559,7 @@ pub const View = struct {
         self.ime_preedit.deinit(std.heap.page_allocator);
         self.clearLinkHints();
         self.clearHoveredLink();
+        self.link_cache.deinit(std.heap.page_allocator);
         self.gdi_renderer.release();
         if (self.text_engine) |*engine| engine.deinit();
         self.text_engine = null;
@@ -2323,29 +2325,25 @@ pub const View = struct {
         };
         const session = self.boundSession() orelse return;
         const runtime = session.runtime orelse return;
-        const generation = runtime.contentGeneration();
-        if (self.hovered_link) |hovered| {
-            if (hovered.runtime == runtime and hovered.generation == generation and
-                hovered.point.x == point.x and hovered.point.y == point.y) return;
-        }
-        self.clearHoveredLink();
-        const found = runtime.linkAtAlloc(std.heap.page_allocator, point) catch |err| {
+        const revision = self.link_cache.revision;
+        const found = runtime.linkAtCached(&self.link_cache, point) catch |err| {
+            self.clearHoveredLink();
             log.debug("unable to inspect terminal link: {}", .{err});
             return;
-        } orelse return;
-        self.hovered_link = .{
-            .runtime = runtime,
-            .generation = generation,
-            .point = point,
-            .link = found,
         };
-        self.invalidate();
+        if (revision == self.link_cache.revision) return;
+        const was_hovered = self.hovered_link != null;
+        self.hovered_link = if (found) |value| .{
+            .runtime = runtime,
+            .link = value,
+        } else null;
+        if (was_hovered or self.hovered_link != null) self.invalidate();
     }
 
     fn clearHoveredLink(self: *View) void {
-        if (self.hovered_link) |hovered| std.heap.page_allocator.free(hovered.link.uri);
         if (self.hovered_link != null) self.invalidate();
         self.hovered_link = null;
+        self.link_cache.invalidate();
     }
 
     fn openLinkAt(self: *View, lparam: win.LPARAM) bool {
@@ -2375,8 +2373,6 @@ const MouseSelection = struct {
 
 const HoveredLink = struct {
     runtime: *SessionRuntime,
-    generation: u64,
-    point: Terminal.Point,
     link: Terminal.Link,
 };
 

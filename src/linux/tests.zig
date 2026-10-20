@@ -119,8 +119,14 @@ test "Linux links share OSC8 precedence and scheme policy and invalidate hover o
     var length: usize = 0;
     var uri = c.zgtk_link_at(core, 2, 0, &length);
     try std.testing.expectEqualStrings("https://target.invalid/", uri[0..length]);
-    try std.testing.expect(c.zgtk_render(core));
+    try std.testing.expect(c.zgtk_render_retained(core, true));
     try std.testing.expectEqual(@as(usize, 21), state.underlined);
+    // Repeated pointer motion inside the same cell retains scene pixels.
+    uri = c.zgtk_link_at(core, 2, 0, &length);
+    try std.testing.expectEqualStrings("https://target.invalid/", uri[0..length]);
+    try std.testing.expectEqual(@as(u8, 0), uri[length]);
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expectEqual(@as(usize, 0), state.drawn_cells);
     try feed(core, " ");
     try std.testing.expect(c.zgtk_render(core));
     try std.testing.expectEqual(@as(usize, 0), state.underlined);
@@ -128,6 +134,10 @@ test "Linux links share OSC8 precedence and scheme policy and invalidate hover o
     try std.testing.expectEqualStrings("https://plain.invalid/a", uri[0..length]);
     try std.testing.expect(c.zgtk_link_at(core, 4, 2, &length) == null);
     try std.testing.expectEqual(@as(usize, 0), length);
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expect(c.zgtk_link_at(core, 4, 2, &length) == null);
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    try std.testing.expectEqual(@as(usize, 0), state.drawn_cells);
     try std.testing.expect(c.zgtk_link_at(core, 80, 0, &length) == null);
     _ = c.zgtk_link_at(core, 2, 0, &length);
     c.zgtk_scroll(core, -1);

@@ -66,6 +66,8 @@ typedef struct {
     double pointer_x, pointer_y;
     guint reported_buttons;
     gboolean pointer_inside, selecting, rectangle;
+    gboolean hover_present;
+    int hover_column, hover_row;
 } Tab;
 
 static void new_tab(Window *window);
@@ -612,29 +614,39 @@ static void select_at(Tab *tab, double x, double y, bool begin) {
 }
 static void clear_hover(Tab *tab) {
     zgtk_clear_hover(tab->core);
+    if (!tab->hover_present) return;
+    tab->hover_present = FALSE;
     gtk_widget_set_cursor_from_name(tab->area, "text");
     gtk_widget_set_tooltip_text(tab->area, NULL);
     gtk_widget_queue_draw(tab->area);
 }
 
-static char *link_at_pointer(Tab *tab, GdkModifierType state) {
+static const char *link_at_pointer(Tab *tab, GdkModifierType state) {
     if (!tab->pointer_inside || !(state & GDK_CONTROL_MASK) || (state & GDK_SHIFT_MASK)) return NULL;
     double x = tab->pointer_x - settings.padding, y = tab->pointer_y - settings.padding;
     if (x < 0 || y < 0 || x >= tab->columns * tab->cell_width || y >= tab->rows * tab->cell_height) return NULL;
     size_t length = 0;
     const char *bytes = zgtk_link_at(tab->core, (uint16_t)(x / tab->cell_width),
                                     (uint16_t)(y / tab->cell_height + tab->scroll_offset), &length);
-    return bytes ? g_strndup(bytes, length) : NULL;
+    return bytes;
 }
 
 static void update_hover(Tab *tab, GdkModifierType state) {
-    clear_hover(tab);
-    char *uri = link_at_pointer(tab, state);
+    const char *uri = link_at_pointer(tab, state);
     if (uri) {
-        gtk_widget_set_cursor_from_name(tab->area, "pointer");
-        gtk_widget_set_tooltip_text(tab->area, uri);
-        g_free(uri);
-    }
+        const int column = (int)((tab->pointer_x - settings.padding) / tab->cell_width);
+        const int row = (int)((tab->pointer_y - settings.padding) / tab->cell_height + tab->scroll_offset);
+        if (!tab->hover_present || tab->hover_column != column || tab->hover_row != row ||
+            g_strcmp0(gtk_widget_get_tooltip_text(tab->area), uri) != 0) {
+            tab->hover_present = TRUE;
+            tab->hover_column = column;
+            tab->hover_row = row;
+            gtk_widget_set_cursor_from_name(tab->area, "pointer");
+            gtk_widget_set_tooltip_text(tab->area, uri);
+            gtk_widget_queue_draw(tab->area);
+        }
+    } else if (tab->hover_present || !tab->pointer_inside ||
+               !(state & GDK_CONTROL_MASK) || (state & GDK_SHIFT_MASK)) clear_hover(tab);
 }
 
 static gboolean report_mouse(Tab *tab, uint8_t action, uint8_t button, GdkModifierType state) {
@@ -697,13 +709,12 @@ static gboolean pointer_button(GtkEventControllerLegacy *controller, GdkEvent *e
     gtk_widget_grab_focus(tab->area);
     tab->pointer_inside = TRUE;
     clear_hover(tab);
-    char *uri = button == 1 ? link_at_pointer(tab, state) : NULL;
+    const char *uri = button == 1 ? link_at_pointer(tab, state) : NULL;
     if (uri) {
         /* Native URI dispatch, never a command line or shell interpolation. */
         GtkUriLauncher *launcher = gtk_uri_launcher_new(uri);
         gtk_uri_launcher_launch(launcher, tab->window->window, NULL, uri_opened, NULL);
         g_object_unref(launcher);
-        g_free(uri);
         return TRUE;
     }
     if (!(state & GDK_SHIFT_MASK)) {

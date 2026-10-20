@@ -99,6 +99,7 @@ const Core = struct {
     next_clipboard_token: u64 = 1,
     search_cache: Terminal.SearchCache = .{},
     search: Search = .{},
+    link_cache: Terminal.LinkCache = .{},
     selection_unit: Terminal.SelectionUnit = .cell,
     selection_rectangle: bool = false,
     progress_active: bool = false,
@@ -1278,14 +1279,30 @@ export fn zigonaut_core_link_at(self: ?*Core, column: u16, row: u16, output: ?[*
     const core = self orelse return 0;
     core.mutex.lock();
     defer core.mutex.unlock();
-    const found = core.terminal.linkAtAlloc(std.heap.c_allocator, .{ .x = column, .y = row }) catch return 0;
+    const found = core.link_cache.lookup(std.heap.c_allocator, &core.terminal, .{ .x = column, .y = row }) catch return 0;
     const link = found orelse return 0;
-    defer std.heap.c_allocator.free(link.uri);
     if (start_column) |start| start.* = link.start_column;
     if (end_column) |end| end.* = link.end_column;
     const count = @min(capacity, link.uri.len);
     if (output) |destination| @memcpy(destination[0..count], link.uri[0..count]);
     return @intCast(@min(link.uri.len, std.math.maxInt(u32)));
+}
+
+/// Main-thread borrowed URI, stable until the next link lookup or destruction.
+/// The revision lets Swift retain both converted URLs and misses without a copy.
+export fn zigonaut_core_link_cached(self: ?*Core, column: u16, row: u16, length: *usize, revision: *u64, start_column: *u16, end_column: *u16) ?[*]const u8 {
+    length.* = 0;
+    revision.* = 0;
+    const core = self orelse return null;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    defer revision.* = core.link_cache.revision;
+    const found = core.link_cache.lookup(std.heap.c_allocator, &core.terminal, .{ .x = column, .y = row }) catch return null;
+    const link = found orelse return null;
+    length.* = link.uri.len;
+    start_column.* = link.start_column;
+    end_column.* = link.end_column;
+    return link.uri.ptr;
 }
 
 export fn zigonaut_core_hint_snapshot(self: ?*Core, records: ?[*]HintRecord, record_capacity: u32, bytes: ?[*]u8, byte_capacity: u32, result: ?*HintResult) void {
@@ -1701,6 +1718,7 @@ export fn zigonaut_core_destroy(self: ?*Core) void {
     reapBounded(core.child);
     core.search_cache.deinit(std.heap.c_allocator);
     core.search.deinit(std.heap.c_allocator);
+    core.link_cache.deinit(std.heap.c_allocator);
     for (core.notifications.items) |item| std.heap.c_allocator.free(item.payload);
     core.notifications.deinit(std.heap.c_allocator);
     for (core.clipboard_writes.items) |item| std.heap.c_allocator.free(item.payload);

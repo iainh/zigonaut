@@ -416,6 +416,8 @@ struct TerminalPalette: Equatable {
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
   private var imageCache: [TerminalImageKey: CGImage] = [:]
   private var imagesNeedRefresh = true
+  private var linkRevision: UInt64 = 0
+  private var cachedLink: TerminalLink?
   private var latencySignpostID: OSSignpostID?
   private var currentColumns = 80
   private var currentRows = 24
@@ -556,15 +558,20 @@ struct TerminalPalette: Equatable {
 
   func link(column: Int, row: Int) -> TerminalLink? {
     guard let core else { return nil }
-    var bytes = [UInt8](repeating: 0, count: 2048)
+    var length = 0
+    var revision: UInt64 = 0
     var startColumn: UInt16 = 0
     var endColumn: UInt16 = 0
-    let required = zigonaut_core_link_at(core.pointer, UInt16(clamping: column),
-      UInt16(clamping: row), &bytes, UInt32(bytes.count), &startColumn, &endColumn)
-    guard required > 0, required <= bytes.count,
-      let value = String(bytes: bytes.prefix(Int(required)), encoding: .utf8),
+    let bytes = zigonaut_core_link_cached(core.pointer, UInt16(clamping: column),
+      UInt16(clamping: row), &length, &revision, &startColumn, &endColumn)
+    if revision == linkRevision { return cachedLink }
+    linkRevision = revision
+    cachedLink = nil
+    guard let bytes, length > 0,
+      let value = String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8),
       let url = URL(string: value) else { return nil }
-    return TerminalLink(url: url, row: row, startColumn: Int(startColumn), endColumn: Int(endColumn))
+    cachedLink = TerminalLink(url: url, row: row, startColumn: Int(startColumn), endColumn: Int(endColumn))
+    return cachedLink
   }
   func linkHints() -> [TerminalHint] {
     guard let core else { return [] }

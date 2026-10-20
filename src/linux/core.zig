@@ -112,7 +112,7 @@ const Core = struct {
     clipboard_enabled: bool = false,
     clipboard_limit: u32 = 1048576,
     hover: ?Terminal.Link = null,
-    link_scratch: Terminal.LinkScratch = .{},
+    link_cache: Terminal.LinkCache = .{},
     visual_dirty: bool = true,
     clear_scene: bool = true,
 
@@ -297,7 +297,7 @@ export fn zgtk_configure(core: *Core, theme: u8, scrollback: u32, intense: u8, c
 
 export fn zgtk_destroy(core: *Core) void {
     zgtk_clear_hover(core);
-    core.link_scratch.deinit(allocator);
+    core.link_cache.deinit(allocator);
     core.search.deinit(allocator);
     core.search_cache.deinit(allocator);
     core.snapshot.deinit(allocator);
@@ -447,15 +447,16 @@ export fn zgtk_mouse(core: *Core, action: u8, button: u8, x: i32, y: i32, width:
 
 export fn zgtk_clear_hover(core: *Core) void {
     core.visual_dirty = core.visual_dirty or core.hover != null;
-    if (core.hover) |link| allocator.free(link.uri);
     core.hover = null;
+    core.link_cache.invalidate();
 }
 
 export fn zgtk_link_at(core: *Core, x: u16, y: u16, length: *usize) ?[*]const u8 {
-    zgtk_clear_hover(core);
-    core.visual_dirty = true;
     length.* = 0;
-    core.hover = core.terminal.linkAtAllocWithScratch(allocator, allocator, &core.link_scratch, .{ .x = x, .y = y }) catch return null;
+    const revision = core.link_cache.revision;
+    const was_hovered = core.hover != null;
+    core.hover = core.link_cache.lookup(allocator, &core.terminal, .{ .x = x, .y = y }) catch null;
+    if (core.link_cache.revision != revision and (was_hovered or core.hover != null)) core.visual_dirty = true;
     const link = core.hover orelse return null;
     length.* = link.uri.len;
     return link.uri.ptr;

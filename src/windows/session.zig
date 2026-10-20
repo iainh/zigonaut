@@ -466,6 +466,12 @@ pub const SessionRuntime = struct {
         return self.terminal.linkAtAllocWithScratch(allocator, self.allocator, &self.link_scratch, point);
     }
 
+    pub fn linkAtCached(self: *SessionRuntime, cache: *Terminal.LinkCache, point: Terminal.Point) !?Terminal.Link {
+        self.terminal_mutex.lock();
+        defer self.terminal_mutex.unlock();
+        return cache.lookup(std.heap.page_allocator, &self.terminal, point);
+    }
+
     pub fn linkHintsAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) ![]shared.hint.Candidate {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();

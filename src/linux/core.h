@@ -30,7 +30,7 @@ bool zgtk_mouse(TerminalCore *core, uint8_t action, uint8_t button,
                 int32_t x, int32_t y, uint32_t width, uint32_t height,
                 uint32_t cell_width, uint32_t cell_height, uint32_t padding,
                 uint16_t modifiers, bool any_pressed);
-/* Borrowed URI bytes, valid until the next hover or terminal mutation. Never
+/* Borrowed NUL-terminated URI bytes, valid until the next hover or terminal mutation. Never
  * shell text. Shared link detection owns OSC8 precedence and scheme policy. */
 const char *zgtk_link_at(TerminalCore *core, uint16_t x, uint16_t y, size_t *length);
 void zgtk_clear_hover(TerminalCore *core);

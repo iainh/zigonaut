@@ -60,6 +60,7 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_link_at",
     "zigonaut_hint_key",
     "zigonaut_hint_suffix",
+    "zigonaut_core_link_cached",
     "zigonaut_core_take_notification",
     "zigonaut_core_set_command_notifications",
     "zigonaut_core_set_clipboard_write",

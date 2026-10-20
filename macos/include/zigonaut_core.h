@@ -147,6 +147,10 @@ bool zigonaut_core_exited(zigonaut_core *);
 uint64_t zigonaut_core_output_generation(zigonaut_core *);
 uint32_t zigonaut_core_title(zigonaut_core *, uint8_t *output, uint32_t capacity);
 uint32_t zigonaut_core_link_at(zigonaut_core *, uint16_t column, uint16_t row, uint8_t *output, uint32_t capacity, uint16_t *start_column, uint16_t *end_column);
+/* Main-thread lookup. URI remains valid until the next link lookup or destroy.
+   Revision changes on a new point/content/viewport/geometry lookup, even a miss. */
+const uint8_t *zigonaut_core_link_cached(zigonaut_core *, uint16_t column, uint16_t row,
+    size_t *length, uint64_t *revision, uint16_t *start_column, uint16_t *end_column);
 void zigonaut_core_hint_snapshot(zigonaut_core *, zigonaut_hint_v1 *, uint32_t hint_capacity, uint8_t *bytes, uint32_t byte_capacity, zigonaut_hint_result_v1 *);
 void zigonaut_core_take_notification(zigonaut_core *, uint8_t *title, uint32_t title_capacity, uint8_t *body, uint32_t body_capacity, zigonaut_notification_result_v1 *);
 /* Opt-in OSC 133 completion alerts: at least five seconds and pane unfocused at completion. */
