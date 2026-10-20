@@ -1,11 +1,18 @@
 const std = @import("std");
 const shared = @import("shared");
+comptime {
+    _ = shared.selection_path;
+}
 const win32 = @import("win32.zig");
 const native = win32.c;
 const vt = @cImport({
     @cDefine("GHOSTTY_STATIC", "1");
     @cInclude("ghostty/vt.h");
 });
+
+comptime {
+    _ = @import("glyph_atlas_allocator.zig");
+}
 
 const kitty_image_limit: usize = 32 * 1024 * 1024;
 var decode_png_mutex: win32.Mutex = .{};

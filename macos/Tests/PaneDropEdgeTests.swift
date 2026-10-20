@@ -8,6 +8,9 @@ import ZigonautPaneLayout
   #expect(PaneDropEdge.nearest(to: CGPoint(x: 190, y: 50), in: size) == .right)
   #expect(PaneDropEdge.nearest(to: CGPoint(x: 100, y: 5), in: size) == .top)
   #expect(PaneDropEdge.nearest(to: CGPoint(x: 100, y: 95), in: size) == .bottom)
+  // Pixel distances would incorrectly choose top in this wide pane.
+  #expect(PaneDropEdge.nearest(to: CGPoint(x: 30, y: 20), in: size) == .left)
+  #expect(PaneDropEdge.nearest(to: .zero, in: size) == .left)
 }
 
 @Test func paneDropRejectsInvalidGeometry() {

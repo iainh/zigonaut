@@ -859,18 +859,9 @@ struct TerminalPalette: Equatable {
   }
 
   func accessibilityLayout() -> TerminalAccessibilityLayout {
-    let snapshot = renderSnapshot
-    return TerminalAccessibilityLayout(
-      columns: currentColumns,
-      rows: currentRows,
-      cells: snapshot.cells.map {
-        AccessibilityCell(column: $0.x, row: $0.y, text: $0.text,
-          columns: $0.occupancy == 1 ? 2 : 1, continuation: $0.occupancy == 2,
-          selected: $0.selected)
-      },
-      cursorColumn: snapshot.frame.cursorX,
-      cursorRow: snapshot.frame.cursorY
-    )
+    guard let core else { return TerminalAccessibilityLayout() }
+    return TerminalAccessibilityLayout(owning: zigonaut_core_accessibility_snapshot(
+      core.pointer, UInt16(clamping: currentColumns), UInt16(clamping: currentRows), 100_000))
   }
 
   private func retrieveTitle(core: OpaquePointer) {
@@ -1153,131 +1144,40 @@ struct TerminalPalette: Equatable {
   }
 }
 
-@MainActor indirect enum PaneNode {
-  case leaf(TerminalModel)
-  case split(UUID, Axis, Double, PaneNode, PaneNode)
-  var id: UUID {
-    switch self {
-    case .leaf(let pane): pane.id
-    case .split(let id, _, _, _, _): id
-    }
+/// A presentation handle into Zig's retained preorder buffer, not a second tree.
+@MainActor struct PaneNode {
+  let window: WindowModel
+  let id: UUID
+  enum Content {
+    case leaf(TerminalModel)
+    case split(UUID, Axis, Double, PaneNode, PaneNode)
   }
-  func contains(_ id: UUID) -> Bool {
-    switch self {
-    case .leaf(let p): p.id == id
-    case .split(_, _, _, let a, let b): a.contains(id) || b.contains(id)
-    }
-  }
-  func replacing(_ target: UUID, with node: PaneNode) -> PaneNode {
-    switch self {
-    case .leaf(let p): return p.id == target ? node : self
-    case .split(let id, let axis, let ratio, let a, let b):
-      return .split(id, axis, ratio, a.replacing(target, with: node), b.replacing(target, with: node))
-    }
-  }
-  func removing(_ target: UUID) -> PaneNode? {
-    switch self {
-    case .leaf(let p): return p.id == target ? nil : self
-    case .split(let id, let axis, let ratio, let a, let b):
-      let na = a.removing(target)
-      let nb = b.removing(target)
-      if na == nil { return nb }
-      if nb == nil { return na }
-      guard let na, let nb else { return nil }
-      return .split(id, axis, ratio, na, nb)
-    }
-  }
-  var leaves: [TerminalModel] {
-    switch self {
-    case .leaf(let p): [p]
-    case .split(_, _, _, let a, let b): a.leaves + b.leaves
-    }
-  }
-  func settingRatio(_ target: UUID, _ ratio: Double) -> PaneNode {
-    switch self {
-    case .leaf: self
-    case .split(let id, let axis, let old, let first, let second):
-      id == target ? .split(id, axis, ratio, first, second)
-        : .split(id, axis, old, first.settingRatio(target, ratio), second.settingRatio(target, ratio))
-    }
-  }
-  func node(_ target: UUID) -> PaneNode? {
-    if id == target { return self }
-    switch self {
-    case .leaf: return nil
-    case .split(_, _, _, let first, let second): return first.node(target) ?? second.node(target)
-    }
-  }
-  func canResize(_ target: UUID, axis wanted: Axis) -> Bool {
-    switch self {
-    case .leaf: return false
-    case .split(_, let axis, _, let first, let second):
-      guard first.contains(target) || second.contains(target) else { return false }
-      let child = first.contains(target) ? first : second
-      return child.canResize(target, axis: wanted) || axis == wanted
-    }
-  }
-  func resizing(_ target: UUID, direction: PaneFocusDirection, amount: Double) -> (PaneNode, Bool) {
-    switch self {
-    case .leaf: return (self, false)
-    case .split(let id, let axis, let ratio, let first, let second):
-      guard first.contains(target) || second.contains(target) else { return (self, false) }
-      let wanted: Axis = direction == .left || direction == .right ? .horizontal : .vertical
-      if first.contains(target) {
-        if first.canResize(target, axis: wanted) {
-          let (resized, changed) = first.resizing(target, direction: direction, amount: amount)
-          return (.split(id, axis, ratio, resized, second), changed)
-        }
-      } else {
-        if second.canResize(target, axis: wanted) {
-          let (resized, changed) = second.resizing(target, direction: direction, amount: amount)
-          return (.split(id, axis, ratio, first, resized), changed)
-        }
-      }
-      guard axis == wanted else { return (self, false) }
-      let delta = direction == .left || direction == .up ? -amount : amount
-      let resized = min(max(ratio + delta, 0.1), 0.9)
-      return (.split(id, axis, resized, first, second), resized != ratio)
-    }
-  }
-  func axisWeight(_ wanted: Axis) -> Int {
-    switch self {
-    case .leaf: return 1
-    case .split(_, let axis, _, let first, let second):
-      return axis == wanted ? first.axisWeight(wanted) + second.axisWeight(wanted) : 1
-    }
-  }
-  func equalized() -> PaneNode {
-    switch self {
-    case .leaf: return self
-    case .split(let id, let axis, _, let first, let second):
-      let firstWeight = first.axisWeight(axis)
-      let secondWeight = second.axisWeight(axis)
-      return .split(id, axis, Double(firstWeight) / Double(firstWeight + secondWeight),
-        first.equalized(), second.equalized())
-    }
-  }
-  var saved: SavedPaneNode {
-    switch self {
-    case .leaf(let pane): .leaf(SavedPane(id: pane.id, directory: pane.restorationDirectory()))
-    case .split(let id, let axis, let ratio, let first, let second):
-      .split(id, axis == .horizontal ? .horizontal : .vertical, ratio, first.saved, second.saved)
-    }
+  var content: Content? {
+    let tree = window.paneTree
+    // SwiftUI may evaluate an outgoing child after its node was collapsed.
+    guard let index = tree.index(of: id) else { return nil }
+    let node = tree.node(at: index)
+    guard node.split else { return window.terminalModels[id].map(Content.leaf) }
+    let second = index + 1 + Int(tree.node(at: index + 1).subtree_size)
+    return .split(id, node.vertical ? .vertical : .horizontal, Double(node.ratio) / 65535,
+      PaneNode(window: window, id: tree.id(at: index + 1)), PaneNode(window: window, id: tree.id(at: second)))
   }
 }
 
 @MainActor final class WindowModel: ObservableObject {
-  @Published var root: PaneNode
+  let paneTree: SharedPaneTree
+  private(set) var terminalModels: [UUID: TerminalModel]
+  private(set) var panes: [TerminalModel]
+  @Published private var layoutRevision: UInt64 = 0
   @Published var draggingPane: UUID?
-  @Published var focusedPane: UUID? {
-    didSet {
-      if zoomedPane != nil { zoomedPane = focusedPane }
-      synchronizeTitleOwner()
-      synchronizeFindOwner()
-      stateChanged?()
+  var focusedPane: UUID? {
+    get { paneTree.focused }
+    set {
+      guard let newValue, paneTree.focus(newValue) else { return }
+      focusChanged()
     }
   }
-  @Published private(set) var zoomedPane: UUID?
+  var zoomedPane: UUID? { paneTree.zoomed }
   @Published private(set) var title: String
   @Published private(set) var progress: TerminalProgress?
   @Published private(set) var outputGeneration: UInt64 = 0
@@ -1296,38 +1196,53 @@ struct TerminalPalette: Equatable {
   init(preferences: Preferences) {
     self.preferences = preferences
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
-    root = .leaf(pane)
-    zoomedPane = nil
-    focusedPane = pane.id
+    paneTree = SharedPaneTree(saved: .leaf(SavedPane(id: pane.id, directory: nil)))!
+    terminalModels = [pane.id: pane]
+    panes = [pane]
     title = pane.title
     synchronizeTitleOwner()
     synchronizeOutputOwners()
   }
   init(saved: SavedTab, preferences: Preferences) {
     self.preferences = preferences
-    func restore(_ node: SavedPaneNode) -> PaneNode {
+    paneTree = SharedPaneTree(saved: saved.root)!
+    var terminals: [UUID: TerminalModel] = [:]
+    func restore(_ node: SavedPaneNode) {
       switch node {
       case .leaf(let pane):
-        return .leaf(TerminalModel(id: pane.id, shell: preferences.validShell,
-          workingDirectory: pane.directory, preferences: preferences))
-      case .split(let id, let axis, let ratio, let first, let second):
-        return .split(id, axis == .horizontal ? .horizontal : .vertical, ratio,
-          restore(first), restore(second))
+        terminals[pane.id] = TerminalModel(id: pane.id, shell: preferences.validShell,
+          workingDirectory: pane.directory, preferences: preferences)
+      case .split(_, _, _, let first, let second):
+        restore(first)
+        restore(second)
       }
     }
-    let restored = restore(saved.root)
-    root = restored
-    zoomedPane = nil
-    focusedPane = restored.contains(saved.focusedPane) ? saved.focusedPane : restored.leaves[0].id
-    title = restored.leaves.first?.title ?? "Terminal"
+    restore(saved.root)
+    terminalModels = terminals
+    panes = paneTree.leafIDs.compactMap { terminals[$0] }
+    paneTree.focus(saved.focusedPane)
+    title = panes.first?.title ?? "Terminal"
     synchronizeTitleOwner()
     synchronizeOutputOwners()
   }
-  var saved: SavedTab { SavedTab(root: root.saved, focusedPane: focusedPane ?? root.leaves[0].id) }
-  var focused: TerminalModel? { root.leaves.first { $0.id == focusedPane } }
-  var panes: [TerminalModel] { root.leaves }
-  var visibleRoot: PaneNode { zoomedPane.flatMap { root.node($0) } ?? root }
+  var saved: SavedTab {
+    SavedTab(root: paneTree.saved { terminalModels[$0]?.restorationDirectory() },
+      focusedPane: focusedPane ?? paneTree.leafIDs[0])
+  }
+  var focused: TerminalModel? { focusedPane.flatMap { terminalModels[$0] } }
+  var visibleRoot: PaneNode { PaneNode(window: self, id: zoomedPane ?? paneTree.id(at: 0)) }
   var foregroundJobCount: Int { panes.filter(\.hasForegroundJob).count }
+  private func focusChanged() {
+    layoutRevision &+= 1
+    synchronizeTitleOwner()
+    synchronizeFindOwner()
+    stateChanged?()
+  }
+  private func topologyChanged() {
+    panes = paneTree.leafIDs.compactMap { terminalModels[$0] }
+    synchronizeOutputOwners()
+    focusChanged()
+  }
   func updateFindQuery(_ query: String) {
     findQuery = query
     synchronizeFindOwner()
@@ -1369,34 +1284,20 @@ struct TerminalPalette: Equatable {
     }
   }
   func split(_ axis: Axis) {
-    guard let focus = focusedPane,
-      let existing = root.leaves.first(where: { $0.id == focus })
-    else { return }
+    guard let focus = focusedPane, panes.count < 64 else { return }
     let pane = TerminalModel(shell: preferences.validShell, preferences: preferences)
-    root = root.replacing(focus, with: .split(UUID(), axis, 0.5, .leaf(existing), .leaf(pane)))
-    synchronizeOutputOwners()
-    zoomedPane = nil
-    focusedPane = pane.id
-    stateChanged?()
+    guard paneTree.split(target: focus, pane: pane.id, vertical: axis == .vertical) else { return }
+    terminalModels[pane.id] = pane
+    topologyChanged()
   }
   func movePane(_ source: UUID, onto target: UUID, edge: PaneDropEdge) -> Bool {
-    guard source != target, panes.count > 1,
-      let sourceNode = root.node(source), case .leaf = sourceNode,
-      let remaining = root.removing(source), remaining.contains(target) else { return false }
-    let axis: Axis = edge == .left || edge == .right ? .horizontal : .vertical
-    let sourceFirst = edge == .left || edge == .top
-    let targetNode = remaining.node(target) ?? remaining
-    let split = sourceFirst
-      ? PaneNode.split(UUID(), axis, 0.5, sourceNode, targetNode)
-      : PaneNode.split(UUID(), axis, 0.5, targetNode, sourceNode)
-    root = remaining.replacing(target, with: split)
-    zoomedPane = nil
-    focusedPane = source
-    stateChanged?()
+    guard paneTree.move(source, onto: target, edge: edge) else { return false }
+    topologyChanged()
     return true
   }
   func setRatio(_ id: UUID, _ ratio: Double) {
-    root = root.settingRatio(id, min(max(ratio, 0.1), 0.9))
+    guard paneTree.setRatio(id, ratio) else { return }
+    layoutRevision &+= 1
     stateChanged?()
   }
   /// Returns false when the native window tab itself should be closed.
@@ -1406,57 +1307,45 @@ struct TerminalPalette: Equatable {
   }
   /// Returns false when removing this pane means closing the native tab.
   func closePane(_ pane: UUID) -> Bool {
-    guard root.contains(pane), let remaining = root.removing(pane) else { return false }
-    root = remaining
-    synchronizeOutputOwners()
-    if zoomedPane == pane { zoomedPane = nil }
-    focusedPane = remaining.leaves.first?.id
-    stateChanged?()
+    guard paneTree.close(pane) else { return false }
+    terminalModels.removeValue(forKey: pane)
+    topologyChanged()
     return true
   }
   func updatePaneFrames(_ frames: [UUID: CGRect]) {
-    let visible = Set(visibleRoot.leaves.map(\.id))
-    paneFrames = frames.filter { visible.contains($0.key) }
+    let zoomed = zoomedPane
+    paneFrames = frames.filter { terminalModels[$0.key] != nil && (zoomed == nil || zoomed == $0.key) }
   }
   func focus(_ direction: PaneFocusDirection) {
     guard let focusedPane,
       let destination = DirectionalPaneFocus.destination(from: focusedPane, direction: direction,
-        frames: paneFrames, stableOrder: root.leaves.map(\.id)) else { return }
+        frames: paneFrames, stableOrder: paneTree.leafIDs) else { return }
     self.focusedPane = destination
   }
   func focusCycle(forward: Bool) {
-    let leaves = root.leaves
-    guard leaves.count > 1, let focusedPane,
-      let index = leaves.firstIndex(where: { $0.id == focusedPane }) else { return }
-    let destination = forward ? (index + 1) % leaves.count : (index + leaves.count - 1) % leaves.count
-    self.focusedPane = leaves[destination].id
+    if paneTree.cycle(forward: forward) { focusChanged() }
   }
   func canResize(_ direction: PaneFocusDirection) -> Bool {
-    guard let focusedPane else { return false }
-    let axis: Axis = direction == .left || direction == .right ? .horizontal : .vertical
-    return root.canResize(focusedPane, axis: axis)
+    paneTree.canResize(direction)
   }
   func resize(_ direction: PaneFocusDirection) {
-    guard let focusedPane else { return }
-    let (resized, changed) = root.resizing(focusedPane, direction: direction, amount: 0.05)
-    guard changed else { return }
-    root = resized
-    zoomedPane = nil
+    guard paneTree.resize(direction) else { return }
+    layoutRevision &+= 1
     stateChanged?()
   }
   func equalizePanes() {
-    guard panes.count > 1 else { return }
-    root = root.equalized()
+    guard paneTree.equalize() else { return }
+    layoutRevision &+= 1
     stateChanged?()
   }
   func togglePaneZoom() {
-    guard panes.count > 1 else { return }
-    zoomedPane = zoomedPane == nil ? focusedPane : nil
+    guard paneTree.toggleZoom() else { return }
+    layoutRevision &+= 1
     stateChanged?()
   }
   func canFocus(_ direction: PaneFocusDirection) -> Bool {
     guard let focusedPane else { return false }
     return DirectionalPaneFocus.destination(from: focusedPane, direction: direction,
-      frames: paneFrames, stableOrder: root.leaves.map(\.id)) != nil
+      frames: paneFrames, stableOrder: paneTree.leafIDs) != nil
   }
 }

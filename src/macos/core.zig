@@ -1,4 +1,7 @@
 const std = @import("std");
+comptime {
+    _ = @import("pane_layout.zig");
+}
 const c = @cImport({
     @cInclude("errno.h");
     @cInclude("fcntl.h");
@@ -10,8 +13,12 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 const shared = @import("shared");
+comptime {
+    _ = shared.selection_path;
+}
 const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;
+const accessibility = @import("accessibility.zig");
 const search = shared.search;
 const Search = search.State;
 const SynchronizedOutput = shared.synchronized_output.Watchdog;
@@ -760,6 +767,47 @@ export fn zigonaut_core_snapshot(self: ?*Core, output: ?[*]u8, capacity: usize) 
     core.mutex.lock();
     defer core.mutex.unlock();
     return (core.terminal.writeViewportText(destination[0..capacity]) catch return 0).len;
+}
+
+export fn zigonaut_core_accessibility_snapshot(self: ?*Core, columns: u16, rows: u16, maximum_length: u32) ?*accessibility.Layout {
+    const core = self orelse return null;
+    core.mutex.lock();
+    defer core.mutex.unlock();
+    const frame = core.render_snapshot.frame orelse return null;
+    const layout = accessibility.Layout.create(std.heap.c_allocator, columns, rows, maximum_length) catch return null;
+    var writer = accessibility.Writer{ .layout = layout, .columns = columns, .rows = rows, .cursor_x = frame.cursor_x, .cursor_y = frame.cursor_y };
+    core.render_snapshot.replay(&writer);
+    return layout;
+}
+
+test "accessibility owns the prepared Unicode viewport independently of the live terminal" {
+    const layout = blk: {
+        var core = Core{
+            .terminal = try Terminal.init(4, 2, theme.rasmus),
+            .master = -1,
+            .cancel_read = -1,
+            .cancel_write = -1,
+            .child = -1,
+            .wake = null,
+            .context = null,
+        };
+        defer core.terminal.deinit();
+        defer core.render_snapshot.deinit(std.heap.c_allocator);
+        core.terminal.feed("界x\r\n😀z");
+        zigonaut_core_selection_begin(&core, 0, 0, 0, false);
+        zigonaut_core_selection_update(&core, 2, 0);
+        try core.render_snapshot.capture(std.heap.c_allocator, &core.terminal);
+        // AX must describe the prepared frame even if PTY output arrives before
+        // the next render. Destroy both terminal and snapshot before querying.
+        core.terminal.feed("\x1b[HQQ");
+        break :blk zigonaut_core_accessibility_snapshot(&core, 4, 2, 100_000) orelse return error.OutOfMemory;
+    };
+    defer layout.destroy(std.heap.c_allocator);
+    const expected = [_]u16{ '界', 'x', ' ', '\n', 0xd83d, 0xde00, 'z', ' ' };
+    try std.testing.expectEqualSlices(u16, &expected, layout.text[0..layout.text_count]);
+    try std.testing.expectEqual(accessibility.Range{ .location = 7 }, layout.cursor);
+    try std.testing.expectEqualSlices(accessibility.Range, &.{.{ .location = 0, .length = 2 }}, layout.selections[0..layout.selection_count]);
+    try std.testing.expectEqual(accessibility.Rect{ .x = 0, .y = 1, .width = 2, .height = 1 }, layout.rect(.{ .location = 4, .length = 2 }));
 }
 
 const SnapshotCollector = struct {
@@ -1717,6 +1765,10 @@ fn expectAbiCompatible(comptime ZigType: type, comptime CType: type) !void {
 }
 
 test "Zig ABI records match the public C header" {
+    try expectAbiCompatible(accessibility.Range, public_abi.zigonaut_accessibility_range);
+    try expectAbiCompatible(accessibility.Span, public_abi.zigonaut_accessibility_span);
+    try expectAbiCompatible(accessibility.Rect, public_abi.zigonaut_accessibility_rect);
+    try expectAbiCompatible(accessibility.View, public_abi.zigonaut_accessibility_view);
     try expectAbiCompatible(RenderFrame, public_abi.zigonaut_render_frame_v1);
     try expectAbiCompatible(RenderCell, public_abi.zigonaut_render_cell_v1);
     try expectAbiCompatible(RenderImage, public_abi.zigonaut_render_image_v1);
@@ -1730,6 +1782,10 @@ test "Zig ABI records match the public C header" {
     try expectAbiCompatible(ClipboardResult, public_abi.zigonaut_clipboard_result_v1);
     try expectAbiCompatible(KeyEvent, public_abi.zigonaut_key_event_v1);
     try expectAbiCompatible(PseudographicsResult, public_abi.zigonaut_pseudographics_result_v1);
+    try expectAbiCompatible(shared.selection_path.Line, public_abi.zigonaut_selection_line);
+    try expectAbiCompatible(shared.selection_path.Command, public_abi.zigonaut_selection_command);
+    try expectAbiCompatible(shared.selection_path.Interval, public_abi.zigonaut_selection_interval);
+    try expectAbiCompatible(shared.selection_path.CommandF32, public_abi.zigonaut_selection_command_f32);
 }
 
 test "null ABI handles are safe" {

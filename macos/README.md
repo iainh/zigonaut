@@ -1,6 +1,6 @@
 # Zigonaut native macOS frontend
 
-Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`. `zig build macos-run` builds and opens it. AppKit owns application lifecycle, Safari-style native window tabs, windows, menus, command routing and persistent `NSView` terminal surfaces. SwiftUI owns recursive split topology, find and settings. Keeping split presentation topology in Swift is an intentional interim boundary; the Zig core continues to own each terminal and PTY.
+Build with `zig build macos-app`; the unsigned result is `zig-out/Zigonaut.app`. `zig build macos-run` builds and opens it. AppKit owns application lifecycle, Safari-style native window tabs, windows, menus, command routing and terminal surfaces. SwiftUI presents splits, find and settings. The shared Zig pane tree owns split topology, ratios, focus and zoom; Swift retains observable terminal models and a UUID identity registry. Presentation reads a retained preorder buffer without converting a tree on each frame. Directional focus keeps macOS's measured-frame scoring rather than substituting normalized-tree geometry. The Zig core also owns each terminal and PTY.
 
 ## Supported now
 

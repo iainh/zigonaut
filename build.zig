@@ -433,10 +433,6 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
     module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
     module.linkSystemLibrary("libpng", .{ .use_pkg_config = .force });
-    module.addCSourceFile(.{
-        .file = b.path("src/linux/images.c"),
-        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
-    });
     const exe = b.addExecutable(.{ .name = "zigonaut", .root_module = module });
     exe.step.dependOn(&dependencies.step);
     b.installArtifact(exe);
@@ -473,10 +469,6 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     configureGhostty(tests.root_module, ghostty);
     tests.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
     tests.root_module.linkSystemLibrary("libpng", .{ .use_pkg_config = .force });
-    tests.root_module.addCSourceFile(.{
-        .file = b.path("src/linux/images.c"),
-        .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
-    });
     const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
     linux_tests.dependOn(&b.addRunArtifact(tests).step);
     const shell_tests = b.step("test-linux-shell-integration", "Test real Bash, Zsh and fish PTYs (requires all three shells)");

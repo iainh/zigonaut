@@ -75,6 +75,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   var wantsKeyboardFocus = false
   var onFocus: () -> Void
   private var scrollRemainder: CGFloat = 0
+  private let selectionPathBuffer = SelectionPathBuffer()
   private var markedText = NSMutableAttributedString()
   private var markedSelection = NSRange(location: NSNotFound, length: 0)
   private var reportingButton: UInt8 = 0
@@ -98,8 +99,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var cachedFontAdvances: [UInt: CGFloat] = [:]
   private var clipboardEnabled: Bool?
   private var clipboardMaximumBytes = 0
-  private var accessibilityLayout = TerminalAccessibilityLayout(
-    columns: 0, rows: 0, cells: [], cursorColumn: 0, cursorRow: 0)
+  private var accessibilityLayout = TerminalAccessibilityLayout()
   private var voiceOverObservation: NSKeyValueObservation?
   private var colorCache: [ColorKey: NSColor] = [:]
   private var pseudographicsCache: [PseudographicsKey: CGImage] = [:]
@@ -1683,7 +1683,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func roundedSelectionPath(_ rows: [[TerminalRenderCell]]) -> CGPath? {
-    var lines: [SelectionLine] = []
+    selectionPathBuffer.reset()
     for (row, cells) in rows.enumerated() {
       var start: Int?
       var end = 0
@@ -1692,31 +1692,31 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         end = max(end, cell.x + (cell.occupancy == 1 ? 2 : 1))
       }
       if let start, start < end {
-        lines.append(SelectionLine(row: row, startColumn: start, endColumn: end))
+        selectionPathBuffer.append(row: row, startColumn: start, endColumn: end)
       }
     }
-    let components = SelectionShape.paths(
-      lines: lines, rowCount: rows.count, originX: Double(originX), originY: Double(originY),
-      cellWidth: Double(cellWidth), lineHeight: Double(lineHeight))
-    guard !components.isEmpty else { return nil }
-    let path = CGMutablePath()
-    for commands in components {
+    return selectionPathBuffer.withCommands(
+      rowCount: rows.count, originX: Double(originX), originY: Double(originY),
+      cellWidth: Double(cellWidth), lineHeight: Double(lineHeight)
+    ) { commands in
+      guard !commands.isEmpty else { return nil }
+      let path = CGMutablePath()
       for command in commands {
-        switch command {
-        case .move(let point):
-          path.move(to: CGPoint(x: point.x, y: point.y))
-        case .line(let point):
-          path.addLine(to: CGPoint(x: point.x, y: point.y))
-        case .quadratic(let control, let end):
+        let end = CGPoint(x: command.x, y: command.y)
+        switch command.tag {
+        case 0:
+          path.move(to: end)
+        case 1:
+          path.addLine(to: end)
+        case 2:
           path.addQuadCurve(
-            to: CGPoint(x: end.x, y: end.y),
-            control: CGPoint(x: control.x, y: control.y))
-        case .close:
+            to: end, control: CGPoint(x: command.cx, y: command.cy))
+        default:
           path.closeSubpath()
         }
       }
+      return path
     }
-    return path
   }
 
   private func drawBackgrounds(_ cells: [TerminalRenderCell], selectionPath: CGPath?) {

@@ -2,7 +2,7 @@ const std = @import("std");
 const shared = @import("shared");
 const Terminal = shared.terminal.Terminal;
 const allocator = std.heap.c_allocator;
-const native = @cImport(@cInclude("images.h"));
+const native = @import("images.zig").c;
 
 pub extern fn main(c_int, [*][*:0]u8) c_int;
 

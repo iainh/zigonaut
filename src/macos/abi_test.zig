@@ -5,6 +5,20 @@ const abi = @cImport({
 });
 
 const symbols = [_][:0]const u8{
+    "zigonaut_panes_create",
+    "zigonaut_panes_destroy",
+    "zigonaut_panes_split",
+    "zigonaut_panes_move",
+    "zigonaut_panes_close",
+    "zigonaut_panes_focus",
+    "zigonaut_panes_focused",
+    "zigonaut_panes_zoomed",
+    "zigonaut_panes_action",
+    "zigonaut_panes_can_resize",
+    "zigonaut_panes_ratio",
+    "zigonaut_panes_nodes",
+    "zigonaut_panes_destination",
+    "zigonaut_panes_drop_edge",
     "zigonaut_core_create",
     "zigonaut_core_resize",
     "zigonaut_core_request_stop",
@@ -29,6 +43,12 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_copy_selection",
     "zigonaut_core_snapshot",
     "zigonaut_core_render_snapshot",
+    "zigonaut_core_accessibility_snapshot",
+    "zigonaut_accessibility_build",
+    "zigonaut_accessibility_release",
+    "zigonaut_accessibility_get_view",
+    "zigonaut_accessibility_line",
+    "zigonaut_accessibility_grid_rect",
     "zigonaut_core_render_images",
     "zigonaut_core_set_theme",
     "zigonaut_core_set_scrollback",
@@ -47,9 +67,13 @@ const symbols = [_][:0]const u8{
     "zigonaut_core_destroy",
     "zigonaut_pseudographics_covers",
     "zigonaut_pseudographics_render",
+    "zigonaut_selection_path",
+    "zigonaut_selection_row_path",
 };
 
 test "public header compiles and dylib exports its contract" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(abi.zigonaut_pane_node));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(abi.zigonaut_pane_frame));
     try std.testing.expect(@sizeOf(abi.zigonaut_render_frame_v1) > 0);
     try std.testing.expect(@sizeOf(abi.zigonaut_pseudographics_result_v1) > 0);
     var library = try std.DynLib.open("zig-out/lib/libzigonaut-core.dylib");

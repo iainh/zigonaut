@@ -40,6 +40,16 @@ struct DirectionalFocusTests {
     #expect(result == "second")
   }
 
+  @Test func measuredCentreHalfPlaneIsNotNormalizedTreeEdgeScoring() {
+    // A tall adjacent pane overlaps the source's vertical range, but its centre
+    // is above the source. macOS admits it for Up; tree edge scoring rejects it.
+    let layout = ["source": CGRect(x: 0, y: 200, width: 100, height: 100),
+      "tall": CGRect(x: 101, y: 0, width: 100, height: 400),
+      "above": CGRect(x: 0, y: 0, width: 100, height: 100)]
+    #expect(DirectionalPaneFocus.destination(from: "source", direction: .up,
+      frames: layout, stableOrder: ["source", "above", "tall"]) == "tall")
+  }
+
   private func destination(_ source: String, _ direction: PaneFocusDirection) -> String? {
     DirectionalPaneFocus.destination(from: source, direction: direction,
       frames: frames, stableOrder: order)

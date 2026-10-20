@@ -1,5 +1,6 @@
 #include "directwrite_renderer.h"
 #include "glyph_atlas_allocator.h"
+#include "../shared/selection_path.h"
 
 #include <algorithm>
 #include <atomic>
@@ -387,11 +388,6 @@ struct SelectionInterval {
     bool active = false;
 };
 
-bool intervalsOverlap(const SelectionInterval& left, const SelectionInterval& right) {
-    return left.active && right.active &&
-        std::max(left.start, right.start) < std::min(left.end, right.end);
-}
-
 HRESULT createSelectionGeometry(ID2D1Factory1* factory,
     SelectionInterval previous, SelectionInterval current, SelectionInterval next,
     float origin_x, float top, float cell_width, float cell_height,
@@ -400,29 +396,15 @@ HRESULT createSelectionGeometry(ID2D1Factory1* factory,
     *result = nullptr;
     if (factory == nullptr || !current.active || cell_width <= 0.0f || cell_height <= 0.0f)
         return E_INVALIDARG;
-    struct Line { float left, right, top; };
-    Line lines[3]{};
-    size_t count = 0;
-    if (intervalsOverlap(previous, current)) lines[count++] = {
-        origin_x + previous.start * cell_width,
-        origin_x + previous.end * cell_width,
-        top - cell_height,
+    const zigonaut_selection_interval intervals[] = {
+        {previous.start, previous.end, previous.active},
+        {current.start, current.end, current.active},
+        {next.start, next.end, next.active},
     };
-    lines[count++] = {
-        origin_x + current.start * cell_width,
-        origin_x + current.end * cell_width,
-        top,
-    };
-    if (intervalsOverlap(current, next)) lines[count++] = {
-        origin_x + next.start * cell_width,
-        origin_x + next.end * cell_width,
-        top + cell_height,
-    };
-    const bool clip_top = top_clipped && count != 0 && lines[0].top == top;
-    const bool clip_bottom = bottom_clipped && count != 0 &&
-        lines[count - 1].top == top;
-    const float radius = std::min(0.15f * cell_height, 0.25f * cell_width);
-    const float vertical_radius = std::min(radius, 0.5f * cell_height);
+    zigonaut_selection_command_f32 commands[27];
+    const size_t count = zigonaut_selection_row_path(intervals,
+        origin_x, top, cell_width, cell_height, top_clipped, bottom_clipped,
+        commands, 27);
 
     ID2D1PathGeometry* geometry = nullptr;
     HRESULT hr = factory->CreatePathGeometry(&geometry);
@@ -434,82 +416,24 @@ HRESULT createSelectionGeometry(ID2D1Factory1* factory,
         return hr;
     }
     const auto point = [](float x, float y) { return D2D1::Point2F(x, y); };
-    const auto line_to = [&](float x, float y) { sink->AddLine(point(x, y)); };
-    const auto curve_to = [&](float control_x, float control_y, float x, float y) {
-        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-            point(control_x, control_y), point(x, y)));
-    };
-
-    const Line& first = lines[0];
-    const float first_top = first.top;
-    const float first_width_radius = std::min(radius, 0.5f * (first.right - first.left));
-    if (clip_top) {
-        sink->BeginFigure(point(first.right, first_top), D2D1_FIGURE_BEGIN_FILLED);
-    } else {
-        sink->BeginFigure(point(first.right - first_width_radius, first_top),
-            D2D1_FIGURE_BEGIN_FILLED);
-        curve_to(first.right, first_top, first.right, first_top + vertical_radius);
-    }
-
-    for (size_t index = 0; index + 1 < count; ++index) {
-        const Line& upper = lines[index];
-        const Line& lower = lines[index + 1];
-        const float boundary = lower.top;
-        if (upper.right == lower.right) {
-            line_to(lower.right, boundary);
-            continue;
+    for (size_t index = 0; index < count; ++index) {
+        const auto& command = commands[index];
+        switch (command.tag) {
+        case 0:
+            sink->BeginFigure(point(command.x, command.y), D2D1_FIGURE_BEGIN_FILLED);
+            break;
+        case 1:
+            sink->AddLine(point(command.x, command.y));
+            break;
+        case 2:
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                point(command.cx, command.cy), point(command.x, command.y)));
+            break;
+        case 3:
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            break;
         }
-        const float direction = lower.right > upper.right ? 1.0f : -1.0f;
-        const float width_radius = std::min(radius,
-            0.5f * std::abs(lower.right - upper.right));
-        line_to(upper.right, boundary - vertical_radius);
-        curve_to(upper.right, boundary,
-            upper.right + direction * width_radius, boundary);
-        line_to(lower.right - direction * width_radius, boundary);
-        curve_to(lower.right, boundary,
-            lower.right, boundary + vertical_radius);
     }
-
-    const Line& last = lines[count - 1];
-    const float bottom = last.top + cell_height;
-    const float last_width_radius = std::min(radius, 0.5f * (last.right - last.left));
-    if (clip_bottom) {
-        line_to(last.right, bottom);
-        line_to(last.left, bottom);
-    } else {
-        line_to(last.right, bottom - vertical_radius);
-        curve_to(last.right, bottom, last.right - last_width_radius, bottom);
-        line_to(last.left + last_width_radius, bottom);
-        curve_to(last.left, bottom, last.left, bottom - vertical_radius);
-    }
-
-    for (size_t index = count - 1; index > 0; --index) {
-        const Line& lower = lines[index];
-        const Line& upper = lines[index - 1];
-        const float boundary = lower.top;
-        if (lower.left == upper.left) {
-            line_to(upper.left, boundary);
-            continue;
-        }
-        const float direction = upper.left > lower.left ? 1.0f : -1.0f;
-        const float width_radius = std::min(radius,
-            0.5f * std::abs(upper.left - lower.left));
-        line_to(lower.left, boundary + vertical_radius);
-        curve_to(lower.left, boundary,
-            lower.left + direction * width_radius, boundary);
-        line_to(upper.left - direction * width_radius, boundary);
-        curve_to(upper.left, boundary,
-            upper.left, boundary - vertical_radius);
-    }
-
-    if (clip_top) {
-        line_to(first.left, first_top);
-    } else {
-        line_to(first.left, first_top + vertical_radius);
-        curve_to(first.left, first_top,
-            first.left + first_width_radius, first_top);
-    }
-    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
     hr = sink->Close();
     release(sink);
     if (FAILED(hr)) {

@@ -8,6 +8,34 @@ const max_nodes = max_panes * 2 - 1;
 pub const Axis = enum { left_right, top_bottom };
 pub const Direction = enum { left, right, up, down };
 
+/// Native preorder interchange, matching the Linux pane ABI. No terminal state.
+pub const LayoutNode = extern struct {
+    id: u64,
+    subtree_size: u32,
+    ratio: u16,
+    split: bool,
+    vertical: bool,
+};
+
+pub const LayoutWriter = struct {
+    output: []LayoutNode,
+    index: usize = 0,
+
+    pub fn leaf(self: *@This(), id: u64) !void {
+        self.output[self.index] = .{ .id = id, .subtree_size = 1, .ratio = 0, .split = false, .vertical = false };
+        self.index += 1;
+    }
+    pub fn split(self: *@This(), id: u64, axis: Axis, ratio: u16) usize {
+        const index = self.index;
+        self.output[index] = .{ .id = id, .subtree_size = 0, .ratio = ratio, .split = true, .vertical = axis == .top_bottom };
+        self.index += 1;
+        return index;
+    }
+    pub fn finishSplit(self: *@This(), index: usize, size: u32) void {
+        self.output[index].subtree_size = size;
+    }
+};
+
 pub const Rect = struct {
     x: u32,
     y: u32,
@@ -28,6 +56,7 @@ pub const Error = error{
     InvalidRatio,
     TreeFull,
     AllocatorMismatch,
+    InvalidTree,
 };
 
 const Node = union(enum) {
@@ -61,6 +90,28 @@ pub const Tree = struct {
     pub fn deinit(self: *Tree) void {
         if (self.root) |root| destroyNode(self.allocator, root);
         self.* = .{ .allocator = self.allocator, .root = null, .focused = null, .zoomed = null };
+    }
+
+    /// Restores the full tree, never a zoom-filtered presentation. Validation
+    /// checks identities first; partial allocation is unwound on failure.
+    pub fn fromPreorder(allocator: std.mem.Allocator, nodes: []const LayoutNode) (Error || std.mem.Allocator.Error)!Tree {
+        if (nodes.len == 0 or nodes.len > max_nodes) return error.InvalidTree;
+        for (nodes, 0..) |node, index| {
+            if (node.id == 0) return error.InvalidId;
+            for (nodes[0..index]) |previous| if (previous.id == node.id) return error.DuplicateId;
+        }
+        var index: usize = 0;
+        const root = try readNode(allocator, nodes, &index);
+        errdefer destroyNode(allocator, root);
+        if (index != nodes.len) return error.InvalidTree;
+        const tree = Tree{ .allocator = allocator, .root = root, .focused = firstLeaf(root) };
+        tree.assertValid();
+        return tree;
+    }
+
+    pub fn canResize(self: *const Tree, direction: Direction) bool {
+        const focused = self.focused orelse return false;
+        return findResizeTarget(self.root orelse return false, focused, if (direction == .left or direction == .right) .left_right else .top_bottom) != null;
     }
 
     pub fn split(self: *Tree, target: PaneId, new_pane: PaneId, split_id: SplitId, axis: Axis) (Error || std.mem.Allocator.Error)!void {
@@ -305,6 +356,12 @@ pub const Tree = struct {
     }
 
     fn assertValid(self: *const Tree) void {
+        // Recursive uniqueness scans are quadratic and are not hot-path work.
+        // Recursive calls can survive optimization even when assert is elided.
+        switch (@import("builtin").mode) {
+            .Debug, .ReleaseSafe => {},
+            .ReleaseFast, .ReleaseSmall => return,
+        }
         const root = self.root orelse {
             std.debug.assert(self.focused == null);
             std.debug.assert(self.zoomed == null);
@@ -319,6 +376,28 @@ pub const Tree = struct {
 };
 
 const full_rect = Rect{ .x = 0, .y = 0, .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) };
+
+fn readNode(allocator: std.mem.Allocator, nodes: []const LayoutNode, index: *usize) (Error || std.mem.Allocator.Error)!*Node {
+    if (index.* >= nodes.len) return error.InvalidTree;
+    const start = index.*;
+    const saved = nodes[start];
+    index.* += 1;
+    if (!saved.split) {
+        if (saved.subtree_size != 1) return error.InvalidTree;
+        const node = try allocator.create(Node);
+        node.* = .{ .leaf = saved.id };
+        return node;
+    }
+    if (saved.ratio == 0 or saved.ratio == std.math.maxInt(u16)) return error.InvalidRatio;
+    const first = try readNode(allocator, nodes, index);
+    errdefer destroyNode(allocator, first);
+    const second = try readNode(allocator, nodes, index);
+    errdefer destroyNode(allocator, second);
+    if (index.* - start != saved.subtree_size) return error.InvalidTree;
+    const node = try allocator.create(Node);
+    node.* = .{ .split = .{ .id = saved.id, .axis = if (saved.vertical) .top_bottom else .left_right, .ratio = saved.ratio, .first = first, .second = second } };
+    return node;
+}
 
 fn destroyNode(allocator: std.mem.Allocator, node: *Node) void {
     switch (node.*) {
@@ -522,6 +601,62 @@ fn removeLeaf(allocator: std.mem.Allocator, node: *Node, target: PaneId) ?*Node 
 }
 
 const Scores = struct { primary: u64, secondary: u64 };
+
+/// Measured native frames use points (including divider widths), not normalized
+/// tree rectangles. Preserve macOS's centre half-plane and lexicographic score;
+/// Linux/Windows continue using directionScores below.
+pub const MeasuredPane = extern struct { id: u64, x: f64, y: f64, width: f64, height: f64 };
+
+pub fn measuredDestination(source: PaneId, direction: Direction, frames: []const MeasuredPane) ?PaneId {
+    var from: ?MeasuredPane = null;
+    for (frames) |frame| if (frame.id == source) {
+        from = frame;
+        break;
+    };
+    const start = from orelse return null;
+    const horizontal = direction == .left or direction == .right;
+    const reverse = direction == .left or direction == .up;
+    const a = if (horizontal) start.x else start.y;
+    const a_end = a + if (horizontal) start.width else start.height;
+    const a_cross = if (horizontal) start.y else start.x;
+    const a_cross_end = a_cross + if (horizontal) start.height else start.width;
+    var best: ?PaneId = null;
+    var best_score = [_]f64{std.math.inf(f64)} ** 4;
+    for (frames) |frame| {
+        if (frame.id == source) continue;
+        const b = if (horizontal) frame.x else frame.y;
+        const b_end = b + if (horizontal) frame.width else frame.height;
+        const b_cross = if (horizontal) frame.y else frame.x;
+        const b_cross_end = b_cross + if (horizontal) frame.height else frame.width;
+        const distance = ((b + b_end) - (a + a_end)) / 2;
+        if (if (reverse) distance >= 0 else distance <= 0) continue;
+        const score = [4]f64{
+            @max(0, if (reverse) a - b_end else b - a_end),
+            @abs(distance),
+            @max(0, @max(a_cross, b_cross) - @min(a_cross_end, b_cross_end)),
+            @abs((a_cross + a_cross_end) - (b_cross + b_cross_end)) / 2,
+        };
+        for (score, best_score) |value, previous| {
+            if (value == previous) continue;
+            if (value < previous) {
+                best = frame.id;
+                best_score = score;
+            }
+            break;
+        }
+    }
+    return best;
+}
+
+pub fn nearestDropEdge(x: f64, y: f64, width: f64, height: f64) ?Direction {
+    if (!(width > 0 and height > 0 and x >= 0 and y >= 0 and x <= width and y <= height)) return null;
+    const distances = [4]f64{ x / width, (width - x) / width, y / height, (height - y) / height };
+    var best: usize = 0;
+    for (distances, 0..) |distance, index| if (distance < distances[best]) {
+        best = index;
+    };
+    return @enumFromInt(best);
+}
 
 fn directionScores(from: Rect, candidate: Rect, direction: Direction) ?Scores {
     const fx1: u64 = from.x;
@@ -739,4 +874,37 @@ test "moving a pane changes its split position and preserves focus" {
     try std.testing.expectEqual(Axis.top_bottom, items[2].split.axis);
     try std.testing.expectEqual(@as(PaneId, 3), items[3].leaf.id);
     try std.testing.expectEqual(@as(PaneId, 1), items[4].leaf.id);
+}
+
+test "native preorder restoration preserves mixed topology and rejects corrupt input" {
+    var original = try Tree.init(std.testing.allocator, 7);
+    defer original.deinit();
+    try original.split(7, 9, 20, .left_right);
+    try original.split(9, 11, 21, .top_bottom);
+    try original.setRatio(20, 19000);
+    try original.setRatio(21, 41000);
+    var nodes: [5]LayoutNode = undefined;
+    var writer = LayoutWriter{ .output = &nodes };
+    try original.writePreorder(&writer);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var restored = try Tree.fromPreorder(failing.allocator(), &nodes);
+    defer restored.deinit();
+    // Retained presentation and ordinary layout changes must work with all
+    // further allocations disabled, including in safety-enabled builds.
+    failing.fail_index = failing.alloc_index;
+    var actual: [5]LayoutNode = undefined;
+    var actual_writer = LayoutWriter{ .output = &actual };
+    try restored.writePreorder(&actual_writer);
+    try std.testing.expectEqualDeep(nodes, actual);
+    try std.testing.expectEqual(@as(?PaneId, 7), restored.focused);
+    try std.testing.expect(restored.focus(11));
+    try restored.setRatio(20, 21000);
+    try std.testing.expect(restored.resizeFocused(.up, 3277));
+    try std.testing.expect(restored.equalize());
+    try std.testing.expect(!failing.has_induced_failure);
+    nodes[2].subtree_size = 99;
+    try std.testing.expectError(error.InvalidTree, Tree.fromPreorder(std.testing.allocator, &nodes));
+    nodes[2].subtree_size = 3;
+    nodes[4].id = 7;
+    try std.testing.expectError(error.DuplicateId, Tree.fromPreorder(std.testing.allocator, &nodes));
 }

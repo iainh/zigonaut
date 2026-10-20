@@ -17,7 +17,9 @@ struct PaneView: View {
   @ObservedObject var window: WindowModel
 
   var body: some View {
-    switch node {
+    switch node.content {
+    case nil:
+      EmptyView()
     case .leaf(let pane):
       PaneLeafView(pane: pane, window: window)
     case .split(let id, let axis, let ratio, let first, let second):

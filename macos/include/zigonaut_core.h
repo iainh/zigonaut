@@ -3,8 +3,35 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "../../src/shared/selection_path.h"
 typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
+/* Main-thread pane tree. IDs are nonzero and unique across leaves and splits.
+   Full preorder nodes match Linux's pane ABI; subtree_size includes the node.
+   Ratios are fractions of UINT16_MAX. Maximum 64 panes / 127 nodes.
+   nodes() returns required count without writing when capacity is insufficient.
+   The native host owns terminal objects; Zig owns topology, focus and zoom. */
+typedef struct zigonaut_panes zigonaut_panes;
+typedef struct { uint64_t id; uint32_t subtree_size; uint16_t ratio; bool split, vertical; } zigonaut_pane_node;
+typedef struct { uint64_t id; double x, y, width, height; } zigonaut_pane_frame;
+zigonaut_panes *zigonaut_panes_create(const zigonaut_pane_node *, size_t count);
+void zigonaut_panes_destroy(zigonaut_panes *);
+bool zigonaut_panes_split(zigonaut_panes *, uint64_t target, uint64_t pane, uint64_t split, bool vertical);
+bool zigonaut_panes_move(zigonaut_panes *, uint64_t source, uint64_t target, uint64_t split, uint8_t edge);
+bool zigonaut_panes_close(zigonaut_panes *, uint64_t pane);
+bool zigonaut_panes_focus(zigonaut_panes *, uint64_t pane);
+uint64_t zigonaut_panes_focused(const zigonaut_panes *);
+uint64_t zigonaut_panes_zoomed(const zigonaut_panes *);
+/* 4/5 previous/next; 6..9 resize left/right/up/down; 10 equalize; 11 zoom. */
+bool zigonaut_panes_action(zigonaut_panes *, uint8_t action);
+bool zigonaut_panes_can_resize(const zigonaut_panes *, uint8_t direction);
+bool zigonaut_panes_ratio(zigonaut_panes *, uint64_t split, uint16_t ratio);
+size_t zigonaut_panes_nodes(const zigonaut_panes *, zigonaut_pane_node *, size_t capacity);
+/* Directions/edges: 0 left, 1 right, 2 up/top, 3 down/bottom.
+   Measured frames are in stable layout order, with native top-left coordinates.
+   destination returns 0 for no candidate; drop_edge returns -1 outside bounds. */
+uint64_t zigonaut_panes_destination(uint64_t source, uint8_t direction, const zigonaut_pane_frame *, size_t count);
+int8_t zigonaut_panes_drop_edge(double x, double y, double width, double height);
 /* mouse_shape uses public GhosttyMouseShape values (0 default, 8 text initially).
    It occupies a formerly reserved byte; record size and existing offsets are unchanged. */
 /* viewport_rows and scroll_offset consume the remaining reserved bytes in v1.
@@ -19,6 +46,31 @@ typedef struct { uint32_t version, size, image_id; uint64_t generation; uint32_t
 typedef struct { uint32_t image_id, reserved; uint64_t generation; } zigonaut_image_generation_v1;
 /* status: 0 complete, 1 truncated, 2 error. Holds replay the completed frame. */
 typedef struct { uint32_t version, size, required_cells, written_cells, required_text_bytes, written_text_bytes, required_rows, written_rows; uint64_t viewport_offset; uint8_t status, images_changed; uint8_t reserved[6]; } zigonaut_render_snapshot_result_v1;
+typedef struct zigonaut_accessibility_layout zigonaut_accessibility_layout;
+typedef struct { uint32_t location, length; } zigonaut_accessibility_range;
+typedef struct { zigonaut_accessibility_range range; uint16_t column, row, columns, reserved; } zigonaut_accessibility_span;
+typedef struct { uint32_t x, y, width, height; } zigonaut_accessibility_rect;
+/* All view pointers belong to layout, are immutable, and remain valid until
+   release. No pointers into the terminal or input batch are retained. */
+typedef struct {
+    const uint16_t *text;
+    const zigonaut_accessibility_range *lines, *selections;
+    const zigonaut_accessibility_span *spans;
+    uint32_t text_count, line_count, selection_count, span_count;
+    zigonaut_accessibility_range cursor;
+} zigonaut_accessibility_view;
+/* Replay the last prepared render snapshot, not a fresh terminal capture.
+   maximum_length is clamped to 100000 UTF-16 units, without split surrogates.
+   The caller owns the returned layout; NULL means allocation/argument failure. */
+zigonaut_accessibility_layout *zigonaut_core_accessibility_snapshot(zigonaut_core *, uint16_t columns, uint16_t rows, uint32_t maximum_length);
+/* Pure batch alternative: cells must be row-major (sparse is allowed), with
+   valid UTF-8 slices in text. Invalid batches return NULL. */
+zigonaut_accessibility_layout *zigonaut_accessibility_build(uint16_t columns, uint16_t rows, const zigonaut_render_cell_v1 *cells, uint32_t cell_count, const uint8_t *text, uint32_t text_count, uint16_t cursor_column, uint16_t cursor_row, uint32_t maximum_length);
+void zigonaut_accessibility_release(zigonaut_accessibility_layout *);
+void zigonaut_accessibility_get_view(const zigonaut_accessibility_layout *, zigonaut_accessibility_view *);
+/* Returns -1 for an invalid index; adapters translate this to native NSNotFound. */
+int64_t zigonaut_accessibility_line(const zigonaut_accessibility_layout *, uint32_t index);
+zigonaut_accessibility_rect zigonaut_accessibility_grid_rect(const zigonaut_accessibility_layout *, zigonaut_accessibility_range);
 typedef struct { uint32_t version, size, required_images, written_images, required_data_bytes, written_data_bytes; uint8_t status; uint8_t reserved[7]; } zigonaut_render_images_result_v1;
 typedef struct { uint32_t version, size, foreground_rgb, background_rgb, cursor_rgb; uint32_t ansi_rgb[16]; uint8_t reserved[8]; } zigonaut_terminal_theme_v1;
 typedef struct { uint32_t version, size; uint64_t generation; uint8_t active, state, value; uint8_t reserved[5]; } zigonaut_progress_v1;
