@@ -114,9 +114,19 @@ void zgtk_begin_frame(void *host, uint32_t background, float scroll_offset, bool
     }
 }
 
+void zgtk_draw_background(void *host, uint16_t x, uint16_t y, uint16_t columns,
+                          uint32_t background) {
+    Tab *tab = host;
+    colour(tab->cr, background, 1);
+    cairo_rectangle(tab->cr, settings.padding + x * tab->cell_width,
+        settings.padding + y * tab->cell_height, columns * tab->cell_width, tab->cell_height);
+    cairo_fill(tab->cr);
+}
+
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
                     uint32_t background, uint32_t underline, uint16_t flags) {
+    (void)background; /* Ordinary spans were painted before this row's glyphs. */
     Tab *tab = host;
     double left = settings.padding + x * tab->cell_width, top = settings.padding + y * tab->cell_height;
     double width = columns * tab->cell_width;
@@ -124,8 +134,10 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
     cairo_save(cr);
     cairo_rectangle(cr, left, top, width, tab->cell_height);
     cairo_clip(cr);
-    colour(cr, flags & 32 ? 0x365880 : flags & 256 ? 0xc8a15a : flags & 128 ? 0x625022 : background, 1);
-    cairo_paint(cr);
+    if (flags & (32 | 256 | 128)) {
+        colour(cr, flags & 32 ? 0x365880 : flags & 256 ? 0xc8a15a : 0x625022, 1);
+        cairo_paint(cr);
+    }
     if (length) {
         pango_font_description_set_weight(tab->font, flags & 1 ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
         pango_font_description_set_style(tab->font, flags & 2 ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);

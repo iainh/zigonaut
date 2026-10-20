@@ -95,6 +95,7 @@ extern fn zgtk_write(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_title(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_clipboard(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_begin_frame(?*anyopaque, u32, f32, bool) void;
+extern fn zgtk_draw_background(?*anyopaque, u16, u16, u16, u32) void;
 extern fn zgtk_draw_cell(?*anyopaque, u16, u16, u8, [*]const u8, usize, u32, u32, u32, u16) void;
 extern fn zgtk_draw_cursor(?*anyopaque, u16, u16, u8, u8, u32) void;
 
@@ -164,7 +165,29 @@ const Core = struct {
         zgtk_begin_frame(self.host, colour(frame.background), frame.scroll_offset, self.clear_scene);
     }
 
-    pub fn beginRow(_: *Core, _: u16) void {}
+    pub fn beginRow(self: *Core, y: u16) void {
+        // Paint the ordinary layer before any glyphs or highlights. This is
+        // called only for replayed rows, including default-colour dirty rows.
+        const count = self.snapshot.cells.items.len / self.snapshot.rows.items.len;
+        var pending: ?shared.background_span.Span = null;
+        for (self.snapshot.cells.items[@as(usize, y) * count ..][0..count], 0..) |cell, x| {
+            const occupancy: Terminal.Cell.Occupancy = @enumFromInt(cell.attributes.occupancy);
+            if (occupancy == .wide_tail) continue;
+            const next = shared.background_span.Span{
+                .left = @floatFromInt(x),
+                .right = @floatFromInt(x + @as(usize, if (occupancy == .wide) 2 else 1)),
+                .top = @floatFromInt(y),
+                .bottom = @floatFromInt(@as(u32, y) + 1),
+                .colour = colour(cell.background),
+            };
+            if (pending) |*span| {
+                if (shared.background_span.zigonaut_background_span_extend(span, &next) != 0) continue;
+                zgtk_draw_background(self.host, @intFromFloat(span.left), y, @intFromFloat(span.right - span.left), span.colour);
+            }
+            pending = next;
+        }
+        if (pending) |span| zgtk_draw_background(self.host, @intFromFloat(span.left), y, @intFromFloat(span.right - span.left), span.colour);
+    }
     pub fn endRow(_: *Core, _: u16) void {}
 
     pub fn drawCell(self: *Core, cell: Terminal.Cell) void {

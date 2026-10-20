@@ -2,6 +2,7 @@
 #include "glyph_atlas_allocator.h"
 #include "../shared/selection_path.h"
 #include "../shared/text_runs.h"
+#include "../shared/background_span.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1654,6 +1655,12 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 left + width + 1.0f, top + height + 1.0f);
         }
         if (row_active && !benchmark_legacy_background_fills) {
+            zigonaut_background_span pending = {
+                pending_row_background.left, pending_row_background.top,
+                pending_row_background.right, pending_row_background.bottom,
+                pending_row_background_color};
+            const zigonaut_background_span next = {
+                rect.left, rect.top, rect.right, rect.bottom, background};
             if (selection_background) {
                 if (ordinary_background != frame_background) {
                     brush->SetColor(color(ordinary_background));
@@ -1684,11 +1691,8 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
                 flushRowBackground();
             } else if (pending_row_background_active &&
                     !pending_row_background_selection &&
-                    pending_row_background_color == background &&
-                    pending_row_background.right == rect.left &&
-                    pending_row_background.top == rect.top &&
-                    pending_row_background.bottom == rect.bottom) {
-                pending_row_background.right = rect.right;
+                    zigonaut_background_span_extend(&pending, &next)) {
+                pending_row_background.right = static_cast<float>(pending.right);
             } else {
                 flushRowBackground();
                 pending_row_background = rect;

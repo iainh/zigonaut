@@ -80,6 +80,7 @@ void zgtk_write(void *host, const char *bytes, size_t length);
 void zgtk_title(void *host, const char *bytes, size_t length);
 void zgtk_clipboard(void *host, const char *bytes, size_t length);
 void zgtk_begin_frame(void *host, uint32_t background, float scroll_offset, bool clear);
+void zgtk_draw_background(void *host, uint16_t x, uint16_t y, uint16_t columns, uint32_t background);
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
                     const char *text, size_t length, uint32_t foreground,
                     uint32_t background, uint32_t underline, uint16_t flags);

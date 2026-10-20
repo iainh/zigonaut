@@ -16,6 +16,7 @@ const shared = @import("shared");
 comptime {
     _ = shared.selection_path;
     _ = shared.text_runs;
+    _ = shared.background_span;
 }
 const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;

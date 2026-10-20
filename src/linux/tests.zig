@@ -21,6 +21,8 @@ const Capture = struct {
     cache: c.ImageCache = std.mem.zeroes(c.ImageCache),
     cr: ?*c.cairo_t = null,
     drawn_cells: usize = 0,
+    background_spans: usize = 0,
+    background_columns: usize = 0,
     scroll_offset: f32 = 0,
 
     fn deinit(self: *Capture) void {
@@ -47,12 +49,18 @@ export fn zgtk_clipboard(host: ?*anyopaque, bytes: [*]const u8, length: usize) v
 export fn zgtk_begin_frame(host: ?*anyopaque, background: u32, scroll_offset: f32, _: bool) void {
     capture(host).background = background;
     capture(host).drawn_cells = 0;
+    capture(host).background_spans = 0;
+    capture(host).background_columns = 0;
     capture(host).scroll_offset = scroll_offset;
     capture(host).first_row = @splat(' ');
     capture(host).highlighted = 0;
     capture(host).active_highlighted = 0;
     capture(host).images = 0;
     capture(host).underlined = 0;
+}
+export fn zgtk_draw_background(host: ?*anyopaque, _: u16, _: u16, columns: u16, _: u32) void {
+    capture(host).background_spans += 1;
+    capture(host).background_columns += columns;
 }
 export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [*]const u8, length: usize, foreground: u32, _: u32, _: u32, flags: u16) void {
     const state = capture(host);
@@ -160,6 +168,10 @@ test "Linux rendering, selection and titles preserve terminal data across resize
     try std.testing.expect(c.zgtk_render(core));
     try std.testing.expect(state.red_cell);
     try std.testing.expectEqual(@as(u8, 2), state.wide_columns);
+    // One ordinary span per row, including the extra fractional-scroll row;
+    // wide tails must not split or overlap the head's background.
+    try std.testing.expectEqual(@as(usize, 8), state.background_spans);
+    try std.testing.expectEqual(@as(usize, 31 * 8), state.background_columns);
     try std.testing.expectEqualStrings("Alpha R ", state.first_row[0..8]);
     try std.testing.expectEqualStrings("Linux shell", state.title.written());
     try std.testing.expect(c.zgtk_select(core, 4, 0, true, false));
@@ -451,10 +463,12 @@ test "retained GTK fractional scroll presents without redrawing unchanged cells"
     try std.testing.expect(c.zgtk_scroll_fractional(core, -1.5));
     try std.testing.expect(c.zgtk_render_retained(core, true));
     try std.testing.expectEqual(@as(usize, 48), state.drawn_cells);
+    try std.testing.expectEqual(@as(usize, 4), state.background_spans);
     try std.testing.expectEqual(@as(f32, 0.5), state.scroll_offset);
     try std.testing.expect(c.zgtk_scroll_fractional(core, 0.125));
     try std.testing.expect(c.zgtk_render_retained(core, false));
     try std.testing.expectEqual(@as(usize, 0), state.drawn_cells);
+    try std.testing.expectEqual(@as(usize, 0), state.background_spans);
     try std.testing.expectEqual(@as(f32, 0.625), state.scroll_offset);
     try std.testing.expect(c.zgtk_scroll_fractional(core, 0.5));
     try std.testing.expect(c.zgtk_render_retained(core, false));

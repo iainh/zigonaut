@@ -2,6 +2,7 @@ const std = @import("std");
 const shared = @import("root.zig");
 
 const modules = .{
+    shared.background_span,
     shared.hint,
     shared.link,
     shared.pane_tree,

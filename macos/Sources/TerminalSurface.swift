@@ -1762,11 +1762,30 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func drawBackgrounds<C: Collection>(_ cells: C, selectionPath: CGPath?)
     where C.Element == TerminalRenderCell
   {
-    for cell in cells {
-      if cell.backgroundIsDefault { continue }
-      color(cell.background, alpha: preferences.opacity).setFill()
-      cellRect(cell).fill()
+    var pending: zigonaut_background_span?
+    func flushBackground() {
+      guard let span = pending else { return }
+      color(span.colour, alpha: preferences.opacity).setFill()
+      NSRect(x: span.left, y: span.top,
+        width: span.right - span.left, height: span.bottom - span.top).fill()
+      pending = nil
     }
+    for cell in cells {
+      if cell.backgroundIsDefault {
+        flushBackground()
+        continue
+      }
+      let rect = cellRect(cell)
+      var next = zigonaut_background_span(left: rect.minX, top: rect.minY,
+        right: rect.maxX, bottom: rect.maxY, colour: cell.background)
+      if var span = pending, zigonaut_background_span_extend(&span, &next) != 0 {
+        pending = span
+      } else {
+        flushBackground()
+        pending = next
+      }
+    }
+    flushBackground()
 
     if let selectionPath, let context = NSGraphicsContext.current?.cgContext {
       let radius = CGFloat(SelectionShape.cornerRadius(
