@@ -2,6 +2,34 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.12.0] - 2026-10-20
+
+### Added
+
+- An initial native Linux frontend using GTK 4 and libadwaita, with tabs,
+  split panes, independent PTYs, scrollback search, prompt navigation, and
+  automatic Bash, Zsh, and fish shell integration.
+- Persistent Linux settings and terminal profiles, live preference updates,
+  native new-window and command-output copy actions, terminal mouse reporting,
+  Ctrl-click links, and Kitty image rendering.
+- Fractional scrolling on Windows, macOS, and Linux, reusing retained content
+  while preserving native momentum and aligning input with the scrolled display.
+
+### Changed
+
+- Reduced rendering allocations and repeated work by sharing text-run,
+  background, underline, search-highlight, link, and image preparation in Zig.
+- Retained packed macOS render rows without per-cell Swift strings and shared
+  pane layout, selection geometry, and accessibility layout work with Zig.
+- Updated libghostty to the latest compatible revision.
+- Established Debian 13 or equivalent libraries as the Linux build baseline.
+
+### Fixed
+
+- Kept scrolled viewports valid when increasing terminal height.
+- Restored Windows tab close glyphs on hover and keyboard focus, and deferred
+  status-glyph templates until native tab items are ready.
+
 ## [0.11.0] - 2026-10-16
 
 ### Added
