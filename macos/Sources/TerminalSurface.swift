@@ -1046,7 +1046,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSBezierPath(rect: viewportRect).addClip()
     drawBackgrounds(snapshot.cells, selectionPath: roundedSelectionPath(snapshot.cellsByRow))
     drawText(snapshot.cells)
-    for cell in snapshot.cells where !cell.text.isEmpty && cell.occupancy != 2 {
+    for cell in snapshot.cells where !cell.textBytes.isEmpty && cell.occupancy != 2 {
       drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
     }
     drawImages(snapshot.images)
@@ -1197,7 +1197,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       return disableMetal()
     }
     let hasDecorations = snapshot.cells.contains {
-      !$0.text.isEmpty && $0.occupancy != 2
+      !$0.textBytes.isEmpty && $0.occupancy != 2
         && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
     } || hoveredLink != nil || !linkHints.isEmpty
     if !hasDecorations { decorationSignature = "" }
@@ -1295,7 +1295,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
   }
 
-  private func metalTextPlacements(_ cells: [TerminalRenderCell]) -> [MetalTextPlacement] {
+  private func metalTextPlacements<C: Collection>(_ cells: C) -> [MetalTextPlacement]
+    where C.Element == TerminalRenderCell
+  {
     var placements: [MetalTextPlacement] = []
     var run: TextRun?
     func flush() {
@@ -1431,12 +1433,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
   }
 
-  private func rasterizeDecorations(_ cells: [TerminalRenderCell], in bitmap: CGContext) {
+  private func rasterizeDecorations<C: Collection>(_ cells: C, in bitmap: CGContext)
+    where C.Element == TerminalRenderCell
+  {
     bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + lineHeight))
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
-    for cell in cells where !cell.text.isEmpty && cell.occupancy != 2 {
+    for cell in cells where !cell.textBytes.isEmpty && cell.occupancy != 2 {
       drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
     }
     NSGraphicsContext.restoreGraphicsState()
@@ -1601,7 +1605,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       NSBezierPath(rect: rowRect).addClip()
       color(snapshot.frame.background, alpha: preferences.opacity).setFill()
       rowRect.fill()
-      let cells = snapshot.cellsByRow.indices.contains(row) ? snapshot.cellsByRow[row] : []
+      guard snapshot.cellsByRow.indices.contains(row) else { bitmap.restoreGState(); return }
+      let cells = snapshot.cellsByRow[row]
       drawEdgeColors(cells)
       drawBackgrounds(cells, selectionPath: selectionPath)
       drawRetainedPseudographics(cells)
@@ -1629,7 +1634,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSGraphicsContext.restoreGraphicsState()
   }
 
-  private func drawEdgeColors(_ cells: [TerminalRenderCell]) {
+  private func drawEdgeColors<C: Collection>(_ cells: C) where C.Element == TerminalRenderCell {
     guard preferences.paddingColor != "Background" else { return }
     let always = preferences.paddingColor == "Always Extend"
     let gridRight = originX + CGFloat(gridColumns) * cellWidth
@@ -1682,7 +1687,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     )
   }
 
-  private func roundedSelectionPath(_ rows: [[TerminalRenderCell]]) -> CGPath? {
+  private func roundedSelectionPath(_ rows: [PackedRenderRow]) -> CGPath? {
     selectionPathBuffer.reset()
     for (row, cells) in rows.enumerated() {
       var start: Int?
@@ -1719,7 +1724,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     }
   }
 
-  private func drawBackgrounds(_ cells: [TerminalRenderCell], selectionPath: CGPath?) {
+  private func drawBackgrounds<C: Collection>(_ cells: C, selectionPath: CGPath?)
+    where C.Element == TerminalRenderCell
+  {
     for cell in cells {
       if cell.backgroundIsDefault { continue }
       color(cell.background, alpha: preferences.opacity).setFill()
@@ -1774,7 +1781,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     flushSearch()
   }
 
-  private func drawText(_ cells: [TerminalRenderCell]) {
+  private func drawText<C: Collection>(_ cells: C) where C.Element == TerminalRenderCell {
     var run: TextRun?
     func flush() {
       guard let current = run else { return }
@@ -1813,7 +1820,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     flush()
   }
 
-  private func drawRetainedPseudographics(_ cells: [TerminalRenderCell]) {
+  private func drawRetainedPseudographics<C: Collection>(_ cells: C)
+    where C.Element == TerminalRenderCell
+  {
     for cell in cells {
       let columns = cell.occupancy == 1 ? 2 : 1
       guard let scalar = proceduralScalar(cell.text),

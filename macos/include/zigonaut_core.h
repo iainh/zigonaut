@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "../../src/shared/selection_path.h"
+#include "../../src/shared/render_cells.h"
 typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
 /* Main-thread pane tree. IDs are nonzero and unique across leaves and splits.
@@ -39,8 +40,6 @@ int8_t zigonaut_panes_drop_edge(double x, double y, double width, double height)
    legacy logical-row count; otherwise snapshots include one bottom overscan
    row. Positive scroll_offset translates content UP by that fraction of a row. */
 typedef struct { uint32_t version, size; uint32_t foreground_rgb, background_rgb, cursor_rgb; uint16_t cursor_x, cursor_y; uint8_t cursor_columns, cursor_style, cursor_visible, cursor_has_position, images_skipped, mouse_shape; uint16_t viewport_rows; float scroll_offset; } zigonaut_render_frame_v1;
-/* text_offset/text_length reference the caller-owned UTF-8 arena passed with this cell array. */
-typedef struct { uint32_t version, size, text_offset, text_length; uint32_t foreground_rgb, background_rgb, underline_rgb; uint16_t x, y; uint8_t occupancy, underline_style, bold, italic, faint, strikethrough, overline, selected, background_is_default, search_highlight; uint8_t reserved[6]; } zigonaut_render_cell_v1;
 /* data_offset/data_length reference the caller-owned RGBA arena. */
 typedef struct { uint32_t version, size, image_id; uint64_t generation; uint32_t data_offset, data_length, width, height, source_x, source_y, source_width, source_height, pixel_width, pixel_height; int32_t viewport_column, viewport_row, z; uint32_t x_offset, y_offset; uint8_t reserved[8]; } zigonaut_render_image_v1;
 typedef struct { uint32_t image_id, reserved; uint64_t generation; } zigonaut_image_generation_v1;

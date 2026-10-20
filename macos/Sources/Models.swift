@@ -5,6 +5,7 @@ import SwiftUI
 import ZigonautAccessibility
 import ZigonautCore
 import ZigonautPaneLayout
+import ZigonautRenderSupport
 import ZigonautRestoration
 
 enum TerminalLatencyTrace {
@@ -91,30 +92,10 @@ struct TerminalRenderFrame {
   var scrollOffset: CGFloat = 0
 }
 
-struct TerminalRenderCell: Identifiable {
-  let id: Int
-  let x: Int
-  let y: Int
-  let text: String
-  let foreground: UInt32
-  let background: UInt32
-  let underlineColor: UInt32
-  let occupancy: UInt8
-  let underlineStyle: UInt8
-  let bold: Bool
-  let italic: Bool
-  let faint: Bool
-  let strikethrough: Bool
-  let overline: Bool
-  let selected: Bool
-  let backgroundIsDefault: Bool
-  let searchHighlight: UInt8
-}
-
 struct TerminalRenderSnapshot {
   var frame = TerminalRenderFrame()
-  var cells: [TerminalRenderCell] = []
-  var cellsByRow: [[TerminalRenderCell]] = []
+  var cells = TerminalRenderCells()
+  var cellsByRow: [PackedRenderRow] { cells.rows }
   var images: [TerminalRenderImage] = []
   var rowHashes: [UInt64] = []
   var viewportOffset: UInt64 = 0
@@ -430,7 +411,7 @@ struct TerminalPalette: Equatable {
     repeating: zigonaut_render_cell_v1(), count: 80 * 24)
   private var textBuffer = [UInt8](repeating: 0, count: 80 * 24 * 4)
   private var hashBuffer = [UInt64](repeating: 0, count: 24)
-  private var retainedCellsByRow = [[TerminalRenderCell]]()
+  private var retainedCellsByRow = [PackedRenderRow]()
   private var imageBuffer = [zigonaut_render_image_v1](repeating: zigonaut_render_image_v1(), count: 4)
   private var imageData = [UInt8](repeating: 0, count: 1_048_576)
   private var imageCache: [TerminalImageKey: CGImage] = [:]
@@ -721,44 +702,22 @@ struct TerminalPalette: Equatable {
       return
     }
     let count = min(Int(result.written_cells), cellBuffer.count)
-    let cells = cellBuffer.prefix(count).enumerated().map { index, cell in
-      let start = min(Int(cell.text_offset), textBuffer.count)
-      let end = min(start + Int(cell.text_length), textBuffer.count)
-      return TerminalRenderCell(
-        id: Int(cell.y) * max(currentColumns, 1) + Int(cell.x),
-        x: Int(cell.x),
-        y: Int(cell.y),
-        text: String(decoding: textBuffer[start..<end], as: UTF8.self),
-        foreground: cell.foreground_rgb,
-        background: cell.background_rgb,
-        underlineColor: cell.underline_rgb,
-        occupancy: cell.occupancy,
-        underlineStyle: cell.underline_style,
-        bold: cell.bold != 0,
-        italic: cell.italic != 0,
-        faint: cell.faint != 0,
-        strikethrough: cell.strikethrough != 0,
-        overline: cell.overline != 0,
-        selected: cell.selected != 0,
-        backgroundIsDefault: cell.background_is_default != 0 && cell.background_rgb == frame.background_rgb,
-        searchHighlight: cell.search_highlight
-      )
-    }
     let rowCount = Int(result.written_rows)
     let rowHashes = Array(hashBuffer.prefix(rowCount))
+    let emptyRow = PackedRenderRow(cells: [], text: [], background: frame.background_rgb)
     if retainedCellsByRow.count != rowCount {
-      retainedCellsByRow = [[TerminalRenderCell]](repeating: [], count: rowCount)
+      retainedCellsByRow = [PackedRenderRow](repeating: emptyRow, count: rowCount)
     }
-    if !cells.isEmpty {
-      var dirtyCells = [[TerminalRenderCell]](repeating: [], count: rowCount)
-      for cell in cells where dirtyCells.indices.contains(cell.y) {
-        dirtyCells[cell.y].append(cell)
-      }
-      for row in rowHashes.indices
-        where renderSnapshot.rowHashes.count != rowCount || renderSnapshot.rowHashes[row] != rowHashes[row]
-      {
-        retainedCellsByRow[row] = dirtyCells[row]
-      }
+    // The Zig collector emits complete dirty rows in row/column order. Copy
+    // each row's packed records and arena once; never decode or flatten cells.
+    var start = 0
+    while start < count {
+      let row = Int(cellBuffer[start].y)
+      var end = start + 1
+      while end < count && cellBuffer[end].y == cellBuffer[start].y { end += 1 }
+      retainedCellsByRow[row] = PackedRenderRow(cells: cellBuffer[start..<end],
+        text: textBuffer, background: frame.background_rgb)
+      start = end
     }
     let images = imagesNeedRefresh ? retrieveImages(core: core) : renderSnapshot.images
     imagesNeedRefresh = false
@@ -776,9 +735,7 @@ struct TerminalPalette: Equatable {
         viewportRows: Int(frame.viewport_rows),
         scrollOffset: CGFloat(frame.scroll_offset)
       ),
-      cells: rowHashes == renderSnapshot.rowHashes
-        ? renderSnapshot.cells : retainedCellsByRow.flatMap { $0 },
-      cellsByRow: retainedCellsByRow,
+      cells: TerminalRenderCells(rows: retainedCellsByRow, columns: currentColumns),
       images: images,
       rowHashes: rowHashes,
       viewportOffset: result.viewport_offset
