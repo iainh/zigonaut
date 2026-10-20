@@ -6,6 +6,7 @@ comptime {
     _ = shared.background_span;
     _ = shared.decoration_path;
     _ = shared.search;
+    _ = shared.image;
 }
 const win32 = @import("win32.zig");
 const native = win32.c;

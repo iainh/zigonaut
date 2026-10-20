@@ -5,6 +5,7 @@
 #include "../shared/background_span.h"
 #include "../shared/decoration_path.h"
 #include "../shared/search.h"
+#include "../shared/image.h"
 
 #include <algorithm>
 #include <atomic>
@@ -572,6 +573,8 @@ struct ZigonautTextEngine {
     std::map<LayoutKey, LayoutEntry, LayoutKeyLess> layouts;
     std::list<const LayoutKey*> layout_recency;
     std::map<uint32_t, ImageCacheEntry> images;
+    std::unique_ptr<uint8_t[]> image_upload;
+    size_t image_upload_capacity = 0;
     std::map<BuiltinKey, BuiltinPlacement> builtin_placements;
     std::map<BuiltinKey, ID2D1Bitmap*> builtin_bitmaps;
     uint64_t builtin_generation = 1;
@@ -4389,24 +4392,23 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     }
     auto& cached = iterator->second;
     if (cached.generation != generation) {
-        std::unique_ptr<uint8_t[]> premultiplied(new (std::nothrow) uint8_t[byte_length]);
-        if (!premultiplied) {
-            if (inserted) engine->images.erase(iterator);
-            return E_OUTOFMEMORY;
+        if (engine->image_upload_capacity < byte_length) {
+            std::unique_ptr<uint8_t[]> upload(new (std::nothrow) uint8_t[byte_length]);
+            if (!upload) {
+                if (inserted) engine->images.erase(iterator);
+                return E_OUTOFMEMORY;
+            }
+            engine->image_upload = std::move(upload);
+            engine->image_upload_capacity = byte_length;
         }
-        std::copy_n(rgba, byte_length, premultiplied.get());
-        for (size_t index = 0; index < byte_length; index += 4) {
-            const uint32_t alpha = premultiplied[index + 3];
-            premultiplied[index] = static_cast<uint8_t>((premultiplied[index] * alpha + 127) / 255);
-            premultiplied[index + 1] = static_cast<uint8_t>((premultiplied[index + 1] * alpha + 127) / 255);
-            premultiplied[index + 2] = static_cast<uint8_t>((premultiplied[index + 2] * alpha + 127) / 255);
-        }
+        zigonaut_image_premultiply(rgba, engine->image_upload.get(), image_width,
+            image_height, static_cast<size_t>(image_width) * 4, 0);
         D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_NONE,
             D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
         ID2D1Bitmap1* bitmap = nullptr;
         const HRESULT hr = engine->target->CreateBitmap(D2D1::SizeU(image_width, image_height),
-            premultiplied.get(), image_width * 4, properties, &bitmap);
+            engine->image_upload.get(), image_width * 4, properties, &bitmap);
         if (FAILED(hr)) {
             if (inserted) engine->images.erase(iterator);
             return hr;

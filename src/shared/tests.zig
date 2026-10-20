@@ -5,6 +5,7 @@ const modules = .{
     shared.background_span,
     shared.decoration_path,
     shared.hint,
+    shared.image,
     shared.link,
     shared.pane_tree,
     shared.pseudographics,

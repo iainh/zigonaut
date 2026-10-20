@@ -2,6 +2,7 @@ pub const link = @import("link.zig");
 pub const background_span = @import("background_span.zig");
 pub const decoration_path = @import("decoration_path.zig");
 pub const hint = @import("hint.zig");
+pub const image = @import("image.zig");
 pub const pane_tree = @import("pane_tree.zig");
 pub const render_cells = @import("render_cells.zig");
 pub const search = @import("search.zig");

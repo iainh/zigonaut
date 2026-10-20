@@ -1,4 +1,5 @@
 const std = @import("std");
+const shared_image = @import("shared").image;
 pub const c = @cImport({
     @cInclude("images.h");
     @cDefine("GHOSTTY_STATIC", "1");
@@ -70,16 +71,7 @@ fn imageSurface(cache: *c.ImageCache, image: *const c.TerminalImage) ?*c.cairo_s
         return null;
     }
     const destination = c.cairo_image_surface_get_data(surface);
-    for (0..image.height) |y| {
-        const row: [*]u32 = @ptrCast(@alignCast(destination + y * @as(usize, @intCast(stride))));
-        const rgba = image.pixels + y * image.width * 4;
-        for (0..image.width) |x| {
-            const a: u32 = rgba[x * 4 + 3];
-            // Native-endian ARGB words are Cairo's format on either endian.
-            row[x] = a << 24 | ((@as(u32, rgba[x * 4]) * a + 127) / 255) << 16 |
-                ((@as(u32, rgba[x * 4 + 1]) * a + 127) / 255) << 8 | ((@as(u32, rgba[x * 4 + 2]) * a + 127) / 255);
-        }
-    }
+    shared_image.premultiply(image.pixels, destination, image.width, image.height, @intCast(stride), .native_argb);
     c.cairo_surface_mark_dirty(surface);
     std.mem.copyBackwards(c.ImageSurface, cache.entries[1 .. cache.count + 1], cache.entries[0..cache.count]);
     cache.entries[0] = .{ .surface = surface, .generation = image.generation, .image_id = image.image_id, .width = image.width, .height = image.height, .bytes = bytes };
