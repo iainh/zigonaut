@@ -72,6 +72,8 @@ const symbols = [_][:0]const u8{
     "zigonaut_pseudographics_render",
     "zigonaut_selection_path",
     "zigonaut_selection_row_path",
+    "zigonaut_image_clip_quad",
+    "zigonaut_image_clip_quad_f32",
 };
 
 test "public header compiles and dylib exports its contract" {

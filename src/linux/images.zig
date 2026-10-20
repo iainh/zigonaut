@@ -85,16 +85,20 @@ export fn zgtk_images_draw(cache: *c.ImageCache, cr: *c.cairo_t, image: *const c
         image.width > image_limit / 4 / image.height or
         image.length != @as(usize, image.width) * image.height * 4 or
         image.width > std.math.maxInt(c_int) or image.height > std.math.maxInt(c_int) or
-        image.source_width == 0 or image.source_height == 0 or image.pixel_width == 0 or image.pixel_height == 0 or
         image.source_x > image.width or image.source_width > image.width - image.source_x or
         image.source_y > image.height or image.source_height > image.height - image.source_y) return;
-    const surface = imageSurface(cache, image) orelse return;
     const left = @as(f64, @floatFromInt(padding)) + @as(f64, @floatFromInt(image.viewport_col)) * @as(f64, @floatFromInt(cell_width)) + @as(f64, @floatFromInt(image.x_offset));
     const top = @as(f64, @floatFromInt(padding)) + @as(f64, @floatFromInt(image.viewport_row)) * @as(f64, @floatFromInt(cell_height)) + @as(f64, @floatFromInt(image.y_offset));
+    var quad: shared_image.Quad(f64) = undefined;
+    if (shared_image.clippedQuad(f64, .{ .x = left, .y = top, .width = @floatFromInt(image.pixel_width), .height = @floatFromInt(image.pixel_height) }, .{ .x = @floatFromInt(image.source_x), .y = @floatFromInt(image.source_y), .width = @floatFromInt(image.source_width), .height = @floatFromInt(image.source_height) }, .{
+        .left = @floatFromInt(padding),
+        .top = @floatFromInt(padding),
+        .right = @as(f64, @floatFromInt(padding)) + @as(f64, @floatFromInt(columns)) * @as(f64, @floatFromInt(cell_width)),
+        .bottom = @as(f64, @floatFromInt(padding)) + @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(cell_height)),
+    }, &quad) != .visible) return;
+    const surface = imageSurface(cache, image) orelse return;
     c.cairo_save(cr);
-    c.cairo_rectangle(cr, @floatFromInt(padding), @floatFromInt(padding), @as(f64, @floatFromInt(columns)) * @as(f64, @floatFromInt(cell_width)), @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(cell_height)));
-    c.cairo_clip(cr);
-    c.cairo_rectangle(cr, left, top, @floatFromInt(image.pixel_width), @floatFromInt(image.pixel_height));
+    c.cairo_rectangle(cr, quad.destination.x, quad.destination.y, quad.destination.width, quad.destination.height);
     c.cairo_clip(cr);
     c.cairo_translate(cr, left, top);
     c.cairo_scale(cr, @as(f64, @floatFromInt(image.pixel_width)) / @as(f64, @floatFromInt(image.source_width)), @as(f64, @floatFromInt(image.pixel_height)) / @as(f64, @floatFromInt(image.source_height)));

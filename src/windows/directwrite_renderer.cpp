@@ -4368,19 +4368,18 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     float cl, float ct, float cr, float cb) {
     if (!engine || !engine->target || !image_id || !generation || !rgba || !image_width || !image_height ||
         image_width > UINT32_MAX / 4 ||
-        !std::isfinite(dl) || !std::isfinite(dt) || !std::isfinite(dw) || !std::isfinite(dh) ||
-        !std::isfinite(sl) || !std::isfinite(st) || !std::isfinite(sw) || !std::isfinite(sh) ||
-        !std::isfinite(cl) || !std::isfinite(ct) || !std::isfinite(cr) || !std::isfinite(cb) ||
-        dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 || sl < 0 || st < 0 ||
-        sl > image_width || st > image_height || sw > image_width - sl || sh > image_height - st ||
-        cl >= cr || ct >= cb || !std::isfinite(dl + dw) || !std::isfinite(dt + dh) ||
-        !std::isfinite(sl + sw) || !std::isfinite(st + sh)) return E_INVALIDARG;
-    HRESULT pending=engine->flushGlyphInstances();
-    if (FAILED(pending)) return pending;
+        sl > image_width || st > image_height || sw > image_width - sl || sh > image_height - st) return E_INVALIDARG;
     constexpr size_t max_image_bytes = 32u * 1024u * 1024u;
     if (static_cast<size_t>(image_width) > max_image_bytes / 4u / image_height) return E_INVALIDARG;
     const size_t byte_length = static_cast<size_t>(image_width) * image_height * 4;
     if (rgba_length != byte_length) return E_INVALIDARG;
+    zigonaut_image_quad_f32 quad;
+    const uint32_t visibility = zigonaut_image_clip_quad_f32(
+        {dl, dt, dw, dh}, {sl, st, sw, sh}, {cl, ct, cr, cb}, &quad);
+    if (visibility == 0) return E_INVALIDARG;
+    if (visibility == 1) return S_OK;
+    HRESULT pending=engine->flushGlyphInstances();
+    if (FAILED(pending)) return pending;
     decltype(engine->images)::iterator iterator;
     bool inserted = false;
     try {
@@ -4422,6 +4421,7 @@ extern "C" HRESULT zigonaut_text_engine_draw_image(ZigonautTextEngine* engine,
     engine->addDamage(engine->frame_damage,
         std::max(dl, cl), std::max(dt, ct),
         std::min(dl + dw, cr), std::min(dt + dh, cb));
+    // Retain the original source crop and transform for Direct2D filtering.
     engine->target->PushAxisAlignedClip(D2D1::RectF(cl, ct, cr, cb), D2D1_ANTIALIAS_MODE_ALIASED);
     engine->target->DrawBitmap(cached.bitmap, D2D1::RectF(dl, dt, dl + dw, dt + dh), 1.0f,
         D2D1_INTERPOLATION_MODE_LINEAR, D2D1::RectF(sl, st, sl + sw, st + sh));

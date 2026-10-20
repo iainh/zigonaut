@@ -19,4 +19,16 @@ import Testing
   #expect(ImageGeometry.clippedQuad(
     destination: ImageRect(x: 0, y: 0, width: 0, height: 10),
     source: ImageRect(x: 0, y: 0, width: 10, height: 10), clip: clip) == nil)
+  #expect(ImageGeometry.clippedQuad(
+    destination: ImageRect(x: .nan, y: 0, width: 10, height: 10),
+    source: ImageRect(x: 0, y: 0, width: 10, height: 10), clip: clip) == nil)
+}
+
+@Test func imageGeometryKeepsFractionalScrollAndAsymmetricCropMapping() {
+  #expect(ImageGeometry.clippedQuad(
+    destination: ImageRect(x: -10.25, y: 20.125, width: 100, height: 50),
+    source: ImageRect(x: 20, y: 40, width: 200, height: 100),
+    clip: ImageRect(x: 0.25, y: 22.625, width: 80, height: 37.5)) == ImageQuad(
+      destination: ImageRect(x: 0.25, y: 22.625, width: 80, height: 37.5),
+      source: ImageRect(x: 41, y: 45, width: 160, height: 75)))
 }

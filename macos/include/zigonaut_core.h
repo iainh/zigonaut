@@ -9,6 +9,7 @@
 #include "../../src/shared/background_span.h"
 #include "../../src/shared/decoration_path.h"
 #include "../../src/shared/search.h"
+#include "../../src/shared/image.h"
 typedef struct zigonaut_core zigonaut_core;
 typedef void (*zigonaut_wake_fn)(void *context);
 /* Main-thread pane tree. IDs are nonzero and unique across leaves and splits.

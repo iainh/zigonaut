@@ -1523,13 +1523,24 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         metalImageTextures[placement.key] = loaded
         texture = loaded
       }
-      var vertices = quadVertices(
-        destination: CGRect(x: quad.destination.x, y: quad.destination.y,
-          width: quad.destination.width, height: quad.destination.height),
-        source: CGRect(x: quad.source.x, y: quad.source.y,
-          width: quad.source.width, height: quad.source.height),
-        textureWidth: CGFloat(texture.width), textureHeight: CGFloat(texture.height))
-      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      let destinationRect = CGRect(x: quad.destination.x, y: quad.destination.y,
+        width: quad.destination.width, height: quad.destination.height)
+      let sourceRect = CGRect(x: quad.source.x, y: quad.source.y,
+        width: quad.source.width, height: quad.source.height)
+      let left = Float(destinationRect.minX / bounds.width * 2 - 1)
+      let right = Float(destinationRect.maxX / bounds.width * 2 - 1)
+      let top = Float(1 - destinationRect.minY / bounds.height * 2)
+      let bottom = Float(1 - destinationRect.maxY / bounds.height * 2)
+      let u0 = Float(sourceRect.minX / CGFloat(texture.width))
+      let u1 = Float(sourceRect.maxX / CGFloat(texture.width))
+      let v0 = Float(sourceRect.minY / CGFloat(texture.height))
+      let v1 = Float(sourceRect.maxY / CGFloat(texture.height))
+      // Four inline position/UV records, not a heap array for each placement.
+      var vertices = (SIMD4(left, bottom, u0, v1), SIMD4(right, bottom, u1, v1),
+        SIMD4(left, top, u0, v0), SIMD4(right, top, u1, v0))
+      withUnsafeBytes(of: &vertices) { bytes in
+        encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+      }
       encoder.setFragmentTexture(texture, index: 0)
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
@@ -1699,6 +1710,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
 
   private func drawImages(_ images: [TerminalRenderImage]) {
     guard !images.isEmpty else { return }
+    let clip = ImageRect(x: Double(originX), y: Double(unscrolledOriginY),
+      width: Double(CGFloat(gridColumns) * cellWidth),
+      height: Double(CGFloat(gridRows) * lineHeight))
     NSGraphicsContext.current?.saveGraphicsState()
     NSBezierPath(rect: NSRect(x: originX, y: unscrolledOriginY,
       width: CGFloat(gridColumns) * cellWidth, height: CGFloat(gridRows) * lineHeight)).addClip()
@@ -1707,6 +1721,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         x: originX + CGFloat(placement.viewportColumn) * cellWidth + placement.xOffset,
         y: originY + CGFloat(placement.viewportRow) * lineHeight + placement.yOffset,
         width: placement.pixelWidth, height: placement.pixelHeight)
+      guard ImageGeometry.clippedQuad(
+        destination: ImageRect(x: Double(destination.minX), y: Double(destination.minY),
+          width: Double(destination.width), height: Double(destination.height)),
+        source: ImageRect(x: Double(placement.sourcePixels.minX),
+          y: Double(placement.sourcePixels.minY), width: Double(placement.sourcePixels.width),
+          height: Double(placement.sourcePixels.height)), clip: clip) != nil else { continue }
+      // AppKit retains its flipped source coordinates and original filtering crop.
       placement.image.draw(in: destination, from: placement.source, operation: .sourceOver,
         fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
     }

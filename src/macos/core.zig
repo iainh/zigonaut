@@ -18,6 +18,7 @@ comptime {
     _ = shared.text_runs;
     _ = shared.background_span;
     _ = shared.decoration_path;
+    _ = shared.image;
 }
 const pseudographics = shared.pseudographics;
 const Terminal = shared.terminal.Terminal;

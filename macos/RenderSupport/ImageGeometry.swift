@@ -1,3 +1,5 @@
+import ZigonautCore
+
 public struct ImageRect: Equatable {
   public let x: Double
   public let y: Double
@@ -27,22 +29,17 @@ public enum ImageGeometry {
   public static func clippedQuad(
     destination: ImageRect, source: ImageRect, clip: ImageRect
   ) -> ImageQuad? {
-    guard destination.width > 0, destination.height > 0,
-      source.width > 0, source.height > 0 else { return nil }
-    let visibleX = max(destination.x, clip.x)
-    let visibleY = max(destination.y, clip.y)
-    let visibleMaxX = min(destination.x + destination.width, clip.x + clip.width)
-    let visibleMaxY = min(destination.y + destination.height, clip.y + clip.height)
-    guard visibleX < visibleMaxX, visibleY < visibleMaxY else { return nil }
-    let visible = ImageRect(x: visibleX, y: visibleY,
-      width: visibleMaxX - visibleX, height: visibleMaxY - visibleY)
-    let xScale = source.width / destination.width
-    let yScale = source.height / destination.height
-    let visibleSource = ImageRect(
-      x: source.x + (visible.x - destination.x) * xScale,
-      y: source.y + (visible.y - destination.y) * yScale,
-      width: visible.width * xScale,
-      height: visible.height * yScale)
-    return ImageQuad(destination: visible, source: visibleSource)
+    var quad = zigonaut_image_quad()
+    guard zigonaut_image_clip_quad(
+      zigonaut_image_rect(x: destination.x, y: destination.y,
+        width: destination.width, height: destination.height),
+      zigonaut_image_rect(x: source.x, y: source.y, width: source.width, height: source.height),
+      zigonaut_image_clip(left: clip.x, top: clip.y,
+        right: clip.x + clip.width, bottom: clip.y + clip.height), &quad) == 2 else { return nil }
+    return ImageQuad(
+      destination: ImageRect(x: quad.destination.x, y: quad.destination.y,
+        width: quad.destination.width, height: quad.destination.height),
+      source: ImageRect(x: quad.source.x, y: quad.source.y,
+        width: quad.source.width, height: quad.source.height))
   }
 }

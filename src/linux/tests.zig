@@ -278,6 +278,17 @@ test "Linux image compositor clips negative viewport rows and padding at nondefa
     try std.testing.expectEqual(@as(u32, 0xff0c5ad2), pixel(surface, 42, 57));
     for ([_][2]usize{ .{ 3, 4 }, .{ 4, 3 }, .{ 43, 30 }, .{ 20, 58 } }) |point|
         try std.testing.expectEqual(@as(u32, 0), pixel(surface, point[0], point[1]));
+    // Offscreen generations do not populate or replace native surfaces.
+    c.zgtk_images_clear(&cache);
+    var invisible = image;
+    invisible.viewport_row = 3;
+    c.zgtk_images_draw(&cache, cr, &invisible, 4, 3, 2, 13, 27);
+    try std.testing.expectEqual(@as(usize, 0), cache.count);
+    c.zgtk_images_draw(&cache, cr, &image, 4, 3, 2, 13, 27);
+    invisible.generation = 2;
+    c.zgtk_images_draw(&cache, cr, &invisible, 4, 3, 2, 13, 27);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+    try std.testing.expectEqual(@as(u64, 1), cache.entries[0].generation);
 }
 
 fn search(core: *c.TerminalCore, query: []const u8) !c.SearchStatus {
