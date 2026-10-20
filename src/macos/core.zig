@@ -329,7 +329,7 @@ fn clipboardWrite(context: ?*anyopaque, operation: Terminal.ClipboardWriteOperat
         .clear => "",
         .text => |value| value,
     };
-    if (text.len > self.clipboard_max_bytes or std.mem.indexOfScalar(u8, text, 0) != null or !std.unicode.utf8ValidateSlice(text)) return .invalid_data;
+    Terminal.validateClipboardPayload(text, self.clipboard_max_bytes) catch return .invalid_data;
     if (self.clipboard_writes.items.len >= clipboard_queue_capacity) return .busy;
     const payload = std.heap.c_allocator.dupe(u8, text) catch return .io_error;
     self.clipboard_writes.append(std.heap.c_allocator, .{ .payload = payload, .token = self.next_clipboard_token, .clear = clear }) catch {

@@ -1304,7 +1304,7 @@ pub const SessionRuntime = struct {
         const pending: PendingClipboardWrite = switch (operation) {
             .clear => .clear,
             .text => |text| text: {
-                if (text.len > self.clipboard_write_max_bytes or std.mem.indexOfScalar(u8, text, 0) != null or !std.unicode.utf8ValidateSlice(text)) return .invalid_data;
+                Terminal.validateClipboardPayload(text, self.clipboard_write_max_bytes) catch return .invalid_data;
                 break :text .{ .text = self.allocator.dupe(u8, text) catch return .io_error };
             },
         };

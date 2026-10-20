@@ -433,6 +433,7 @@ struct TerminalPalette: Equatable {
   private let maximumImageBytes = 64 * 1_024 * 1_024
   // Selection pasteboard writes are all-or-nothing and capped to bound memory use.
   private let maximumSelectionBytes = 4_194_304
+  private var clipboardBuffer = [UInt8](repeating: 0, count: 1_024)
   private let preferences: Preferences
   private let defaultTitle: String
   var themeSeed: UInt64 { id.uuidString.utf8.reduce(5381) { ($0 &* 33) &+ UInt64($1) } }
@@ -640,12 +641,14 @@ struct TerminalPalette: Equatable {
       guard result.status == 3 else { return }
       let required = Int(result.required_bytes)
       guard required <= 4_194_304 else { return }
-      var bytes = [UInt8](repeating: 0, count: max(required, 1_024))
-      zigonaut_core_take_clipboard_write(core, &bytes, UInt32(bytes.count), &result)
+      if clipboardBuffer.count < required {
+        clipboardBuffer = [UInt8](repeating: 0, count: required)
+      }
+      zigonaut_core_take_clipboard_write(core, &clipboardBuffer, UInt32(clipboardBuffer.count), &result)
       guard result.status == 0, result.written_bytes == result.required_bytes else { return }
       if result.clear != 0 {
         NSPasteboard.general.clearContents()
-      } else if let value = String(bytes: bytes.prefix(required), encoding: .utf8) {
+      } else if let value = String(bytes: clipboardBuffer.prefix(Int(result.written_bytes)), encoding: .utf8) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
       }

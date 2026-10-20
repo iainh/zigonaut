@@ -158,6 +158,14 @@ pub const Terminal = struct {
     pub const ClipboardWrite = *const fn (?*anyopaque, ClipboardWriteOperation) ClipboardWriteResult;
     pub const ClipboardWriteOperation = union(enum) { clear, text: []const u8 };
     pub const ClipboardWriteResult = enum { success, denied, unsupported, busy, invalid_data, io_error };
+
+    /// Validates borrowed decoded text only. Adapters retain permission, clear,
+    /// delivery and ownership policies, including how a size failure is reported.
+    pub fn validateClipboardPayload(bytes: []const u8, max_bytes: usize) error{ TooLarge, InvalidData }!void {
+        if (bytes.len > max_bytes) return error.TooLarge;
+        if (std.mem.indexOfScalar(u8, bytes, 0) != null or !std.unicode.utf8ValidateSlice(bytes)) return error.InvalidData;
+    }
+
     pub const DesktopNotification = *const fn (?*anyopaque, []const u8, []const u8) void;
     pub const ProgressReport = *const fn (?*anyopaque, ProgressUpdate) void;
     pub const ProgressUpdate = union(enum) {
@@ -3324,6 +3332,17 @@ test "visibility reports follow host visibility" {
     listener.bytes.clearRetainingCapacity();
     terminal.setVisible(true);
     try std.testing.expectEqualStrings("\x1b[?999;1n", listener.bytes.items);
+}
+
+test "clipboard payload validation counts bytes and rejects NUL and invalid UTF-8" {
+    try Terminal.validateClipboardPayload("", 0);
+    try Terminal.validateClipboardPayload("aé", 3);
+    try std.testing.expectError(error.TooLarge, Terminal.validateClipboardPayload("aé", 2));
+    try std.testing.expectError(error.InvalidData, Terminal.validateClipboardPayload("a\x00b", 3));
+    try std.testing.expectError(error.InvalidData, Terminal.validateClipboardPayload("\xc3", 1));
+    try std.testing.expectError(error.InvalidData, Terminal.validateClipboardPayload("\xc0\xaf", 2));
+    // Linux reports oversize before invalid content; preserve that precedence.
+    try std.testing.expectError(error.TooLarge, Terminal.validateClipboardPayload("\xff\x00", 1));
 }
 
 test "libghostty emits decoded clipboard writes but ignores reads" {

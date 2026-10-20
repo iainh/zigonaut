@@ -120,8 +120,10 @@ const Core = struct {
             .clear => "",
             .text => |text| text,
         };
-        if (bytes.len > self.clipboard_limit) return .denied;
-        if (!std.unicode.utf8ValidateSlice(bytes) or std.mem.indexOfScalar(u8, bytes, 0) != null) return .invalid_data;
+        Terminal.validateClipboardPayload(bytes, self.clipboard_limit) catch |err| return switch (err) {
+            error.TooLarge => .denied,
+            error.InvalidData => .invalid_data,
+        };
         zgtk_clipboard(self.host, bytes.ptr, bytes.len);
         return .success;
     }
