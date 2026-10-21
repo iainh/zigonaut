@@ -147,14 +147,14 @@ try {
     $closePixels = Get-SlotPixels $close
 
     # Keep the reporting process alive so shell integration does not end its status.
-    $report = '[Console]::Write([string][char]27 + "]7501;state=error:id=tab-test" + [char]7); Start-Sleep -Seconds 60'
+    $report = '[Console]::Write([string][char]27 + "]7501;state=working:id=tab-test" + [char]7); Start-Sleep -Seconds 60'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($report)).Replace('+', '{+}')
     $keyboard.SendKeys("powershell.exe -NoProfile -EncodedCommand $encoded{ENTER}")
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $statusTab = $null
     do {
         foreach ($tab in $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $tabCondition)) {
-            if ($tab.Current.HelpText -eq 'Program status in this tab: Error') {
+            if ($tab.Current.HelpText -eq 'Program status in this tab: Working') {
                 $statusTab = $tab
                 break
             }
@@ -164,7 +164,7 @@ try {
     if ($null -eq $statusTab) { throw 'OSC 7501 status was not exposed in tab help text.' }
 
     $textStatusCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, 'Error'
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Working'
     )
     if ($statusTab.FindAll([System.Windows.Automation.TreeScope]::Descendants, $textStatusCondition).Count -ne 0) {
         throw 'The tab still displays a text status label instead of a glyph.'
@@ -177,6 +177,15 @@ try {
     $slot = $close.Current.BoundingRectangle
     if ($slot.IsEmpty -or $slot.Width -le 0) { throw 'The status/close slot is not visible.' }
     $title = $statusTab.Current.Name
+    # Sample several frames after the initial layout has settled: a static ring
+    # replaces the close glyph too, but cannot pass this animation check.
+    Start-Sleep -Milliseconds 500
+    $frames = New-Object 'System.Collections.Generic.HashSet[string]'
+    for ($frame = 0; $frame -lt 10; $frame++) {
+        [void]$frames.Add((Get-SlotPixels $close))
+        Start-Sleep -Milliseconds 137
+    }
+    if ($frames.Count -lt 3) { throw 'The working status indicator is not visibly animated.' }
     Start-Sleep -Milliseconds 250
     if ((Get-SlotPixels $close) -eq $closePixels) {
         throw 'Program status did not visibly replace the native close glyph.'

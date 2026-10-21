@@ -2338,11 +2338,12 @@ struct Bridge {
         if (unbox_value<uint32_t>(button.Tag()) == displayed) return;
         button.Tag(box_value(displayed));
         if (displayed == 2) {
-            // A small, static open ring: no animation or colour needed to read it.
+            // Let WinUI own the animation and its lifetime inside the native slot.
             button.Content(Microsoft::UI::Xaml::Markup::XamlReader::Load(
-                LR"(<PathIcon xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    Width="12" Height="12" IsHitTestVisible="False"
-                    Data="M13.657,2.343 A8,8 0 1 0 16,8 L14.5,8 A6.5,6.5 0 1 1 12.596,3.404 Z" />)"));
+                LR"(<ProgressRing xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    Width="12" Height="12" MinWidth="0" MinHeight="0"
+                    IsActive="True" IsIndeterminate="True" IsHitTestVisible="False"
+                    IsTabStop="False" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />)"));
         } else {
             // Segoe Fluent Icons: Remove, Accept, Important, Warning; native X.
             auto const glyph = displayed == 1 ? L"\xE738" : displayed == 3 ? L"\xE8FB"
