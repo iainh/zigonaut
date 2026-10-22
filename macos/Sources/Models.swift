@@ -167,7 +167,10 @@ struct TerminalPalette: Equatable {
     ansi: [0x333332, 0xff968c, 0x61957f, 0xffc591, 0x8db4d4, 0xde9bc8, 0x7bb099, 0xd1d1d1,
       0x4c4c4b, 0xffafa5, 0x7aae98, 0xffdeaa, 0xa6cded, 0xf7b4e1, 0x94c9b2, 0xeaeaea])
 
-  static func load(_ name: String) -> TerminalPalette {
+  @MainActor private static var bundledPalettes: [String: TerminalPalette] = [:]
+
+  @MainActor static func load(_ name: String) -> TerminalPalette {
+    if let cached = bundledPalettes[name] { return cached }
     guard name != "rasmus",
       let url = Bundle.main.url(forResource: name, withExtension: "json", subdirectory: "Themes"),
       let data = try? Data(contentsOf: url),
@@ -177,7 +180,10 @@ struct TerminalPalette: Equatable {
     else { return .rasmus }
     let ansi = value.ansi.compactMap(rgb)
     guard ansi.count == 16 else { return .rasmus }
-    return TerminalPalette(foreground: foreground, background: background, cursor: cursor, ansi: ansi)
+    let palette = TerminalPalette(foreground: foreground, background: background, cursor: cursor, ansi: ansi)
+    // Only bundled, valid themes enter this process-lifetime cache.
+    bundledPalettes[name] = palette
+    return palette
   }
 
   static func rgb(_ text: String) -> UInt32? {
@@ -243,6 +249,8 @@ struct TerminalPalette: Equatable {
   @AppStorage("terminalClipboardMaxBytes") var terminalClipboardMaxBytes = 1_048_576
   @AppStorage("pipeCommandOutput") var pipeCommandOutput = ""
 
+  private var resolvedPalettes: [Bool: (theme: String, overrides: String, palette: TerminalPalette)] = [:]
+
   var validShell: String {
     shellPath.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: shellPath)
       ? shellPath : "/bin/zsh"
@@ -261,18 +269,26 @@ struct TerminalPalette: Equatable {
   }
 
   func terminalPalette(dark: Bool, seed: UInt64? = nil) -> TerminalPalette {
-    var palette = TerminalPalette.load(dark ? darkTerminalTheme : lightTerminalTheme)
-    for (key, value) in overrideValues() {
-      guard let rgb = TerminalPalette.rgb(value) else { continue }
-      switch key {
-      case "foreground": palette.foreground = rgb
-      case "background": palette.background = rgb
-      case "cursor": palette.cursor = rgb
-      default:
-        if key.hasPrefix("ansi"), let index = Int(key.dropFirst(4)), palette.ansi.indices.contains(index) {
-          palette.ansi[index] = rgb
+    let theme = dark ? darkTerminalTheme : lightTerminalTheme
+    let overrides = paletteOverrides
+    var palette: TerminalPalette
+    if let cached = resolvedPalettes[dark], cached.theme == theme, cached.overrides == overrides {
+      palette = cached.palette
+    } else {
+      palette = TerminalPalette.load(theme)
+      for (key, value) in overrideValues() {
+        guard let rgb = TerminalPalette.rgb(value) else { continue }
+        switch key {
+        case "foreground": palette.foreground = rgb
+        case "background": palette.background = rgb
+        case "cursor": palette.cursor = rgb
+        default:
+          if key.hasPrefix("ansi"), let index = Int(key.dropFirst(4)), palette.ansi.indices.contains(index) {
+            palette.ansi[index] = rgb
+          }
         }
       }
+      resolvedPalettes[dark] = (theme, overrides, palette)
     }
     if randomizeTabBackground, let seed {
       let accent = Self.hue(seed)
