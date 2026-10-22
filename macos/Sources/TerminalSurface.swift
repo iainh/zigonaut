@@ -125,7 +125,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var retainedAppearance = ""
   private var retainedPixelSize = CGSize.zero
   private var drawingRetainedScene = false
-  private var cachedTextPlacements: [MetalTextPlacement] = []
+  private var cachedTextPlacements: [[MetalTextPlacement]] = []
+  private var cachedDecoratedRows: [Bool] = []
   private var textRunBytes: [UInt8] = []
   private struct OverlayState: Equatable {
     let markedText: String
@@ -1198,8 +1199,38 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     retainedViewportOffset = snapshot.viewportOffset
     drawingRetainedScene = false
     // Glyph placements/resources are independent of the subrow translation.
+    if forceAll {
+      cachedTextPlacements = Array(repeating: [], count: snapshot.cellsByRow.count)
+      cachedDecoratedRows = Array(repeating: false, count: snapshot.cellsByRow.count)
+    } else if let delta = scrollDelta {
+      // Move only native cache entries, never the immutable published rows.
+      let count = cachedTextPlacements.count
+      for row in stride(from: delta > 0 ? count - 1 : 0,
+        to: delta > 0 ? -1 : count, by: delta > 0 ? -1 : 1)
+      {
+        if let source = RetainedScroll.sourceRow(for: row, delta: delta,
+          rowCount: cachedTextPlacements.count)
+        {
+          cachedTextPlacements[row] = cachedTextPlacements[source]
+          cachedDecoratedRows[row] = cachedDecoratedRows[source]
+        } else {
+          cachedTextPlacements[row] = []
+          cachedDecoratedRows[row] = false
+        }
+      }
+    }
     if sceneChanged {
-      cachedTextPlacements = metalTextPlacements(snapshot.cells)
+      for row in forceAll ? Array(snapshot.cellsByRow.indices) : dirtyRows {
+        var placements = cachedTextPlacements[row]
+        cachedTextPlacements[row] = []
+        placements.removeAll(keepingCapacity: true)
+        prepareText(snapshot.cellsByRow[row], drawBuiltins: false) { placements.append($0) }
+        cachedTextPlacements[row] = placements
+        cachedDecoratedRows[row] = snapshot.cellsByRow[row].contains {
+          !$0.textBytes.isEmpty && $0.occupancy != 2
+            && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
+        }
+      }
     }
     let hasOverlay = markedText.length > 0 || !linkHints.isEmpty
     if !hasOverlay { overlaySignature = nil }
@@ -1215,24 +1246,44 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       overlayTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
         withBytes: overlayData, bytesPerRow: overlayBitmap.bytesPerRow)
     }
-    let textPlacements = cachedTextPlacements
-    if sceneChanged && !prepareMetalGlyphs(textPlacements, scale: scale) {
+    if sceneChanged && !prepareMetalGlyphs(cachedTextPlacements.joined(), scale: scale) {
       return disableMetal()
     }
-    let hasDecorations = snapshot.cells.contains {
-      !$0.textBytes.isEmpty && $0.occupancy != 2
-        && ($0.underlineStyle != 0 || $0.strikethrough || $0.overline)
-    } || hoveredLink != nil || !linkHints.isEmpty
+    let hasDecorations = cachedDecoratedRows.contains(true) || hoveredLink != nil || !linkHints.isEmpty
     if !hasDecorations { decorationSignature = nil }
     let nextDecorationSignature = DecorationState(hoveredLink: hoveredLink, hints: hintGeneration)
     if hasDecorations && (sceneChanged || nextDecorationSignature != decorationSignature) {
+      var rows: [Int]? = nil
+      if !forceAll && scrollDelta == nil, let previous = decorationSignature,
+        previous.hints == hintGeneration
+      {
+        rows = dirtyRows
+        if previous.hoveredLink != hoveredLink {
+          for row in [previous.hoveredLink?.row, hoveredLink?.row].compactMap({ $0 })
+            where snapshot.cellsByRow.indices.contains(row) && !rows!.contains(row)
+          { rows!.append(row) }
+        }
+      }
       drawingRetainedScene = true
-      rasterizeDecorations(snapshot.cells, in: decorationBitmap)
+      rasterizeDecorations(snapshot.cellsByRow, rows: rows, in: decorationBitmap)
       drawingRetainedScene = false
       decorationSignature = nextDecorationSignature
       guard let decorationData = decorationBitmap.data else { return disableMetal() }
-      decorationTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
-        withBytes: decorationData, bytesPerRow: decorationBitmap.bytesPerRow)
+      if let rows {
+        for row in rows {
+          let top = max(0, Int(floor((unscrolledOriginY + CGFloat(row) * lineHeight) * scale)))
+          let bottom = min(pixelHeight,
+            Int(ceil((unscrolledOriginY + CGFloat(row + 1) * lineHeight) * scale)))
+          if bottom > top {
+            decorationTexture.replace(region: MTLRegionMake2D(0, top, pixelWidth, bottom - top),
+              mipmapLevel: 0, withBytes: decorationData.advanced(by: top * decorationBitmap.bytesPerRow),
+              bytesPerRow: decorationBitmap.bytesPerRow)
+          }
+        }
+      } else {
+        decorationTexture.replace(region: MTLRegionMake2D(0, 0, pixelWidth, pixelHeight), mipmapLevel: 0,
+          withBytes: decorationData, bytesPerRow: decorationBitmap.bytesPerRow)
+      }
     }
     guard let drawable = presentation.nextDrawable() else { return disableMetal() }
     guard let command = queue.makeCommandBuffer() else { return disableMetal() }
@@ -1267,7 +1318,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     sampling[1] = Float(scrollTranslation * scale) / Float(pixelHeight)
     encoder.setVertexBytes(&sampling, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-    drawMetalText(textPlacements, encoder: encoder, pipeline: glyphPipeline, scale: scale)
+    drawMetalText(cachedTextPlacements, encoder: encoder, pipeline: glyphPipeline, scale: scale)
     if hasDecorations {
       encoder.setRenderPipelineState(overlayPipeline)
       encoder.setFragmentTexture(decorationTexture, index: 0)
@@ -1318,14 +1369,6 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         x: originX + CGFloat(hint.startColumn) * cellWidth,
         y: originY + CGFloat(hint.row) * lineHeight))
     }
-  }
-
-  private func metalTextPlacements<C: Collection>(_ cells: C) -> [MetalTextPlacement]
-    where C.Element == TerminalRenderCell
-  {
-    var placements: [MetalTextPlacement] = []
-    prepareText(cells, drawBuiltins: false) { placements.append($0) }
-    return placements
   }
 
   private func prepareText<C: Collection>(_ cells: C, drawBuiltins: Bool,
@@ -1382,7 +1425,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       pixelHeight: max(1, Int((lineHeight * scale).rounded(.up))), batched: placement.batched)
   }
 
-  private func prepareMetalGlyphs(_ placements: [MetalTextPlacement], scale: CGFloat) -> Bool
+  private func prepareMetalGlyphs<S: Sequence>(_ placements: S, scale: CGFloat) -> Bool
+    where S.Element == MetalTextPlacement
   {
     metalGlyphUse &+= 1
     if metalGlyphUse == 0 { metalGlyphUse = 1 }
@@ -1452,37 +1496,46 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     ])
   }
 
-  private func drawMetalText(_ placements: [MetalTextPlacement], encoder: MTLRenderCommandEncoder,
+  private func drawMetalText(_ rows: [[MetalTextPlacement]], encoder: MTLRenderCommandEncoder,
     pipeline: MTLRenderPipelineState, scale: CGFloat)
   {
     encoder.setRenderPipelineState(pipeline)
-    for placement in placements {
-      guard let key = glyphKey(placement, scale: scale),
-        let cached = metalGlyphTextures[key] else { continue }
-      let destination = CGRect(
-        x: originX + CGFloat(placement.x) * cellWidth,
-        y: originY + CGFloat(placement.y) * lineHeight,
-        width: CGFloat(placement.columns) * cellWidth, height: lineHeight)
-      var vertices = quadVertices(destination: destination,
-        source: CGRect(x: 0, y: 0, width: cached.texture.width, height: cached.texture.height),
-        textureWidth: CGFloat(cached.texture.width), textureHeight: CGFloat(cached.texture.height))
-      withUnsafeBytes(of: &vertices) { bytes in
-        encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    for (row, placements) in rows.enumerated() {
+      for placement in placements {
+        guard let key = glyphKey(placement, scale: scale),
+          let cached = metalGlyphTextures[key] else { continue }
+        let destination = CGRect(
+          x: originX + CGFloat(placement.x) * cellWidth,
+          y: originY + CGFloat(row) * lineHeight,
+          width: CGFloat(placement.columns) * cellWidth, height: lineHeight)
+        var vertices = quadVertices(destination: destination,
+          source: CGRect(x: 0, y: 0, width: cached.texture.width, height: cached.texture.height),
+          textureWidth: CGFloat(cached.texture.width), textureHeight: CGFloat(cached.texture.height))
+        withUnsafeBytes(of: &vertices) { bytes in
+          encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        encoder.setFragmentTexture(cached.texture, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
       }
-      encoder.setFragmentTexture(cached.texture, index: 0)
-      encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
   }
 
-  private func rasterizeDecorations<C: Collection>(_ cells: C, in bitmap: CGContext)
-    where C.Element == TerminalRenderCell
+  private func rasterizeDecorations(_ cellsByRow: [PackedRenderRow], rows: [Int]?, in bitmap: CGContext)
   {
-    bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + lineHeight))
+    if rows == nil {
+      bitmap.clear(CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height + lineHeight))
+    }
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
-    for cell in cells where !cell.textBytes.isEmpty && cell.occupancy != 2 {
-      drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
+    for row in rows ?? Array(cellsByRow.indices) {
+      if rows != nil {
+        bitmap.clear(CGRect(x: 0, y: originY + CGFloat(row) * lineHeight,
+          width: bounds.width, height: lineHeight))
+      }
+      for cell in cellsByRow[row] where !cell.textBytes.isEmpty && cell.occupancy != 2 {
+        drawDecorations(cell, rect: cellRect(cell), forceUnderline: isHoveredLinkCell(cell))
+      }
     }
     NSGraphicsContext.restoreGraphicsState()
   }
