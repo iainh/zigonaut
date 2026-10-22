@@ -114,6 +114,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var overlayBitmap: CGContext?
   private var decorationTexture: MTLTexture?
   private var decorationBitmap: CGContext?
+  private var glyphBitmap: CGContext?
   private var metalTextureLoader: MTKTextureLoader?
   private var metalImageTextures: [TerminalImageKey: MTLTexture] = [:]
   private var metalGlyphTextures: [GlyphKey: CachedGlyph] = [:]
@@ -1430,7 +1431,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   {
     metalGlyphUse &+= 1
     if metalGlyphUse == 0 { metalGlyphUse = 1 }
-    guard let loader = metalTextureLoader else { return false }
+    guard let device = metalLayer?.device else { return false }
     activeGlyphKeys.removeAll(keepingCapacity: true)
     for placement in placements {
       guard let key = glyphKey(placement, scale: scale) else { continue }
@@ -1440,7 +1441,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         metalGlyphTextures[key] = cached
         continue
       }
-      guard let texture = makeGlyphTexture(key, loader: loader, scale: scale) else { return false }
+      guard let texture = makeGlyphTexture(key, device: device, scale: scale) else { return false }
       metalGlyphTextures[key] = CachedGlyph(
         texture: texture, byteCount: texture.width * texture.height * 4, lastUsed: metalGlyphUse)
     }
@@ -1460,14 +1461,20 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     return true
   }
 
-  private func makeGlyphTexture(_ key: GlyphKey, loader: MTKTextureLoader,
+  private func makeGlyphTexture(_ key: GlyphKey, device: MTLDevice,
     scale: CGFloat) -> MTLTexture?
   {
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    guard let bitmap = CGContext(data: nil, width: key.pixelWidth, height: key.pixelHeight,
-      bitsPerComponent: 8, bytesPerRow: key.pixelWidth * 4, space: colorSpace,
-      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-        | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+    if glyphBitmap?.width != key.pixelWidth || glyphBitmap?.height != key.pixelHeight {
+      // One scratch run, rather than a bitmap for every cached texture.
+      glyphBitmap = CGContext(data: nil, width: key.pixelWidth, height: key.pixelHeight,
+        bitsPerComponent: 8, bytesPerRow: key.pixelWidth * 4, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+          | CGBitmapInfo.byteOrder32Little.rawValue)
+    }
+    guard let bitmap = glyphBitmap, let data = bitmap.data else { return nil }
+    bitmap.clear(CGRect(x: 0, y: 0, width: key.pixelWidth, height: key.pixelHeight))
+    bitmap.saveGState()
+    defer { bitmap.restoreGState() }
     bitmap.translateBy(x: 0, y: CGFloat(key.pixelHeight))
     bitmap.scaleBy(x: scale, y: -scale)
     let context = NSGraphicsContext(cgContext: bitmap, flipped: true)
@@ -1490,10 +1497,14 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     NSAttributedString(string: key.text, attributes: attributes).draw(
       at: NSPoint(x: 0, y: textOffsetY + font.ascender - glyphFont.ascender))
     NSGraphicsContext.restoreGraphicsState()
-    guard let image = bitmap.makeImage() else { return nil }
-    return try? loader.newTexture(cgImage: image, options: [
-      .SRGB: false, .origin: MTKTextureLoader.Origin.topLeft,
-    ])
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+      width: key.pixelWidth, height: key.pixelHeight, mipmapped: false)
+    descriptor.usage = .shaderRead
+    descriptor.storageMode = .shared
+    guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+    texture.replace(region: MTLRegionMake2D(0, 0, key.pixelWidth, key.pixelHeight), mipmapLevel: 0,
+      withBytes: data, bytesPerRow: bitmap.bytesPerRow)
+    return texture
   }
 
   private func drawMetalText(_ rows: [[MetalTextPlacement]], encoder: MTLRenderCommandEncoder,
