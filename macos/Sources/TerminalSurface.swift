@@ -114,8 +114,11 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private var overlayBitmap: CGContext?
   private var decorationTexture: MTLTexture?
   private var decorationBitmap: CGContext?
+  private var metalTextureLoader: MTKTextureLoader?
   private var metalImageTextures: [TerminalImageKey: MTLTexture] = [:]
   private var metalGlyphTextures: [GlyphKey: CachedGlyph] = [:]
+  private var activeImageKeys = Set<TerminalImageKey>()
+  private var activeGlyphKeys = Set<GlyphKey>()
   private var metalGlyphUse: UInt64 = 0
   private var retainedRowHashes: [UInt64] = []
   private var retainedViewportOffset: UInt64?
@@ -400,6 +403,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     layer?.addSublayer(presentation)
     metalLayer = presentation
     metalQueue = queue
+    metalTextureLoader = MTKTextureLoader(device: device)
     metalPipeline = pipeline
     metalImagePipeline = imagePipeline
     metalGlyphPipeline = glyphPipeline
@@ -1212,7 +1216,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
         withBytes: overlayData, bytesPerRow: overlayBitmap.bytesPerRow)
     }
     let textPlacements = cachedTextPlacements
-    if sceneChanged && !prepareMetalGlyphs(textPlacements, device: device, scale: scale) {
+    if sceneChanged && !prepareMetalGlyphs(textPlacements, scale: scale) {
       return disableMetal()
     }
     let hasDecorations = snapshot.cells.contains {
@@ -1378,16 +1382,15 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       pixelHeight: max(1, Int((lineHeight * scale).rounded(.up))), batched: placement.batched)
   }
 
-  private func prepareMetalGlyphs(_ placements: [MetalTextPlacement], device: MTLDevice,
-    scale: CGFloat) -> Bool
+  private func prepareMetalGlyphs(_ placements: [MetalTextPlacement], scale: CGFloat) -> Bool
   {
     metalGlyphUse &+= 1
     if metalGlyphUse == 0 { metalGlyphUse = 1 }
-    let loader = MTKTextureLoader(device: device)
-    var active = Set<GlyphKey>()
+    guard let loader = metalTextureLoader else { return false }
+    activeGlyphKeys.removeAll(keepingCapacity: true)
     for placement in placements {
       guard let key = glyphKey(placement, scale: scale) else { continue }
-      active.insert(key)
+      activeGlyphKeys.insert(key)
       if var cached = metalGlyphTextures[key] {
         cached.lastUsed = metalGlyphUse
         metalGlyphTextures[key] = cached
@@ -1402,7 +1405,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     var cachedBytes = metalGlyphTextures.values.reduce(0) { $0 + $1.byteCount }
     if metalGlyphTextures.count > maximumGlyphs || cachedBytes > maximumBytes {
       let removable = metalGlyphTextures
-        .filter { !active.contains($0.key) }
+        .filter { !activeGlyphKeys.contains($0.key) }
         .sorted { $0.value.lastUsed < $1.value.lastUsed }
       for entry in removable {
         guard metalGlyphTextures.count > maximumGlyphs || cachedBytes > maximumBytes else { break }
@@ -1496,11 +1499,13 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   private func drawMetalImages(_ images: [TerminalRenderImage], encoder: MTLRenderCommandEncoder,
     pipeline: MTLRenderPipelineState)
   {
-    let active = Set(images.map(\.key))
-    metalImageTextures = metalImageTextures.filter { active.contains($0.key) }
+    activeImageKeys.removeAll(keepingCapacity: true)
+    for image in images { activeImageKeys.insert(image.key) }
+    for key in metalImageTextures.keys where !activeImageKeys.contains(key) {
+      metalImageTextures.removeValue(forKey: key)
+    }
     guard !images.isEmpty, bounds.width > 0, bounds.height > 0,
-      let device = retainedTexture?.device else { return }
-    let loader = MTKTextureLoader(device: device)
+      let loader = metalTextureLoader else { return }
     let clip = ImageRect(x: Double(originX), y: Double(unscrolledOriginY),
       width: Double(CGFloat(gridColumns) * cellWidth),
       height: Double(CGFloat(gridRows) * lineHeight))
