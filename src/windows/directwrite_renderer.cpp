@@ -66,15 +66,15 @@ HRESULT classifyPresentResult(HRESULT result) {
 
 struct LayoutKey {
     std::u16string text;
-    uint32_t width;
-    uint32_t height;
+    float width;
+    float height;
     uint8_t style;
 };
 
 struct LayoutKeyView {
     std::u16string_view text;
-    uint32_t width;
-    uint32_t height;
+    float width;
+    float height;
     uint8_t style;
 };
 
@@ -177,7 +177,7 @@ struct RowCell {
     bool search_background = false;
     enum class Kind : uint8_t { font, builtin } kind = Kind::font;
     uint32_t builtin_codepoint = 0;
-    std::vector<uint8_t> builtin_mask;
+    size_t builtin_mask_offset = 0;
     uint32_t builtin_width = 0, builtin_height = 0, builtin_stride = 0;
 };
 
@@ -587,6 +587,9 @@ struct ZigonautTextEngine {
     uint64_t background_fill_calls = 0;
     uint64_t image_frame = 0;
     std::vector<RowCell> row_cells;
+    // Offsets, not pointers, survive growth while recording a row. Keep the
+    // high-water allocation for subsequent rows, like row_text and row_cells.
+    std::vector<uint8_t> row_masks;
     std::u16string row_text;
     RowSegment row_segment;
     std::vector<RowSegment> row_segments;
@@ -1420,18 +1423,22 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
     HRESULT layoutFor(
         const char16_t* text,
         size_t text_length,
-        uint32_t width,
-        uint32_t height,
+        float width,
+        float height,
         size_t format_index,
-        IDWriteTextLayout** result) {
-        if (result == nullptr || text_length > UINT32_MAX || format_index >= std::size(formats)) {
+        IDWriteTextLayout** result,
+        bool underlined = false) {
+        if (result == nullptr || text_length > UINT32_MAX || format_index >= std::size(formats) ||
+            !std::isfinite(width) || !std::isfinite(height)) {
             return E_INVALIDARG;
         }
+        // Preedit/hint layouts are immutable too, but must never lend their
+        // underline to a terminal layout with otherwise identical text/size.
         const LayoutKeyView key{
             std::u16string_view(text, text_length),
             width,
             height,
-            static_cast<uint8_t>(format_index),
+            static_cast<uint8_t>(format_index | (underlined ? 4u : 0u)),
         };
         auto existing = layouts.find(key);
         if (existing != layouts.end()) {
@@ -1449,26 +1456,34 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
             layouts.erase(oldest);
         }
         IDWriteTextLayout* layout = nullptr;
-        const HRESULT hr = factory->CreateTextLayout(
+        HRESULT hr = factory->CreateTextLayout(
             reinterpret_cast<const wchar_t*>(text),
             static_cast<UINT32>(text_length),
             formats[format_index],
-            static_cast<float>(width),
-            static_cast<float>(height),
+            width,
+            height,
             &layout);
         if (FAILED(hr)) return hr;
+        if (underlined) {
+            hr = layout->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(text_length)});
+            if (FAILED(hr)) { release(layout); return hr; }
+        }
         ++layout_creation_count;
-        auto inserted = layouts.emplace(
-            LayoutKey{
-                std::u16string(text, text + text_length),
-                width,
-                height,
-                static_cast<uint8_t>(format_index),
-            },
-            LayoutEntry{layout, {}, nullptr}).first;
-        layout_recency.push_back(&inserted->first);
-        auto recency = std::prev(layout_recency.end());
-        inserted->second.recency = recency;
+        try {
+            auto inserted = layouts.emplace(
+                LayoutKey{std::u16string(text, text + text_length), width, height, key.style},
+                LayoutEntry{layout, {}, nullptr}).first;
+            try {
+                layout_recency.push_back(&inserted->first);
+            } catch (...) {
+                layouts.erase(inserted);
+                throw;
+            }
+            inserted->second.recency = std::prev(layout_recency.end());
+        } catch (...) {
+            release(layout);
+            return E_OUTOFMEMORY;
+        }
         *result = layout;
         return S_OK;
     }
@@ -1819,6 +1834,7 @@ float4 ps(O i):SV_Target { if(i.p.x<i.clip.x||i.p.y<i.clip.y||i.p.x>=i.clip.z||i
         bool top_clipped = false,
         bool bottom_clipped = false) {
         row_cells.clear();
+        row_masks.clear();
         row_text.clear();
         row_origin_x = origin_x;
         row_top = top;
@@ -2228,7 +2244,8 @@ HRESULT ZigonautTextEngine::drawSegment(const RowSegment& segment) {
         &layout);
     if (FAILED(hr)) return hr;
 
-    const LayoutKeyView key{segment.text, width, height, static_cast<uint8_t>(format_index)};
+    const LayoutKeyView key{segment.text, static_cast<float>(width),
+        static_cast<float>(height), static_cast<uint8_t>(format_index)};
     auto cached_layout = layouts.find(key);
     if (cached_layout == layouts.end()) return E_UNEXPECTED;
     auto& cached_plan = cached_layout->second.plan;
@@ -2477,7 +2494,7 @@ HRESULT ZigonautTextEngine::endRow() {
                 const BuiltinKey key{cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,span,atlas_generation};
                 auto found = builtin_placements.find(key);
                 if (found == builtin_placements.end()) {
-                    if (cell.builtin_mask.empty() || !cell.builtin_width || !cell.builtin_height ||
+                    if (!cell.builtin_width || !cell.builtin_height ||
                         cell.builtin_stride < cell.builtin_width) { batched=false; break; }
                     GlyphAtlasAllocator::Rect slot{};
                     if (!atlas_allocator->reserve(cell.builtin_width,cell.builtin_height,slot)) {
@@ -2487,7 +2504,7 @@ HRESULT ZigonautTextEngine::endRow() {
                     const auto props=D2D1::BitmapProperties(D2D1::PixelFormat(
                         DXGI_FORMAT_A8_UNORM,D2D1_ALPHA_MODE_STRAIGHT),96,96);
                     HRESULT upload=atlas_context->CreateBitmap(D2D1::SizeU(cell.builtin_width,cell.builtin_height),
-                        cell.builtin_mask.data(),cell.builtin_stride,props,&mask);
+                        row_masks.data()+cell.builtin_mask_offset,cell.builtin_stride,props,&mask);
                     if (SUCCEEDED(upload)) upload=beginAtlasDraw();
                     if (SUCCEEDED(upload)) {
                         const auto destination=D2D1::RectF(static_cast<float>(slot.x),static_cast<float>(slot.y),
@@ -2516,7 +2533,8 @@ HRESULT ZigonautTextEngine::endRow() {
             for (uint32_t packed : item.columns) { start=std::min(start,startColumn(packed)); end=std::max(end,endColumn(packed)); }
             const uint32_t width = static_cast<uint32_t>(std::lround((end-start)*row_cell_width));
             const uint32_t height = static_cast<uint32_t>(std::lround(row_cell_height));
-            const LayoutKeyView key{item.text,width,height,static_cast<uint8_t>((item.bold?1:0)|(item.italic?2:0))};
+            const LayoutKeyView key{item.text,static_cast<float>(width),static_cast<float>(height),
+                static_cast<uint8_t>((item.bold?1:0)|(item.italic?2:0))};
             auto found = layouts.find(key);
             if (found == layouts.end() || !found->second.plan ||
                 !matchesNormalizedColumns(found->second.plan->columns,item.columns,start) ||
@@ -2603,7 +2621,7 @@ native_fallback:
                 ID2D1Bitmap* bitmap=nullptr;
                 const uint32_t span=cell.occupancy == ZIGONAUT_CELL_WIDE ? 2u : 1u;
                 hr=getBuiltinBitmap(cell.builtin_codepoint,cell.builtin_width,cell.builtin_height,
-                    span,cell.builtin_mask.data(),cell.builtin_stride,&bitmap);
+                    span,row_masks.data()+cell.builtin_mask_offset,cell.builtin_stride,&bitmap);
                 if (SUCCEEDED(hr)) {
                     brush->SetColor(color(cell.foreground));
                     const float left=row_origin_x+cell.column*row_cell_width;
@@ -3978,7 +3996,8 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
         reinterpret_cast<uintptr_t>(window));
     const uint32_t width = SUCCEEDED(hr) ? columns * engine->metrics.width : 1;
     const uint32_t height = SUCCEEDED(hr) ? engine->metrics.height : 1;
-    std::vector<uint8_t> builtin_mask(SUCCEEDED(hr) ? engine->metrics.width * height : 1, 255);
+    const uint32_t mask_stride = SUCCEEDED(hr) ? engine->metrics.width + 3 : 1;
+    std::vector<uint8_t> builtin_mask(mask_stride * height);
     const auto row = [&](bool spaces) -> HRESULT {
         engine->beginRow(0, 0, static_cast<float>(engine->metrics.width),
             static_cast<float>(engine->metrics.height));
@@ -3991,14 +4010,19 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
                 foreground, background, foreground, false, false, false, false, false, 0,
                 ZIGONAUT_CELL_NARROW);
             if (FAILED(draw)) return draw;
-            // Exercise procedural placement beside shaped segments. The repeated
-            // key proves one upload followed by warm placement hits without
-            // manufacturing a glyph id for U+2588.
+            // Distinct full/half masks and padded strides catch stale pointers
+            // and wrong offsets when deferred row storage grows. Reuse and
+            // poison the caller's buffer before endRow consumes its copies.
             if (!spaces && column % 4 == 1) {
-                const HRESULT builtin=zigonaut_text_engine_draw_builtin_cell(engine,0x2588,
-                    builtin_mask.data(),engine->metrics.width,height,engine->metrics.width,
+                const bool full = column % 8 == 1;
+                std::fill(builtin_mask.begin(), builtin_mask.end(), 0);
+                for (uint32_t y = 0; y < (full ? height : height / 2); ++y)
+                    std::fill_n(builtin_mask.data() + y * mask_stride, engine->metrics.width, 255);
+                const HRESULT builtin=zigonaut_text_engine_draw_builtin_cell(engine,full ? 0x2588 : 0x2580,
+                    builtin_mask.data(),engine->metrics.width,height,mask_stride,
                     static_cast<float>(column*engine->metrics.width),0,
                     static_cast<float>(engine->metrics.width),static_cast<float>(height),0x20ff20);
+                std::fill(builtin_mask.begin(), builtin_mask.end(), 0);
                 if (FAILED(builtin)) return builtin;
             }
         }
@@ -4033,6 +4057,15 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
                         if (red && r > g + 8 && r > b + 8) ++*red;
                         if (green && g > r + 8 && g > b + 8) ++*green;
                     }
+                    if (green) {
+                        for (uint32_t column = 1; column < columns; column += 4) {
+                            const uint32_t x = column * engine->metrics.width + engine->metrics.width / 2;
+                            const bool ink = column % 8 == 1 || y < height / 2;
+                            if (scan[x * 4] != (ink ? 0x20 : 0x18) ||
+                                scan[x * 4 + 1] != (ink ? 0xff : 0x18) ||
+                                scan[x * 4 + 2] != (ink ? 0x20 : 0x18)) value = E_FAIL;
+                        }
+                    }
                 }
                 engine->d3d_context->Unmap(staging, 0);
             }
@@ -4044,6 +4077,8 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height, background, TRUE, &rebuild);
     if (SUCCEEDED(hr)) hr = row(false); // Resolve plans through the native fallback.
     if (SUCCEEDED(hr)) hr = finish();
+    uint64_t native_changed = 0, native_green = 0;
+    if (SUCCEEDED(hr)) hr = inspect(&native_changed, nullptr, &native_green);
     if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height, background, TRUE, &rebuild);
     engine->benchmark = {}; engine->benchmark_active = SUCCEEDED(hr);
     if (SUCCEEDED(hr)) hr = row(false); // Populate and draw an atlas-only frame.
@@ -4076,7 +4111,30 @@ extern "C" HRESULT zigonaut_test_glyph_atlas_pixels(ZigonautGlyphAtlasPixelsTest
     result->second_placement_hits = engine->benchmark.atlas_placement_hits;
     result->second_uploads = engine->benchmark.atlas_uploads;
     result->second_rasterizations = engine->benchmark.atlas_rasterizations;
-    if (SUCCEEDED(hr)) hr = inspect(&result->second_changed_pixels, nullptr, nullptr);
+    if (SUCCEEDED(hr)) hr = inspect(&result->second_changed_pixels, nullptr, &native_green);
+
+    // Compare changing hint/IME text and caret positions against fresh layouts,
+    // including returning to an earlier text/size at a different position.
+    if (SUCCEEDED(hr)) hr = zigonaut_text_engine_begin_frame(engine, width, height, background, TRUE, &rebuild);
+    for (uint32_t index = 0; index < 3 && SUCCEEDED(hr); ++index) {
+        const char16_t* preedit = index == 1 ? u"WWW" : u"iW ";
+        const float max_width = index == 1 ? 63.75f : 63.25f;
+        IDWriteTextLayout* reference = nullptr;
+        hr = engine->factory->CreateTextLayout(reinterpret_cast<const wchar_t*>(preedit), 3,
+            engine->formats[0], max_width, 21.5f, &reference);
+        FLOAT x = 0, y = 0;
+        DWRITE_HIT_TEST_METRICS hit{};
+        if (SUCCEEDED(hr)) hr = reference->SetUnderline(TRUE, DWRITE_TEXT_RANGE{0, 3});
+        if (SUCCEEDED(hr)) hr = reference->HitTestTextPosition(index + 1, FALSE, &x, &y, &hit);
+        float caret_x = 0;
+        const float left = 1.25f + index;
+        if (SUCCEEDED(hr)) hr = zigonaut_text_engine_draw_preedit(engine,
+            reinterpret_cast<const uint16_t*>(preedit), 3, index + 1, left, 0.5f,
+            max_width, 21.5f, 0x20ff20, background, &caret_x);
+        if (SUCCEEDED(hr) && caret_x != left + x) hr = E_FAIL;
+        release(reference);
+    }
+    if (SUCCEEDED(hr)) hr = finish();
     zigonaut_text_engine_destroy(engine);
     DestroyWindow(window);
     return hr;
@@ -4330,12 +4388,15 @@ extern "C" HRESULT zigonaut_text_engine_draw_builtin_cell(
     if (engine->row_active) {
         if (engine->row_cells.empty()) return E_UNEXPECTED;
         auto& cell=engine->row_cells.back();
+        if (mask_height > SIZE_MAX / mask_stride) return E_OUTOFMEMORY;
+        const size_t offset = engine->row_masks.size();
         try {
-            cell.builtin_mask.assign(mask,
+            engine->row_masks.insert(engine->row_masks.end(), mask,
                 mask + static_cast<size_t>(mask_stride) * mask_height);
         } catch (...) {
             return E_OUTOFMEMORY;
         }
+        cell.builtin_mask_offset=offset;
         cell.kind=RowCell::Kind::builtin;
         cell.foreground=foreground;
         cell.builtin_codepoint=codepoint;
@@ -4474,15 +4535,12 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
     if (FAILED(pending)) return pending;
     engine->setTag(frame_command_preedit);
     IDWriteTextLayout* layout = nullptr;
-    auto hr = engine->factory->CreateTextLayout(reinterpret_cast<const wchar_t*>(text), text_length,
-        engine->formats[0], std::max(max_width, 1.0f), std::max(height, 1.0f), &layout);
+    auto hr = engine->layoutFor(reinterpret_cast<const char16_t*>(text), text_length,
+        std::max(max_width, 1.0f), std::max(height, 1.0f), 0, &layout, true);
     if (FAILED(hr)) return hr;
-    DWRITE_TEXT_RANGE all{0, text_length};
-    hr = layout->SetUnderline(TRUE, all);
-    if (FAILED(hr)) { release(layout); return hr; }
     DWRITE_TEXT_METRICS text_metrics{};
     hr = layout->GetMetrics(&text_metrics);
-    if (FAILED(hr)) { release(layout); return hr; }
+    if (FAILED(hr)) return hr;
     const auto preedit_rect = D2D1::RectF(left, top, left + max_width,
         top + std::max(text_metrics.height, height));
     engine->addDamage(engine->frame_damage, preedit_rect.left, preedit_rect.top,
@@ -4499,7 +4557,6 @@ extern "C" HRESULT zigonaut_text_engine_draw_preedit(ZigonautTextEngine* engine,
     FLOAT x = 0, y = 0; DWRITE_HIT_TEST_METRICS metrics{};
     hr = layout->HitTestTextPosition(std::min(caret, text_length), FALSE, &x, &y, &metrics);
     *caret_x = left + x;
-    release(layout);
     return hr;
 }
 
