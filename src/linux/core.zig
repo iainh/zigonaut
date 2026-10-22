@@ -95,6 +95,7 @@ extern fn zgtk_write(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_title(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_clipboard(?*anyopaque, [*]const u8, usize) void;
 extern fn zgtk_begin_frame(?*anyopaque, u32, f32, bool) void;
+extern fn zgtk_shift_scene(?*anyopaque, i32, u16, u32) bool;
 extern fn zgtk_draw_background(?*anyopaque, u16, u16, u16, u32) void;
 extern fn zgtk_draw_cell(?*anyopaque, u16, u16, u8, [*]const u8, usize, u32, u32, u32, u16) void;
 extern fn zgtk_draw_cursor(?*anyopaque, u16, u16, u8, u8, u32) void;
@@ -326,12 +327,12 @@ export fn zgtk_render(core: *Core) bool {
 }
 
 export fn zgtk_render_retained(core: *Core, force: bool) bool {
-    const previous_images = core.snapshot.image_generation;
     const had_images = core.snapshot.images.items.len != 0;
+    const previous_offset = core.viewport_offset;
     core.snapshot.capture(allocator, &core.terminal) catch return false;
     core.clear_scene = force or core.visual_dirty;
     core.visual_dirty = false;
-    var changed = core.clear_scene or previous_images != core.snapshot.image_generation;
+    var changed = core.clear_scene or core.snapshot.images_changed;
     for (core.snapshot.rows.items) |row| changed = changed or row.dirty;
     if (!changed) {
         // Update presentation without touching retained pixels, including images.
@@ -339,6 +340,20 @@ export fn zgtk_render_retained(core: *Core, force: bool) bool {
         return true;
     }
     core.clear_scene = core.clear_scene or had_images or core.snapshot.images.items.len != 0;
+    // Search/hover add host visuals absent from the shared row hashes. Keep
+    // their conservative replay path, as well as image and selection scenes.
+    const offset = if (core.terminal.scrollbar()) |state| state.offset else |_| previous_offset;
+    if (!core.clear_scene and !core.search.enabled and core.hover == null and
+        !core.terminal.hasSelection() and !core.terminal.render_held and offset != previous_offset)
+    {
+        const raw = @as(i128, previous_offset) - @as(i128, offset);
+        if (std.math.cast(i32, raw)) |delta| {
+            if (core.snapshot.canShift(delta) and zgtk_shift_scene(core.host, delta, core.terminal.columns, @intCast(core.snapshot.rows.items.len))) {
+                core.snapshot.replayShifted(core, delta);
+                return true;
+            }
+        }
+    }
     if (core.clear_scene) core.snapshot.replay(core) else core.snapshot.replayDirty(core);
     return true;
 }

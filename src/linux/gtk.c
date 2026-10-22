@@ -50,8 +50,10 @@ typedef struct {
     GdkEvent *key_event;
     PangoLayout *layout;
     PangoFontDescription *font;
+    GHashTable *text_layouts;
+    guint text_context_serial;
     TerminalCore *core;
-    cairo_t *cr; /* Borrowed only inside the drawing callback. */
+    cairo_t *cr; /* Owned with the retained scene surface. */
     cairo_surface_t *scene;
     int scene_width, scene_height, scene_scale;
     uint32_t background;
@@ -116,6 +118,33 @@ void zgtk_begin_frame(void *host, uint32_t background, float scroll_offset, bool
     }
 }
 
+bool zgtk_shift_scene(void *host, int32_t delta, uint16_t columns, uint32_t rows) {
+    Tab *tab = host;
+    int64_t scale = tab->scene_scale;
+    int64_t left = settings.padding * scale, top = settings.padding * scale;
+    int64_t width = columns * (int64_t)tab->cell_width * scale;
+    int64_t height = rows * (int64_t)tab->cell_height * scale;
+    int64_t shift = delta * (int64_t)tab->cell_height * scale;
+    int64_t amount = llabs(shift);
+    if (!tab->scene || !shift || amount >= height || left < 0 || top < 0 ||
+        left + width > cairo_image_surface_get_width(tab->scene) ||
+        top + height > cairo_image_surface_get_height(tab->scene)) return false;
+    cairo_surface_flush(tab->scene);
+    unsigned char *pixels = cairo_image_surface_get_data(tab->scene);
+    int stride = cairo_image_surface_get_stride(tab->scene);
+    int64_t source = top + (shift < 0 ? amount : 0);
+    int64_t destination = top + (shift > 0 ? amount : 0);
+    int64_t retained = height - amount;
+    /* Row order matters even though each individual copy permits overlap. */
+    for (int64_t i = 0; i < retained; i++) {
+        int64_t row = shift > 0 ? retained - i - 1 : i;
+        memmove(pixels + (destination + row) * stride + left * 4,
+                pixels + (source + row) * stride + left * 4, (size_t)width * 4);
+    }
+    cairo_surface_mark_dirty_rectangle(tab->scene, (int)left, (int)top, (int)width, (int)height);
+    return true;
+}
+
 void zgtk_draw_background(void *host, uint16_t x, uint16_t y, uint16_t columns,
                           uint32_t background) {
     Tab *tab = host;
@@ -123,6 +152,34 @@ void zgtk_draw_background(void *host, uint16_t x, uint16_t y, uint16_t columns,
     cairo_rectangle(tab->cr, settings.padding + x * tab->cell_width,
         settings.padding + y * tab->cell_height, columns * tab->cell_width, tab->cell_height);
     cairo_fill(tab->cr);
+}
+
+static PangoLayout *cell_layout(Tab *tab, const char *text, size_t length, uint16_t flags) {
+    /* The core encodes at most 16 Unicode scalars per cell. Colours and
+     * decorations do not affect shaping, so they deliberately stay out. */
+    char key[66];
+    g_assert(length <= 64);
+    key[0] = '0' + (flags & 3);
+    memcpy(key + 1, text, length);
+    key[length + 1] = '\0';
+    PangoContext *context = pango_layout_get_context(tab->layout);
+    guint serial = pango_context_get_serial(context);
+    if (serial != tab->text_context_serial) {
+        g_hash_table_remove_all(tab->text_layouts);
+        tab->text_context_serial = serial;
+    }
+    PangoLayout *layout = g_hash_table_lookup(tab->text_layouts, key);
+    if (layout) return layout;
+    /* Bound retained shaping resources even for streams of unique graphemes. */
+    if (g_hash_table_size(tab->text_layouts) >= 1024) g_hash_table_remove_all(tab->text_layouts);
+    layout = pango_layout_new(context);
+    pango_layout_set_single_paragraph_mode(layout, TRUE);
+    pango_font_description_set_weight(tab->font, flags & 1 ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
+    pango_font_description_set_style(tab->font, flags & 2 ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
+    pango_layout_set_font_description(layout, tab->font);
+    pango_layout_set_text(layout, text, (int)length);
+    g_hash_table_insert(tab->text_layouts, g_strdup(key), layout);
+    return layout;
 }
 
 void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
@@ -141,13 +198,9 @@ void zgtk_draw_cell(void *host, uint16_t x, uint16_t y, uint8_t columns,
         cairo_paint(cr);
     }
     if (length) {
-        pango_font_description_set_weight(tab->font, flags & 1 ? PANGO_WEIGHT_BOLD : PANGO_WEIGHT_NORMAL);
-        pango_font_description_set_style(tab->font, flags & 2 ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
-        pango_layout_set_font_description(tab->layout, tab->font);
-        pango_layout_set_text(tab->layout, text, (int)length);
         colour(cr, (flags & 256) && !(flags & 32) ? 0x141414 : foreground, flags & 16 ? 0.5 : 1);
         cairo_move_to(cr, left, top);
-        pango_cairo_show_layout(cr, tab->layout);
+        pango_cairo_show_layout(cr, cell_layout(tab, text, length, flags));
     }
     colour(cr, underline, 1);
     if (flags & 4) cairo_rectangle(cr, left, top + tab->cell_height - 2, width, 1);
@@ -314,9 +367,11 @@ static void destroy_tab(gpointer data) {
     g_object_unref(tab->clipboard_read);
     zgtk_destroy(tab->core);
     zgtk_images_clear(&tab->images);
+    if (tab->cr) cairo_destroy(tab->cr);
     if (tab->scene) cairo_surface_destroy(tab->scene);
     g_byte_array_unref(tab->pending);
     g_object_unref(tab->im);
+    g_hash_table_unref(tab->text_layouts);
     g_object_unref(tab->layout);
     pango_font_description_free(tab->font);
     g_free(tab->title);
@@ -422,17 +477,16 @@ static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpoin
     gboolean force = !tab->scene || tab->scene_width != width ||
         tab->scene_height != scene_height || tab->scene_scale != scale;
     if (force) {
+        if (tab->cr) cairo_destroy(tab->cr);
         if (tab->scene) cairo_surface_destroy(tab->scene);
         tab->scene = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width * scale, scene_height * scale);
         cairo_surface_set_device_scale(tab->scene, scale, scale);
+        tab->cr = cairo_create(tab->scene);
         tab->scene_width = width;
         tab->scene_height = scene_height;
         tab->scene_scale = scale;
     }
-    tab->cr = cairo_create(tab->scene);
     if (!zgtk_render_retained(tab->core, force)) g_warning("Unable to render terminal");
-    cairo_destroy(tab->cr);
-    tab->cr = NULL;
     colour(cr, tab->background, 1);
     cairo_paint(cr);
     cairo_save(cr);
@@ -455,7 +509,6 @@ static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpoin
         cairo_rectangle(cr, 1, 1, width - 2, height - 2);
         cairo_stroke(cr);
     }
-    tab->cr = NULL;
 }
 
 static uint16_t modifiers(GdkModifierType state) {
@@ -493,6 +546,7 @@ static void paste(Tab *tab) {
 
 static void set_font(Tab *tab, int size) {
     clear_hover(tab);
+    g_hash_table_remove_all(tab->text_layouts);
     tab->font_size = CLAMP(size, 6, 40);
     pango_font_description_set_size(tab->font, tab->font_size * PANGO_SCALE);
     pango_font_description_set_weight(tab->font, PANGO_WEIGHT_NORMAL);
@@ -1035,6 +1089,7 @@ static Tab *new_pane(Window *window, Layout *owner, uint64_t id, AdwTabPage *pag
     g_signal_connect(tab->im, "commit", G_CALLBACK(commit), tab);
     tab->layout = gtk_widget_create_pango_layout(tab->area, NULL);
     pango_layout_set_single_paragraph_mode(tab->layout, TRUE);
+    tab->text_layouts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
     tab->font = pango_font_description_new();
     tab->core = zgtk_create(tab);
     if (!tab->core) g_error("Unable to initialize terminal engine");

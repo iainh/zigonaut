@@ -9,6 +9,7 @@ const Capture = struct {
     clipboard: std.Io.Writer.Allocating = .init(std.testing.allocator),
     title: std.Io.Writer.Allocating = .init(std.testing.allocator),
     first_row: [80]u8 = @splat(' '),
+    grid: [64][80]u8 = @splat(@splat(' ')),
     wide_columns: u8 = 0,
     red_cell: bool = false,
     highlighted: usize = 0,
@@ -62,9 +63,21 @@ export fn zgtk_draw_background(host: ?*anyopaque, _: u16, _: u16, columns: u16, 
     capture(host).background_spans += 1;
     capture(host).background_columns += columns;
 }
+export fn zgtk_shift_scene(host: ?*anyopaque, delta: i32, columns: u16, rows: u32) bool {
+    const state = capture(host);
+    if (columns > 80 or rows > 64) return false;
+    for (0..rows) |index| {
+        const row = if (delta > 0) rows - index - 1 else index;
+        const source = @as(i64, @intCast(row)) - delta;
+        if (source >= 0 and source < rows)
+            @memcpy(state.grid[row][0..columns], state.grid[@intCast(source)][0..columns]);
+    }
+    return true;
+}
 export fn zgtk_draw_cell(host: ?*anyopaque, x: u16, y: u16, columns: u8, text: [*]const u8, length: usize, foreground: u32, _: u32, _: u32, flags: u16) void {
     const state = capture(host);
     state.drawn_cells += 1;
+    if (y < 64 and x < 80) state.grid[y][x] = if (length == 1) text[0] else ' ';
     if (y == 0 and x < 80 and length == 1) state.first_row[x] = text[0];
     if (length == 3 and std.mem.eql(u8, text[0..length], "界")) state.wide_columns = columns;
     if (length == 1 and text[0] == 'R' and foreground == 0xff0000) state.red_cell = true;
@@ -495,6 +508,16 @@ test "retained GTK fractional scroll presents without redrawing unchanged cells"
     try std.testing.expect(c.zgtk_render_retained(core, false));
     try std.testing.expectEqual(@as(f32, 0.125), state.scroll_offset);
     try std.testing.expect(state.drawn_cells > 0);
+    try std.testing.expect(state.drawn_cells < 48);
+    var shifted = state.grid;
+    try std.testing.expect(c.zgtk_render_retained(core, true));
+    try std.testing.expectEqualDeep(shifted, state.grid);
+    // Reverse the shift as well; stale rows can look correct in one direction.
+    c.zgtk_scroll(core, -1);
+    try std.testing.expect(c.zgtk_render_retained(core, false));
+    shifted = state.grid;
+    try std.testing.expect(c.zgtk_render_retained(core, true));
+    try std.testing.expectEqualDeep(shifted, state.grid);
     c.zgtk_scroll(core, 100);
     try std.testing.expect(c.zgtk_render_retained(core, false));
     try std.testing.expectEqual(@as(f32, 0), state.scroll_offset);
