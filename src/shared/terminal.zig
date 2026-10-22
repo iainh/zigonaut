@@ -310,6 +310,8 @@ pub const Terminal = struct {
         rows: std.ArrayList(Row) = .empty,
         images: std.ArrayList(OwnedImage) = .empty,
         placements: std.ArrayList(Placement) = .empty,
+        previous_placements: std.ArrayList(Placement) = .empty,
+        virtual_placements: std.ArrayList(VirtualPlacement) = .empty,
         row_hashes: std.ArrayList(u64) = .empty,
         previous_row_hashes: std.ArrayList(u64) = .empty,
         previous_selection_ranges: std.ArrayList(?SelectionRange) = .empty,
@@ -322,7 +324,8 @@ pub const Terminal = struct {
             generation: u64,
             width: u32,
             height: u32,
-            pixels: []u8,
+            pixels: []const u8,
+            used: bool = false,
         };
 
         const Placement = struct {
@@ -496,6 +499,8 @@ pub const Terminal = struct {
             self.clearImages(allocator);
             self.images.deinit(allocator);
             self.placements.deinit(allocator);
+            self.previous_placements.deinit(allocator);
+            self.virtual_placements.deinit(allocator);
             self.row_hashes.deinit(allocator);
             self.previous_row_hashes.deinit(allocator);
             self.previous_selection_ranges.deinit(allocator);
@@ -658,29 +663,69 @@ pub const Terminal = struct {
             if (self.image_generation == terminal.image_generation and self.images_held == terminal.render_held) return;
             self.image_generation = null;
             try self.captureImagesUncached(allocator, terminal);
-            self.images_changed = true;
+            // Keep pixel ownership independent of placement invalidation. Text
+            // output can move an image without changing its content.
+            var index = self.images.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (self.images.items[index].used) continue;
+                allocator.free(self.images.orderedRemove(index).pixels);
+                for (self.placements.items) |*placement| {
+                    if (placement.image_index > index) placement.image_index -= 1;
+                }
+                self.images_changed = true;
+            }
+            if (self.placements.items.len != self.previous_placements.items.len) {
+                self.images_changed = true;
+            } else for (self.placements.items, self.previous_placements.items) |current, previous| {
+                if (!std.meta.eql(current, previous)) {
+                    self.images_changed = true;
+                    break;
+                }
+            }
             self.image_generation = terminal.image_generation;
             self.images_held = terminal.render_held;
         }
 
+        fn retainImage(self: *RenderSnapshot, allocator: std.mem.Allocator, source: OwnedImage) !usize {
+            for (self.images.items, 0..) |*image, index| {
+                if (image.image_id != source.image_id) continue;
+                if (image.generation != source.generation or image.width != source.width or image.height != source.height) {
+                    const pixels = try allocator.dupe(u8, source.pixels);
+                    allocator.free(image.pixels);
+                    image.* = source;
+                    image.pixels = pixels;
+                    self.images_changed = true;
+                }
+                image.used = true;
+                return index;
+            }
+            var image = source;
+            image.pixels = try allocator.dupe(u8, source.pixels);
+            errdefer allocator.free(image.pixels);
+            image.used = true;
+            try self.images.append(allocator, image);
+            self.images_changed = true;
+            return self.images.items.len - 1;
+        }
+
         fn captureImagesUncached(self: *RenderSnapshot, allocator: std.mem.Allocator, terminal: *Terminal) !void {
-            self.clearImages(allocator);
+            for (self.images.items) |*image| image.used = false;
+            self.previous_placements.clearRetainingCapacity();
+            std.mem.swap(std.ArrayList(Placement), &self.placements, &self.previous_placements);
+            self.virtual_placements.clearRetainingCapacity();
             errdefer self.clearImages(allocator);
             if (terminal.render_held) {
                 // Pixels and placement geometry must come from the same
                 // boundary as the text, not the live, partially drawn screen.
                 const held = &terminal.held_snapshot;
-                try self.images.ensureTotalCapacity(allocator, held.images.items.len);
-                for (held.images.items) |image| {
-                    var owned = image;
-                    owned.pixels = try allocator.dupe(u8, image.pixels);
-                    self.images.appendAssumeCapacity(owned);
+                for (held.placements.items) |placement| {
+                    var owned = placement;
+                    owned.image_index = try self.retainImage(allocator, held.images.items[placement.image_index]);
+                    try self.placements.append(allocator, owned);
                 }
-                try self.placements.appendSlice(allocator, held.placements.items);
                 return;
             }
-            var virtual_placements: std.ArrayList(VirtualPlacement) = .empty;
-            defer virtual_placements.deinit(allocator);
             var graphics: vt.GhosttyKittyGraphics = null;
             if (vt.ghostty_terminal_get(terminal.terminal, vt.GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, @ptrCast(&graphics)) != vt.GHOSTTY_SUCCESS or graphics == null) return;
             var iterator: vt.GhosttyKittyGraphicsPlacementIterator = null;
@@ -722,32 +767,18 @@ pub const Terminal = struct {
                 if (!virtual and !info.viewport_visible and
                     !(terminal.fractional_scrolling and info.viewport_row == terminal.rows)) continue;
                 if (info.source_x > width or info.source_y > height or info.source_width > width - info.source_x or info.source_height > height - info.source_y) continue;
-                var image_index: ?usize = null;
-                for (self.images.items, 0..) |image, index| {
-                    if (image.image_id == image_id) {
-                        image_index = index;
-                        break;
-                    }
-                }
-                if (image_index == null) {
-                    const pixels = try allocator.dupe(u8, data_ptr[0..data_len]);
-                    self.images.append(allocator, .{
-                        .image_id = image_id,
-                        .generation = generation,
-                        .width = width,
-                        .height = height,
-                        .pixels = pixels,
-                    }) catch |err| {
-                        allocator.free(pixels);
-                        return err;
-                    };
-                    image_index = self.images.items.len - 1;
-                }
+                const image_index = try self.retainImage(allocator, .{
+                    .image_id = image_id,
+                    .generation = generation,
+                    .width = width,
+                    .height = height,
+                    .pixels = data_ptr[0..data_len],
+                });
                 if (virtual) {
                     var placement_id: u32 = 0;
                     try check(vt.ghostty_kitty_graphics_placement_get(iterator, vt.GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID, &placement_id));
-                    try virtual_placements.append(allocator, .{
-                        .image_index = image_index.?,
+                    try self.virtual_placements.append(allocator, .{
+                        .image_index = image_index,
                         .image_id = image_id,
                         .placement_id = placement_id,
                         .source_x = info.source_x,
@@ -761,7 +792,7 @@ pub const Terminal = struct {
                     continue;
                 }
                 try self.placements.append(allocator, .{
-                    .image_index = image_index.?,
+                    .image_index = image_index,
                     .image_id = image_id,
                     .source_x = info.source_x,
                     .source_y = info.source_y,
@@ -776,7 +807,7 @@ pub const Terminal = struct {
                     .z = z,
                 });
             }
-            try self.captureVirtualPlacements(allocator, terminal, virtual_placements.items);
+            try self.captureVirtualPlacements(allocator, terminal, self.virtual_placements.items);
             // libghostty's placement iterator is hash ordered, which is not a
             // stable compositing order. Keep equal-z images deterministic too.
             sortPlacements(self.placements.items);
@@ -4310,6 +4341,41 @@ test "Kitty placements sort by z then image ID" {
     try std.testing.expectEqual(@as(i32, 1), placements[0].z);
     try std.testing.expectEqual(@as(u32, 3), placements[1].image_id);
     try std.testing.expectEqual(@as(u32, 4), placements[2].image_id);
+}
+
+test "image snapshots reuse content across text output and refresh replacement, movement and deletion" {
+    const allocator = std.testing.allocator;
+    var terminal = try Terminal.init(12, 4, theme.rasmus);
+    defer terminal.deinit();
+    try terminal.resize(12, 4, 8, 16);
+    terminal.feed("\x1b_Gf=32,s=1,v=1,a=T,i=1,c=1,r=1;/wAA/w==\x1b\\");
+    var snapshot = Terminal.RenderSnapshot{};
+    defer snapshot.deinit(allocator);
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expect(snapshot.images_changed);
+    // Warm both retained placement buffers before denying further allocation.
+    terminal.feed("\x1b[4;1HX");
+    try snapshot.capture(allocator, &terminal);
+    for (0..8) |iteration| {
+        terminal.feed(if (iteration % 2 == 0) "\rY" else "\rX");
+        try snapshot.capture(std.testing.failing_allocator, &terminal);
+        try std.testing.expect(!snapshot.images_changed);
+        try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, snapshot.images.items[0].pixels);
+    }
+    terminal.feed("\x1b_Gf=32,s=1,v=1,a=T,i=1,c=1,r=1;AP8A/w==\x1b\\");
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expect(snapshot.images_changed);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, snapshot.images.items[0].pixels);
+    const previous_row = snapshot.placements.items[snapshot.placements.items.len - 1].viewport_row;
+    terminal.feed("\r\n");
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expect(snapshot.images_changed);
+    try std.testing.expectEqual(previous_row - 1, snapshot.placements.items[snapshot.placements.items.len - 1].viewport_row);
+    terminal.feed("\x1b_Ga=d,d=I,i=1\x1b\\");
+    try snapshot.capture(allocator, &terminal);
+    try std.testing.expect(snapshot.images_changed);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.images.items.len);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.placements.items.len);
 }
 
 test "render snapshots resolve Kitty Unicode placeholders" {
