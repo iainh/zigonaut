@@ -2,6 +2,19 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [0.12.1] - 2026-10-22
+
+### Changed
+
+- Reused unchanged Kitty image pixels across snapshot updates on all platforms.
+- Reduced Linux text-layout allocations and reused retained pixels when
+  scrolling, repainting only exposed or changed rows.
+- Cached macOS theme palettes and retained text placements and decorations by
+  row. Reused rendering scratch buffers and uploaded shaped text directly to Metal.
+- Reused Windows box-drawing mask storage and cached link-hint and IME preedit
+  text layouts.
+- Animated the Windows working-status indicator using a native progress ring.
+
 ## [0.12.0] - 2026-10-20
 
 ### Added
