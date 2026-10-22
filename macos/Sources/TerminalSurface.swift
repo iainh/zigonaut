@@ -1239,8 +1239,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
     guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return disableMetal() }
     // Paint stationary padding first, then translate only the clipped grid.
-    var sampling: [Float] = [Float(geometry.height) / Float(pixelHeight), 0]
-    encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
+    var sampling = SIMD2<Float>(Float(geometry.height) / Float(pixelHeight), 0)
+    encoder.setVertexBytes(&sampling, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentTexture(texture, index: 0)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -1250,7 +1250,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       encoder.setScissorRect(MTLScissorRect(x: 0, y: paddingTop,
         width: geometry.width, height: geometry.height - paddingTop))
       sampling[1] = Float(lineHeight * scale) / Float(pixelHeight)
-      encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
+      encoder.setVertexBytes(&sampling, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
     let intersection = viewportRect.intersection(bounds)
@@ -1261,7 +1261,7 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       width: min(geometry.width - clipX, max(1, Int(clip.width * scale))),
       height: min(geometry.height - clipY, max(1, Int(clip.height * scale)))))
     sampling[1] = Float(scrollTranslation * scale) / Float(pixelHeight)
-    encoder.setVertexBytes(&sampling, length: MemoryLayout<Float>.stride * 2, index: 1)
+    encoder.setVertexBytes(&sampling, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     drawMetalText(textPlacements, encoder: encoder, pipeline: glyphPipeline, scale: scale)
     if hasDecorations {
@@ -1463,7 +1463,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
       var vertices = quadVertices(destination: destination,
         source: CGRect(x: 0, y: 0, width: cached.texture.width, height: cached.texture.height),
         textureWidth: CGFloat(cached.texture.width), textureHeight: CGFloat(cached.texture.height))
-      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      withUnsafeBytes(of: &vertices) { bytes in
+        encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+      }
       encoder.setFragmentTexture(cached.texture, index: 0)
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
@@ -1547,7 +1549,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
   }
 
   private func quadVertices(destination: CGRect, source: CGRect,
-    textureWidth: CGFloat = 1, textureHeight: CGFloat = 1) -> [Float]
+    textureWidth: CGFloat = 1, textureHeight: CGFloat = 1
+  ) -> (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)
   {
     let left = Float(destination.minX / bounds.width * 2 - 1)
     let right = Float(destination.maxX / bounds.width * 2 - 1)
@@ -1557,8 +1560,8 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let u1 = Float(source.maxX / textureWidth)
     let v0 = Float(source.minY / textureHeight)
     let v1 = Float(source.maxY / textureHeight)
-    return [left, bottom, u0, v1, right, bottom, u1, v1,
-      left, top, u0, v0, right, top, u1, v0]
+    return (SIMD4(left, bottom, u0, v1), SIMD4(right, bottom, u1, v1),
+      SIMD4(left, top, u0, v0), SIMD4(right, top, u1, v0))
   }
 
   private func drawMetalCursor(_ frame: TerminalRenderFrame, encoder: MTLRenderCommandEncoder,
@@ -1568,29 +1571,28 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     let rect = CGRect(x: originX + CGFloat(frame.cursorX) * cellWidth,
       y: originY + CGFloat(frame.cursorY) * lineHeight,
       width: cellWidth * CGFloat(max(frame.cursorColumns, 1)), height: lineHeight)
-    let rectangles: [CGRect]
-    switch frame.cursorStyle {
-    case 0: rectangles = [CGRect(x: rect.minX, y: rect.minY, width: 2, height: rect.height)]
-    case 2: rectangles = [CGRect(x: rect.minX, y: rect.maxY - 2, width: rect.width, height: 2)]
-    case 3:
-      rectangles = [
-        CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 1),
-        CGRect(x: rect.minX, y: rect.maxY - 1, width: rect.width, height: 1),
-        CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height),
-        CGRect(x: rect.maxX - 1, y: rect.minY, width: 1, height: rect.height),
-      ]
-    default: rectangles = [rect]
-    }
     var difference: UInt32 = frame.cursorStyle == 1 ? 1 : 0
     var cursor = SIMD4<Float>(Float((frame.cursor >> 16) & 0xff) / 255,
       Float((frame.cursor >> 8) & 0xff) / 255, Float(frame.cursor & 0xff) / 255, 1)
     encoder.setRenderPipelineState(pipeline)
     encoder.setFragmentBytes(&difference, length: MemoryLayout<UInt32>.stride, index: 0)
     encoder.setFragmentBytes(&cursor, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
-    for rectangle in rectangles {
+    func draw(_ rectangle: CGRect) {
       var vertices = quadVertices(destination: rectangle, source: .zero)
-      encoder.setVertexBytes(&vertices, length: MemoryLayout<Float>.stride * vertices.count, index: 0)
+      withUnsafeBytes(of: &vertices) { bytes in
+        encoder.setVertexBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+      }
       encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+    switch frame.cursorStyle {
+    case 0: draw(CGRect(x: rect.minX, y: rect.minY, width: 2, height: rect.height))
+    case 2: draw(CGRect(x: rect.minX, y: rect.maxY - 2, width: rect.width, height: 2))
+    case 3:
+      draw(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: 1))
+      draw(CGRect(x: rect.minX, y: rect.maxY - 1, width: rect.width, height: 1))
+      draw(CGRect(x: rect.minX, y: rect.minY, width: 1, height: rect.height))
+      draw(CGRect(x: rect.maxX - 1, y: rect.minY, width: 1, height: rect.height))
+    default: draw(rect)
     }
   }
 
@@ -1623,12 +1625,9 @@ final class TerminalSurfaceView: NSView, @preconcurrency NSTextInputClient, NSMe
     guard command.status == .completed else { return false }
 
     let byteCount = retainedHeight * bitmap.bytesPerRow
-    let retained = Data(bytes: data.advanced(by: sourceY * bitmap.bytesPerRow), count: byteCount)
-    retained.withUnsafeBytes { bytes in
-      guard let source = bytes.baseAddress else { return }
-      data.advanced(by: destinationY * bitmap.bytesPerRow).copyMemory(
-        from: source, byteCount: byteCount)
-    }
+    // Swift's raw copyMemory has memmove semantics, including overlapping rows.
+    data.advanced(by: destinationY * bitmap.bytesPerRow).copyMemory(
+      from: data.advanced(by: sourceY * bitmap.bytesPerRow), byteCount: byteCount)
     return true
   }
 
