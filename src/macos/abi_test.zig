@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const abi = @cImport({
-    @cInclude("zigonaut_core.h");
-});
+const abi = @import("public-abi");
 
 const symbols = [_][:0]const u8{
     "zigonaut_panes_create",

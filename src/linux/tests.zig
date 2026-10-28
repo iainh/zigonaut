@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("images.h"));
+const c = @import("linux-images");
 comptime {
     _ = @import("core.zig");
 }
@@ -342,9 +342,9 @@ test "Linux search uses smart case, highlights UTF-8 cells, and restores the vie
     try std.testing.expectEqual(@as(usize, 0), state.active_highlighted + state.highlighted);
 
     try std.testing.expectEqual(@as(u32, 0), (try search(core, "absent")).matches);
-    const boundary = [_]u8{'x'} ** 256;
+    const boundary: [256]u8 = @splat('x');
     _ = try search(core, &boundary);
-    const oversized = [_]u8{'x'} ** 257;
+    const oversized: [257]u8 = @splat('x');
     try std.testing.expect(!c.zgtk_search_set(core, &oversized, oversized.len));
     try std.testing.expect(c.zgtk_search_tick(core).failed);
     try std.testing.expect(!c.zgtk_search_set(core, "\xff", 1));

@@ -1,11 +1,6 @@
 const std = @import("std");
 const shared_image = @import("shared").image;
-pub const c = @cImport({
-    @cInclude("images.h");
-    @cDefine("GHOSTTY_STATIC", "1");
-    @cInclude("ghostty/vt.h");
-    @cInclude("png.h");
-});
+pub const c = @import("linux-images");
 
 const image_limit = 32 * 1024 * 1024;
 

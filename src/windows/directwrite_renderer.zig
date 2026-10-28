@@ -10,10 +10,7 @@ comptime {
 }
 const win32 = @import("win32.zig");
 const native = win32.c;
-const vt = @cImport({
-    @cDefine("GHOSTTY_STATIC", "1");
-    @cInclude("ghostty/vt.h");
-});
+const vt = @import("ghostty-vt");
 
 comptime {
     _ = @import("glyph_atlas_allocator.zig");
@@ -88,7 +85,7 @@ pub const Engine = struct {
     handle: *native.ZigonautTextEngine,
     // Separate one- and two-cell entries: alternating spans must not evict the
     // entire procedural cache every cell/frame.
-    builtin_masks: [320]?[]u8 = [_]?[]u8{null} ** 320,
+    builtin_masks: [320]?[]u8 = @splat(null),
     builtin_metrics: Metrics = .{ .width = 0, .height = 0, .baseline = 0, .builtin_thickness = 0 },
 
     pub const Metrics = struct {
@@ -101,7 +98,7 @@ pub const Engine = struct {
     pub fn init(font_family: []const u8, symbol_fallback_family: []const u8, font_size: u32, font_weight: u16, intense_font_weight: u16, line_height_percent: u16, dpi: u32, antialiasing: u32) !Engine {
         if (antialiasing > 1) return error.InvalidTextAntialiasing;
         if (line_height_percent < 75 or line_height_percent > 200) return error.InvalidLineHeight;
-        var wide_name = [_]u16{0} ** 128;
+        var wide_name: [128]u16 = @splat(0);
         _ = @import("std").unicode.utf8ToUtf16Le(
             wide_name[0 .. wide_name.len - 1],
             font_family,
@@ -120,7 +117,7 @@ pub const Engine = struct {
         if (result < 0 or handle == null) return error.DirectWriteInitializationFailed;
         errdefer native.zigonaut_text_engine_destroy(handle.?);
         if (symbol_fallback_family.len != 0) {
-            var wide_fallback = [_]u16{0} ** 128;
+            var wide_fallback: [128]u16 = @splat(0);
             _ = std.unicode.utf8ToUtf16Le(
                 wide_fallback[0 .. wide_fallback.len - 1],
                 symbol_fallback_family,

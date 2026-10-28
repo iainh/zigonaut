@@ -5,10 +5,7 @@ const theme = @import("theme.zig");
 const CommandNotifications = @import("command_notifications.zig").State;
 const SearchMatch = @import("search.zig").Match;
 
-const vt = @cImport({
-    @cDefine("GHOSTTY_STATIC", "1");
-    @cInclude("ghostty/vt.h");
-});
+const vt = @import("ghostty-vt");
 
 // Bound both encoded and decoded images. Terminal output is untrusted and can
 // otherwise make the process retain an unbounded amount of image data.
@@ -98,7 +95,7 @@ pub const Terminal = struct {
     program_status: @import("program_status.zig").Store = .{},
     visible: bool = true,
     focused: bool = false,
-    scrollback_keys: [4]bool = .{false} ** 4,
+    scrollback_keys: [4]bool = @splat(false),
     columns: u16,
     rows: u16,
     intense_text_style: IntenseTextStyle = .all,
@@ -403,7 +400,7 @@ pub const Terminal = struct {
                         .powerline = cell.powerline,
                     },
                     .attributes = .{
-                        .occupancy = @intCast(@intFromEnum(cell.occupancy)),
+                        .occupancy = @intCast(@backingInt(cell.occupancy)),
                         .bold = cell.bold,
                         .italic = cell.italic,
                         .faint = cell.faint,
@@ -424,7 +421,7 @@ pub const Terminal = struct {
                 return .{
                     .x = x,
                     .y = y,
-                    .occupancy = @enumFromInt(self.attributes.occupancy),
+                    .occupancy = @fromBackingInt(@intCast(self.attributes.occupancy)),
                     .codepoints = if (stored_codepoints.len > 0 and stored_codepoints[0] == kitty_unicode_placeholder)
                         stored_codepoints[0..0]
                     else
@@ -1406,7 +1403,7 @@ pub const Terminal = struct {
         }
         var shape: vt.GhosttyMouseShape = undefined;
         if (vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_MOUSE_SHAPE, &shape) == vt.GHOSTTY_SUCCESS)
-            self.mouse_shape = @enumFromInt(shape);
+            self.mouse_shape = @fromBackingInt(@intCast(shape));
         if (!focus_reporting and self.focusReporting()) {
             var buffer: [3]u8 = undefined;
             const encoded = self.encodeFocusReport(self.focused, &buffer);
@@ -1443,7 +1440,7 @@ pub const Terminal = struct {
     }
 
     pub fn setFocused(self: *Terminal, focused: bool) void {
-        if (!focused) self.scrollback_keys = .{false} ** 4;
+        if (!focused) self.scrollback_keys = @splat(false);
         if (self.focused == focused) return;
         if (focused) self.program_status.acknowledge();
         self.focused = focused;
@@ -2945,7 +2942,7 @@ fn programStatus(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const
     if (report == null or report[0].size < @sizeOf(vt.GhosttyTerminalProgramStatus)) return;
     const value = report[0];
     if (value.state > vt.GHOSTTY_PROGRAM_STATUS_STATE_CLEAR) return;
-    self.program_status.put(@enumFromInt(value.state), @intCast(value.kind), value.progress, statusString(value.id), statusString(value.app), statusString(value.title), statusString(value.message));
+    self.program_status.put(@fromBackingInt(@intCast(value.state)), @intCast(value.kind), value.progress, statusString(value.id), statusString(value.app), statusString(value.title), statusString(value.message));
 }
 
 fn statusString(value: vt.GhosttyString) []const u8 {
@@ -3067,7 +3064,7 @@ test "OSC 133 completion alerts survive screen changes and consume command lifet
     for (&terminals, &listeners, 0..) |*terminal, *listener, index| {
         terminal.* = try Terminal.init(20, 3, theme.rasmus);
         initialized += 1;
-        const case: Case = @enumFromInt(index);
+        const case: Case = @fromBackingInt(@intCast(index));
         if (case == .reset) try terminal.setReset(Listener.onReset, listener);
         // Both features must survive either callback-registration order.
         if (index % 2 == 0) try terminal.enableProgramStatus();
@@ -3092,7 +3089,7 @@ test "OSC 133 completion alerts survive screen changes and consume command lifet
     // boundaries are covered by the deterministic policy tests.
     try std.Io.sleep(std.testing.io, .fromMilliseconds(5010), .awake);
     for (&terminals, &listeners, 0..) |*terminal, *listener, index| {
-        const case: Case = @enumFromInt(index);
+        const case: Case = @fromBackingInt(@intCast(index));
         terminal.setFocused(case == .focused_at_end);
         terminal.feed(if (case == .no_status) "\x1b]133;D\x07" else "\x1b]133;D;-7\x07");
         terminal.setFocused(false);
@@ -4859,7 +4856,7 @@ test "selection interval changes invalidate only immediate row neighbours" {
 
 const ShiftReplayTestRenderer = struct {
     rows: [8]u16 = undefined,
-    row_checksums: [8]u64 = [_]u64{0} ** 8,
+    row_checksums: [8]u64 = @splat(0),
     row_count: usize = 0,
 
     pub fn beginFrame(_: *ShiftReplayTestRenderer, _: Terminal.Frame) void {}

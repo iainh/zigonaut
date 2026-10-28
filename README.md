@@ -118,7 +118,7 @@ Drag to select and copy text automatically. Hold `Alt` for rectangular selection
 
 ### Linux (GTK 4)
 
-The Linux dependency baseline is Debian 13 (trixie): Zig 0.16.0, GTK 4.18+,
+The Linux dependency baseline is Debian 13 (trixie): Zig 0.17.0, GTK 4.18+,
 libadwaita 1.7+, GLib 2.84+ and libpng 1.6.48+ development libraries,
 `pkg-config`, and a Linux desktop session. Other distributions need equivalent
 or newer libraries; Debian 12 and Ubuntu 24.04's stock libraries are too old.
@@ -304,7 +304,7 @@ PTY I/O is nonblocking and event-driven on the GTK main loop. Shells start via
 ### Requirements
 
 - Windows 10 version 1809 or later, or Windows 11
-- [Zig 0.16.0](https://ziglang.org/download/)
+- [Zig 0.17.0](https://ziglang.org/download/)
 - Visual Studio 2022 with the **Desktop development with C++** workload
 - Windows App Runtime 2.3.1 for the target architecture
 

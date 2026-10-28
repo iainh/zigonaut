@@ -359,8 +359,8 @@ pub const Tree = struct {
         // Recursive uniqueness scans are quadratic and are not hot-path work.
         // Recursive calls can survive optimization even when assert is elided.
         switch (@import("builtin").mode) {
-            .Debug, .ReleaseSafe => {},
-            .ReleaseFast, .ReleaseSmall => return,
+            .debug, .safe => {},
+            .fast, .small => return,
         }
         const root = self.root orelse {
             std.debug.assert(self.focused == null);
@@ -621,7 +621,7 @@ pub fn measuredDestination(source: PaneId, direction: Direction, frames: []const
     const a_cross = if (horizontal) start.y else start.x;
     const a_cross_end = a_cross + if (horizontal) start.height else start.width;
     var best: ?PaneId = null;
-    var best_score = [_]f64{std.math.inf(f64)} ** 4;
+    var best_score: [4]f64 = @splat(std.math.inf(f64));
     for (frames) |frame| {
         if (frame.id == source) continue;
         const b = if (horizontal) frame.x else frame.y;
@@ -655,7 +655,7 @@ pub fn nearestDropEdge(x: f64, y: f64, width: f64, height: f64) ?Direction {
     for (distances, 0..) |distance, index| if (distance < distances[best]) {
         best = index;
     };
-    return @enumFromInt(best);
+    return @fromBackingInt(@intCast(best));
 }
 
 fn directionScores(from: Rect, candidate: Rect, direction: Direction) ?Scores {

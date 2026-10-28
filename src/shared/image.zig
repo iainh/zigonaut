@@ -21,7 +21,7 @@ pub fn premultiply(rgba: [*]const u8, output: [*]u8, width: usize, height: usize
 }
 
 export fn zigonaut_image_premultiply(rgba: [*]const u8, output: [*]u8, width: usize, height: usize, stride: usize, format: u32) void {
-    premultiply(rgba, output, width, height, stride, @enumFromInt(format));
+    premultiply(rgba, output, width, height, stride, @fromBackingInt(@intCast(format)));
 }
 
 pub fn Rect(comptime T: type) type {
@@ -70,16 +70,16 @@ pub fn clippedQuad(comptime T: type, destination: Rect(T), source: Rect(T), clip
 }
 
 export fn zigonaut_image_clip_quad(destination: Rect(f64), source: Rect(f64), clip: Clip(f64), output: *Quad(f64)) u32 {
-    return @intFromEnum(clippedQuad(f64, destination, source, clip, output));
+    return @backingInt(clippedQuad(f64, destination, source, clip, output));
 }
 
 export fn zigonaut_image_clip_quad_f32(destination: Rect(f32), source: Rect(f32), clip: Clip(f32), output: *Quad(f32)) u32 {
-    return @intFromEnum(clippedQuad(f32, destination, source, clip, output));
+    return @backingInt(clippedQuad(f32, destination, source, clip, output));
 }
 
 test "premultiplication preserves channel order, rounding, row stride and padding" {
     const rgba = [_]u8{ 240, 40, 80, 128, 200, 100, 30, 64, 12, 90, 210, 255, 70, 30, 220, 0 };
-    var output = [_]u8{0xaa} ** 24;
+    var output: [24]u8 = @splat(0xaa);
     zigonaut_image_premultiply(&rgba, &output, 2, 2, 12, 0);
     try std.testing.expectEqualSlices(u8, &.{ 120, 20, 40, 128, 50, 25, 8, 64, 0xaa, 0xaa, 0xaa, 0xaa, 12, 90, 210, 255, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa, 0xaa }, &output);
     zigonaut_image_premultiply(&rgba, &output, 2, 2, 12, 1);
@@ -87,8 +87,8 @@ test "premultiplication preserves channel order, rounding, row stride and paddin
         const offset = (i / 2) * 12 + (i % 2) * 4;
         try std.testing.expectEqual(word, @as(*align(1) const u32, @ptrCast(&output[offset])).*);
     }
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xaa} ** 4), output[8..12]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xaa} ** 4), output[20..24]);
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0xaa)), output[8..12]);
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0xaa)), output[20..24]);
 }
 
 test "image clipping preserves fractional placement and coupled crop mapping at native precision" {
@@ -126,17 +126,17 @@ test "image geometry rejects nonfinite, overflowing and empty inputs before expo
         const clip: Clip(T) = .{ .left = 0, .top = 0, .right = 10, .bottom = 20 };
         const initial: Quad(T) = .{ .destination = rect, .source = rect };
         var quad = initial;
-        inline for (std.meta.fields(Rect(T))) |field| {
+        inline for (@typeInfo(Rect(T)).@"struct".field_names) |field| {
             for ([_]T{ std.math.nan(T), std.math.inf(T), -std.math.inf(T) }) |value| {
                 var invalid = rect;
-                @field(invalid, field.name) = value;
+                @field(invalid, field) = value;
                 try std.testing.expectEqual(Visibility.invalid, clippedQuad(T, invalid, rect, clip, &quad));
                 try std.testing.expectEqual(Visibility.invalid, clippedQuad(T, rect, invalid, clip, &quad));
             }
         }
-        inline for (std.meta.fields(Clip(T))) |field| {
+        inline for (@typeInfo(Clip(T)).@"struct".field_names) |field| {
             var invalid = clip;
-            @field(invalid, field.name) = std.math.nan(T);
+            @field(invalid, field) = std.math.nan(T);
             try std.testing.expectEqual(Visibility.invalid, clippedQuad(T, rect, rect, invalid, &quad));
         }
         for ([_]Rect(T){

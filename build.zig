@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const package = @import("build.zig.zon");
+const Translator = @import("translate_c").Translator;
 const app_version = package.version;
 
 comptime {
@@ -15,7 +16,7 @@ comptime {
 }
 
 pub fn build(b: *std.Build) void {
-    const fmt = b.addFmt(.{ .paths = &.{ "build.zig", "src" }, .check = true });
+    const fmt = b.addFmt(.{ .paths = &.{ b.path("build.zig"), b.path("src") }, .check = true });
     const fmt_step = b.step("test:fmt", "Check Zig formatting");
     fmt_step.dependOn(&fmt.step);
 
@@ -36,7 +37,7 @@ pub fn build(b: *std.Build) void {
         .@"emit-lib-vt" = true,
         .simd = true,
     });
-    const apple_sdk = findAppleSdk(b, target, ghostty);
+    const apple_sdk = findAppleSdk(b, target);
     const shared_module = b.createModule(.{
         .root_source_file = b.path("src/shared/root.zig"),
         .target = target,
@@ -66,26 +67,27 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/windows/main.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = optimize != .Debug and !debug_info,
+        .strip = optimize != .debug and !debug_info,
     });
     app_module.addImport("shared", shared_module);
     app_module.addOptions("build_options", build_options);
     app_module.addIncludePath(b.path("winui"));
     configureGhostty(app_module, ghostty);
+    configureWindowsHeaders(app_module);
 
     const exe = b.addExecutable(.{
         .name = "zigonaut",
         .root_module = app_module,
         .win32_manifest = generatedManifest(b, app_version),
     });
-    const debug_build = optimize == .Debug;
+    const debug_build = optimize == .debug;
     const icon_path = if (debug_build)
         "assets/icons/zigonaut-debug.ico"
     else
         "assets/icons/zigonaut.ico";
-    const icon_bytes = b.build_root.handle.readFileAlloc(
+    const icon_bytes = b.root.root_dir.handle.readFileAlloc(
         b.graph.io,
-        icon_path,
+        b.pathJoin(&.{ b.root.sub_path, icon_path }),
         b.allocator,
         .limited(1024 * 1024),
     ) catch @panic("unable to read application icon");
@@ -100,7 +102,7 @@ pub fn build(b: *std.Build) void {
         // to Zig's cache. Vary a harmless define so icon edits rebuild the RES.
         .flags = resource_flags,
     });
-    exe.subsystem = .Windows;
+    exe.subsystem = .windows;
     exe.root_module.link_libc = true;
     exe.root_module.link_libcpp = true;
     exe.root_module.addIncludePath(b.path("src/windows"));
@@ -143,7 +145,8 @@ pub fn build(b: *std.Build) void {
     });
     b.getInstallStep().dependOn(&install_shell_integration.step);
 
-    const run_cmd = b.addSystemCommand(&.{b.getInstallPath(.bin, "zigonaut.exe")});
+    const installed_exe: std.Build.LazyPath = .{ .relative = .{ .base = .install_bin, .sub_path = "zigonaut.exe" } };
+    const run_cmd = b.addRunFile(installed_exe);
     run_cmd.step.dependOn(b.getInstallStep());
     const run_step = b.step("run", "Run Zigonaut");
     run_step.dependOn(&run_cmd.step);
@@ -168,7 +171,8 @@ pub fn build(b: *std.Build) void {
 
     const tab_rendering_test = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File" });
     tab_rendering_test.addFileArg(b.path("winui/test-tab-rendering.ps1"));
-    tab_rendering_test.addArgs(&.{ "-Executable", b.getInstallPath(.bin, "zigonaut.exe") });
+    tab_rendering_test.addArg("-Executable");
+    tab_rendering_test.addFileArg(installed_exe);
     tab_rendering_test.step.dependOn(winui_step);
     const tab_rendering_test_step = b.step("test-winui-tabs", "Verify terminal rendering and input after changing tabs");
     tab_rendering_test_step.dependOn(&tab_rendering_test.step);
@@ -207,6 +211,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("windowscodecs", .{});
     tests.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(tests.root_module, ghostty);
+    configureWindowsHeaders(tests.root_module);
     const windows_test_step = b.step("test-windows", "Run Windows client unit tests");
     windows_test_step.dependOn(&b.addRunArtifact(tests).step);
     const test_step = b.step("test", "Run all supported tests");
@@ -223,11 +228,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     conpty_test.root_module.link_libc = true;
+    configureWindowsHeaders(conpty_test.root_module);
     conpty_test.root_module.addIncludePath(b.path("src/windows"));
     conpty_test.root_module.addIncludePath(b.path("winui"));
     conpty_test.root_module.linkSystemLibrary("kernel32", .{});
     const install_conpty_test = b.addInstallArtifact(conpty_test, .{});
-    const run_conpty_test = b.addSystemCommand(&.{b.getInstallPath(.bin, "conpty-resize-test.exe")});
+    const run_conpty_test = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "conpty-resize-test.exe" } });
     run_conpty_test.step.dependOn(&install_conpty_test.step);
     run_conpty_test.step.dependOn(winui_step);
     const conpty_test_step = b.step("test-conpty", "Verify resize does not emit a synthetic ConPTY repaint");
@@ -262,10 +268,12 @@ pub fn build(b: *std.Build) void {
     benchmark.root_module.linkSystemLibrary("windowscodecs", .{});
     benchmark.root_module.linkSystemLibrary("ole32", .{});
     configureGhostty(benchmark.root_module, ghostty);
+    configureWindowsHeaders(benchmark.root_module);
     const benchmark_step = b.step("benchmark", "Benchmark terminal feed and render traversal");
     benchmark_step.dependOn(&b.addRunArtifact(benchmark).step);
     const install_benchmark = b.addInstallArtifact(benchmark, .{});
-    const run_conpty_benchmark = b.addSystemCommand(&.{ b.getInstallPath(.bin, "zigonaut-benchmark.exe"), "--conpty" });
+    const run_conpty_benchmark = b.addRunFile(.{ .relative = .{ .base = .install_bin, .sub_path = "zigonaut-benchmark.exe" } });
+    run_conpty_benchmark.addArg("--conpty");
     run_conpty_benchmark.step.dependOn(&install_benchmark.step);
     run_conpty_benchmark.step.dependOn(winui_step);
     const conpty_benchmark_step = b.step("benchmark-conpty", "Benchmark end-to-end ConPTY transport and terminal parsing");
@@ -302,6 +310,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         }),
     });
     helper.root_module.link_libc = true;
+    configurePtyHeaders(helper.root_module);
     b.installArtifact(helper);
     const module = b.createModule(.{
         .root_source_file = b.path("src/macos/core.zig"),
@@ -313,6 +322,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     module.link_libc = true;
     module.addIncludePath(b.path("macos/include"));
     configureGhostty(module, ghostty);
+    configureMacosHeaders(module);
     const library = b.addLibrary(.{ .name = "zigonaut-core", .root_module = module, .linkage = .dynamic });
     applyAppleSdk(library, apple_sdk);
     b.installArtifact(library);
@@ -333,6 +343,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     tests.root_module.link_libc = true;
     tests.root_module.addIncludePath(b.path("macos/include"));
     configureGhostty(tests.root_module, ghostty);
+    configureMacosHeaders(tests.root_module);
     applyAppleSdk(tests, apple_sdk);
     const core_test_step = b.step("test-macos-core", "Run macOS Zig core and ABI tests");
     core_test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -342,6 +353,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .optimize = optimize,
     }) });
     helper_tests.root_module.link_libc = true;
+    configurePtyHeaders(helper_tests.root_module);
     core_test_step.dependOn(&b.addRunArtifact(helper_tests).step);
     const shell_integration_tests = b.addSystemCommand(&.{"python3"});
     shell_integration_tests.addFileArg(b.path("assets/shell-integration/test_shell_integration.py"));
@@ -354,11 +366,13 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     }) });
     abi_tests.root_module.link_libc = true;
     abi_tests.root_module.addIncludePath(b.path("macos/include"));
+    const public_abi = translateHeaders(abi_tests.root_module, "public-abi", "#include <zigonaut_core.h>\n");
+    public_abi.addIncludePath(b.path("macos/include"));
     const run_abi_tests = b.addRunArtifact(abi_tests);
     run_abi_tests.step.dependOn(b.getInstallStep());
     core_test_step.dependOn(&run_abi_tests.step);
 
-    const swift_configuration: []const u8 = if (optimize == .Debug) "debug" else "release";
+    const swift_configuration: []const u8 = if (optimize == .debug) "debug" else "release";
     const swift_tests = b.addSystemCommand(&.{
         "swift",
         "test",
@@ -386,7 +400,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     swift.step.dependOn(b.getInstallStep());
     const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh", swift_configuration });
-    bundle.addDirectoryArg(b.path(if (optimize == .Debug)
+    bundle.addDirectoryArg(b.path(if (optimize == .debug)
         "assets/icons/macos/ZigonautDebug.icon"
     else
         "assets/icons/macos/Zigonaut.icon"));
@@ -412,8 +426,11 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     module.addImport("shared", shared_module);
     module.addIncludePath(b.path("src/linux"));
     configureGhostty(module, ghostty);
-    module.linkSystemLibrary("gtk4", .{ .use_pkg_config = .force });
-    module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .force });
+    configureLinuxHeaders(module, ghostty);
+    // The dependency check above requires pkg-config. Zig 0.17's .force also
+    // rejects GTK's architecture flags (-mfpmath=sse, -msse, -msse2).
+    module.linkSystemLibrary("gtk4", .{});
+    module.linkSystemLibrary("libadwaita-1", .{});
     // Debian 13's API baseline, including when building with newer headers.
     module.addCMacro("GDK_VERSION_MIN_REQUIRED", "GDK_VERSION_4_18");
     module.addCMacro("GDK_VERSION_MAX_ALLOWED", "GDK_VERSION_4_18");
@@ -449,10 +466,10 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const check_step = b.step("check", "Compile Zigonaut without installing it");
     check_step.dependOn(&exe.step);
     // Run the installed layout, including shell startup resources.
-    const installed_exe = b.getInstallPath(.bin, "zigonaut");
-    const run = b.addSystemCommand(&.{installed_exe});
+    const installed_exe: std.Build.LazyPath = .{ .relative = .{ .base = .install_bin, .sub_path = "zigonaut" } };
+    const run = b.addRunFile(installed_exe);
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run the native GTK frontend").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -467,6 +484,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     tests.root_module.addAnonymousImport("fluent-light", .{ .root_source_file = b.path("themes/fluent-light.json") });
     tests.root_module.addAnonymousImport("fluent-dark", .{ .root_source_file = b.path("themes/fluent-dark.json") });
     configureGhostty(tests.root_module, ghostty);
+    configureLinuxHeaders(tests.root_module, ghostty);
     tests.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
     tests.root_module.linkSystemLibrary("libpng", .{ .use_pkg_config = .force });
     const linux_tests = b.step("test-linux", "Run Linux frontend contract tests");
@@ -474,12 +492,14 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const shell_tests = b.step("test-linux-shell-integration", "Test real Bash, Zsh and fish PTYs (requires all three shells)");
     const zsh_tests = b.addSystemCommand(&.{"python3"});
     zsh_tests.addFileArg(b.path("assets/shell-integration/test_shell_integration.py"));
-    zsh_tests.addArgs(&.{ installed_exe, "--linux" });
+    zsh_tests.addFileArg(installed_exe);
+    zsh_tests.addArg("--linux");
     zsh_tests.step.dependOn(b.getInstallStep());
     shell_tests.dependOn(&zsh_tests.step);
     const additional_shell_tests = b.addSystemCommand(&.{"python3"});
     additional_shell_tests.addFileArg(b.path("assets/shell-integration/test_additional_shells.py"));
-    additional_shell_tests.addArgs(&.{ installed_exe, "/bin/bash", "/usr/bin/fish", "--linux" });
+    additional_shell_tests.addFileArg(installed_exe);
+    additional_shell_tests.addArgs(&.{ "/bin/bash", "/usr/bin/fish", "--linux" });
     additional_shell_tests.step.dependOn(b.getInstallStep());
     shell_tests.dependOn(&additional_shell_tests.step);
     const test_step = b.step("test", "Run all supported tests");
@@ -489,22 +509,22 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
     const ui_tests = b.addSystemCommand(&.{"python3"});
     ui_tests.addFileArg(b.path("src/linux/test_ui.py"));
-    ui_tests.addArg(installed_exe);
+    ui_tests.addFileArg(installed_exe);
     ui_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-ui", "Test the GTK frontend on an X11 display (requires xdotool)").dependOn(&ui_tests.step);
     const settings_tests = b.addSystemCommand(&.{ "dbus-run-session", "--", "/usr/bin/python3" });
     settings_tests.addFileArg(b.path("src/linux/test_settings_ui.py"));
-    settings_tests.addArg(installed_exe);
+    settings_tests.addFileArg(installed_exe);
     settings_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-settings-ui", "Test native settings and profiles (requires python3-pyatspi and X11)").dependOn(&settings_tests.step);
     const image_tests = b.addSystemCommand(&.{"/usr/bin/python3"});
     image_tests.addFileArg(b.path("src/linux/test_images_ui.py"));
-    image_tests.addArg(installed_exe);
+    image_tests.addFileArg(installed_exe);
     image_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-images-ui", "Test Kitty pixels and pane lifetimes at 2x (requires python3-pil and X11)").dependOn(&image_tests.step);
     const pointer_tests = b.addSystemCommand(&.{ "dbus-run-session", "--", "/usr/bin/python3" });
     pointer_tests.addFileArg(b.path("src/linux/test_pointer_ui.py"));
-    pointer_tests.addArg(installed_exe);
+    pointer_tests.addFileArg(installed_exe);
     pointer_tests.step.dependOn(b.getInstallStep());
     b.step("test-linux-pointer-ui", "Test native mouse reporting and links (requires python3-pyatspi and X11)").dependOn(&pointer_tests.step);
 }
@@ -520,6 +540,107 @@ fn configureGhostty(module: *std.Build.Module, ghostty: *std.Build.Dependency) v
     module.addIncludePath(ghostty.path("include"));
     module.addCMacro("GHOSTTY_STATIC", "1");
     module.linkLibrary(ghostty.artifact("ghostty-vt-static"));
+    const b = module.owner;
+    // Shared terminal code and native PNG decoders must use one module for
+    // the generated file; Zig rejects the same file in separate modules.
+    if (b.modules.get("ghostty-vt")) |vt| {
+        module.addImport("ghostty-vt", vt);
+        return;
+    }
+    const vt = translateHeaders(module, "ghostty-vt", "#define GHOSTTY_STATIC 1\n#include <ghostty/vt.h>\n");
+    vt.addIncludePath(ghostty.path("include"));
+    b.modules.put(b.allocator, "ghostty-vt", vt.mod) catch @panic("OOM");
+}
+
+fn translateHeaders(module: *std.Build.Module, name: []const u8, source: []const u8) Translator {
+    const b = module.owner;
+    const sdk = findAppleSdk(b, module.resolved_target.?);
+    const translated = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = name,
+        .c_source_file = b.addWriteFiles().add(b.fmt("{s}.h", .{name}), source),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+        .libc_file = if (sdk) |apple| apple.libc else null,
+    });
+    module.addImport(name, translated.mod);
+    return translated;
+}
+
+fn configureWindowsHeaders(module: *std.Build.Module) void {
+    const headers = translateHeaders(module, "win32-c",
+        \\#define UNICODE 1
+        \\#define _UNICODE 1
+        \\#define _WIN32_WINNT 0x0A00
+        \\#define WIN32_LEAN_AND_MEAN 1
+        \\#define _FORTIFY_SOURCE 0
+        \\#include <windows.h>
+        \\#include <commctrl.h>
+        \\#include <dwmapi.h>
+        \\#include <shellapi.h>
+        \\#include <wtsapi32.h>
+        \\#include <bridge.h>
+        \\#include <directwrite_renderer.h>
+        \\#include <scroll_trace.h>
+        \\
+    );
+    headers.addIncludePath(module.owner.path("winui"));
+    headers.addIncludePath(module.owner.path("src/windows"));
+}
+
+fn configureLinuxHeaders(module: *std.Build.Module, ghostty: *std.Build.Dependency) void {
+    const b = module.owner;
+    const headers = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "linux-images",
+        .c_source_file = b.addWriteFiles().add("linux-images.h",
+            \\#define GHOSTTY_STATIC 1
+            \\#include <images.h>
+            \\#include <ghostty/vt.h>
+            \\#include <png.h>
+            \\
+        ),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+        .link_system_libs = &.{
+            .{ .name = "cairo", .options = .{ .use_pkg_config = .force } },
+            .{ .name = "libpng", .options = .{ .use_pkg_config = .force } },
+        },
+    });
+    module.addImport("linux-images", headers.mod);
+    headers.addIncludePath(b.path("src/linux"));
+    headers.addIncludePath(ghostty.path("include"));
+}
+
+fn configureMacosHeaders(module: *std.Build.Module) void {
+    _ = translateHeaders(module, "macos-c",
+        \\#include <errno.h>
+        \\#include <fcntl.h>
+        \\#include <poll.h>
+        \\#include <signal.h>
+        \\#include <sys/ioctl.h>
+        \\#include <sys/wait.h>
+        \\#include <time.h>
+        \\#include <unistd.h>
+        \\
+    );
+    const abi = translateHeaders(module, "public-abi", "#include <zigonaut_core.h>\n");
+    abi.addIncludePath(module.owner.path("macos/include"));
+}
+
+fn configurePtyHeaders(module: *std.Build.Module) void {
+    _ = translateHeaders(module, "pty-c",
+        \\#include <errno.h>
+        \\#include <fcntl.h>
+        \\#include <poll.h>
+        \\#include <pwd.h>
+        \\#include <signal.h>
+        \\#include <stdlib.h>
+        \\#include <sys/ioctl.h>
+        \\#include <sys/stat.h>
+        \\#include <sys/wait.h>
+        \\#include <termios.h>
+        \\#include <unistd.h>
+        \\
+    );
 }
 
 const AppleSdk = struct {
@@ -529,12 +650,12 @@ const AppleSdk = struct {
     library: []const u8,
 };
 
-fn findAppleSdk(b: *std.Build, resolved_target: std.Build.ResolvedTarget, ghostty: *std.Build.Dependency) ?AppleSdk {
+fn findAppleSdk(b: *std.Build, resolved_target: std.Build.ResolvedTarget) ?AppleSdk {
     if (comptime builtin.os.tag != .macos) return null;
     if (resolved_target.result.os.tag != .macos) return null;
 
     var target = resolved_target.result;
-    var libc = std.zig.LibCInstallation.findNative(
+    const libc = std.zig.LibCInstallation.findNative(
         b.allocator,
         b.graph.io,
         .{
@@ -543,10 +664,6 @@ fn findAppleSdk(b: *std.Build, resolved_target: std.Build.ResolvedTarget, ghostt
             .verbose = false,
         },
     ) catch return null;
-
-    // Xcode 27's math.h and Zig 0.16's bundled float.h disagree about the
-    // __need_infinity_nan protocol. Overlay math.h using Ghostty's workaround.
-    libc.include_dir = ghostty.path("pkg/apple-sdk/include").getPath(b);
 
     var stream: std.Io.Writer.Allocating = .init(b.allocator);
     defer stream.deinit();
@@ -576,9 +693,9 @@ fn applyAppleSdk(step: *std.Build.Step.Compile, apple_sdk: ?AppleSdk) void {
 }
 
 fn generatedManifest(b: *std.Build, version: []const u8) std.Build.LazyPath {
-    const source = b.build_root.handle.readFileAlloc(
+    const source = b.root.root_dir.handle.readFileAlloc(
         b.graph.io,
-        "zigonaut.manifest",
+        b.pathJoin(&.{ b.root.sub_path, "zigonaut.manifest" }),
         b.allocator,
         .limited(64 * 1024),
     ) catch @panic("unable to read application manifest");

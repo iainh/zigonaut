@@ -1,18 +1,4 @@
-pub const c = @cImport({
-    @cDefine("UNICODE", "1");
-    @cDefine("_UNICODE", "1");
-    @cDefine("_WIN32_WINNT", "0x0A00");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("_FORTIFY_SOURCE", "0");
-    @cInclude("windows.h");
-    @cInclude("commctrl.h");
-    @cInclude("dwmapi.h");
-    @cInclude("shellapi.h");
-    @cInclude("wtsapi32.h");
-    @cInclude("bridge.h");
-    @cInclude("directwrite_renderer.h");
-    @cInclude("scroll_trace.h");
-});
+pub const c = @import("win32-c");
 
 const std = @import("std");
 

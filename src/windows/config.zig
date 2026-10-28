@@ -55,7 +55,7 @@ const default_profiles = [3]Profile{
     .{ .name = "PowerShell", .shell = .powershell, .command = "powershell.exe", .working_directory = "" },
     .{ .name = "WSL", .shell = .wsl, .command = "wsl.exe", .working_directory = "" },
     .{ .name = "Command Prompt", .shell = .windows, .command = "cmd.exe", .working_directory = "" },
-} ++ [_]Profile{.{ .name = "", .shell = .windows, .command = "", .working_directory = "" }} ** (max_profiles - 3);
+} ++ @as([max_profiles - 3]Profile, @splat(.{ .name = "", .shell = .windows, .command = "", .working_directory = "" }));
 
 pub const Backdrop = enum { none, mica, acrylic, mica_alt };
 pub const ColorScheme = enum { system, light, dark };

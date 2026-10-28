@@ -46,7 +46,7 @@ pub fn push(state: *State, input: Input, windows: bool) Action {
 }
 
 export fn zigonaut_text_run_push(state: *State, input: *const Input, windows: bool) u32 {
-    return @intFromEnum(push(state, input.*, windows));
+    return @backingInt(push(state, input.*, windows));
 }
 
 export fn zigonaut_render_procedural_scalar(text: [*]const u8, length: usize) u32 {

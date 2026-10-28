@@ -54,9 +54,9 @@ export fn zgtk_layout_zoomed(layout: *PaneLayout) bool {
 }
 export fn zgtk_layout_action(layout: *PaneLayout, action: c_int) bool {
     return switch (action) {
-        0...3 => layout.tree.focusDirection(@enumFromInt(action)),
+        0...3 => layout.tree.focusDirection(@fromBackingInt(@intCast(action))),
         4, 5 => layout.tree.focusCycle(action == 5),
-        6...9 => layout.tree.resizeFocused(@enumFromInt(action - 6), 3277),
+        6...9 => layout.tree.resizeFocused(@fromBackingInt(@intCast(action - 6)), 3277),
         10 => layout.tree.equalize(),
         11 => layout.tree.toggleZoom(),
         else => false,
@@ -176,7 +176,7 @@ const Core = struct {
         const count = self.snapshot.cells.items.len / self.snapshot.rows.items.len;
         var pending: ?shared.background_span.Span = null;
         for (self.snapshot.cells.items[@as(usize, y) * count ..][0..count], 0..) |cell, x| {
-            const occupancy: Terminal.Cell.Occupancy = @enumFromInt(cell.attributes.occupancy);
+            const occupancy: Terminal.Cell.Occupancy = @fromBackingInt(@intCast(cell.attributes.occupancy));
             if (occupancy == .wide_tail) continue;
             const next = shared.background_span.Span{
                 .left = @floatFromInt(x),
@@ -241,7 +241,7 @@ const Core = struct {
     }
 
     pub fn endFrame(self: *Core, frame: Terminal.Frame) void {
-        if (frame.cursor_visible) zgtk_draw_cursor(self.host, frame.cursor_x, frame.cursor_y, frame.cursor_columns, @intFromEnum(frame.cursor_style), colour(frame.cursor));
+        if (frame.cursor_visible) zgtk_draw_cursor(self.host, frame.cursor_x, frame.cursor_y, frame.cursor_columns, @backingInt(frame.cursor_style), colour(frame.cursor));
     }
 };
 
@@ -363,8 +363,8 @@ export fn zgtk_render_retained(core: *Core, force: bool) bool {
 fn keyFromName(name: []const u8) ?Terminal.Key {
     if (name.len == 1) {
         const ch = std.ascii.toLower(name[0]);
-        if (ch >= 'a' and ch <= 'z') return @enumFromInt(@intFromEnum(Terminal.Key.a) + ch - 'a');
-        if (ch >= '0' and ch <= '9') return @enumFromInt(@intFromEnum(Terminal.Key.digit_0) + ch - '0');
+        if (ch >= 'a' and ch <= 'z') return @fromBackingInt(@intCast(@backingInt(Terminal.Key.a) + ch - 'a'));
+        if (ch >= '0' and ch <= '9') return @fromBackingInt(@intCast(@backingInt(Terminal.Key.digit_0) + ch - '0'));
     }
     const names = .{
         .{ "Return", "enter" },           .{ "Escape", "escape" },              .{ "BackSpace", "backspace" },
@@ -390,7 +390,7 @@ fn keyFromName(name: []const u8) ?Terminal.Key {
     }
     if (name.len >= 2 and name[0] == 'F') {
         const number = std.fmt.parseInt(u8, name[1..], 10) catch return null;
-        if (number >= 1 and number <= 24) return @enumFromInt(@intFromEnum(Terminal.Key.f1) + number - 1);
+        if (number >= 1 and number <= 24) return @fromBackingInt(@intCast(@backingInt(Terminal.Key.f1) + number - 1));
     }
     return null;
 }
@@ -446,7 +446,7 @@ export fn zgtk_mouse_tracking(core: *Core) bool {
 export fn zgtk_mouse(core: *Core, action: u8, button: u8, x: i32, y: i32, width: u32, height: u32, cell_width: u32, cell_height: u32, padding: u32, modifiers: u16, any_pressed: bool) bool {
     if (action > 2 or button > 7 or !core.terminal.mouseTracking()) return false;
     var buffer: [128]u8 = undefined;
-    const bytes = core.terminal.encodeMouse(@enumFromInt(action), @enumFromInt(button), .{ .x = x, .y = y }, modifiers, .{
+    const bytes = core.terminal.encodeMouse(@fromBackingInt(@intCast(action)), @fromBackingInt(@intCast(button)), .{ .x = x, .y = y }, modifiers, .{
         .screen_width = width,
         .screen_height = height,
         .cell_width = cell_width,

@@ -1,17 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("poll.h");
-    @cInclude("pwd.h");
-    @cInclude("signal.h");
-    @cInclude("stdlib.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("sys/stat.h");
-    @cInclude("sys/wait.h");
-    @cInclude("termios.h");
-    @cInclude("unistd.h");
-});
+const c = @import("pty-c");
 
 fn validArguments(args: []const []const u8) bool {
     return args.len == 4 and args[1].len > 0 and args[1][0] == '/' and
@@ -42,11 +30,11 @@ fn configureZshIntegration(allocator: std.mem.Allocator, shell: []const u8, root
     const trampoline = integrationFile(allocator, root, "zsh/.zshenv") orelse return;
     defer allocator.free(trampoline);
     const directory = std.fs.path.dirname(trampoline) orelse return;
-    const directory_z = allocator.dupeZ(u8, directory) catch return;
+    const directory_z = allocator.dupeSentinel(u8, directory, 0) catch return;
     defer allocator.free(directory_z);
-    const original_zdotdir = if (c.getenv("ZDOTDIR")) |value| allocator.dupeZ(u8, std.mem.span(value)) catch return else null;
+    const original_zdotdir = if (c.getenv("ZDOTDIR")) |value| allocator.dupeSentinel(u8, std.mem.span(value), 0) catch return else null;
     defer if (original_zdotdir) |value| allocator.free(value);
-    const previous_original = if (c.getenv("ZIGONAUT_ZSH_ORIGINAL_ZDOTDIR")) |value| allocator.dupeZ(u8, std.mem.span(value)) catch return else null;
+    const previous_original = if (c.getenv("ZIGONAUT_ZSH_ORIGINAL_ZDOTDIR")) |value| allocator.dupeSentinel(u8, std.mem.span(value), 0) catch return else null;
     defer if (previous_original) |value| allocator.free(value);
 
     const original_set = if (original_zdotdir) |value|
@@ -84,7 +72,7 @@ fn versionAtLeast(output: []const u8, minimum_major: u16, minimum_minor: u16) bo
 }
 
 fn shellVersionAtLeast(allocator: std.mem.Allocator, shell: []const u8, minimum_major: u16, minimum_minor: u16) bool {
-    const shell_z = allocator.dupeZ(u8, shell) catch return false;
+    const shell_z = allocator.dupeSentinel(u8, shell, 0) catch return false;
     defer allocator.free(shell_z);
     var descriptors: [2]c_int = undefined;
     if (c.pipe(&descriptors) != 0) return false;
@@ -133,7 +121,7 @@ fn configureBashIntegration(allocator: std.mem.Allocator, shell: []const u8, roo
     const script = integrationFile(allocator, root, "bash/zigonaut.bash") orelse return;
     defer allocator.free(script);
     if (!shellVersionAtLeast(allocator, shell, 4, 4)) return;
-    const original_prompt = if (c.getenv("PROMPT_COMMAND")) |value| allocator.dupeZ(u8, std.mem.span(value)) catch return else null;
+    const original_prompt = if (c.getenv("PROMPT_COMMAND")) |value| allocator.dupeSentinel(u8, std.mem.span(value), 0) catch return else null;
     defer if (original_prompt) |value| allocator.free(value);
     const inherited = if (original_prompt) |value| value[0..value.len] else "";
     const prompt_command = std.fmt.allocPrintSentinel(
@@ -176,7 +164,7 @@ pub fn main(init: std.process.Init) u8 {
     if (c.ioctl(10, c.TIOCSCTTY, @as(c_int, 0)) < 0) return 71;
     inline for (0..3) |fd| if (c.dup2(10, fd) < 0) return 71;
     if (args.items[2].len != 0) {
-        const directory = init.gpa.dupeZ(u8, args.items[2]) catch return 71;
+        const directory = init.gpa.dupeSentinel(u8, args.items[2], 0) catch return 71;
         defer init.gpa.free(directory);
         if (c.chdir(directory.ptr) != 0) return 71;
     } else if (!changeToHomeDirectory()) return 71;
@@ -193,7 +181,7 @@ pub fn main(init: std.process.Init) u8 {
     const fish_integration = configureFishIntegration(init.gpa, args.items[1], args.items[3]);
     configureBashIntegration(init.gpa, args.items[1], args.items[3]);
 
-    const shell = init.gpa.dupeZ(u8, args.items[1]) catch return 71;
+    const shell = init.gpa.dupeSentinel(u8, args.items[1], 0) catch return 71;
     if (fish_integration) {
         var argv = [_:null]?[*:0]u8{
             shell.ptr,

@@ -138,15 +138,15 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         shell: pwsh
         env:
-          ZIG_X64_URL: https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
-          ZIG_X64_SHA256: 68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e
+          ZIG_X64_URL: https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip
+          ZIG_X64_SHA256: b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428
         run: |
           # Use x64 on both runners because the Zig 0.16.0 ARM64 compiler crashes on Windows.
-          $archive = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0.zip'
-          $sdk = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.16.0'
+          $archive = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.17.0.zip'
+          $sdk = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.17.0'
           Invoke-WebRequest -Uri $env:ZIG_X64_URL -OutFile $archive
           if ((Get-FileHash -Algorithm SHA256 $archive).Hash -ne $env:ZIG_X64_SHA256) {
             throw 'Zig x64 archive checksum mismatch.'
@@ -347,13 +347,13 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.create_release && format('refs/tags/v{0}', inputs.version) || github.ref }}
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         env:
-          ZIG_URL: https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
-          ZIG_SHA256: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+          ZIG_URL: https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz
+          ZIG_SHA256: b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a
         run: |
-          archive="$RUNNER_TEMP/zig-aarch64-macos-0.16.0.tar.xz"
-          sdk="$RUNNER_TEMP/zig-aarch64-macos-0.16.0"
+          archive="$RUNNER_TEMP/zig-aarch64-macos-0.17.0.tar.xz"
+          sdk="$RUNNER_TEMP/zig-aarch64-macos-0.17.0"
           curl --fail --location --retry 3 "$ZIG_URL" --output "$archive"
           echo "$ZIG_SHA256  $archive" | shasum --algorithm 256 --check
           tar -xf "$archive" -C "$RUNNER_TEMP"
@@ -419,4 +419,4 @@ jobs:
       - name: Remove build caches
         if: always()
         run: |
-          rm -rf "$ZIG_GLOBAL_CACHE_DIR" .zig-cache macos/.build "$RUNNER_TEMP/zig-aarch64-macos-0.16.0"
+          rm -rf "$ZIG_GLOBAL_CACHE_DIR" .zig-cache macos/.build "$RUNNER_TEMP/zig-aarch64-macos-0.17.0"

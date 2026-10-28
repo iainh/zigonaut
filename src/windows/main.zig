@@ -487,7 +487,7 @@ const Application = struct {
         const view = try std.heap.page_allocator.create(TerminalView);
         var may_free = true;
         errdefer if (may_free) std.heap.page_allocator.destroy(view);
-        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.settings.symbol_fallback_family, self.zoomed_font_size, @intFromEnum(self.settings.font_weight), @intFromEnum(self.settings.intense_font_weight), self.settings.line_height_percent, @intFromEnum(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color, self.settings.background_opacity, self.settings.background_opacity_cells, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
+        view.* = TerminalView.init(hwnd, &self.model, self.font, self.settings.font_family, self.settings.symbol_fallback_family, self.zoomed_font_size, @backingInt(self.settings.font_weight), @backingInt(self.settings.intense_font_weight), self.settings.line_height_percent, @backingInt(self.settings.text_antialiasing), self.dpi, self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color, self.settings.background_opacity, self.settings.background_opacity_cells, titles_changed_message, shell_exited_message, scrollbar_changed_message, progress_changed_message, notification_changed_message, renderer_failed_message, ime_bounds_changed_message, search_status_changed_message, chrome_message);
         view.pane_id = id;
         view.create(hwnd, win.GetModuleHandleW(null)) catch |err| {
             if (!view.destroy()) may_free = false;
@@ -660,7 +660,7 @@ const Application = struct {
         var count: usize = 0;
         errdefer for (prepared[0..count]) |*value| value.deinit();
         for (self.views.items, 0..) |entry, index| {
-            prepared[index] = try entry.view.prepareReload(font, settings.font_family, settings.symbol_fallback_family, size, @intFromEnum(settings.font_weight), @intFromEnum(settings.intense_font_weight), settings.line_height_percent, @intFromEnum(settings.text_antialiasing), dpi);
+            prepared[index] = try entry.view.prepareReload(font, settings.font_family, settings.symbol_fallback_family, size, @backingInt(settings.font_weight), @backingInt(settings.intense_font_weight), settings.line_height_percent, @backingInt(settings.text_antialiasing), dpi);
             count += 1;
         }
         try self.detachPresentation();
@@ -2083,7 +2083,7 @@ fn syncProfilesImpl(self: *Application, settings: *const config.Config) !void {
 }
 
 fn sendChromeCommand(hwnd: win.HWND, command: chrome.Command, argument: u32) void {
-    _ = win.PostMessageW(hwnd, chrome_message, @intFromEnum(command), @intCast(argument));
+    _ = win.PostMessageW(hwnd, chrome_message, @backingInt(command), @intCast(argument));
 }
 
 fn createFontFor(value: config.Config, dpi: u32) win.HFONT {
@@ -2098,7 +2098,7 @@ fn createFont(font_family: []const u8, font_size: u16, font_weight: config.FontW
         0,
         0,
         0,
-        @intFromEnum(font_weight),
+        @backingInt(font_weight),
         0,
         0,
         0,
@@ -2184,7 +2184,7 @@ fn updateThemeImpl(self: *Application, terminal_theme_changed: bool) void {
     const update_terminal_theme = self.terminal_ready and (terminal_theme_changed or previous_dark_theme != self.dark_theme);
     if (update_terminal_theme) self.model.applySettings(config.terminalTheme(self.settings, &self.themes, self.dark_theme), self.settings.randomize_tab_background);
     if (self.terminal_ready) for (self.views.items) |entry| entry.view.updateTheme(self.dark_theme, self.high_contrast, self.settings.background_opacity, self.settings.background_opacity_cells);
-    if (self.chrome) |*bridge| _ = bridge.updateAppearance(@intFromEnum(self.settings.backdrop), self.high_contrast, self.dark_theme);
+    if (self.chrome) |*bridge| _ = bridge.updateAppearance(@backingInt(self.settings.backdrop), self.high_contrast, self.dark_theme);
     if (update_terminal_theme) self.syncChrome();
     _ = win.InvalidateRect(hwnd, null, 0);
 }

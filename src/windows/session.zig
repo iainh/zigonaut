@@ -799,7 +799,7 @@ pub const SessionRuntime = struct {
         self.terminal_mutex.lock();
         defer self.terminal_mutex.unlock();
         const record = self.terminal.program_status.selected() orelse return 0;
-        return @intFromEnum(record.state) + 1;
+        return @backingInt(record.state) + 1;
     }
 
     pub fn progressGeneration(self: *const SessionRuntime) u64 {

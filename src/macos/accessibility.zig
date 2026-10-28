@@ -249,9 +249,7 @@ export fn zigonaut_accessibility_grid_rect(layout: *const Layout, range: Range) 
     return layout.rect(range);
 }
 
-const abi = @cImport({
-    @cInclude("zigonaut_core.h");
-});
+const abi = @import("public-abi");
 
 export fn zigonaut_accessibility_build(columns: u16, rows: u16, cells: ?[*]const abi.zigonaut_render_cell_v1, cell_count: u32, text: ?[*]const u8, text_count: u32, cursor_column: u16, cursor_row: u16, limit: u32) ?*Layout {
     const records = if (cells) |p| p[0..cell_count] else if (cell_count == 0) &.{} else return null;

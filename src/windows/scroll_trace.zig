@@ -23,8 +23,8 @@ pub const Event = enum(c_uint) {
 };
 
 comptime {
-    if (@intFromEnum(Event.input) != win.ZIGONAUT_SCROLL_TRACE_INPUT or
-        @intFromEnum(Event.present_submitted) != win.ZIGONAUT_SCROLL_TRACE_PRESENT_SUBMITTED)
+    if (@backingInt(Event.input) != win.ZIGONAUT_SCROLL_TRACE_INPUT or
+        @backingInt(Event.present_submitted) != win.ZIGONAUT_SCROLL_TRACE_PRESENT_SUBMITTED)
         @compileError("scroll trace event IDs disagree with scroll_trace.h");
 }
 
@@ -41,5 +41,5 @@ pub fn enabled() bool {
 }
 
 pub fn write(event: Event, pane_id: u64, request_id: u64, value1: i64, value2: i64) void {
-    win.zigonaut_scroll_trace_write(@intFromEnum(event), pane_id, request_id, value1, value2);
+    win.zigonaut_scroll_trace_write(@backingInt(event), pane_id, request_id, value1, value2);
 }

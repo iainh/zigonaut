@@ -22,6 +22,7 @@ pub const State = extern struct {
         return .{
             .items = self.nodes[0..self.length],
             .capacity = self.capacity,
+            .pointer_stability = .{},
         };
     }
 

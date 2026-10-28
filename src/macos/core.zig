@@ -2,16 +2,7 @@ const std = @import("std");
 comptime {
     _ = @import("pane_layout.zig");
 }
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("poll.h");
-    @cInclude("signal.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("sys/wait.h");
-    @cInclude("time.h");
-    @cInclude("unistd.h");
-});
+const c = @import("macos-c");
 const shared = @import("shared");
 comptime {
     _ = shared.selection_path;
@@ -29,9 +20,7 @@ const SynchronizedOutput = shared.synchronized_output.Watchdog;
 const hint = shared.hint;
 const theme = shared.theme;
 const Mutex = @import("platform_sync").Mutex;
-const public_abi = @cImport({
-    @cInclude("zigonaut_core.h");
-});
+const public_abi = @import("public-abi");
 extern var environ: [*:null]?[*:0]u8;
 extern fn openpty(amaster: *c_int, aslave: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*c.winsize) c_int;
 extern fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
@@ -819,11 +808,11 @@ const SnapshotCollector = struct {
             .cursor_x = frame.cursor_x,
             .cursor_y = frame.cursor_y,
             .cursor_columns = frame.cursor_columns,
-            .cursor_style = @intFromEnum(frame.cursor_style),
+            .cursor_style = @backingInt(frame.cursor_style),
             .cursor_visible = @intFromBool(frame.cursor_visible),
             .cursor_has_position = @intFromBool(frame.cursor_has_position),
             .images_skipped = 0,
-            .mouse_shape = @intFromEnum(frame.mouse_shape),
+            .mouse_shape = @backingInt(frame.mouse_shape),
             .viewport_rows = frame.viewport_rows,
             .scroll_offset = frame.scroll_offset,
         };
@@ -871,7 +860,7 @@ const SnapshotCollector = struct {
             .underline_rgb = rgb(cell.underline_color),
             .x = cell.x,
             .y = cell.y,
-            .occupancy = @intFromEnum(cell.occupancy),
+            .occupancy = @backingInt(cell.occupancy),
             .underline_style = cell.underline,
             .bold = @intFromBool(cell.bold),
             .italic = @intFromBool(cell.italic),
@@ -1183,10 +1172,10 @@ export fn zigonaut_core_set_scrollback(self: ?*Core, lines: u32) bool {
 
 export fn zigonaut_core_set_intense_text_style(self: ?*Core, style: u8) bool {
     const core = self orelse return false;
-    if (style > @intFromEnum(Terminal.IntenseTextStyle.bright)) return false;
+    if (style > @backingInt(Terminal.IntenseTextStyle.bright)) return false;
     core.mutex.lock();
     defer core.mutex.unlock();
-    core.terminal.setIntenseTextStyle(@enumFromInt(style));
+    core.terminal.setIntenseTextStyle(@fromBackingInt(@intCast(style)));
     return true;
 }
 
@@ -1198,7 +1187,7 @@ export fn zigonaut_core_program_status(self: ?*Core, output: ?[*]u8, capacity: u
     defer core.mutex.unlock();
     const store = &core.terminal.program_status;
     const record = store.selected() orelse return 0;
-    if (state) |value| value.* = @intFromEnum(record.state) + 1;
+    if (state) |value| value.* = @backingInt(record.state) + 1;
     var buffer: [768]u8 = undefined;
     const label = store.label(&buffer);
     if (output) |bytes| if (capacity >= label.len) {
@@ -1215,7 +1204,7 @@ export fn zigonaut_core_progress(self: ?*Core, result: ?*Progress) void {
     defer core.mutex.unlock();
     output.generation = core.progress_generation;
     output.active = @intFromBool(core.progress_active);
-    output.state = @intFromEnum(core.progress_state);
+    output.state = @backingInt(core.progress_state);
     output.value = core.progress_value;
 }
 
@@ -1621,10 +1610,10 @@ export fn zigonaut_core_working_directory(self: ?*Core, output: ?[*]u8, capacity
 
 export fn zigonaut_core_selection_begin(self: ?*Core, column: u16, row: u16, unit: u8, rectangle: bool) void {
     const core = self orelse return;
-    if (unit > @intFromEnum(Terminal.SelectionUnit.logical_line)) return;
+    if (unit > @backingInt(Terminal.SelectionUnit.logical_line)) return;
     core.mutex.lock();
     defer core.mutex.unlock();
-    core.selection_unit = @enumFromInt(unit);
+    core.selection_unit = @fromBackingInt(@intCast(unit));
     core.selection_rectangle = rectangle and core.selection_unit == .cell;
     core.terminal.beginSelectionAnchor(.{ .x = column, .y = row }) catch {};
     core.terminal.setDerivedSelection(.{ .x = column, .y = row }, core.selection_unit, core.selection_rectangle) catch {};
@@ -1681,9 +1670,9 @@ export fn zigonaut_core_mouse_tracking(self: ?*Core) bool {
 /// action: press=0, release=1, motion=2. button follows Terminal.MouseButton.
 export fn zigonaut_core_mouse(self: ?*Core, action: u8, button: u8, x: i32, y: i32, screen_width: u32, screen_height: u32, cell_width: u32, cell_height: u32, padding_top: u32, padding_bottom: u32, padding_left: u32, padding_right: u32, modifiers: u16, any_button_pressed: bool) bool {
     const core = self orelse return false;
-    if (action > @intFromEnum(Terminal.MouseAction.motion) or button > @intFromEnum(Terminal.MouseButton.wheel_right)) return false;
-    const mouse_action: Terminal.MouseAction = @enumFromInt(action);
-    const mouse_button: Terminal.MouseButton = @enumFromInt(button);
+    if (action > @backingInt(Terminal.MouseAction.motion) or button > @backingInt(Terminal.MouseButton.wheel_right)) return false;
+    const mouse_action: Terminal.MouseAction = @fromBackingInt(@intCast(action));
+    const mouse_button: Terminal.MouseButton = @fromBackingInt(@intCast(button));
     var buffer: [128]u8 = undefined;
     core.mutex.lock();
     const encoded = core.terminal.encodeMouse(mouse_action, mouse_button, .{ .x = x, .y = y }, modifiers, .{
@@ -1763,9 +1752,9 @@ fn completeCopyFits(required: usize, has_output: bool, capacity: usize) bool {
 fn expectAbiCompatible(comptime ZigType: type, comptime CType: type) !void {
     try std.testing.expectEqual(@sizeOf(CType), @sizeOf(ZigType));
     try std.testing.expectEqual(@alignOf(CType), @alignOf(ZigType));
-    inline for (@typeInfo(ZigType).@"struct".fields) |field| {
-        if (!@hasField(CType, field.name)) @compileError("public ABI field is missing: " ++ field.name);
-        try std.testing.expectEqual(@offsetOf(CType, field.name), @offsetOf(ZigType, field.name));
+    inline for (@typeInfo(ZigType).@"struct".field_names) |field| {
+        if (!@hasField(CType, field)) @compileError("public ABI field is missing: " ++ field);
+        try std.testing.expectEqual(@offsetOf(CType, field), @offsetOf(ZigType, field));
     }
 }
 
@@ -2114,7 +2103,7 @@ test "styled snapshot accounts for and writes graphemes larger than 64 bytes" {
     var short_text: [64]u8 = undefined;
     var result = std.mem.zeroes(RenderSnapshotResult);
     var collector = SnapshotCollector{ .frame = &frame, .cells = &cells, .text = &short_text, .result = &result };
-    const codepoints = [_]u32{0x1f642} ** 20;
+    const codepoints: [20]u32 = @splat(0x1f642);
     const cell = Terminal.Cell{ .x = 0, .y = 0, .occupancy = .narrow, .codepoints = &codepoints, .foreground = theme.rasmus.foreground, .background = theme.rasmus.background, .underline_color = theme.rasmus.foreground, .bold = false, .italic = false, .faint = false, .strikethrough = false, .overline = false, .underline = 0, .selected = false };
     collector.drawCell(cell);
     try std.testing.expectEqual(@as(u32, 80), result.required_text_bytes);
@@ -2124,7 +2113,7 @@ test "styled snapshot accounts for and writes graphemes larger than 64 bytes" {
     collector.truncated = false;
     collector.drawCell(cell);
     try std.testing.expectEqual(@as(u32, 80), result.written_text_bytes);
-    try std.testing.expectEqualStrings("🙂" ** 20, &text);
+    try std.testing.expectEqualStrings("🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂", &text);
 }
 
 test "image collector preserves placements and rejects partial RGBA copies" {

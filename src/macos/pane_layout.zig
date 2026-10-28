@@ -26,7 +26,7 @@ export fn zigonaut_panes_split(tree: *panes.Tree, target: u64, pane: u64, split:
 
 export fn zigonaut_panes_move(tree: *panes.Tree, source: u64, target: u64, split: u64, edge: u8) bool {
     if (edge > 3) return false;
-    tree.movePane(source, target, split, @enumFromInt(edge)) catch return false;
+    tree.movePane(source, target, split, @fromBackingInt(@intCast(edge))) catch return false;
     return true;
 }
 
@@ -57,14 +57,14 @@ export fn zigonaut_panes_zoomed(tree: *const panes.Tree) u64 {
 export fn zigonaut_panes_action(tree: *panes.Tree, action: u8) bool {
     return switch (action) {
         4, 5 => tree.focusCycle(action == 5),
-        6...9 => tree.resizeFocused(@enumFromInt(action - 6), 3277),
+        6...9 => tree.resizeFocused(@fromBackingInt(@intCast(action - 6)), 3277),
         10 => tree.equalize(),
         11 => tree.toggleZoom(),
         else => false,
     };
 }
 export fn zigonaut_panes_can_resize(tree: *const panes.Tree, direction: u8) bool {
-    return direction <= 3 and tree.canResize(@enumFromInt(direction));
+    return direction <= 3 and tree.canResize(@fromBackingInt(@intCast(direction)));
 }
 export fn zigonaut_panes_ratio(tree: *panes.Tree, split: u64, ratio: u16) bool {
     tree.setRatio(split, ratio) catch return false;
@@ -79,8 +79,8 @@ export fn zigonaut_panes_nodes(tree: *const panes.Tree, nodes: [*]panes.LayoutNo
 }
 export fn zigonaut_panes_destination(source: u64, direction: u8, frames: [*]const panes.MeasuredPane, count: usize) u64 {
     if (direction > 3) return 0;
-    return panes.measuredDestination(source, @enumFromInt(direction), frames[0..count]) orelse 0;
+    return panes.measuredDestination(source, @fromBackingInt(@intCast(direction)), frames[0..count]) orelse 0;
 }
 export fn zigonaut_panes_drop_edge(x: f64, y: f64, width: f64, height: f64) i8 {
-    return if (panes.nearestDropEdge(x, y, width, height)) |edge| @intCast(@intFromEnum(edge)) else -1;
+    return if (panes.nearestDropEdge(x, y, width, height)) |edge| @intCast(@backingInt(edge)) else -1;
 }

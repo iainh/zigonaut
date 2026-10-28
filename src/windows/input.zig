@@ -28,7 +28,7 @@ pub const State = struct {
     pub fn keyEvent(self: *State, virtual_key: usize, lparam: isize, released: bool) ?KeyEvent {
         const key = keyFromMessage(virtual_key, lparam) orelse return null;
         const repeated = (@as(usize, @bitCast(lparam)) & (1 << 30)) != 0;
-        const index = @intFromEnum(key);
+        const index = @backingInt(key);
         var event: KeyEvent = .{
             .key = key,
             .action = if (released) .release else if (repeated) .repeat else .press,
@@ -57,11 +57,11 @@ pub const State = struct {
 
     pub fn hasPressedMessage(self: *const State, virtual_key: usize, lparam: isize) bool {
         const key = keyFromMessage(virtual_key, lparam) orelse return false;
-        return self.pressed[@intFromEnum(key)];
+        return self.pressed[@backingInt(key)];
     }
 
     pub fn takePressed(self: *State, key: Terminal.Key) ?PressedKey {
-        const index = @intFromEnum(key);
+        const index = @backingInt(key);
         const pressed = &self.pressed[index];
         if (!pressed.*) return null;
         pressed.* = false;
@@ -437,7 +437,7 @@ test "pressed keys can be drained when focus is lost" {
 
 test "draining a pressed AltGr key retains release normalization" {
     var state = State{};
-    const index = @intFromEnum(Terminal.Key.q);
+    const index = @backingInt(Terminal.Key.q);
     state.pressed[index] = true;
     state.unshifted_codepoints[index] = 'q';
     state.altgr_text[index] = true;

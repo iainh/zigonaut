@@ -118,7 +118,7 @@ fn publishFrameWaitCompletion(view: *View, context: *const FrameWaitContext, req
         view.tracePaneId(),
         request_id,
         @intCast(context.wait_id),
-        @intFromEnum(outcome),
+        @backingInt(outcome),
     );
     view.completion_request_id = request_id;
     view.completion_generation = generation;
@@ -152,12 +152,12 @@ fn frameWaitCallback(raw: ?*anyopaque, timed_out: win.BOOLEAN) callconv(.winapi)
     if (context.runtime) |runtime| {
         scroll_trace.write(.capture_started, view.tracePaneId(), request_id, @intCast(context.wait_id), 0);
         const prepared = runtime.captureRender() catch {
-            scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(FrameWaitOutcome.failed));
+            scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @backingInt(FrameWaitOutcome.failed));
             publishFrameWaitCompletion(view, context, request_id, generation, .failed);
             return;
         };
         generation = prepared.content_generation;
-        scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @intFromEnum(FrameWaitOutcome.prepared));
+        scroll_trace.write(.capture_completed, view.tracePaneId(), request_id, @intCast(context.wait_id), @backingInt(FrameWaitOutcome.prepared));
     }
     publishFrameWaitCompletion(view, context, request_id, generation, .prepared);
 }
@@ -1402,8 +1402,8 @@ pub const View = struct {
             return true;
         };
         const latency = if (self.boundRuntime()) |runtime| runtime.latencyTrace() else SessionRuntime.LatencyTrace{ .pane_id = self.tracePaneId(), .request_id = 0 };
-        if (latency.request_id != 0) scroll_trace.write(.native_raster_completed, latency.pane_id, latency.request_id, @intFromEnum(result), 0);
-        scroll_trace.write(.paint_completed, self.tracePaneId(), request_id, @intFromEnum(result), 0);
+        if (latency.request_id != 0) scroll_trace.write(.native_raster_completed, latency.pane_id, latency.request_id, @backingInt(result), 0);
+        scroll_trace.write(.paint_completed, self.tracePaneId(), request_id, @backingInt(result), 0);
         if (result == .retry) {
             self.present_pending = true;
             self.present_retry_delay_ms = present_retry_initial_ms;
@@ -1673,7 +1673,7 @@ pub const View = struct {
             return true;
         }
         if (!released and control_shift and wparam == 'F') {
-            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, @intFromEnum(@import("chrome_bridge.zig").Command.find), 0);
+            _ = win.PostMessageW(win.GetParent(self.hwnd), self.chrome_message, @backingInt(@import("chrome_bridge.zig").Command.find), 0);
             self.suppressed_search_character = 0x06;
             return true;
         }
@@ -1682,14 +1682,14 @@ pub const View = struct {
         const active_runtime = if (self.boundSession()) |session| session.runtime else null;
         if (!released and active_runtime == null) return true;
         const event = self.input_state.keyEvent(wparam, lparam, released) orelse return true;
-        const index = @intFromEnum(event.key);
+        const index = @backingInt(event.key);
         if (event.action == .press) self.key_runtimes[index] = active_runtime;
         const key_runtime = self.key_runtimes[index] orelse return true;
         if (event.action == .release) self.key_runtimes[index] = null;
         if (!self.runtimeIsLive(key_runtime)) return true;
         if (event.action == .press and scroll_trace.enabled()) {
             const request_id = key_runtime.beginLatencyTrace(self.tracePaneId());
-            scroll_trace.write(.key_received, self.tracePaneId(), request_id, @intFromEnum(event.action), @intFromEnum(event.key));
+            scroll_trace.write(.key_received, self.tracePaneId(), request_id, @backingInt(event.action), @backingInt(event.key));
         }
         const encoded = key_runtime.sendKey(
             event.key,
@@ -1901,7 +1901,7 @@ pub const View = struct {
     fn releasePressedKeys(self: *View) void {
         for (std.enums.values(Terminal.Key)) |key| {
             const pressed = self.input_state.takePressed(key) orelse continue;
-            const index = @intFromEnum(key);
+            const index = @backingInt(key);
             const runtime = self.key_runtimes[index];
             self.key_runtimes[index] = null;
             if (runtime) |current| {
@@ -2254,7 +2254,7 @@ pub const View = struct {
             null,
         );
         if (selected == 0) return;
-        const command: ContextMenuCommand = @enumFromInt(selected);
+        const command: ContextMenuCommand = @fromBackingInt(@intCast(selected));
         switch (command) {
             .copy => self.copySelection() catch |err| log.debug("unable to copy terminal selection: {}", .{err}),
             .paste => self.pasteClipboard() catch |err| log.debug("unable to paste clipboard: {}", .{err}),
@@ -2555,7 +2555,7 @@ const DirectWriteCellRenderer = struct {
             cell.strikethrough,
             cell.overline,
             if (hovered) @max(cell.underline, 1) else cell.underline,
-            @intFromEnum(cell.occupancy),
+            @backingInt(cell.occupancy),
         ) catch |err| {
             self.draw_error = err;
         };
@@ -3019,7 +3019,7 @@ fn screenLparamToClient(hwnd: win.HWND, lparam: win.LPARAM) Terminal.PixelPoint 
 
 fn appendContextMenuItem(menu: win.HMENU, command: ContextMenuCommand, comptime label: []const u8, enabled: bool) void {
     const flags: win.UINT = @intCast(win.MF_STRING | if (enabled) 0 else win.MF_GRAYED);
-    _ = win.AppendMenuW(menu, flags, @intFromEnum(command), std.unicode.utf8ToUtf16LeStringLiteral(label));
+    _ = win.AppendMenuW(menu, flags, @backingInt(command), std.unicode.utf8ToUtf16LeStringLiteral(label));
 }
 
 fn keyboardContextMenuPoint(hwnd: win.HWND) win.POINT {
@@ -3194,7 +3194,7 @@ fn drawDirectWriteMessage(
         false,
         false,
         0,
-        @intFromEnum(Terminal.Cell.Occupancy.narrow),
+        @backingInt(Terminal.Cell.Occupancy.narrow),
     );
 }
 

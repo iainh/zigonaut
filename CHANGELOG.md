@@ -2,6 +2,12 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Updated libghostty to Ghostty 1.4.0 and source builds to Zig 0.17.0.
+
 ## [0.12.1] - 2026-10-22
 
 ### Changed

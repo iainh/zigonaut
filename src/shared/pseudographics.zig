@@ -232,10 +232,10 @@ fn renderBox(cp: u21, m: Metrics, c: Canvas) void {
         else => {
             const t = topology[cp - 0x2500];
             linesChar(c, .{
-                .up = @enumFromInt(@as(u2, @truncate(t))),
-                .down = @enumFromInt(@as(u2, @truncate(t >> 2))),
-                .left = @enumFromInt(@as(u2, @truncate(t >> 4))),
-                .right = @enumFromInt(@as(u2, @truncate(t >> 6))),
+                .up = @fromBackingInt(@intCast(@as(u2, @truncate(t)))),
+                .down = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 2)))),
+                .left = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 4)))),
+                .right = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 6)))),
             }, base);
         },
     }
@@ -334,10 +334,10 @@ test "double corners and junctions preserve connected rails and channels" {
         // to its perpendicular guide. These ranges overlap the corresponding
         // perpendicular rails, proving joins rather than mere edge marks.
         const t = topology[cp - 0x2500];
-        const up: Style = @enumFromInt(@as(u2, @truncate(t)));
-        const down: Style = @enumFromInt(@as(u2, @truncate(t >> 2)));
-        const left: Style = @enumFromInt(@as(u2, @truncate(t >> 4)));
-        const right: Style = @enumFromInt(@as(u2, @truncate(t >> 6)));
+        const up: Style = @fromBackingInt(@intCast(@as(u2, @truncate(t))));
+        const down: Style = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 2))));
+        const left: Style = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 4))));
+        const right: Style = @fromBackingInt(@intCast(@as(u2, @truncate(t >> 6))));
         if (up == .double) for (0..hl[0]) |y| {
             try std.testing.expect(pixels[y * w + vdl] != 0);
             try std.testing.expect(pixels[y * w + vl[1]] != 0);
