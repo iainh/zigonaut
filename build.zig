@@ -373,7 +373,19 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     core_test_step.dependOn(&run_abi_tests.step);
 
     const swift_configuration: []const u8 = if (optimize == .debug) "debug" else "release";
+    // Swift Build can stamp the deployment target as the linked SDK version.
+    // Supply both explicitly so AppKit adopts the selected SDK's appearance.
+    const swift_sdk_args: []const []const u8 = if (apple_sdk) |sdk| &.{
+        "--sdk",    sdk.root,
+        "-Xlinker", "-platform_version",
+        "-Xlinker", "macos",
+        "-Xlinker", "15.0",
+        "-Xlinker", std.mem.trim(u8, b.run(&.{ "xcrun", "--sdk", sdk.root, "--show-sdk-version" }), " \t\r\n"),
+    } else &.{};
     const swift_tests = b.addSystemCommand(&.{
+        "xcrun",
+        "--sdk",
+        "macosx",
         "swift",
         "test",
         "--package-path",
@@ -381,6 +393,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         "--configuration",
         swift_configuration,
     });
+    swift_tests.addArgs(swift_sdk_args);
     swift_tests.step.dependOn(b.getInstallStep());
     const ui_test_step = b.step("test-macos-ui", "Run macOS Swift unit tests");
     ui_test_step.dependOn(&swift_tests.step);
@@ -391,6 +404,9 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     addCiStep(b, check_step, test_step, fmt_step);
 
     const swift = b.addSystemCommand(&.{
+        "xcrun",
+        "--sdk",
+        "macosx",
         "swift",
         "build",
         "--package-path",
@@ -398,6 +414,7 @@ fn buildMacos(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         "--configuration",
         swift_configuration,
     });
+    swift.addArgs(swift_sdk_args);
     swift.step.dependOn(b.getInstallStep());
     const bundle = b.addSystemCommand(&.{ "sh", "macos/assemble.sh", swift_configuration });
     bundle.addDirectoryArg(b.path(if (optimize == .debug)
@@ -644,6 +661,7 @@ fn configurePtyHeaders(module: *std.Build.Module) void {
 }
 
 const AppleSdk = struct {
+    root: []const u8,
     libc: std.Build.LazyPath,
     framework: []const u8,
     system_include: []const u8,
@@ -676,6 +694,7 @@ fn findAppleSdk(b: *std.Build, resolved_target: std.Build.ResolvedTarget) ?Apple
         @panic("Apple SDK usr directory has no parent");
 
     return .{
+        .root = sdk_root,
         .libc = libc_file,
         .framework = b.pathJoin(&.{ sdk_root, "System", "Library", "Frameworks" }),
         .system_include = libc.sys_include_dir.?,

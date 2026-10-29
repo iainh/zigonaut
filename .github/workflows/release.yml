@@ -338,7 +338,7 @@ jobs:
       needs.validate.result == 'success' &&
       (needs.prepare_release.result == 'success' || needs.prepare_release.result == 'skipped')
     needs: [validate, prepare_release]
-    runs-on: macos-15
+    runs-on: xcode-27
     permissions:
       contents: write
 

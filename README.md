@@ -116,6 +116,19 @@ Drag to select and copy text automatically. Hold `Alt` for rectangular selection
 
 ## Compiling
 
+### macOS
+
+Use Zig 0.17.0 and Xcode 27 or later with the macOS 27 SDK. The application
+still supports macOS 15 and later; the newer SDK enables the current native
+window controls on macOS 27.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer zig build macos-app -Doptimize=ReleaseSafe
+```
+
+The Swift frontend and Zig core use the selected Apple SDK. Bundle assembly
+rejects a frontend linked against an SDK older than 27.
+
 ### Linux (GTK 4)
 
 The Linux dependency baseline is Debian 13 (trixie): Zig 0.17.0, GTK 4.18+,

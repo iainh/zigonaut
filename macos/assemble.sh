@@ -8,6 +8,13 @@ case "$configuration" in
     *) echo "usage: $0 [debug|release]" >&2; exit 2 ;;
 esac
 icon_path="${2:-$root/assets/icons/macos/$icon_name.icon}"
+# AppKit selects its modern appearance from the executable's linked SDK,
+# independently of the minimum macOS deployment target.
+if ! xcrun vtool -show-build "$root/macos/.build/$configuration/ZigonautMac" |
+    awk '$1 == "sdk" && $2 + 0 >= 27 { found = 1 } END { exit !found }'; then
+    echo "Zigonaut requires macOS SDK 27 or later. Select Xcode 27 or later and rebuild the Swift frontend." >&2
+    exit 1
+fi
 app="$root/zig-out/Zigonaut.app/Contents"
 rm -rf "$root/zig-out/Zigonaut.app"
 mkdir -p "$app/MacOS" "$app/Frameworks" "$app/Resources"
