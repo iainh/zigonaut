@@ -90,6 +90,31 @@ notification permissions still apply. Explicit OSC 9/777 notifications remain
 independent; sending one during a command suppresses its automatic completion
 alert. Enabling or disabling this setting discards any command already running.
 
+### WSL tab directories
+
+New tabs start independently in the selected profile's `workingDirectory`; they do not inherit the active pane's directory. If the profile directory is empty, **Start WSL in Linux home** in Settings > Profiles (`profiles.wslHomeFallback`) selects Linux home instead of the Windows starting directory. This preference is off by default. An explicit profile directory, including `~`, always takes precedence. Splits inherit the focused pane's reported directory, and duplicate tabs inherit the source tab's focused pane's reported directory; if no report is available, they use the source pane's launch directory.
+
+Your WSL shell must report its directory with OSC 7; Zigonaut does not inject integration into WSL shells. If your prompt already reports a local `file://` URI, no shell changes are needed. Otherwise, for Bash, add this hook to `~/.bashrc` inside WSL:
+
+```bash
+_zigonaut_report_directory() {
+    local LC_ALL=C encoded= byte hex i
+    for ((i = 0; i < ${#PWD}; i++)); do
+        byte=${PWD:i:1}
+        if [[ $byte == [A-Za-z0-9._~/-] ]]; then
+            encoded+=$byte
+        else
+            printf -v hex '%02X' "'$byte"
+            encoded+=%$hex
+        fi
+    done
+    printf '\e]7;file://localhost%s\a' "$encoded"
+}
+PROMPT_COMMAND+=(_zigonaut_report_directory)
+```
+
+Reload `~/.bashrc` or open a fresh WSL tab, change directory, then split the pane or use **Duplicate tab** to continue in that directory. `Ctrl+Shift+T` opens an independent tab using the default profile. Reports with remote hosts, malformed escapes or invalid paths are ignored; no Windows directory is inferred from a Linux path.
+
 ## Keyboard shortcuts
 
 See [Windows keyboard shortcuts](docs/keyboard-shortcuts-windows.md) for the complete Windows reference, including tab selection, clipboard alternatives, and search controls.

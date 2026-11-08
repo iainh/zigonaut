@@ -362,6 +362,7 @@ const Application = struct {
         result.model.setDefaultScrollbackSize(loaded.value.scrollback_size);
         result.model.setShellIntegrationEnabled(loaded.value.shell_integration_enabled);
         result.model.setCommandNotifications(loaded.value.command_completion_notifications);
+        result.model.wsl_home_fallback = loaded.value.wsl_home_fallback;
         return result;
     }
 
@@ -1020,7 +1021,7 @@ fn chromeMessageImpl(self: *Application, hwnd: win.HWND, wparam: win.WPARAM, lpa
             const pane = self.model.tabs.items[argument].focusedPane() orelse return 0;
             const session = &pane.session;
             const reported_directory = if (session.runtime) |runtime|
-                runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null
+                runtime.currentDirectoryAlloc(std.heap.page_allocator, if (session.shell == .wsl) .wsl else .windows) catch null
             else
                 null;
             defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
@@ -1655,13 +1656,7 @@ fn profileNamedImpl(self: *Application, name: ?[]const u8) ?config.Profile {
 }
 
 fn addProfileImpl(self: *Application, profile: config.Profile) !void {
-    const reported_directory = if (self.model.activeSession()) |session|
-        if (session.runtime) |runtime| runtime.currentDirectoryAlloc(std.heap.page_allocator) catch null else null
-    else
-        null;
-    defer if (reported_directory) |directory| std.heap.page_allocator.free(directory);
-    const working_directory = if (profile.working_directory.len > 0) profile.working_directory else reported_directory orelse "";
-    try self.addProfileAt(profile, working_directory);
+    try self.addProfileAt(profile, profile.working_directory);
 }
 
 fn addProfileAtImpl(self: *Application, profile: config.Profile, working_directory: []const u8) !void {
@@ -1723,7 +1718,7 @@ fn spawnNewWindowImpl(self: *Application) !void {
     const executable = try std.process.executablePathAlloc(self.io, allocator);
     defer allocator.free(executable);
     const directory = if (self.model.activeSession()) |session|
-        if (session.runtime) |runtime| try runtime.currentDirectoryAlloc(allocator) else null
+        if (session.runtime) |runtime| try runtime.currentDirectoryAlloc(allocator, .windows) else null
     else
         null;
     defer if (directory) |value| allocator.free(value);
@@ -1747,7 +1742,7 @@ fn pipeCommandOutputImpl(self: *Application) !void {
     const runtime = (self.model.activeSession() orelse return).runtime orelse return;
     const output = try runtime.lastCommandOutputAlloc(std.heap.page_allocator) orelse return;
     errdefer std.heap.page_allocator.free(output);
-    const directory = try runtime.currentDirectoryAlloc(std.heap.page_allocator);
+    const directory = try runtime.currentDirectoryAlloc(std.heap.page_allocator, .windows);
     errdefer if (directory) |value| std.heap.page_allocator.free(value);
     try PipeCommandTask.spawn(self.io, self.settings.pipe_command_output, output, directory);
 }
@@ -2165,6 +2160,7 @@ fn reloadSettingsImpl(self: *Application) !void {
     self.model.setDefaultScrollbackSize(self.settings.scrollback_size);
     self.model.setShellIntegrationEnabled(self.settings.shell_integration_enabled);
     self.model.setCommandNotifications(self.settings.command_completion_notifications);
+    self.model.wsl_home_fallback = self.settings.wsl_home_fallback;
     for (self.views.items) |entry| entry.view.updatePadding(self.settings.padding_horizontal, self.settings.padding_vertical, self.settings.padding_balance, self.settings.padding_color);
     self.updateTheme(changed.theme);
     if (new_font != null) _ = win.DeleteObject(old_font);

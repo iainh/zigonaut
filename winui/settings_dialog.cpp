@@ -151,6 +151,7 @@ std::map<std::string, std::string> parse(std::string_view contents) {
     values["randomize_tab_background"] = appearance.GetNamedBoolean(L"randomizeTabBackground") ? "true" : "false";
     values["default_profile"] = to_string(profiles.GetNamedString(L"default"));
     values["hold_on_exit"] = profiles.GetNamedBoolean(L"holdOnExit") ? "true" : "false";
+    values["wsl_home_fallback"] = profiles.GetNamedBoolean(L"wslHomeFallback", false) ? "true" : "false";
     values["automatic_shell_integration"] = advanced.GetNamedBoolean(L"automaticShellIntegration", true) ? "true" : "false";
     values["osc52_clipboard_write"] = clipboard.GetNamedBoolean(L"terminalWrites") ? "true" : "false";
     values["osc52_clipboard_max_bytes"] = number(clipboard.GetNamedNumber(L"maximumBytes"));
@@ -650,6 +651,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     bool updating_profiles{};
     bool updating_explorer{};
     ToggleSwitch hold_on_exit{nullptr};
+    ToggleSwitch wsl_home_fallback{nullptr};
     ToggleSwitch automatic_shell_integration{nullptr}, clipboard_write{nullptr};
     ToggleSwitch command_completion_notifications{nullptr};
     NumberBox clipboard_limit{nullptr};
@@ -1107,6 +1109,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         profile_panel.Children().Append(add_profile);
         updateProfileButtons();
         hold_on_exit = toggle(value(values, "hold_on_exit", "false"));
+        wsl_home_fallback = toggle(value(values, "wsl_home_fallback", "false"));
+        Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(wsl_home_fallback, L"Start WSL in Linux home");
         auto default_terminal = HyperlinkButton{};
         default_terminal.Content(box_value(L"Open Windows default terminal settings"));
         default_terminal.NavigateUri(Windows::Foundation::Uri{L"ms-settings:developers"});
@@ -1133,6 +1137,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         });
         return page(L"Profiles", L"Manage the shells available from the new-tab menu.", {
             card(L"Default profile", L"The profile opened at startup and by Ctrl+Shift+T.", default_profile),
+            card(L"Start WSL in Linux home", L"Use Linux home when no explicit or inherited directory is available. Off keeps the Windows starting directory. Applies to new terminals.", wsl_home_fallback),
             card(L"Launch profiles", L"Choose a name, shell type, command, and working directory for each new-tab option.", profile_panel, true),
             card(L"Keep tabs open", L"Keep a new tab open after its process exits cleanly.", hold_on_exit),
             card(L"Windows default terminal", L"Open the Windows selector for apps that implement the native terminal-host handoff.", default_terminal),
@@ -1413,6 +1418,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         }
         profile_settings.Insert(L"items", profile_items);
         profile_settings.Insert(L"holdOnExit", boolean(hold_on_exit.IsOn()));
+        profile_settings.Insert(L"wslHomeFallback", boolean(wsl_home_fallback.IsOn()));
         root.Insert(L"profiles", profile_settings);
 
         JsonObject advanced;
@@ -1492,7 +1498,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             if (!updating_profiles) save();
         });
         auto toggled = [this](auto const&, auto const&) { save(); };
-        for (auto const& editor : {random_background, opacity_cells, hold_on_exit, command_completion_notifications}) editor.Toggled(toggled);
+        for (auto const& editor : {random_background, opacity_cells, hold_on_exit, command_completion_notifications, wsl_home_fallback}) editor.Toggled(toggled);
         clipboard_write.Toggled([this](auto const&, auto const&) {
             clipboard_limit.IsEnabled(clipboard_write.IsOn());
             save();

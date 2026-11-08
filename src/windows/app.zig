@@ -18,18 +18,20 @@ test {
 
 pub const Shell = config.Shell;
 
-fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []const u8, working_directory: []const u8) !?[]u8 {
-    if (shell != .wsl or !(std.mem.eql(u8, working_directory, "~") or
-        std.mem.startsWith(u8, working_directory, "~/") or
-        std.mem.startsWith(u8, working_directory, "/"))) return null;
+fn wslLaunchCommandAlloc(allocator: std.mem.Allocator, shell: Shell, command: []const u8, working_directory: []const u8, home_fallback: bool) !?[]u8 {
+    const directory = if (working_directory.len == 0 and home_fallback) "~" else working_directory;
+    if (shell != .wsl or !(std.mem.eql(u8, directory, "~") or
+        std.mem.startsWith(u8, directory, "~/") or
+        std.mem.startsWith(u8, directory, "/"))) return null;
 
     // Give Linux paths to WSL with --cd. Win32 cannot use these paths as the
-    // current directory for CreateProcessW.
+    // current directory for CreateProcessW. The optional home fallback applies
+    // only without an explicit or inherited directory.
     var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, command);
     try result.appendSlice(allocator, " --cd ");
-    try shell_integration.appendWindowsArgument(allocator, &result, working_directory);
+    try shell_integration.appendWindowsArgument(allocator, &result, directory);
     return try result.toOwnedSlice(allocator);
 }
 
@@ -156,6 +158,7 @@ pub const App = struct {
     scrollback_size: u32 = 10_000,
     command_completion_notifications: bool = false,
     shell_integration_enabled: bool = true,
+    wsl_home_fallback: bool = false,
     tabs: std.ArrayList(Tab) = .empty,
     active_tab: ?usize = null,
     next_object_id: u64 = 1,
@@ -254,7 +257,7 @@ pub const App = struct {
         if (self.tabs.items.len >= max_tabs) return error.TabLimitReached;
         const background_seed = self.takeBackgroundSeed();
         const terminal_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
-        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory, self.wsl_home_fallback);
         defer if (wsl_command) |value| self.allocator.free(value);
         const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
         defer if (launch_command) |value| self.allocator.free(value);
@@ -378,10 +381,10 @@ pub const App = struct {
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const background_seed = self.takeBackgroundSeed();
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
-        const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator) catch null else null;
+        const reported_directory = if (source.session.runtime) |runtime| runtime.currentDirectoryAlloc(self.allocator, if (source.session.shell == .wsl) .wsl else .windows) catch null else null;
         defer if (reported_directory) |directory| self.allocator.free(directory);
         const working_directory = reported_directory orelse source.session.workingDirectory();
-        const wsl_command = try wslLaunchCommandAlloc(self.allocator, source.session.shell, source.session.command(), working_directory);
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, source.session.shell, source.session.command(), working_directory, self.wsl_home_fallback);
         defer if (wsl_command) |value| self.allocator.free(value);
         const launch_command = try self.launchCommandAlloc(source.session.shell, wsl_command orelse source.session.command());
         defer if (launch_command) |value| self.allocator.free(value);
@@ -398,7 +401,7 @@ pub const App = struct {
         const size = self.terminal_size orelse TerminalSize{ .columns = 80, .rows = 24, .cell_width = 9, .cell_height = 18 };
         const background_seed = self.takeBackgroundSeed();
         const session_theme = if (self.randomize_tab_background) theme.randomizedBackground(self.terminal_theme, background_seed) else self.terminal_theme;
-        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory);
+        const wsl_command = try wslLaunchCommandAlloc(self.allocator, shell, command, working_directory, self.wsl_home_fallback);
         defer if (wsl_command) |value| self.allocator.free(value);
         const launch_command = try self.launchCommandAlloc(shell, wsl_command orelse command);
         defer if (launch_command) |value| self.allocator.free(value);
@@ -969,16 +972,23 @@ test "split clones launch metadata, focuses new pane, and snapshots structure" {
 }
 
 test "WSL launch directories become --cd arguments" {
-    const home = (try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "~")).?;
-    defer std.testing.allocator.free(home);
-    try std.testing.expectEqualStrings("wsl.exe --cd \"~\"", home);
+    for ([_][]const u8{ "", "~" }) |directory| {
+        const home = try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", directory, true);
+        try std.testing.expect(home != null);
+        defer std.testing.allocator.free(home.?);
+        try std.testing.expectEqualStrings("wsl.exe --cd \"~\"", home.?);
+    }
 
-    const path = (try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe -d Debian", "/home/Iain's work")).?;
-    defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("wsl.exe -d Debian --cd \"/home/Iain's work\"", path);
+    for ([_]bool{ false, true }) |home_fallback| {
+        const path = (try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe -d Debian", "/home/Iain's work", home_fallback)).?;
+        defer std.testing.allocator.free(path);
+        try std.testing.expectEqualStrings("wsl.exe -d Debian --cd \"/home/Iain's work\"", path);
+    }
 
-    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "C:\\work")) == null);
-    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .powershell, "pwsh.exe", "~")) == null);
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "", false)) == null);
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .wsl, "wsl.exe", "C:\\work", true)) == null);
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .powershell, "pwsh.exe", "~", true)) == null);
+    try std.testing.expect((try wslLaunchCommandAlloc(std.testing.allocator, .powershell, "pwsh.exe", "", true)) == null);
 }
 
 test "focus title close extraction and stale identities" {

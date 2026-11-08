@@ -25,7 +25,8 @@ pub const default_contents =
     \\      { "name": "WSL", "shell": "wsl", "command": "wsl.exe", "workingDirectory": "" },
     \\      { "name": "Command Prompt", "shell": "windows", "command": "cmd.exe", "workingDirectory": "" }
     \\    ],
-    \\    "holdOnExit": false
+    \\    "holdOnExit": false,
+    \\    "wslHomeFallback": false
     \\  },
     \\  "advanced": {
     \\    "automaticShellIntegration": true,
@@ -134,6 +135,7 @@ const JsonConfig = struct {
         items: []const JsonProfile,
         workingDirectory: []const u8 = "",
         holdOnExit: bool,
+        wslHomeFallback: bool = false,
     },
     advanced: struct {
         automaticShellIntegration: bool = true,
@@ -173,6 +175,7 @@ pub const Config = struct {
     profiles: [max_profiles]Profile = default_profiles,
     profile_count: usize = 3,
     hold_on_exit: bool = false,
+    wsl_home_fallback: bool = false,
     randomize_tab_background: bool = true,
     osc52_clipboard_write: bool = false,
     osc52_clipboard_max_bytes: u32 = 1024 * 1024,
@@ -400,6 +403,7 @@ fn configFromJson(json: JsonConfig) !Config {
     }
     if (!found_default) return error.InvalidDefaultProfile;
     result.hold_on_exit = json.profiles.holdOnExit;
+    result.wsl_home_fallback = json.profiles.wslHomeFallback;
     result.osc52_clipboard_write = json.advanced.clipboard.terminalWrites;
     result.osc52_clipboard_max_bytes = json.advanced.clipboard.maximumBytes;
     result.pipe_command_output = json.advanced.pipeCommandOutput;
@@ -484,6 +488,7 @@ test "default JSON configuration parses" {
     try std.testing.expectEqual(@as(usize, 3), value.profile_count);
     try std.testing.expectEqualStrings("PowerShell", value.defaultProfile().name);
     try std.testing.expect(value.shell_integration_enabled);
+    try std.testing.expect(!value.wsl_home_fallback);
     try std.testing.expect(!value.command_completion_notifications);
 }
 
@@ -498,6 +503,18 @@ test "command completion alerts are opt-in and old configurations remain disable
     var old = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy, .{ .ignore_unknown_fields = true });
     defer old.deinit();
     try std.testing.expect(!(try configFromJson(old.value)).command_completion_notifications);
+}
+
+test "WSL home fallback is opt-in for existing configurations" {
+    var parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, default_contents, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    parsed.value.profiles.wslHomeFallback = true;
+    try std.testing.expect((try configFromJson(parsed.value)).wsl_home_fallback);
+    const legacy = try std.mem.replaceOwned(u8, std.testing.allocator, default_contents, ",\n    \"wslHomeFallback\": false", "");
+    defer std.testing.allocator.free(legacy);
+    var legacy_parsed = try std.json.parseFromSlice(JsonConfig, std.testing.allocator, legacy, .{ .ignore_unknown_fields = true });
+    defer legacy_parsed.deinit();
+    try std.testing.expect(!(try configFromJson(legacy_parsed.value)).wsl_home_fallback);
 }
 
 test "automatic shell integration can be disabled" {

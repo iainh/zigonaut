@@ -442,7 +442,9 @@ pub const SessionRuntime = struct {
         return self.terminal.selectedTextAlloc(allocator);
     }
 
-    pub fn currentDirectoryAlloc(self: *SessionRuntime, allocator: std.mem.Allocator) !?[]u8 {
+    pub const DirectoryKind = enum { windows, wsl };
+
+    pub fn currentDirectoryAlloc(self: *SessionRuntime, allocator: std.mem.Allocator, kind: DirectoryKind) !?[]u8 {
         self.terminal_mutex.lock();
         const reported = self.terminal.pwdAlloc(allocator) catch |err| {
             self.terminal_mutex.unlock();
@@ -457,7 +459,7 @@ pub const SessionRuntime = struct {
         if (win.GetComputerNameW(&hostname_wide, &hostname_length) == 0) return null;
         var hostname_utf8: [256 * 3]u8 = undefined;
         const utf8_length = std.unicode.utf16LeToUtf8(&hostname_utf8, hostname_wide[0..hostname_length]) catch return null;
-        return osc7WindowsPathAlloc(allocator, value, hostname_utf8[0..utf8_length]);
+        return osc7PathAlloc(allocator, value, hostname_utf8[0..utf8_length], kind);
     }
 
     pub fn linkAtAlloc(self: *SessionRuntime, allocator: std.mem.Allocator, point: Terminal.Point) !?Terminal.Link {
@@ -1739,7 +1741,7 @@ fn deinitTestRuntime(runtime: *SessionRuntime) void {
     runtime.terminal.deinit();
 }
 
-fn osc7WindowsPathAlloc(allocator: std.mem.Allocator, value: []const u8, local_hostname: []const u8) !?[]u8 {
+fn osc7PathAlloc(allocator: std.mem.Allocator, value: []const u8, local_hostname: []const u8, kind: SessionRuntime.DirectoryKind) !?[]u8 {
     const uri = std.Uri.parse(value) catch return null;
     if (!std.ascii.eqlIgnoreCase(uri.scheme, "file") or uri.user != null or uri.password != null or uri.port != null or uri.query != null or uri.fragment != null) return null;
 
@@ -1753,7 +1755,9 @@ fn osc7WindowsPathAlloc(allocator: std.mem.Allocator, value: []const u8, local_h
     }
     if (!validPercentEncoding(uri.path)) return null;
     const path = try uri.path.toRawMaybeAlloc(temporary);
-    if (path.len < 4 or path[0] != '/' or !std.ascii.isAlphabetic(path[1]) or path[2] != ':' or path[3] != '/' or std.mem.indexOfScalar(u8, path, 0) != null or !std.unicode.utf8ValidateSlice(path)) return null;
+    if (path.len == 0 or path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null or !std.unicode.utf8ValidateSlice(path)) return null;
+    if (kind == .wsl) return try allocator.dupe(u8, path);
+    if (path.len < 4 or !std.ascii.isAlphabetic(path[1]) or path[2] != ':' or path[3] != '/') return null;
 
     const result = try allocator.dupe(u8, path[1..]);
     for (result) |*byte| if (byte.* == '/') {
@@ -1775,28 +1779,63 @@ fn validPercentEncoding(component: std.Uri.Component) bool {
     return true;
 }
 
+test "WSL directory reports preserve Linux paths for splits and duplicate tabs" {
+    const allocator = std.testing.allocator;
+    var runtime = SessionRuntime{
+        .allocator = allocator,
+        .terminal = try Terminal.init(80, 24, theme.rasmus),
+        .refresh = .{},
+        .columns = 80,
+        .rows = 24,
+    };
+    defer deinitTestRuntime(&runtime);
+    try std.testing.expect((try runtime.currentDirectoryAlloc(allocator, .wsl)) == null);
+    runtime.terminal.feed("\x1b]7;file://localhost/home/alice/My%20Files/%E2%9C%93\x07");
+    const directory = (try runtime.currentDirectoryAlloc(allocator, .wsl)).?;
+    defer allocator.free(directory);
+    try std.testing.expectEqualStrings("/home/alice/My Files/\xe2\x9c\x93", directory);
+    try std.testing.expect((try runtime.currentDirectoryAlloc(allocator, .windows)) == null);
+
+    const invalid_reports = [_][]const u8{
+        "file://remote/home/alice",
+        "file:///home/bad%ZZpath",
+        "file:///home/bad%00path",
+        "file:///home/bad%FFpath",
+    };
+    for (invalid_reports) |report| {
+        runtime.terminal.feed("\x1b]7;");
+        runtime.terminal.feed(report);
+        runtime.terminal.feed("\x07");
+        try std.testing.expect((try runtime.currentDirectoryAlloc(allocator, .wsl)) == null);
+    }
+    runtime.terminal.feed("\x1b]7;file://localhost/\x07");
+    const root = (try runtime.currentDirectoryAlloc(allocator, .wsl)).?;
+    defer allocator.free(root);
+    try std.testing.expectEqualStrings("/", root);
+}
+
 test "OSC 7 local file URIs become Windows working directories" {
     const allocator = std.testing.allocator;
-    const plain = (try osc7WindowsPathAlloc(allocator, "file:///C:/Users/Alice/project", "DESKTOP-1")).?;
+    const plain = (try osc7PathAlloc(allocator, "file:///C:/Users/Alice/project", "DESKTOP-1", .windows)).?;
     defer allocator.free(plain);
     try std.testing.expectEqualStrings("C:\\Users\\Alice\\project", plain);
 
-    const escaped = (try osc7WindowsPathAlloc(allocator, "file://desktop-1/C:/My%20Files/%E2%9C%93", "DESKTOP-1")).?;
+    const escaped = (try osc7PathAlloc(allocator, "file://desktop-1/C:/My%20Files/%E2%9C%93", "DESKTOP-1", .windows)).?;
     defer allocator.free(escaped);
     try std.testing.expectEqualStrings("C:\\My Files\\✓", escaped);
 
-    const localhost = (try osc7WindowsPathAlloc(allocator, "FILE://localhost/D:/work", "DESKTOP-1")).?;
+    const localhost = (try osc7PathAlloc(allocator, "FILE://localhost/D:/work", "DESKTOP-1", .windows)).?;
     defer allocator.free(localhost);
     try std.testing.expectEqualStrings("D:\\work", localhost);
 }
 
 test "OSC 7 rejects remote malformed and non-Windows locations" {
     const allocator = std.testing.allocator;
-    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file://remote/C:/work", "DESKTOP-1")) == null);
-    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "https://localhost/C:/work", "DESKTOP-1")) == null);
-    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///home/alice", "DESKTOP-1")) == null);
-    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%ZZpath", "DESKTOP-1")) == null);
-    try std.testing.expect((try osc7WindowsPathAlloc(allocator, "file:///C:/bad%00path", "DESKTOP-1")) == null);
+    try std.testing.expect((try osc7PathAlloc(allocator, "file://remote/C:/work", "DESKTOP-1", .windows)) == null);
+    try std.testing.expect((try osc7PathAlloc(allocator, "https://localhost/C:/work", "DESKTOP-1", .windows)) == null);
+    try std.testing.expect((try osc7PathAlloc(allocator, "file:///home/alice", "DESKTOP-1", .windows)) == null);
+    try std.testing.expect((try osc7PathAlloc(allocator, "file:///C:/bad%ZZpath", "DESKTOP-1", .windows)) == null);
+    try std.testing.expect((try osc7PathAlloc(allocator, "file:///C:/bad%00path", "DESKTOP-1", .windows)) == null);
 }
 
 test "notification queue preserves FIFO order and evicts its oldest entry" {
