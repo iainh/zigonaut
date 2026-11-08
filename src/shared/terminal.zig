@@ -748,16 +748,14 @@ pub const Terminal = struct {
                 var height: u32 = 0;
                 var generation: u64 = 0;
                 var format: vt.GhosttyKittyImageFormat = vt.GHOSTTY_KITTY_IMAGE_FORMAT_RGB;
-                var data_ptr: [*c]const u8 = null;
-                var data_len: usize = 0;
-                if (vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &width) != vt.GHOSTTY_SUCCESS or
-                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &height) != vt.GHOSTTY_SUCCESS or
-                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &generation) != vt.GHOSTTY_SUCCESS or
-                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &format) != vt.GHOSTTY_SUCCESS or
-                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, @ptrCast(&data_ptr)) != vt.GHOSTTY_SUCCESS or
-                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &data_len) != vt.GHOSTTY_SUCCESS) continue;
+                var pixels = std.mem.zeroes(vt.GhosttyString);
+                if (vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH, &width) != vt.GHOSTTY_SUCCESS or
+                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT, &height) != vt.GHOSTTY_SUCCESS or
+                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION, &generation) != vt.GHOSTTY_SUCCESS or
+                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT, &format) != vt.GHOSTTY_SUCCESS or
+                    vt.ghostty_kitty_graphics_image_get(handle, vt.GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS, &pixels) != vt.GHOSTTY_SUCCESS) continue;
                 const expected = std.math.mul(usize, std.math.mul(usize, width, height) catch continue, 4) catch continue;
-                if (format != vt.GHOSTTY_KITTY_IMAGE_FORMAT_RGBA or expected != data_len or data_len > kitty_image_limit or data_ptr == null) continue;
+                if (format != vt.GHOSTTY_KITTY_IMAGE_FORMAT_RGBA or expected != pixels.len or pixels.len > kitty_image_limit or pixels.ptr == null) continue;
                 var info: vt.GhosttyKittyGraphicsPlacementRenderInfo = std.mem.zeroes(vt.GhosttyKittyGraphicsPlacementRenderInfo);
                 info.size = @sizeOf(vt.GhosttyKittyGraphicsPlacementRenderInfo);
                 if (vt.ghostty_kitty_graphics_placement_render_info(iterator, handle, terminal.terminal, &info) != vt.GHOSTTY_SUCCESS) continue;
@@ -769,7 +767,7 @@ pub const Terminal = struct {
                     .generation = generation,
                     .width = width,
                     .height = height,
-                    .pixels = data_ptr[0..data_len],
+                    .pixels = pixels.ptr[0..pixels.len],
                 });
                 if (virtual) {
                     var placement_id: u32 = 0;
@@ -1358,10 +1356,10 @@ pub const Terminal = struct {
                 // normalizing it for the larger height. Unpin for that loop,
                 // then restore the offset within the new viewport bounds.
                 restore_offset = viewport.offset;
-                vt.ghostty_terminal_scroll_viewport(self.terminal, .{
-                    .tag = vt.GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
+                try check(vt.ghostty_terminal_scroll_viewport(self.terminal, .{
+                    .tag = vt.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM,
                     .value = .{ .delta = 0 },
-                });
+                }));
             }
         }
         try check(vt.ghostty_terminal_resize(
@@ -1493,17 +1491,17 @@ pub const Terminal = struct {
     pub fn scrollViewport(self: *Terminal, delta: isize) void {
         self.scroll_fraction = 0;
         self.image_generation +%= 1;
-        vt.ghostty_terminal_scroll_viewport(self.terminal, .{
-            .tag = vt.GHOSTTY_SCROLL_VIEWPORT_DELTA,
+        check(vt.ghostty_terminal_scroll_viewport(self.terminal, .{
+            .tag = vt.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA,
             .value = .{ .delta = delta },
-        });
+        })) catch unreachable;
     }
 
     /// One persistent bottom row avoids resizing snapshot storage on every
     /// transition between fractional and aligned positions.
     pub fn setFractionalScrolling(self: *Terminal, enabled: bool) !void {
         const overscan = vt.GhosttyRenderStateOverscan{ .above = 0, .below = @intFromBool(enabled) };
-        try check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &overscan));
+        try check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPT_OVERSCAN, &overscan));
         self.fractional_scrolling = enabled;
         self.scroll_fraction = 0;
     }
@@ -1615,8 +1613,7 @@ pub const Terminal = struct {
         const reference = output_ref orelse return null;
 
         var selection = std.mem.zeroes(vt.GhosttySelection);
-        selection.size = @sizeOf(vt.GhosttySelection);
-        const selected = vt.ghostty_terminal_select_output(self.terminal, reference, &selection);
+        const selected = vt.ghostty_terminal_select_output(self.terminal, &reference, &selection);
         if (selected == vt.GHOSTTY_NO_VALUE) return null;
         try check(selected);
         var selection_start = std.mem.zeroes(vt.GhosttyPointCoordinate);
@@ -1633,7 +1630,6 @@ pub const Terminal = struct {
 
     fn screenGridRef(self: *Terminal, x: u16, y: u32) !vt.GhosttyGridRef {
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
-        reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, .{
             .tag = vt.GHOSTTY_POINT_TAG_SCREEN,
             .value = .{ .coordinate = .{ .x = x, .y = y } },
@@ -1658,7 +1654,6 @@ pub const Terminal = struct {
             while (column > 0) {
                 column -= 1;
                 var reference = std.mem.zeroes(vt.GhosttyGridRef);
-                reference.size = @sizeOf(vt.GhosttyGridRef);
                 const resolved = vt.ghostty_terminal_grid_ref(self.terminal, .{
                     .tag = vt.GHOSTTY_POINT_TAG_SCREEN,
                     .value = .{ .coordinate = .{ .x = @intCast(column), .y = row } },
@@ -1717,7 +1712,6 @@ pub const Terminal = struct {
         while (x < self.columns) : (x += 1) {
             starts[x] = @intCast(scratch.text.items.len);
             var reference = std.mem.zeroes(vt.GhosttyGridRef);
-            reference.size = @sizeOf(vt.GhosttyGridRef);
             try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = x, .y = row_index } } }, &reference));
             var cell: vt.GhosttyCell = 0;
             try check(vt.ghostty_grid_ref_cell(&reference, &cell));
@@ -1748,7 +1742,6 @@ pub const Terminal = struct {
         }
         starts[self.columns] = @intCast(scratch.text.items.len);
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
-        reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = 0, .y = row_index } } }, &reference));
         var row: vt.GhosttyRow = 0;
         try check(vt.ghostty_grid_ref_row(&reference, &row));
@@ -1923,7 +1916,6 @@ pub const Terminal = struct {
         if (point.x >= self.columns or point.y > self.rows or
             (point.y == self.rows and self.scroll_fraction == 0)) return null;
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
-        reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(point), &reference));
         var required: usize = 0;
         const status = vt.ghostty_grid_ref_hyperlink_uri(&reference, null, 0, &required);
@@ -1971,7 +1963,6 @@ pub const Terminal = struct {
 
     fn cellHasHyperlink(self: *Terminal, x: u16, y: u16, uri: []const u8) !bool {
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
-        reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(.{ .x = x, .y = y }), &reference));
         var required: usize = 0;
         const result = vt.ghostty_grid_ref_hyperlink_uri(&reference, null, 0, &required);
@@ -1984,7 +1975,6 @@ pub const Terminal = struct {
 
     fn appendCellText(self: *Terminal, allocator: std.mem.Allocator, row: *std.ArrayList(u8), x: u16, y: u16) !void {
         var reference = std.mem.zeroes(vt.GhosttyGridRef);
-        reference.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(.{ .x = x, .y = y }), &reference));
         var codepoints: [16]u32 = undefined;
         var count: usize = 0;
@@ -2127,7 +2117,7 @@ pub const Terminal = struct {
         var cursor_x: u16 = 0;
         var cursor_y: u16 = 0;
         var cursor_wide_tail = false;
-        var cursor_visual_style: vt.GhosttyRenderStateCursorVisualStyle = vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
+        var cursor_visual_style: vt.GhosttyCursorStyle = vt.GHOSTTY_CURSOR_STYLE_BLOCK;
         try check(vt.ghostty_render_state_get(
             self.render_state,
             vt.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
@@ -2146,9 +2136,9 @@ pub const Terminal = struct {
             .background = fromGhostty(colors.background),
             .cursor = fromGhostty(if (colors.cursor_has_value) colors.cursor else colors.foreground),
             .cursor_style = switch (cursor_visual_style) {
-                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => .bar,
-                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => .underline,
-                vt.GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => .hollow,
+                vt.GHOSTTY_CURSOR_STYLE_BAR => .bar,
+                vt.GHOSTTY_CURSOR_STYLE_UNDERLINE => .underline,
+                vt.GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW => .hollow,
                 else => .block,
             },
             .cursor_visible = cursor_visible and cursor_has_position,
@@ -2222,12 +2212,12 @@ pub const Terminal = struct {
             while (vt.ghostty_render_state_row_cells_next(self.row_cells)) : (x += 1) {
                 const occupancy = try currentCellOccupancy(self.row_cells);
                 var style = std.mem.zeroes(vt.GhosttyStyle);
-                style.size = @sizeOf(vt.GhosttyStyle);
                 try check(vt.ghostty_render_state_row_cells_get(
                     self.row_cells,
                     vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
                     &style,
                 ));
+                const bold = style.flags & vt.GHOSTTY_STYLE_FLAG_BOLD != 0;
                 var foreground = colors.foreground;
                 var background = colors.background;
                 if (vt.ghostty_render_state_row_cells_get(
@@ -2238,7 +2228,7 @@ pub const Terminal = struct {
                 const palette_foreground = style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_PALETTE;
                 const can_brighten = style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_NONE or
                     (palette_foreground and style.fg_color.value.palette < 16);
-                const brighten = style.bold and self.intense_text_style != .bold;
+                const brighten = bold and self.intense_text_style != .bold;
                 if (brighten and palette_foreground and style.fg_color.value.palette < 8) {
                     foreground = colors.palette[style.fg_color.value.palette + 8];
                 } else if (brighten and style.fg_color.tag == vt.GHOSTTY_STYLE_COLOR_NONE) {
@@ -2257,7 +2247,7 @@ pub const Terminal = struct {
                 if (!has_background) background = colors.background;
                 const background_is_default = !has_background;
                 const background_matches_default = has_background and std.meta.eql(fromGhostty(background), fromGhostty(colors.background));
-                if (style.inverse) std.mem.swap(vt.GhosttyColorRgb, &foreground, &background);
+                if (style.flags & vt.GHOSTTY_STYLE_FLAG_INVERSE != 0) std.mem.swap(vt.GhosttyColorRgb, &foreground, &background);
                 var underline_color = foreground;
                 switch (style.underline_color.tag) {
                     vt.GHOSTTY_STYLE_COLOR_PALETTE => underline_color = colors.palette[style.underline_color.value.palette],
@@ -2276,29 +2266,30 @@ pub const Terminal = struct {
                 // Hide an oversized cluster instead of truncating it. A prefix
                 // can form a different grapheme and display incorrect text.
                 if (count > 0 and codepoint_count <= codepoints.len) {
+                    var graphemes = vt.GhosttyCodepointBuffer{ .ptr = &codepoints, .cap = codepoints.len, .len = 0 };
                     try check(vt.ghostty_render_state_row_cells_get(
                         self.row_cells,
                         vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                        &codepoints,
+                        &graphemes,
                     ));
                 }
                 const draw_result = renderer.drawCell(Cell{
                     .x = x,
                     .y = y,
                     .occupancy = occupancy,
-                    .codepoints = if (style.invisible or codepoint_count > codepoints.len) codepoints[0..0] else codepoints[0..count],
+                    .codepoints = if (style.flags & vt.GHOSTTY_STYLE_FLAG_INVISIBLE != 0 or codepoint_count > codepoints.len) codepoints[0..0] else codepoints[0..count],
                     .foreground = fromGhostty(foreground),
                     .background = fromGhostty(background),
                     .underline_color = fromGhostty(underline_color),
                     // Match Windows Terminal's fallback: RGB and 256-colour
                     // text has no bright variant, so bold remains its visible
                     // representation of intensity in bright-only mode.
-                    .bold = style.bold and (self.intense_text_style != .bright or !can_brighten),
-                    .italic = style.italic,
-                    .faint = style.faint,
-                    .strikethrough = style.strikethrough,
-                    .overline = style.overline,
-                    .underline = @intCast(@max(style.underline, 0)),
+                    .bold = bold and (self.intense_text_style != .bright or !can_brighten),
+                    .italic = style.flags & vt.GHOSTTY_STYLE_FLAG_ITALIC != 0,
+                    .faint = style.flags & vt.GHOSTTY_STYLE_FLAG_FAINT != 0,
+                    .strikethrough = style.flags & vt.GHOSTTY_STYLE_FLAG_STRIKETHROUGH != 0,
+                    .overline = style.flags & vt.GHOSTTY_STYLE_FLAG_OVERLINE != 0,
+                    .underline = @intCast(vt.GHOSTTY_STYLE_UNDERLINE(style)),
                     .selected = has_selection and x >= selection.start_x and x <= selection.end_x,
                     .background_is_default = background_is_default,
                     .background_matches_default = background_matches_default,
@@ -2310,7 +2301,7 @@ pub const Terminal = struct {
             row_dirty = false;
             try check(vt.ghostty_render_state_row_set(
                 self.row_iterator,
-                vt.GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY,
+                vt.GHOSTTY_RENDER_STATE_ROW_OPT_DIRTY,
                 &row_dirty,
             ));
         }
@@ -2347,19 +2338,19 @@ pub const Terminal = struct {
         dirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         try check(vt.ghostty_render_state_set(
             self.render_state,
-            vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY,
+            vt.GHOSTTY_RENDER_STATE_OPT_DIRTY,
             &dirty,
         ));
     }
 
     pub fn encodeKey(self: *Terminal, key: Key, action: KeyAction, modifiers: u16, consumed_modifiers: u16, utf8: []const u8, unshifted_codepoint: u32, output: []u8) ![]const u8 {
-        vt.ghostty_key_encoder_setopt_from_terminal(self.key_encoder, self.terminal);
-        vt.ghostty_key_event_set_action(self.key_event, switch (action) {
+        try check(vt.ghostty_key_encoder_set_from_terminal(self.key_encoder, self.terminal));
+        try check(vt.ghostty_key_event_set_action(self.key_event, switch (action) {
             .press => vt.GHOSTTY_KEY_ACTION_PRESS,
             .repeat => vt.GHOSTTY_KEY_ACTION_REPEAT,
             .release => vt.GHOSTTY_KEY_ACTION_RELEASE,
-        });
-        vt.ghostty_key_event_set_key(self.key_event, switch (key) {
+        }));
+        try check(vt.ghostty_key_event_set_key(self.key_event, switch (key) {
             .backquote => vt.GHOSTTY_KEY_BACKQUOTE,
             .backslash => vt.GHOSTTY_KEY_BACKSLASH,
             .bracket_left => vt.GHOSTTY_KEY_BRACKET_LEFT,
@@ -2514,12 +2505,12 @@ pub const Terminal = struct {
             .audio_volume_down => vt.GHOSTTY_KEY_AUDIO_VOLUME_DOWN,
             .audio_volume_mute => vt.GHOSTTY_KEY_AUDIO_VOLUME_MUTE,
             .audio_volume_up => vt.GHOSTTY_KEY_AUDIO_VOLUME_UP,
-        });
-        vt.ghostty_key_event_set_mods(self.key_event, modifiers);
-        vt.ghostty_key_event_set_consumed_mods(self.key_event, consumed_modifiers);
-        vt.ghostty_key_event_set_composing(self.key_event, false);
-        vt.ghostty_key_event_set_utf8(self.key_event, if (utf8.len == 0) null else utf8.ptr, utf8.len);
-        vt.ghostty_key_event_set_unshifted_codepoint(self.key_event, unshifted_codepoint);
+        }));
+        try check(vt.ghostty_key_event_set_mods(self.key_event, modifiers));
+        try check(vt.ghostty_key_event_set_consumed_mods(self.key_event, consumed_modifiers));
+        try check(vt.ghostty_key_event_set_composing(self.key_event, false));
+        try check(vt.ghostty_key_event_set_utf8(self.key_event, .{ .ptr = if (utf8.len == 0) null else utf8.ptr, .len = utf8.len }));
+        try check(vt.ghostty_key_event_set_unshifted_codepoint(self.key_event, unshifted_codepoint));
 
         var length: usize = 0;
         try check(vt.ghostty_key_encoder_encode(
@@ -2573,11 +2564,13 @@ pub const Terminal = struct {
                 }
 
                 var codepoints: [16]u32 = undefined;
-                try check(vt.ghostty_render_state_row_cells_get(
+                var graphemes = vt.GhosttyCodepointBuffer{ .ptr = &codepoints, .cap = codepoints.len, .len = 0 };
+                const result = vt.ghostty_render_state_row_cells_get(
                     self.row_cells,
                     vt.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                    @ptrCast(&codepoints),
-                ));
+                    &graphemes,
+                );
+                if (result != vt.GHOSTTY_OUT_OF_SPACE) try check(result);
                 const count = @min(codepoint_count, codepoints.len);
                 for (codepoints[0..count]) |codepoint| {
                     var encoded: [4]u8 = undefined;
@@ -2598,13 +2591,10 @@ pub const Terminal = struct {
             return;
         };
         var start = std.mem.zeroes(vt.GhosttyGridRef);
-        start.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(value.anchor), &start));
         var end = std.mem.zeroes(vt.GhosttyGridRef);
-        end.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(value.focus), &end));
         var native_selection = std.mem.zeroes(vt.GhosttySelection);
-        native_selection.size = @sizeOf(vt.GhosttySelection);
         native_selection.start = start;
         native_selection.end = end;
         native_selection.rectangle = value.rectangle;
@@ -2617,7 +2607,6 @@ pub const Terminal = struct {
 
     pub fn hasSelection(self: *Terminal) bool {
         var selection = std.mem.zeroes(vt.GhosttySelection);
-        selection.size = @sizeOf(vt.GhosttySelection);
         return vt.ghostty_terminal_get(
             self.terminal,
             vt.GHOSTTY_TERMINAL_DATA_SELECTION,
@@ -2651,10 +2640,8 @@ pub const Terminal = struct {
     pub fn setDerivedSelection(self: *Terminal, focus: Point, unit: SelectionUnit, rectangle: bool) !void {
         const tracked = self.selection_anchor orelse return error.SelectionAnchorLost;
         var a = std.mem.zeroes(vt.GhosttyGridRef);
-        a.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_tracked_grid_ref_snapshot(tracked, &a));
         var f = std.mem.zeroes(vt.GhosttyGridRef);
-        f.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, viewportPoint(focus), &f));
         var focus_screen = std.mem.zeroes(vt.GhosttyPointCoordinate);
         try check(vt.ghostty_terminal_point_from_grid_ref(self.terminal, &f, vt.GHOSTTY_POINT_TAG_SCREEN, &focus_screen));
@@ -2662,7 +2649,6 @@ pub const Terminal = struct {
         try check(vt.ghostty_tracked_grid_ref_point(tracked, vt.GHOSTTY_POINT_TAG_SCREEN, &anchor_screen));
         const forward = anchor_screen.y < focus_screen.y or anchor_screen.y == focus_screen.y and anchor_screen.x <= focus_screen.x;
         var selection = std.mem.zeroes(vt.GhosttySelection);
-        selection.size = @sizeOf(vt.GhosttySelection);
         if (unit == .cell) {
             selection.start = a;
             selection.end = f;
@@ -2671,9 +2657,7 @@ pub const Terminal = struct {
             return;
         }
         var first = std.mem.zeroes(vt.GhosttySelection);
-        first.size = @sizeOf(vt.GhosttySelection);
         var last = std.mem.zeroes(vt.GhosttySelection);
-        last.size = @sizeOf(vt.GhosttySelection);
         if (unit == .word) {
             var options = std.mem.zeroes(vt.GhosttyTerminalSelectWordBetweenOptions);
             options.size = @sizeOf(vt.GhosttyTerminalSelectWordBetweenOptions);
@@ -2740,9 +2724,6 @@ pub const Terminal = struct {
             }
         }
         var result = std.mem.zeroes(vt.GhosttySelection);
-        result.size = @sizeOf(vt.GhosttySelection);
-        result.start.size = @sizeOf(vt.GhosttyGridRef);
-        result.end.size = @sizeOf(vt.GhosttyGridRef);
         try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = start_column, .y = point.y } } }, &result.start));
         try check(vt.ghostty_terminal_grid_ref(self.terminal, .{ .tag = vt.GHOSTTY_POINT_TAG_SCREEN, .value = .{ .coordinate = .{ .x = end_column, .y = point.y } } }, &result.end));
         return result;
@@ -2753,7 +2734,6 @@ pub const Terminal = struct {
         options.size = @sizeOf(vt.GhosttyTerminalSelectWordOptions);
         options.ref = reference;
         var result = std.mem.zeroes(vt.GhosttySelection);
-        result.size = @sizeOf(vt.GhosttySelection);
         try check(vt.ghostty_terminal_select_word(self.terminal, &options, &result));
         return result;
     }
@@ -2765,7 +2745,7 @@ pub const Terminal = struct {
     }
 
     pub fn encodeMouse(self: *Terminal, action: MouseAction, button: MouseButton, position: PixelPoint, modifiers: u16, geometry: MouseGeometry, any_button_pressed: bool, output: []u8) ![]const u8 {
-        vt.ghostty_mouse_encoder_setopt_from_terminal(self.mouse_encoder, self.terminal);
+        try check(vt.ghostty_mouse_encoder_set_from_terminal(self.mouse_encoder, self.terminal));
         var size = std.mem.zeroes(vt.GhosttyMouseEncoderSize);
         size.size = @sizeOf(vt.GhosttyMouseEncoderSize);
         size.screen_width = geometry.screen_width;
@@ -2776,14 +2756,14 @@ pub const Terminal = struct {
         size.padding_bottom = geometry.padding_bottom;
         size.padding_left = geometry.padding_left;
         size.padding_right = geometry.padding_right;
-        vt.ghostty_mouse_encoder_setopt(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
-        vt.ghostty_mouse_encoder_setopt(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed);
-        vt.ghostty_mouse_event_set_action(self.mouse_event, switch (action) {
+        try check(vt.ghostty_mouse_encoder_set(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size));
+        try check(vt.ghostty_mouse_encoder_set(self.mouse_encoder, vt.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &any_button_pressed));
+        try check(vt.ghostty_mouse_event_set_action(self.mouse_event, switch (action) {
             .press => vt.GHOSTTY_MOUSE_ACTION_PRESS,
             .release => vt.GHOSTTY_MOUSE_ACTION_RELEASE,
             .motion => vt.GHOSTTY_MOUSE_ACTION_MOTION,
-        });
-        if (button == .none) vt.ghostty_mouse_event_clear_button(self.mouse_event) else vt.ghostty_mouse_event_set_button(self.mouse_event, switch (button) {
+        }));
+        try check(if (button == .none) vt.ghostty_mouse_event_clear_button(self.mouse_event) else vt.ghostty_mouse_event_set_button(self.mouse_event, switch (button) {
             .left => vt.GHOSTTY_MOUSE_BUTTON_LEFT,
             .middle => vt.GHOSTTY_MOUSE_BUTTON_MIDDLE,
             .right => vt.GHOSTTY_MOUSE_BUTTON_RIGHT,
@@ -2792,9 +2772,9 @@ pub const Terminal = struct {
             .wheel_left => vt.GHOSTTY_MOUSE_BUTTON_SIX,
             .wheel_right => vt.GHOSTTY_MOUSE_BUTTON_SEVEN,
             .none => unreachable,
-        });
-        vt.ghostty_mouse_event_set_mods(self.mouse_event, modifiers);
-        vt.ghostty_mouse_event_set_position(self.mouse_event, .{ .x = @floatFromInt(position.x), .y = @floatFromInt(position.y) });
+        }));
+        try check(vt.ghostty_mouse_event_set_mods(self.mouse_event, modifiers));
+        try check(vt.ghostty_mouse_event_set_position(self.mouse_event, .{ .x = @floatFromInt(position.x), .y = @floatFromInt(position.y) }));
         var written: usize = 0;
         try check(vt.ghostty_mouse_encoder_encode(self.mouse_encoder, self.mouse_event, output.ptr, output.len, &written));
         return output[0..written];
@@ -2805,16 +2785,18 @@ pub const Terminal = struct {
     }
 
     fn formatSelectionAlloc(self: *Terminal, allocator: std.mem.Allocator, selection: ?*const vt.GhosttySelection, trim: bool) ![]u8 {
-        var options = std.mem.zeroes(vt.GhosttyTerminalSelectionFormatOptions);
-        options.size = @sizeOf(vt.GhosttyTerminalSelectionFormatOptions);
-        options.emit = vt.GHOSTTY_FORMATTER_FORMAT_PLAIN;
-        options.unwrap = true;
-        options.trim = trim;
-        options.selection = selection;
+        var active_selection = std.mem.zeroes(vt.GhosttySelection);
+        if (selection == null) try check(vt.ghostty_terminal_get(self.terminal, vt.GHOSTTY_TERMINAL_DATA_SELECTION, &active_selection));
+        var formatter: vt.GhosttyFormatter = null;
+        try check(vt.ghostty_formatter_terminal_new(null, &formatter, self.terminal));
+        defer vt.ghostty_formatter_free(formatter);
+        const unwrap = true;
+        try check(vt.ghostty_formatter_set(formatter, vt.GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap));
+        try check(vt.ghostty_formatter_set(formatter, vt.GHOSTTY_FORMATTER_OPT_TRIM, &trim));
+        try check(vt.ghostty_formatter_set(formatter, vt.GHOSTTY_FORMATTER_OPT_SELECTION, selection orelse &active_selection));
         var required: usize = 0;
-        const query = vt.ghostty_terminal_selection_format_buf(
-            self.terminal,
-            options,
+        const query = vt.ghostty_formatter_format_buf(
+            formatter,
             null,
             0,
             &required,
@@ -2823,9 +2805,8 @@ pub const Terminal = struct {
         const output = try allocator.alloc(u8, required);
         errdefer allocator.free(output);
         var written: usize = 0;
-        try check(vt.ghostty_terminal_selection_format_buf(
-            self.terminal,
-            options,
+        try check(vt.ghostty_formatter_format_buf(
+            formatter,
             output.ptr,
             output.len,
             &written,
@@ -2860,7 +2841,7 @@ fn renderHold(_: vt.GhosttyTerminal, userdata: ?*anyopaque, held: bool) callconv
     // The boundary capture is not consumption by the native snapshot. Keep
     // its rows invalidated even if the hold ends before that host renders.
     var dirty: vt.GhosttyRenderStateDirty = vt.GHOSTTY_RENDER_STATE_DIRTY_FULL;
-    check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPTION_DIRTY, &dirty)) catch unreachable;
+    check(vt.ghostty_render_state_set(self.render_state, vt.GHOSTTY_RENDER_STATE_OPT_DIRTY, &dirty)) catch unreachable;
     self.render_held = true;
 }
 
@@ -2893,8 +2874,7 @@ fn titleChanged(terminal: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c
 fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notification: [*c]const vt.GhosttyTerminalDesktopNotification) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.desktop_notification orelse return;
-    const minimum_size = @offsetOf(vt.GhosttyTerminalDesktopNotification, "body") + @sizeOf(vt.GhosttyString);
-    if (notification == null or notification[0].size < minimum_size) return;
+    if (notification == null) return;
     const title = notification[0].title;
     const body = notification[0].body;
     if ((title.len != 0 and title.ptr == null) or (body.len != 0 and body.ptr == null)) return;
@@ -2908,7 +2888,7 @@ fn desktopNotification(_: vt.GhosttyTerminal, userdata: ?*anyopaque, notificatio
 
 fn semanticPrompt(_: vt.GhosttyTerminal, userdata: ?*anyopaque, event: [*c]const vt.GhosttyTerminalSemanticPrompt) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
-    if (event == null or event[0].size < @sizeOf(vt.GhosttyTerminalSemanticPrompt)) return;
+    if (event == null) return;
     if (event[0].kind == vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_START) self.program_status.endProgram();
     const now = std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io());
     self.commandEvent(event[0].kind, event[0].prompt_kind == vt.GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY, if (event[0].has_exit_code) event[0].exit_code else null, @intCast(now.toMilliseconds()));
@@ -2924,8 +2904,7 @@ fn reset(_: vt.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
 fn progressReport(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const vt.GhosttyTerminalProgressReport) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
     const callback = self.progress_report orelse return;
-    const minimum_size = @offsetOf(vt.GhosttyTerminalProgressReport, "progress") + @sizeOf(i8);
-    if (report == null or report[0].size < minimum_size) return;
+    if (report == null) return;
     const update: Terminal.ProgressUpdate = switch (report[0].state) {
         vt.GHOSTTY_TERMINAL_PROGRESS_STATE_REMOVE => .remove,
         vt.GHOSTTY_TERMINAL_PROGRESS_STATE_SET => .{ .report = .{ .state = .normal, .value = progressValue(report[0].progress) } },
@@ -2939,7 +2918,7 @@ fn progressReport(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]cons
 
 fn programStatus(_: vt.GhosttyTerminal, userdata: ?*anyopaque, report: [*c]const vt.GhosttyTerminalProgramStatus) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return));
-    if (report == null or report[0].size < @sizeOf(vt.GhosttyTerminalProgramStatus)) return;
+    if (report == null) return;
     const value = report[0];
     if (value.state > vt.GHOSTTY_PROGRAM_STATUS_STATE_CLEAR) return;
     self.program_status.put(@fromBackingInt(@intCast(value.state)), @intCast(value.kind), value.progress, statusString(value.id), statusString(value.app), statusString(value.title), statusString(value.message));
@@ -2955,8 +2934,7 @@ fn progressValue(value: i8) ?u8 {
 
 fn clipboardWrite(_: vt.GhosttyTerminal, userdata: ?*anyopaque, write: [*c]const vt.GhosttyClipboardWrite) callconv(.c) void {
     if (write == null) return;
-    const minimum_size = @offsetOf(vt.GhosttyClipboardWrite, "reply") + @sizeOf(vt.GhosttyClipboardWriteReplyFn);
-    if (write[0].size < minimum_size or write[0].reply == null) return;
+    if (write[0].reply == null) return;
     const self: *Terminal = @ptrCast(@alignCast(userdata orelse return clipboardWriteReply(write, .io_error)));
     const callback = self.clipboard_write orelse return clipboardWriteReply(write, .unsupported);
     if (write[0].contents_len == 0) return clipboardWriteReply(write, callback(self.clipboard_context, .clear));
