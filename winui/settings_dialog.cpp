@@ -661,10 +661,22 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     Window::Closed_revoker closed_revoker{};
     NavigationView::SelectionChanged_revoker navigation_revoker{};
 
-    Dialog(HWND owner, std::string_view config_path, std::string_view contents, std::wstring_view version, std::wstring_view hash,
-           bool high_contrast, bool dark_theme, std::function<void()> on_saved)
+    Dialog(std::string_view config_path, std::wstring_view version, std::wstring_view hash, std::function<void()> on_saved)
         : path(to_hstring(config_path).c_str()), app_version(version), git_hash(hash),
-          saved(std::move(on_saved)), themes(loadThemes()) {
+          saved(std::move(on_saved)), themes(loadThemes()) {}
+
+    // XAML raises LostFocus asynchronously, so a focused editor can report it
+    // after the window closed or after this dialog was released. Handlers run
+    // only while the dialog is alive and its window is open.
+    template <typename Handler>
+    auto guarded(Handler handler) {
+        return [weak = weak_from_this(), handler](auto const&... args) {
+            if (auto const self = weak.lock(); self && self->open) handler(args...);
+        };
+    }
+
+    // Separate from the constructor so handlers can capture weak_from_this().
+    void build(HWND owner, std::string_view contents, bool high_contrast, bool dark_theme) {
         auto const values = parse(contents);
         window = Window{};
         window.Title(L"Zigonaut Settings");
@@ -998,7 +1010,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         auto browse = Button{};
         browse.Content(actionContent(Symbol::Folder, L"Browse..."));
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(browse, L"Browse for profile working directory");
-        browse.Click([this, id](auto const&, auto const&) { pickWorkingDirectory(shared_from_this(), id); });
+        browse.Click(guarded([this, id](auto const&, auto const&) { pickWorkingDirectory(shared_from_this(), id); }));
         Grid::SetColumn(browse, 1);
         working_directory_panel.Children().Append(browse);
         appendLabeled(fields, L"Working directory", working_directory_panel, L"Leave empty to use your Windows home directory.");
@@ -1020,7 +1032,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         profile_list.Children().Append(container);
         profile_editors.push_back({id, name, shell, command, working_directory, remove, expander, container});
 
-        name.LostFocus([this, id](auto const&, auto const&) {
+        name.LostFocus(guarded([this, id](auto const&, auto const&) {
             auto const found = std::find_if(profile_editors.begin(), profile_editors.end(),
                 [id](auto const& editor) { return editor.id == id; });
             if (found != profile_editors.end()) {
@@ -1029,12 +1041,12 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
                 refreshDefaultProfiles(renamed_default ? trim(to_string(found->name.Text())) : std::string{});
             }
             save();
-        });
-        auto committed = [this](auto const&, auto const&) { save(); };
+        }));
+        auto committed = guarded([this](auto const&, auto const&) { save(); });
         command.LostFocus(committed);
         working_directory.LostFocus(committed);
-        shell.SelectionChanged([this](auto const&, auto const&) { save(); });
-        remove.Click([this, id](auto const&, auto const&) { confirmRemoveProfile(shared_from_this(), id); });
+        shell.SelectionChanged(guarded([this](auto const&, auto const&) { save(); }));
+        remove.Click(guarded([this, id](auto const&, auto const&) { confirmRemoveProfile(shared_from_this(), id); }));
     }
 
     fire_and_forget confirmRemoveProfile(std::shared_ptr<Dialog> lifetime, uint64_t id) {
@@ -1090,7 +1102,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         add_profile.Content(actionContent(Symbol::Add, L"Add profile"));
         add_profile.HorizontalAlignment(HorizontalAlignment::Left);
         Microsoft::UI::Xaml::Automation::AutomationProperties::SetName(add_profile, L"Add profile");
-        add_profile.Click([this](auto const&, auto const&) {
+        add_profile.Click(guarded([this](auto const&, auto const&) {
             auto suffix = profile_editors.size() + 1;
             std::string name;
             do {
@@ -1102,7 +1114,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             refreshDefaultProfiles();
             updateProfileButtons();
             save();
-        });
+        }));
         auto profile_panel = StackPanel{};
         profile_panel.Spacing(10);
         profile_panel.Children().Append(profile_list);
@@ -1120,7 +1132,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         explorer.IsOn(explorerIntegrationInstalled());
         explorer.OnContent(box_value(L"On"));
         explorer.OffContent(box_value(L"Off"));
-        explorer.Toggled([this](auto const& sender, auto const&) {
+        explorer.Toggled(guarded([this](auto const& sender, auto const&) {
             if (updating_explorer) return;
             auto const toggle = sender.as<ToggleSwitch>();
             try {
@@ -1134,7 +1146,7 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
                 toggle.IsOn(explorerIntegrationInstalled());
                 updating_explorer = false;
             }
-        });
+        }));
         return page(L"Profiles", L"Manage the shells available from the new-tab menu.", {
             card(L"Default profile", L"The profile opened at startup and by Ctrl+Shift+T.", default_profile),
             card(L"Start WSL in Linux home", L"Use Linux home when no explicit or inherited directory is available. Off keeps the Windows starting directory. Applies to new terminals.", wsl_home_fallback),
@@ -1435,8 +1447,11 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
     }
 
     void save() noexcept {
-        for (auto const& status : save_status) status.Text(L"Saving\u2026");
+        // Controls of a closed window can fail with RO_E_CLOSED, and changes
+        // were already saved as they were made.
+        if (!open) return;
         try {
+            for (auto const& status : save_status) status.Text(L"Saving\u2026");
             auto output = serialize();
             auto temporary = path;
             temporary.concat(L".tmp");
@@ -1452,26 +1467,36 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
             for (auto const& status : save_status) status.Text(L"Saved");
             if (saved) saved();
         } catch (FieldValidationError const& exception) {
-            auto const message = to_hstring(exception.what());
+            showSaveError(to_hstring(exception.what()), exception.control);
+        } catch (std::exception const& exception) {
+            showSaveError(to_hstring(exception.what()));
+        } catch (hresult_error const& exception) {
+            showSaveError(exception.message());
+        } catch (...) {
+            showSaveError(L"Unable to save the configuration.");
+        }
+    }
+
+    void showSaveError(hstring const& message, Control const& responsible = nullptr) noexcept {
+        if (!open) return;
+        try {
             error.Message(message);
             error.IsOpen(true);
-            exception.control.Focus(FocusState::Programmatic);
+            if (responsible) responsible.Focus(FocusState::Programmatic);
             for (auto const& status : save_status) status.Text(L"Couldn't save");
-        } catch (std::exception const& exception) {
-            error.Message(to_hstring(exception.what()));
-            error.IsOpen(true);
-            for (auto const& status : save_status) status.Text(L"Couldn't save");
+        } catch (...) {
+            // The window is closing; there is nowhere left to report the failure.
         }
     }
 
     void registerAutoSave() {
-        auto text_committed = [this](auto const&, auto const&) { save(); };
+        auto text_committed = guarded([this](auto const&, auto const&) { save(); });
         pipe_command.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
-        auto number_changed = [this](auto const&, auto const&) { save(); };
+        auto number_changed = guarded([this](auto const&, auto const&) { save(); });
         for (auto const& editor : {font_size, line_height_percent, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
             editor.ValueChanged(number_changed);
-        auto selection_changed = [this](auto const&, auto const&) { save(); };
+        auto selection_changed = guarded([this](auto const&, auto const&) { save(); });
         color_scheme.SelectionChanged(selection_changed);
         backdrop.SelectionChanged(selection_changed);
         dark_theme.SelectionChanged(selection_changed);
@@ -1481,28 +1506,28 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         symbol_fallback_family.SelectionChanged(selection_changed);
         padding_balance.SelectionChanged(selection_changed);
         padding_color.SelectionChanged(selection_changed);
-        font_family.SelectionChanged([this](auto const&, auto const&) {
+        font_family.SelectionChanged(guarded([this](auto const&, auto const&) {
             auto const family = unbox_value<hstring>(font_family.SelectedItem());
             updating_font_weights = true;
             refreshWeightCombo(font_weight, family.c_str(), "regular");
             refreshWeightCombo(intense_font_weight, family.c_str(), "bold");
             updating_font_weights = false;
             save();
-        });
-        auto weight_changed = [this](auto const&, auto const&) {
+        }));
+        auto weight_changed = guarded([this](auto const&, auto const&) {
             if (!updating_font_weights) save();
-        };
+        });
         font_weight.SelectionChanged(weight_changed);
         intense_font_weight.SelectionChanged(weight_changed);
-        default_profile.SelectionChanged([this](auto const&, auto const&) {
+        default_profile.SelectionChanged(guarded([this](auto const&, auto const&) {
             if (!updating_profiles) save();
-        });
-        auto toggled = [this](auto const&, auto const&) { save(); };
+        }));
+        auto toggled = guarded([this](auto const&, auto const&) { save(); });
         for (auto const& editor : {random_background, opacity_cells, hold_on_exit, command_completion_notifications, wsl_home_fallback}) editor.Toggled(toggled);
-        clipboard_write.Toggled([this](auto const&, auto const&) {
+        clipboard_write.Toggled(guarded([this](auto const&, auto const&) {
             clipboard_limit.IsEnabled(clipboard_write.IsOn());
             save();
-        });
+        }));
     }
 
     void applyTheme(bool high_contrast, bool dark_theme) {
@@ -1525,7 +1550,8 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
 std::shared_ptr<Dialog> show(HWND owner, std::string_view path, std::string_view contents, std::wstring_view version,
                              std::wstring_view git_hash, bool high_contrast, bool dark_theme,
                              std::function<void()> saved) {
-    auto result = std::make_shared<Dialog>(owner, path, contents, version, git_hash, high_contrast, dark_theme, std::move(saved));
+    auto result = std::make_shared<Dialog>(path, version, git_hash, std::move(saved));
+    result->build(owner, contents, high_contrast, dark_theme);
     result->window.Activate();
     return result;
 }
