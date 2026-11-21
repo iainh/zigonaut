@@ -323,6 +323,7 @@ struct Bridge {
     uint32_t pane_tab_insertion = UINT32_MAX;
     bool appearance_initialized = false;
     bool pane_focus_dispatch_pending = false;
+    bool pane_focus_deferred = false;
     uint64_t pending_pane_focus{};
     bool layout_pending = false;
     uint8_t layout_retry_count = 0;
@@ -869,6 +870,11 @@ struct Bridge {
                 SendMessageW(active->second->window, WM_KILLFOCUS, 0, 0);
                 return;
             }
+            if (pane_focus_deferred) {
+                pane_focus_deferred = false;
+                focusPaneControl(active_pane);
+                return;
+            }
             auto const active = pane_hosts.find(active_pane);
             if (active != pane_hosts.end() && active->second->input.FocusState() != FocusState::Unfocused) {
                 SendMessageW(active->second->window, WM_SETFOCUS, 0, 0);
@@ -1020,8 +1026,20 @@ struct Bridge {
         schedulePaneFocus(id);
     }
 
+    // Programmatic XAML focus also moves Win32 focus to this window. A settings
+    // change rebuilds the panes from inside the settings window's input
+    // handling, and taking activation from it there made XAML fail when that
+    // window later closed. While another window is active, focus the pane when
+    // this window is next activated instead.
+    bool paneFocusAllowed() {
+        if (GetActiveWindow() == parent) return true;
+        pane_focus_deferred = true;
+        return false;
+    }
+
     void focusPaneControl(uint64_t id) {
         auto it = pane_hosts.find(id); if (it == pane_hosts.end()) return;
+        if (!paneFocusAllowed()) return;
         if (find_pane == id && find_border.Visibility() == Visibility::Visible) {
             find_box.Focus(FocusState::Programmatic);
         } else {
@@ -1883,11 +1901,7 @@ struct Bridge {
             return h->grid;
         };
         content_root.Children().Append(build(0)); content_root.Children().Append(find_border); active_pane=focused; updatePaneFocusIndicators(); root.UpdateLayout(); layoutTerminal();
-        if (find_pane == focused && find_border.Visibility() == Visibility::Visible) {
-            find_box.Focus(FocusState::Programmatic);
-        } else if (auto requested=pane_hosts.find(focused); requested!=pane_hosts.end()) {
-            requested->second->input.Focus(FocusState::Programmatic);
-        }
+        focusPaneControl(focused);
     }
 
     static LPARAM keyLparam(Windows::UI::Core::CorePhysicalKeyStatus const& status) {
@@ -1947,7 +1961,7 @@ struct Bridge {
 
     void focusTerminal() {
         auto const active = pane_hosts.find(active_pane);
-        if (active != pane_hosts.end()) active->second->input.Focus(FocusState::Programmatic);
+        if (active != pane_hosts.end() && paneFocusAllowed()) active->second->input.Focus(FocusState::Programmatic);
     }
 
     void showFind(uint64_t pane_id) {
