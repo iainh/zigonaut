@@ -759,7 +759,16 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         });
         root.Children().Append(navigation);
         window.Content(root);
-        closed_revoker = window.Closed(auto_revoke, [this](auto const&, auto const&) { open = false; });
+        closed_revoker = window.Closed(auto_revoke, [this](auto const&, auto const&) {
+            open = false;
+            // Closing this window while it is inactive and a NumberBox last had
+            // focus still delivers that NumberBox's GotFocus after the close.
+            // In Compact mode its handler starts the spin-button storyboard,
+            // which fails with E_UNEXPECTED there, and XAML fails fast.
+            for (auto const& box : numberBoxes()) {
+                try { box.SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Hidden); } catch (...) {}
+            }
+        });
         registerAutoSave();
     }
 
@@ -1489,13 +1498,16 @@ struct Dialog : std::enable_shared_from_this<Dialog> {
         }
     }
 
+    std::array<NumberBox, 9> numberBoxes() const {
+        return {font_size, line_height_percent, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit};
+    }
+
     void registerAutoSave() {
         auto text_committed = guarded([this](auto const&, auto const&) { save(); });
         pipe_command.LostFocus(text_committed);
         for (auto const& editor : colors) editor.LostFocus(text_committed);
         auto number_changed = guarded([this](auto const&, auto const&) { save(); });
-        for (auto const& editor : {font_size, line_height_percent, scrollback_size, initial_columns, initial_rows, padding_horizontal, padding_vertical, opacity, clipboard_limit})
-            editor.ValueChanged(number_changed);
+        for (auto const& editor : numberBoxes()) editor.ValueChanged(number_changed);
         auto selection_changed = guarded([this](auto const&, auto const&) { save(); });
         color_scheme.SelectionChanged(selection_changed);
         backdrop.SelectionChanged(selection_changed);
