@@ -873,6 +873,7 @@ struct Bridge {
             if (pane_focus_deferred) {
                 pane_focus_deferred = false;
                 focusPaneControl(active_pane);
+                schedulePaneFocus(active_pane);
                 return;
             }
             auto const active = pane_hosts.find(active_pane);
@@ -2570,6 +2571,9 @@ struct Bridge {
     }
 
     void showSettings(std::string_view path, std::string_view contents) {
+        // Return keyboard focus to the terminal, not the control that opened
+        // settings, when this window is next activated.
+        pane_focus_deferred = true;
         if (ZigonautSettings::isOpen(settings_dialog)) {
             ZigonautSettings::activate(settings_dialog);
             return;
