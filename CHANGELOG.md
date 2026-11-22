@@ -2,11 +2,27 @@
 
 All notable changes to Zigonaut will be documented in this file.
 
-## [Unreleased]
+## [0.13.0] - 2026-11-22
+
+### Added
+
+- WSL directory inheritance on Windows: splits and duplicated tabs start in the
+  source pane's OSC 7 reported Linux directory, while new tabs stay independent.
+- An opt-in **Start WSL in Linux home** profile setting
+  (`profiles.wslHomeFallback`) for profiles without a working directory.
 
 ### Changed
 
-- Updated libghostty to Ghostty 1.4.0 and source builds to Zig 0.17.0.
+- Updated libghostty to the stable libghostty-vt 1.0.1 release (Ghostty 1.4)
+  and source builds to Zig 0.17.0.
+- Built macOS releases with the macOS 27 SDK so windows adopt the macOS 27
+  window controls, keeping macOS 15 as the minimum version.
+
+### Fixed
+
+- Stopped the Windows settings window crashing when closed while a field had
+  focus, after settings that rebuild panes, or while it was inactive.
+- Returned keyboard focus to the terminal after closing Windows settings.
 
 ## [0.12.1] - 2026-10-22
 
